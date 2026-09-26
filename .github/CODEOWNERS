@@ -1,0 +1,5 @@
+# Every path falls to the maintainers unless a later rule overrides it.
+*                       @somethingwithproof
+
+/.github/               @somethingwithproof
+/SECURITY.md            @somethingwithproof

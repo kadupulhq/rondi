@@ -1,0 +1,9 @@
+# Third-party and generated trees. Composer and npm dependencies are not our
+# code, and scanning them produces findings nobody here can fix.
+include/vendor/
+include/fa/
+node_modules/
+tests/e2e/node_modules/
+
+*.min.js
+*.min.css

@@ -1,0 +1,10 @@
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+
+/.editorconfig  export-ignore
+/.gitattributes export-ignore
+/.github        export-ignore

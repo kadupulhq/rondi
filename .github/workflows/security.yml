@@ -1,0 +1,94 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Rulesets change even when the code does not. Catch that weekly.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semgrep:
+    name: Semgrep
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Blocking. The tree starts clean, so the bar is zero findings and stays
+      # there. A rule that fires wrongly gets a nosem comment with a reason, not
+      # a relaxed gate.
+      - name: Scan
+        env:
+          IMAGE: semgrep/semgrep@sha256:12672acdb0949e19f9f6a4c2b288edd0b404f268f0ca7738a2c06f372f50362e
+        run: |
+          set -euo pipefail
+          configs=(--config p/security-audit --config p/secrets)
+          # Add the language pack for this repository, for example --config p/php.
+          # Project-specific taint rules, once the fork carries them.
+          [ -f .semgrep.yml ] && configs+=(--config .semgrep.yml)
+          [ -d tests/security/semgrep ] && configs+=(--config tests/security/semgrep)
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --env HOME=/tmp \
+            --volume "${PWD}:/src" \
+            --workdir /src \
+            "$IMAGE" \
+            semgrep scan "${configs[@]}" \
+              --error \
+              --metrics off \
+              --timeout 0 --timeout-threshold 0 --max-target-bytes 0 \
+              --sarif --output semgrep.sarif
+
+      # Code scanning needs the paid Code Security add-on on a private
+      # repository, so this only runs once the repository is public. The scan
+      # above is the gate either way.
+      - name: Upload to code scanning
+        if: ${{ always() && !github.event.repository.private && hashFiles('semgrep.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@1c5b675653bb5c22dbe9b12b556ec555138e09fd # v4.38.1
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+      - name: Keep the report when the scan fails
+        if: ${{ failure() && hashFiles('semgrep.sarif') != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+          retention-days: 14
+
+  dependencies:
+    name: Dependency review
+    # Needs the dependency graph, which is another Code Security feature on a
+    # private repository. Turns itself on with the repository.
+    if: ${{ github.event_name == 'pull_request' && !github.event.repository.private }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+          comment-summary-in-pr: on-failure
+          # A dependency that is not redistributable under GPL-3.0 cannot ship.
+          deny-licenses: AGPL-1.0-or-later, AGPL-3.0-or-later, SSPL-1.0, BUSL-1.1, Elastic-2.0

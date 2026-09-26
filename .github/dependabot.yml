@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # Every repository gets this. Add the language ecosystem below it when the
+  # repository grows a manifest.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
