@@ -1383,7 +1383,7 @@ fn rrdtool_create_replaces_by_default_and_honors_no_overwrite() {
     assert!(create("20", false).status.success());
     let refused = create("30", true);
     assert!(!refused.status.success());
-    let info = Command::new("rrdtool")
+    let info = Command::new(&alias)
         .args(["info", file.to_str().unwrap()])
         .output()
         .unwrap();
