@@ -1,0 +1,13 @@
+RRDtool 1.11.0  Copyright by Tobias Oetiker <tobi@oetiker.ch>
+               Compiled 
+
+Usage: rrdtool [options] command command_options
+ * resize - alter the length of one of the RRAs in an RRD
+
+	rrdtool resize filename rranum GROW|SHRINK rows
+
+RRDtool is distributed under the Terms of the GNU General
+Public License Version 2. (www.gnu.org/copyleft/gpl.html)
+
+For more information read the RRD manpages
+
