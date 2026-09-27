@@ -1,13 +1,19 @@
 [package]
 name = "rondi-cli"
+description = "RRDtool-compatible command-line interface and Rondi server executable"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
 
 [[bin]]
 name = "rondi"
 path = "src/main.rs"
+doc = false
 
 [dependencies]
 rondi = { path = "../rondi" }
@@ -21,7 +27,7 @@ http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 shell-words = "1.1"
-libc = "0.2"
+libc.workspace = true
 png = "0.17"
 font8x8 = "0.3"
 
