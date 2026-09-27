@@ -1,16 +1,21 @@
 [package]
 name = "rondi"
+description = "Round-robin time-series storage and RRDtool binary compatibility library"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 fs2.workspace = true
-libc = "0.2"
+libc.workspace = true
 roxmltree.workspace = true
 
 [dev-dependencies]
