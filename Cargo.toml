@@ -1,0 +1,30 @@
+[workspace]
+members = ["crates/rondi", "crates/rondi-cli", "crates/rondi-server"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+rust-version = "1.85"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+fs2 = "0.4"
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "signal", "sync", "time"] }
+clap = { version = "4", features = ["derive"] }
+glob = "0.3"
+roxmltree = "0.20"
+libc = "0.2"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
