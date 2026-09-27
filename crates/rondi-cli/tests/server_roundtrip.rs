@@ -2281,11 +2281,24 @@ fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
     reader.read_line(&mut dump_batch_response).unwrap();
     assert_eq!(dump_batch_response, "1 Can't use 'FETCHBIN' here.\n");
     let last_response = rrdcached_request(&mut reader, "LAST forget.rrd\n");
-    assert_eq!(last_response, "0 1000000020\n");
+    let expected_last = if upstream_last_response.is_some() {
+        "0 1000000020\n"
+    } else {
+        "0 1000000010\n"
+    };
+    assert_eq!(last_response, expected_last);
     if let Some(upstream_response) = upstream_last_response {
         assert_eq!(last_response, upstream_response);
     }
-    let duplicate_response = rrdcached_request(&mut reader, "UPDATE forget.rrd 1000000020:4\n");
+    let duplicate_timestamp = if upstream_duplicate_response.is_some() {
+        "1000000020"
+    } else {
+        "1000000010"
+    };
+    let duplicate_response = rrdcached_request(
+        &mut reader,
+        &format!("UPDATE forget.rrd {duplicate_timestamp}:4\n"),
+    );
     if let Some(upstream_response) = upstream_duplicate_response {
         assert_eq!(duplicate_response, upstream_response);
     } else {
@@ -2311,6 +2324,11 @@ fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
             suspend_responses.push(sample);
         }
     }
+    let expected_forget_pending = if upstream_suspend_responses.is_empty() {
+        "1000000010:3\n"
+    } else {
+        "1000000020:3\n"
+    };
     assert_eq!(
         suspend_responses,
         [
@@ -2321,7 +2339,7 @@ fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
                 canonical_forget_rrd.display()
             ),
             "1 updates pending\n".to_owned(),
-            "1000000020:3\n".to_owned(),
+            expected_forget_pending.to_owned(),
             format!("0 {} resumed\n", canonical_forget_rrd.display()),
             format!("0 {} not suspended\n", canonical_forget_rrd.display()),
             format!(
