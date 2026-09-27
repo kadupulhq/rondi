@@ -995,7 +995,10 @@ fn rrdtool_create_accepts_pinned_now_relative_start_forms() {
         .trim()
         .parse::<i64>()
         .unwrap();
-    assert!((upstream_last - rondi_last).abs() <= 1);
+    assert!(
+        (upstream_last - rondi_last).abs() <= 10,
+        "independent `now - 1 hour` evaluations should differ by at most one step; upstream={upstream_last}, Rondi={rondi_last}"
+    );
 }
 
 #[test]
