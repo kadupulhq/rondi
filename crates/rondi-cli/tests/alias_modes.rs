@@ -842,7 +842,7 @@ fn rrdtool_create_alias_makes_files_upstream_can_update_and_fetch() {
         "{}",
         String::from_utf8_lossy(&created.stderr)
     );
-    let info = Command::new("rrdtool")
+    let info = Command::new(&alias)
         .args(["info", file.to_str().unwrap()])
         .output()
         .unwrap();
