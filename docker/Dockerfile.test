@@ -1,0 +1,33 @@
+FROM rust:1.98.0-slim
+
+RUN rustup component add rustfmt clippy
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        autoconf automake build-essential ca-certificates curl groff-base \
+        libfreetype6-dev libglib2.0-dev libpango1.0-dev libpng-dev libtool \
+        libxml2-dev pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --fail --location --silent --show-error \
+        https://github.com/oetiker/rrdtool-1.x/releases/download/v1.11.0/rrdtool-1.11.0.tar.gz \
+        --output /tmp/rrdtool-1.11.0.tar.gz \
+    && echo '24c345b5c077c1b2b2fcbc1a364f1da051650fb6743ad5213096adc04c862ed4  /tmp/rrdtool-1.11.0.tar.gz' | sha256sum --check \
+    && tar -xzf /tmp/rrdtool-1.11.0.tar.gz --directory /tmp \
+    && cd /tmp/rrdtool-1.11.0 \
+    && ./configure --prefix=/usr/local --disable-perl --disable-python --disable-ruby --disable-lua \
+    && make -j2 \
+    && make install \
+    && ldconfig \
+    && rm -rf /tmp/rrdtool-1.11.0 /tmp/rrdtool-1.11.0.tar.gz
+
+WORKDIR /workspace
+COPY . .
+
+RUN rustc --version \
+    && cargo --version \
+    && rrdtool --version \
+    && cargo fmt --all -- --check \
+    && cargo clippy --workspace --all-targets --locked -- -D warnings \
+    && cargo test --workspace --locked \
+    && cargo build --release --workspace --locked
