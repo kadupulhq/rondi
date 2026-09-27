@@ -3,3 +3,7 @@
 /run
 *.rondi
 *.journal
+*.rondi.lock
+.env
+.env.*
+!.env.example
