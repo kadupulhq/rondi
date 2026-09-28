@@ -2160,6 +2160,86 @@ fn rrdtool_xport_raw_def_and_export_match_rrdtool_xml_and_json() {
 }
 
 #[test]
+fn rrdtool_xport_rpn_aggregates_follow_upstream_stack_order() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping RRDtool RPN aggregate differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("aggregate-order.rrd");
+    let create = Command::new("rrdtool")
+        .args([
+            "create",
+            file.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:value:GAUGE:30:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let update = Command::new("rrdtool")
+        .args(["update", file.to_str().unwrap(), "1000000010:1"])
+        .output()
+        .unwrap();
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let args: Vec<String> = [
+        "--json".to_owned(),
+        "--start".to_owned(),
+        "1000000010".to_owned(),
+        "--end".to_owned(),
+        "1000000020".to_owned(),
+        format!("DEF:value={}:value:AVERAGE", file.display()),
+        "CDEF:avg=value,POP,10000000000000000,-10000000000000000,1,3,AVG".to_owned(),
+        "CDEF:stdev=value,POP,10000000000000000,10000000000000002,-1,3,STDEV".to_owned(),
+        "XPORT:avg:avg".to_owned(),
+        "XPORT:stdev:stdev".to_owned(),
+    ]
+    .into();
+    let upstream = Command::new("rrdtool")
+        .arg("xport")
+        .args(&args)
+        .output()
+        .unwrap();
+    let rondi = Command::new(&alias)
+        .arg("xport")
+        .args(&args)
+        .output()
+        .unwrap();
+    assert!(
+        upstream.status.success(),
+        "upstream: {}",
+        String::from_utf8_lossy(&upstream.stderr)
+    );
+    assert!(
+        rondi.status.success(),
+        "rondi: {}",
+        String::from_utf8_lossy(&rondi.stderr)
+    );
+    assert_eq!(rondi.status.code(), upstream.status.code());
+    assert_eq!(rondi.stdout, upstream.stdout);
+    assert_eq!(rondi.stderr, upstream.stderr);
+}
+
+#[test]
 fn graph_print_and_gprint_printf_grammar_matches_pinned_rrdtool() {
     if !Command::new("rrdtool")
         .arg("--version")
