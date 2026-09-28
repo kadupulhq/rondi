@@ -2042,6 +2042,9 @@ fn parse_graph_print(definition: &str) -> Result<GraphPrint, Box<dyn std::error:
         "GPRINT" => "gprint",
         _ => return Err(format!("invalid graph print element: {definition}").into()),
     };
+    if formatter == GraphPrintFormatter::Numeric && parse_graph_numeric_format(format).is_err() {
+        return Err(format!("bad format for PRINT in \"{format}'").into());
+    }
     Ok(GraphPrint {
         kind,
         variable: variable.to_owned(),
@@ -3542,34 +3545,184 @@ fn clean_graph_time_format(format: &str) -> String {
 }
 
 fn format_graph_numeric(value: f64, format: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let conversion = format
-        .strip_prefix('%')
-        .ok_or("graph print format must begin with %")?;
-    let code = conversion
-        .chars()
-        .last()
-        .ok_or("empty graph print format")?;
-    if !matches!(code, 'f' | 'F' | 'e' | 'E' | 'g' | 'G') {
-        return Err(format!("unsupported graph print format: {format}").into());
-    }
-    let spec = conversion[..conversion.len() - 1].trim_end_matches(['l', 'L']);
-    let precision = if let Some((_, digits)) = spec.rsplit_once('.') {
-        if digits.is_empty() || !digits.chars().all(|digit| digit.is_ascii_digit()) {
-            return Err(format!("unsupported graph print format: {format}").into());
-        }
-        digits.parse::<usize>()?
+    use std::ffi::CString;
+
+    let parsed = parse_graph_numeric_format(format)
+        .map_err(|_| format!("bad format for PRINT in \"{format}'"))?;
+    let (scaled_value, si_symbol) = if parsed.si_symbol.is_some() {
+        graph_si_scale(value)
     } else {
-        6
+        (value, "")
     };
-    if precision > 100 {
-        return Err(format!("unsupported graph print format: {format}").into());
+    let mut output = String::with_capacity(format.len() + 32);
+    let mut cursor = 0;
+    for substitution in parsed.substitutions {
+        append_graph_format_literal(&mut output, &format[cursor..substitution.start]);
+        match substitution.kind {
+            GraphFormatSubstitutionKind::Floating => {
+                let conversion = CString::new(&format[substitution.start..substitution.end])?;
+                let mut buffer = [0 as libc::c_char; 4096];
+                let length = unsafe {
+                    libc::snprintf(
+                        buffer.as_mut_ptr(),
+                        buffer.len(),
+                        conversion.as_ptr(),
+                        scaled_value,
+                    )
+                };
+                if length < 0 || length as usize >= buffer.len() {
+                    return Err("graph print output exceeds its buffer".into());
+                }
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), length as usize)
+                };
+                output.push_str(&String::from_utf8_lossy(bytes));
+            }
+            GraphFormatSubstitutionKind::SiSymbol => output.push_str(si_symbol),
+        }
+        cursor = substitution.end;
     }
-    Ok(match code.to_ascii_lowercase() {
-        'f' => format!("{value:.precision$}"),
-        'e' => format!("{value:.precision$e}"),
-        'g' => format!("{value:.precision$}"),
-        _ => unreachable!(),
+    append_graph_format_literal(&mut output, &format[cursor..]);
+    Ok(output)
+}
+
+#[derive(Clone, Copy)]
+struct GraphFormatSubstitution {
+    start: usize,
+    end: usize,
+    kind: GraphFormatSubstitutionKind,
+}
+
+#[derive(Clone, Copy)]
+enum GraphFormatSubstitutionKind {
+    Floating,
+    SiSymbol,
+}
+
+struct ParsedGraphNumericFormat {
+    substitutions: Vec<GraphFormatSubstitution>,
+    si_symbol: Option<usize>,
+}
+
+fn parse_graph_numeric_format(format: &str) -> Result<ParsedGraphNumericFormat, ()> {
+    let bytes = format.as_bytes();
+    let mut substitutions = Vec::with_capacity(2);
+    let mut si_symbol = None;
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        let Some(&next) = bytes.get(index) else {
+            return Err(());
+        };
+        if next == b'%' {
+            index += 1;
+            continue;
+        }
+        if matches!(next, b's' | b'S') {
+            if substitutions.is_empty() || si_symbol.is_some() {
+                return Err(());
+            }
+            si_symbol = Some(substitutions.len());
+            substitutions.push(GraphFormatSubstitution {
+                start,
+                end: index + 1,
+                kind: GraphFormatSubstitutionKind::SiSymbol,
+            });
+            index += 1;
+            continue;
+        }
+        if substitutions
+            .iter()
+            .any(|item| matches!(item.kind, GraphFormatSubstitutionKind::Floating))
+        {
+            return Err(());
+        }
+        if matches!(next, b'-' | b'+' | b' ' | b'0' | b'#') {
+            index += 1;
+        }
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if bytes.get(index) == Some(&b'.') {
+            index += 1;
+            let precision_start = index;
+            while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                index += 1;
+            }
+            if precision_start == index {
+                return Err(());
+            }
+        }
+        if bytes.get(index) != Some(&b'l') {
+            return Err(());
+        }
+        index += 1;
+        if !bytes
+            .get(index)
+            .is_some_and(|code| matches!(code, b'e' | b'E' | b'f' | b'F' | b'g' | b'G'))
+        {
+            return Err(());
+        }
+        index += 1;
+        substitutions.push(GraphFormatSubstitution {
+            start,
+            end: index,
+            kind: GraphFormatSubstitutionKind::Floating,
+        });
+    }
+    if !substitutions
+        .iter()
+        .any(|item| matches!(item.kind, GraphFormatSubstitutionKind::Floating))
+    {
+        return Err(());
+    }
+    if let Some(symbol_index) = si_symbol {
+        let numeric_index = substitutions
+            .iter()
+            .position(|item| matches!(item.kind, GraphFormatSubstitutionKind::Floating))
+            .ok_or(())?;
+        if symbol_index < numeric_index {
+            return Err(());
+        }
+    }
+    Ok(ParsedGraphNumericFormat {
+        substitutions,
+        si_symbol,
     })
+}
+
+fn append_graph_format_literal(output: &mut String, literal: &str) {
+    let mut chars = literal.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '%' && chars.clone().next() == Some('%') {
+            output.push('%');
+            chars.next();
+        } else {
+            output.push(ch);
+        }
+    }
+}
+
+fn graph_si_scale(value: f64) -> (f64, &'static str) {
+    const SYMBOLS: [&str; 13] = [
+        "a", "f", "p", "n", "u", "m", " ", "k", "M", "G", "T", "P", "E",
+    ];
+    if value == 0.0 || value.is_nan() {
+        return (value, SYMBOLS[6]);
+    }
+    let exponent = (value.abs().log10() / 3.0).floor() as i32;
+    let factor = 1000.0_f64.powi(exponent);
+    let symbol = usize::try_from(exponent + 6)
+        .ok()
+        .and_then(|index| SYMBOLS.get(index))
+        .copied()
+        .unwrap_or("?");
+    (value / factor, symbol)
 }
 
 fn format_xport_xml(
