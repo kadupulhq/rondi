@@ -1061,8 +1061,8 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         for value in row.values {
             match value {
                 Some(value) => print!(" {}", format_rrd_float(value)),
-                None if from_daemon => print!(" {}", rrd_unknown_text()),
-                None => print!(" nan"),
+                None if from_daemon => print!(" {}", rrd_daemon_unknown_text()),
+                None => print!(" {}", rrd_unknown_text()),
             }
         }
         println!();
@@ -1083,10 +1083,18 @@ fn rrd_nan() -> f64 {
 }
 
 fn rrd_unknown_text() -> &'static str {
-    if cfg!(target_os = "linux") {
+    if cfg!(target_arch = "x86_64") {
         "-nan"
     } else {
         "nan"
+    }
+}
+
+fn rrd_daemon_unknown_text() -> &'static str {
+    if cfg!(target_arch = "x86_64") {
+        "nan"
+    } else {
+        "-nan"
     }
 }
 
@@ -3629,6 +3637,12 @@ fn format_xport_xml(
     output
 }
 
+fn normalize_json_graph_nan(value: &str) -> String {
+    // RRDtool's JSON graph serializer emits NaN as `nan`, while graphv's
+    // diagnostics and other text formats preserve printf's `-nan` spelling.
+    value.replace("-nan", "nan")
+}
+
 fn format_xport_json(
     start: i64,
     end: i64,
@@ -3661,7 +3675,7 @@ fn format_xport_json(
             writeln!(
                 output,
                 "        {{ \"print\": {} }}{comma}",
-                serde_json::to_string(value).unwrap()
+                serde_json::to_string(&normalize_json_graph_nan(value)).unwrap()
             )
             .unwrap();
         }
@@ -3674,7 +3688,7 @@ fn format_xport_json(
             writeln!(
                 output,
                 "        {{ \"{kind}\": {} }}{comma}",
-                serde_json::to_string(value).unwrap()
+                serde_json::to_string(&normalize_json_graph_nan(value)).unwrap()
             )
             .unwrap();
         }

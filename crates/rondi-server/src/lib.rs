@@ -1944,12 +1944,24 @@ fn handle_rrdcached_fetchbin(
             .as_bytes(),
         );
         for row in &result.rows {
-            let value = row.values[source_index].unwrap_or(f64::NAN);
+            let value = row.values[source_index].unwrap_or_else(rrd_nan);
             response.extend_from_slice(&value.to_ne_bytes());
         }
         response.push(b'\n');
     }
     response
+}
+
+#[inline]
+fn rrd_nan() -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        f64::from_bits(0xfff8_0000_0000_0000)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        f64::NAN
+    }
 }
 
 fn resolve_rrdcached_path(root: &Path, requested: &str) -> Result<PathBuf, String> {
