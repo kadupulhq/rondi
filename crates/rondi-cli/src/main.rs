@@ -1012,7 +1012,32 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         ensure_rrd_file_exists(&filename)?;
         let metadata = std::fs::metadata(&filename)?;
         if !metadata.is_file() || metadata.len() == 0 {
-            return Err(format!("mmaping file '{}': Invalid argument", filename.display()).into());
+            let error = if metadata.len() == 0 {
+                std::io::Error::from_raw_os_error(libc::EINVAL)
+            } else {
+                let file = std::fs::File::open(&filename)?;
+                let length = usize::try_from(metadata.len()).unwrap_or(1).max(1);
+                let mapped = unsafe {
+                    libc::mmap(
+                        std::ptr::null_mut(),
+                        length,
+                        libc::PROT_READ,
+                        libc::MAP_PRIVATE,
+                        std::os::fd::AsRawFd::as_raw_fd(&file),
+                        0,
+                    )
+                };
+                if mapped == libc::MAP_FAILED {
+                    std::io::Error::last_os_error()
+                } else {
+                    unsafe { libc::munmap(mapped, length) };
+                    std::io::Error::from_raw_os_error(libc::EINVAL)
+                }
+            };
+            let errno = error.raw_os_error().unwrap_or(libc::EINVAL);
+            let message =
+                unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)).to_string_lossy() };
+            return Err(format!("mmaping file '{}': {message}", filename.display()).into());
         }
         if metadata.len() < 128 {
             return Err("reached EOF while loading header rrd->stat_head".into());
@@ -1057,6 +1082,18 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         println!();
     }
     Ok(())
+}
+
+#[inline]
+fn rrd_nan() -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        f64::from_bits(0xfff8_0000_0000_0000)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        f64::NAN
+    }
 }
 
 fn rrd_unknown_text() -> &'static str {
@@ -2241,7 +2278,7 @@ fn render_xport_with_graph_prints(
         // RRDtool's graph buffer includes an unknown right-edge boundary slot
         // that is not part of the rows returned by xport.
         let mut values = values;
-        values.push(f64::NAN);
+        values.push(rrd_nan());
         let value = rondi::evaluate_vdef(
             vdef.function,
             vdef.percentile,
@@ -2279,11 +2316,19 @@ fn render_xport_with_graph_prints(
                 .filter(|value| value.is_finite())
                 .collect::<Vec<_>>();
             let value = match consolidation {
-                "AVERAGE" if values.is_empty() => f64::NAN,
+                "AVERAGE" if values.is_empty() => rrd_nan(),
                 "AVERAGE" => values.iter().sum::<f64>() / values.len() as f64,
-                "MIN" => values.iter().copied().reduce(f64::min).unwrap_or(f64::NAN),
-                "MAX" => values.iter().copied().reduce(f64::max).unwrap_or(f64::NAN),
-                "LAST" => values.last().copied().unwrap_or(f64::NAN),
+                "MIN" => values
+                    .iter()
+                    .copied()
+                    .reduce(f64::min)
+                    .unwrap_or_else(rrd_nan),
+                "MAX" => values
+                    .iter()
+                    .copied()
+                    .reduce(f64::max)
+                    .unwrap_or_else(rrd_nan),
+                "LAST" => values.last().copied().unwrap_or_else(rrd_nan),
                 _ => unreachable!(),
             };
             (value, None)

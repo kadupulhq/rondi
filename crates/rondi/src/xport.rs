@@ -2,6 +2,18 @@
 use crate::{RrdFetchResult, StoreError, fetch_rrd_file, rrd_number::parse_rrd_number};
 use std::{collections::HashMap, path::PathBuf};
 
+#[inline]
+fn rrd_nan() -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        f64::from_bits(0xfff8_0000_0000_0000)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        f64::NAN
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RrdXportDefinition {
     pub name: String,
@@ -170,13 +182,13 @@ pub fn fetch_xport_with_cdefs(
                 .ok_or_else(|| StoreError::RrdUnsupported("DEF time offset overflows".into()))?;
             let source_row = offset / source_step;
             values.push(if source_row < 0 {
-                f64::NAN
+                rrd_nan()
             } else {
                 usize::try_from(source_row)
                     .ok()
                     .and_then(|idx| definition.fetched.rows.get(idx))
                     .and_then(|row| row.values[definition.source_index])
-                    .unwrap_or(f64::NAN)
+                    .unwrap_or(rrd_nan())
             });
         }
         variable_steps.insert(definition.name.clone(), definition.fetched.step);
@@ -197,7 +209,7 @@ pub fn fetch_xport_with_cdefs(
                 .and_then(|row| row.checked_mul(step_i64))
                 .and_then(|offset| aligned_start.checked_add(offset))
                 .ok_or_else(|| StoreError::RrdUnsupported("CDEF timestamp overflows".into()))?;
-            let previous = values.last().copied().unwrap_or(f64::NAN);
+            let previous = values.last().copied().unwrap_or(rrd_nan());
             values.push(evaluate_rpn(
                 &cdef.expression,
                 &variables,
@@ -249,7 +261,7 @@ fn evaluate_rpn(
         let token = *token;
         let unary: Option<fn(f64) -> f64> = match token {
             "UNKN" => {
-                stack.push(f64::NAN);
+                stack.push(rrd_nan());
                 continue;
             }
             "INF" => {
@@ -282,14 +294,14 @@ fn evaluate_rpn(
                     // RRDtool's OP_NOW uses time(NULL), which has whole-second
                     // precision. Do not leak subsecond clock precision into RPN.
                     .map(|duration| duration.as_secs() as f64)
-                    .unwrap_or(f64::NAN);
+                    .unwrap_or(rrd_nan());
                 stack.push(now);
                 continue;
             }
             "LTIME" => {
                 stack.push(
                     local_time_offset(timestamp)
-                        .map_or(f64::NAN, |offset| timestamp as f64 + offset as f64),
+                        .map_or(rrd_nan(), |offset| timestamp as f64 + offset as f64),
                 );
                 continue;
             }
@@ -374,14 +386,14 @@ fn evaluate_rpn(
             "ATAN2" => Some(|a: f64, b: f64| a.atan2(b)),
             "MIN" => Some(|a: f64, b: f64| {
                 if a.is_nan() || b.is_nan() {
-                    f64::NAN
+                    rrd_nan()
                 } else {
                     a.min(b)
                 }
             }),
             "MAX" => Some(|a: f64, b: f64| {
                 if a.is_nan() || b.is_nan() {
-                    f64::NAN
+                    rrd_nan()
                 } else {
                     a.max(b)
                 }
@@ -437,7 +449,7 @@ fn evaluate_rpn(
                     .checked_sub(1)
                     .and_then(|prior_row| values.get(prior_row))
                     .copied()
-                    .unwrap_or(f64::NAN);
+                    .unwrap_or(rrd_nan());
                 stack.push(prior);
             }
             "AVG" | "MEDIAN" | "STDEV" | "SMIN" | "SMAX" | "SORT" | "REV" => {
@@ -460,7 +472,7 @@ fn evaluate_rpn(
                         let known: Vec<f64> = values.into_iter().filter(|v| !v.is_nan()).collect();
                         let known_count = known.len();
                         stack.push(if known.is_empty() {
-                            f64::NAN
+                            rrd_nan()
                         } else {
                             // RRDtool pops aggregate operands from the RPN stack, so it
                             // adds the rightmost operand first. Floating point addition
@@ -473,7 +485,7 @@ fn evaluate_rpn(
                         values.sort_by(f64::total_cmp);
                         let n = values.len();
                         stack.push(if n == 0 {
-                            f64::NAN
+                            rrd_nan()
                         } else if n % 2 == 1 {
                             values[n / 2]
                         } else {
@@ -493,7 +505,7 @@ fn evaluate_rpn(
                             mean2 += delta * (datum - mean);
                         }
                         stack.push(if n < 2.0 {
-                            f64::NAN
+                            rrd_nan()
                         } else {
                             (mean2 / (n - 1.0)).sqrt()
                         });
@@ -503,7 +515,7 @@ fn evaluate_rpn(
                             .into_iter()
                             .filter(|v| !v.is_nan())
                             .reduce(|a, b| if token == "SMIN" { a.min(b) } else { a.max(b) });
-                        stack.push(result.unwrap_or(f64::NAN));
+                        stack.push(result.unwrap_or(rrd_nan()));
                     }
                     _ => unreachable!(),
                 }
@@ -628,7 +640,7 @@ fn evaluate_rpn(
                 let required_rows = (duration_seconds as f32 / source_step_i64 as f32).ceil();
                 let ready = (row + 1) as f32 >= required_rows;
                 let value = if !ready {
-                    f64::NAN
+                    rrd_nan()
                 } else {
                     let stride = usize::try_from(source_step / step_width)
                         .map_err(|_| rpn_error("trend step ratio overflows"))?
@@ -662,7 +674,7 @@ fn evaluate_rpn(
                         offset += 1;
                     }
                     if unknown || count == 0 {
-                        f64::NAN
+                        rrd_nan()
                     } else {
                         sum / count as f64
                     }
@@ -750,13 +762,13 @@ fn evaluate_rpn(
                     }
                 }
                 let prediction = if observations.is_empty() {
-                    f64::NAN
+                    rrd_nan()
                 } else if token == "PREDICT" {
                     observations.iter().sum::<f64>() / observations.len() as f64
                 } else if token == "PREDICTSIGMA" {
                     let count = observations.len() as f64;
                     if count < 2.0 {
-                        f64::NAN
+                        rrd_nan()
                     } else {
                         let sum = observations.iter().sum::<f64>();
                         let sum2 = observations.iter().map(|value| value * value).sum::<f64>();
@@ -794,7 +806,7 @@ fn evaluate_rpn(
                 stack.push(
                     if value.is_nan() || min.is_nan() || max.is_nan() || value < min || value > max
                     {
-                        f64::NAN
+                        rrd_nan()
                     } else {
                         value
                     },
@@ -807,7 +819,7 @@ fn evaluate_rpn(
                     if !tokens.get(token_index + 1).is_some_and(|next| {
                         matches!(*next, "PREDICT" | "PREDICTSIGMA" | "PREDICTPERC")
                     }) {
-                        stack.push(values.get(row).copied().unwrap_or(f64::NAN));
+                        stack.push(values.get(row).copied().unwrap_or(rrd_nan()));
                     }
                 } else {
                     return Err(rpn_error(&format!("unknown token or variable '{token}'")));
