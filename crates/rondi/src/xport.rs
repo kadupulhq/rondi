@@ -785,9 +785,11 @@ fn pop_count(stack: &mut Vec<f64>) -> Result<usize, StoreError> {
 fn rrd_percent_cmp(left: &f64, right: &f64) -> std::cmp::Ordering {
     match (left.is_nan(), right.is_nan()) {
         (true, true) => std::cmp::Ordering::Equal,
-        (true, false) => std::cmp::Ordering::Greater,
-        (false, true) => std::cmp::Ordering::Less,
-        (false, false) => left.total_cmp(right),
+        // rpn_compare_double() in RRDtool 1.11.0 explicitly sorts unknowns
+        // before numbers for the RPN PERCENT operator.
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        (false, false) => left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal),
     }
 }
 fn cmp(a: f64, b: f64, result: bool) -> f64 {
