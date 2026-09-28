@@ -544,12 +544,16 @@ fn evaluate_rpn(
                 stack[top] = stack[target];
             }
             "ROLL" => {
-                let shift = pop(&mut stack)?;
-                let shift = if shift.is_finite() {
-                    shift as i32 as isize
+                let shift_value = pop(&mut stack)?;
+                let shift = if shift_value.is_finite() {
+                    shift_value as i32 as isize
                 } else {
                     return Err(rpn_error("invalid ROLL shift"));
                 };
+                let count_value = stack
+                    .last()
+                    .copied()
+                    .ok_or_else(|| rpn_error("stack underflow"))?;
                 let count = pop_count(&mut stack)?;
                 if stack.len() < count {
                     return Err(rpn_error("stack underflow"));
@@ -568,10 +572,10 @@ fn evaluate_rpn(
                     let mut copied = Vec::with_capacity(count);
                     copied.push(stack[stack.len() - 1]);
                     if count >= 2 {
-                        copied.push(count as f64);
+                        copied.push(count_value);
                     }
                     if count >= 3 {
-                        copied.push(shift as f64);
+                        copied.push(shift_value);
                     }
                     let mut j = count as isize + shift;
                     let stack_len = stack.len();
