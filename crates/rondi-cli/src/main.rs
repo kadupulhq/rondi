@@ -3540,20 +3540,30 @@ fn format_xport_xml(
     writeln!(output, "    <columns>{}</columns>", exports.len()).unwrap();
     output.push_str("    <legend>\n");
     for export in exports {
-        writeln!(output, "      <entry>{}</entry>", export.legend).unwrap();
+        writeln!(
+            output,
+            "      <entry>{}</entry>",
+            xml_escape_text(&export.legend)
+        )
+        .unwrap();
     }
     output.push_str("    </legend>\n");
     if let Some(prints) = options.graph_prints.filter(|values| !values.is_empty()) {
         output.push_str("    <prints>\n");
         for value in prints {
-            writeln!(output, "        <print>{value}</print>").unwrap();
+            writeln!(output, "        <print>{}</print>", xml_escape_text(value)).unwrap();
         }
         output.push_str("    </prints>\n");
     }
     if let Some(gprints) = options.graph_gprints.filter(|values| !values.is_empty()) {
         output.push_str("    <gprints>\n");
         for (kind, value) in gprints {
-            writeln!(output, "        <{kind}>{value}</{kind}>").unwrap();
+            writeln!(
+                output,
+                "        <{kind}>{}</{kind}>",
+                xml_escape_text(value)
+            )
+            .unwrap();
         }
         output.push_str("    </gprints>\n");
     }
@@ -3582,6 +3592,13 @@ fn format_xport_xml(
     }
     output.push_str("  </data>\n</xport>\n");
     output
+}
+
+fn xml_escape_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn format_xport_json(
@@ -3682,10 +3699,6 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
         return Err("Usage: rrdtool update <file> <timestamp:value>...".into());
     }
     let filename = PathBuf::from(&args[1]);
-    let root = filename
-        .parent()
-        .filter(|path| !path.as_os_str().is_empty())
-        .unwrap_or_else(|| std::path::Path::new("."));
     let mut template = None;
     let mut skip_past_updates = false;
     let mut daemon_address = None;
@@ -3714,6 +3727,9 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                     .ok_or("update --daemon requires an address")?;
                 daemon_address = Some(address.clone());
             }
+            option if option.starts_with("--daemon=") => {
+                daemon_address = Some(option["--daemon=".len()..].to_owned());
+            }
             "--skip-past-updates" | "-s" => skip_past_updates = true,
             option if option.starts_with('-') => {
                 return Err(format!("unsupported update option: {option}").into());
@@ -3733,13 +3749,9 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
     if daemon_address.is_none() {
         ensure_rrd_file_exists(&filename)?;
     }
-    // Local mode shares the same ownership lock as the storage daemon. In
-    // daemon mode the rrdcached process is the writer and owns this file.
-    let _ownership = if daemon_address.is_none() {
-        Some(Store::open(root)?)
-    } else {
-        None
-    };
+    // Local RRD writes use RRDtool's blocking per-file fcntl lock in the
+    // library. A directory-wide Rondi lock incorrectly serializes unrelated
+    // files and prevents the poller from updating them in parallel.
     let source_names = if let Some(template) = &template {
         let info = inspect_rrd(&args[1])?;
         let mut indices = Vec::with_capacity(template.len());
@@ -3919,7 +3931,26 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
     }
     if let Some(address) = daemon_address {
         if !daemon_samples.is_empty() {
-            send_rrdcached_update(&address, PathBuf::from(&args[1]).as_path(), &daemon_samples)?;
+            #[cfg(unix)]
+            match connect_rrdcached(&address) {
+                Ok(stream) => {
+                    send_rrdcached_update_on_stream(
+                        stream,
+                        PathBuf::from(&args[1]).as_path(),
+                        &daemon_samples,
+                    )?;
+                }
+                Err(error) => {
+                    let error_text = error.to_string();
+                    let detail = error_text
+                        .split(" (os error ")
+                        .next()
+                        .unwrap_or("Internal error");
+                    return Err(format!("Unable to connect to rrdcached: {detail}").into());
+                }
+            }
+            #[cfg(not(unix))]
+            return Err("rrdcached updates are unavailable on this platform".into());
         }
     }
     Ok(())
@@ -4022,15 +4053,14 @@ fn send_rrdcached_flush(_address: &str, _filename: &str) -> Result<(), Box<dyn s
 }
 
 #[cfg(unix)]
-fn send_rrdcached_update(
-    address: &str,
+fn send_rrdcached_update_on_stream(
+    mut stream: impl std::io::Write + std::io::Read,
     filename: &std::path::Path,
     samples: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     if filename.to_string_lossy().chars().any(char::is_whitespace) {
         return Err("rrdtool update: invalid rrdcached socket or filename".into());
     }
-    let mut stream = connect_rrdcached(address)?;
     writeln!(
         stream,
         "UPDATE {} {}",
@@ -4049,15 +4079,6 @@ fn send_rrdcached_update(
         .unwrap_or(response)
         .to_owned()
         .into())
-}
-
-#[cfg(not(unix))]
-fn send_rrdcached_update(
-    _address: &str,
-    _filename: &std::path::Path,
-    _samples: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
-    Err("rrdcached Unix socket updates are unavailable on this platform".into())
 }
 
 fn format_rrd_scientific(value: f64) -> String {
@@ -4743,7 +4764,7 @@ fn send_rrdcached_multiline_command(
     writeln!(stream, "{command}")?;
     let mut reader = std::io::BufReader::new(stream);
     let mut header = String::new();
-    reader.read_line(&mut header)?;
+    read_bounded_line(&mut reader, &mut header, 1024 * 1024)?;
     if header.starts_with('-') {
         return Err(header
             .split_once(' ')
@@ -4757,15 +4778,58 @@ fn send_rrdcached_multiline_command(
         .next()
         .ok_or("empty rrdcached LIST response")?
         .parse()?;
+    const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+    if count > MAX_RESPONSE_BYTES {
+        return Err("rrdcached response exceeds 64 MiB limit".into());
+    }
     let mut body = String::new();
     for _ in 0..count {
         let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
+        let remaining = MAX_RESPONSE_BYTES.saturating_sub(body.len());
+        if remaining == 0 {
+            return Err("rrdcached response exceeds 64 MiB limit".into());
+        }
+        if read_bounded_line(&mut reader, &mut line, remaining.min(1024 * 1024))? == 0 {
             return Err("incomplete rrdcached LIST response".into());
         }
         body.push_str(&line);
     }
     Ok(body)
+}
+
+fn read_bounded_line<R: BufRead>(
+    reader: &mut R,
+    line: &mut String,
+    max_bytes: usize,
+) -> std::io::Result<usize> {
+    line.clear();
+    let mut bytes = Vec::with_capacity(max_bytes.min(4096));
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            break;
+        }
+        let count = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        if bytes.len().saturating_add(count) > max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "rrdcached response line exceeds 1 MiB",
+            ));
+        }
+        let complete = available[count - 1] == b'\n';
+        bytes.extend_from_slice(&available[..count]);
+        reader.consume(count);
+        if complete {
+            break;
+        }
+    }
+    let length = bytes.len();
+    *line = String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(length)
 }
 
 #[cfg(unix)]
@@ -5528,6 +5592,44 @@ async fn server_mode(socket: PathBuf, command: Command) -> Result<(), Box<dyn st
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod xml_output_tests {
+    use super::{XportFormatOptions, format_xport_xml, xml_escape_text};
+    use rondi::RrdXportColumn;
+
+    #[test]
+    fn escapes_graph_xport_text_nodes() {
+        let exports = [RrdXportColumn {
+            variable: "rate".to_owned(),
+            legend: "load & <peak>".to_owned(),
+        }];
+        let prints = ["value > 1 & < 2".to_owned()];
+        let gprints = [("gprint".to_owned(), "<ok & done>".to_owned())];
+        let xml = format_xport_xml(
+            100,
+            110,
+            10,
+            &exports,
+            &[vec![Some(2.0)]],
+            XportFormatOptions {
+                show_time: false,
+                enum_ds: false,
+                graph_gprints: Some(&gprints),
+                graph_prints: Some(&prints),
+            },
+        );
+
+        assert!(xml.contains("<entry>load &amp; &lt;peak&gt;</entry>"));
+        assert!(xml.contains("<print>value &gt; 1 &amp; &lt; 2</print>"));
+        assert!(xml.contains("<gprint>&lt;ok &amp; done&gt;</gprint>"));
+    }
+
+    #[test]
+    fn xml_escaper_handles_ampersands_before_entities() {
+        assert_eq!(xml_escape_text("&amp; <x>"), "&amp;amp; &lt;x&gt;");
+    }
 }
 
 #[cfg(test)]

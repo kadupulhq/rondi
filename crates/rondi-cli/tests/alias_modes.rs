@@ -471,6 +471,274 @@ fn rrdtool_batch_mode_runs_poller_commands_and_update_templates() {
 }
 
 #[test]
+fn aligned_multi_step_update_matches_upstream_bytes_for_multi_pdp_archive() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping aligned multi-PDP differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let ours = temp.path().join("ours.rrd");
+    let oracle = temp.path().join("oracle.rrd");
+    let create = Command::new("rrdtool")
+        .args([
+            "create",
+            ours.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:value:GAUGE:60:U:U",
+            "RRA:AVERAGE:0.5:2:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    std::fs::copy(&ours, &oracle).unwrap();
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    for (program, path) in [
+        (alias.as_os_str(), ours.as_path()),
+        (std::ffi::OsStr::new("rrdtool"), oracle.as_path()),
+    ] {
+        let output = Command::new(program)
+            .args(["update", path.to_str().unwrap(), "1000000020:10"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let ours_bytes = std::fs::read(&ours).unwrap();
+    let oracle_bytes = std::fs::read(&oracle).unwrap();
+    assert_eq!(
+        ours_bytes, oracle_bytes,
+        "aligned two-step GAUGE archive bytes differ"
+    );
+}
+
+#[test]
+fn update_daemon_equals_down_socket_matches_upstream_failure() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping unavailable-daemon differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let ours = temp.path().join("ours.rrd");
+    let oracle = temp.path().join("oracle.rrd");
+    let create = Command::new("rrdtool")
+        .args([
+            "create",
+            ours.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:value:GAUGE:60:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    std::fs::copy(&ours, &oracle).unwrap();
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let unavailable = format!("unix:{}", temp.path().join("missing.sock").display());
+    let ours_result = Command::new(&alias)
+        .args([
+            "update",
+            ours.to_str().unwrap(),
+            &format!("--daemon={unavailable}"),
+            "1000000010:7",
+        ])
+        .output()
+        .unwrap();
+    let upstream_result = Command::new("rrdtool")
+        .args([
+            "update",
+            oracle.to_str().unwrap(),
+            &format!("--daemon={unavailable}"),
+            "1000000010:7",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        ours_result.status,
+        upstream_result.status,
+        "Rondi stderr: {}; RRDtool stderr: {}",
+        String::from_utf8_lossy(&ours_result.stderr),
+        String::from_utf8_lossy(&upstream_result.stderr)
+    );
+    assert_eq!(ours_result.stdout, upstream_result.stdout);
+    assert_eq!(ours_result.stderr, upstream_result.stderr);
+    assert!(!ours_result.status.success());
+    assert_eq!(std::fs::read(ours).unwrap(), std::fs::read(oracle).unwrap());
+}
+
+#[test]
+fn local_updates_to_different_files_in_one_directory_can_run_concurrently() {
+    let temp = tempfile::tempdir().unwrap();
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let files = [temp.path().join("a.rrd"), temp.path().join("b.rrd")];
+    for file in &files {
+        let created = Command::new(&alias)
+            .args([
+                "create",
+                file.to_str().unwrap(),
+                "--start",
+                "1000000000",
+                "--step",
+                "1",
+                "DS:value:GAUGE:200:U:U",
+                "RRA:AVERAGE:0.5:1:200",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+    }
+    let mut children = files
+        .iter()
+        .enumerate()
+        .map(|(file_index, file)| {
+            let samples = (1..=100)
+                .map(|step| format!("{}:{}", 1_000_000_000 + step, file_index + step))
+                .collect::<Vec<_>>();
+            Command::new(&alias)
+                .arg("update")
+                .arg(file)
+                .args(samples)
+                .spawn()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    for child in &mut children {
+        assert!(child.wait().unwrap().success());
+    }
+    for file in &files {
+        let last = Command::new(&alias)
+            .args(["last", file.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(last.status.success());
+        assert_eq!(String::from_utf8_lossy(&last.stdout).trim(), "1000000100");
+    }
+}
+
+#[test]
+fn update_through_rrd_symlink_follows_the_target_like_rrdtool() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping RRDtool symlink differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let ours = temp.path().join("ours-target.rrd");
+    let oracle = temp.path().join("oracle-target.rrd");
+    let create = Command::new("rrdtool")
+        .args([
+            "create",
+            ours.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:value:GAUGE:60:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(create.status.success());
+    std::fs::copy(&ours, &oracle).unwrap();
+    let ours_link = temp.path().join("ours-link.rrd");
+    let oracle_link = temp.path().join("oracle-link.rrd");
+    symlink(&ours, &ours_link).unwrap();
+    symlink(&oracle, &oracle_link).unwrap();
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let actual = Command::new(&alias)
+        .args(["update", ours_link.to_str().unwrap(), "1000000010:3"])
+        .output()
+        .unwrap();
+    let expected = Command::new("rrdtool")
+        .args(["update", oracle_link.to_str().unwrap(), "1000000010:3"])
+        .output()
+        .unwrap();
+    assert_eq!(actual.status, expected.status);
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(std::fs::read(ours).unwrap(), std::fs::read(oracle).unwrap());
+}
+
+#[test]
+fn negative_tuned_heartbeat_matches_pinned_rrdtool_file_and_diagnostic() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping negative heartbeat differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let ours = temp.path().join("ours.rrd");
+    let oracle = temp.path().join("oracle.rrd");
+    let create = Command::new("rrdtool")
+        .args([
+            "create",
+            ours.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:value:GAUGE:60:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(create.status.success());
+    std::fs::copy(&ours, &oracle).unwrap();
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let actual = Command::new(&alias)
+        .args(["tune", ours.to_str().unwrap(), "--heartbeat", "value:-1"])
+        .output()
+        .unwrap();
+    let expected = Command::new("rrdtool")
+        .args(["tune", oracle.to_str().unwrap(), "--heartbeat", "value:-1"])
+        .output()
+        .unwrap();
+    assert_eq!(actual.status, expected.status);
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(std::fs::read(ours).unwrap(), std::fs::read(oracle).unwrap());
+}
+
+#[test]
 fn rrdtool_update_skip_past_updates_matches_pinned_tool() {
     if !Command::new("rrdtool")
         .arg("--version")
