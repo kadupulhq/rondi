@@ -9,17 +9,86 @@ use rondi::{DatabaseConfig, Store, StoreError, Update};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead as StdBufRead, BufReader as StdBufReader, Write as StdWrite};
+use std::io::{
+    BufRead as StdBufRead, BufReader as StdBufReader, Seek, SeekFrom, Write as StdWrite,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::{Duration, timeout};
 
 pub const DEFAULT_RRDCACHED_QUEUE_BYTES: usize = 64 * 1024 * 1024;
+
+fn open_private_rrdcached_journal(path: &Path) -> Result<File, Box<dyn std::error::Error>> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).append(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+        options
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+            .mode(0o600);
+        let file = options.open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.file_type().is_file() {
+            return Err(format!(
+                "rrdcached journal is not a regular file: {}",
+                path.display()
+            )
+            .into());
+        }
+        // Journal contents are trusted during recovery. Refuse a file planted
+        // by a different local user and repair permissions on owned files.
+        // SAFETY: getuid takes no pointers and has no side effects.
+        let effective_uid = unsafe { libc::geteuid() };
+        if metadata.uid() != effective_uid {
+            return Err(format!(
+                "rrdcached journal is not owned by this user: {}",
+                path.display()
+            )
+            .into());
+        }
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(options.open(path)?)
+    }
+}
+
+fn canonical_journal_path(
+    root: &Path,
+    path: &Path,
+    allow_missing: bool,
+) -> Result<PathBuf, String> {
+    let canonical = match std::fs::canonicalize(path) {
+        Ok(path) => path,
+        Err(error) if allow_missing && error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .ok_or_else(|| format!("invalid journal path: {}", path.display()))?;
+            let filename = path
+                .file_name()
+                .ok_or_else(|| format!("invalid journal path: {}", path.display()))?;
+            std::fs::canonicalize(parent)
+                .map_err(|error| error.to_string())?
+                .join(filename)
+        }
+        Err(error) => return Err(error.to_string()),
+    };
+    if !canonical.starts_with(root) {
+        return Err(format!(
+            "rrdcached journal path is outside base directory: {}",
+            path.display()
+        ));
+    }
+    Ok(canonical)
+}
 
 fn wall_time_seconds() -> i64 {
     std::time::SystemTime::now()
@@ -435,15 +504,17 @@ impl RrdcachedQueue {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let replay_time = wall_time_seconds();
         let journal_path = journal_directory.join(".rrdcached.journal");
+        let journal = open_private_rrdcached_journal(&journal_path)?;
         let mut pending = std::collections::BTreeMap::<PathBuf, Vec<PendingRrdUpdate>>::new();
         let mut flushed = std::collections::HashSet::new();
         let mut forgotten = std::collections::HashSet::new();
         let mut known = CacheTree::default();
         let mut paths_by_id = std::collections::HashMap::<u64, PathBuf>::new();
         let mut next_id = 1;
-        if journal_path.exists() {
-            let journal = File::open(&journal_path)?;
-            for line in StdBufReader::new(journal).lines() {
+        if journal.metadata()?.len() > 0 {
+            let mut replay = journal.try_clone()?;
+            replay.seek(SeekFrom::Start(0))?;
+            for line in StdBufReader::new(replay).lines() {
                 let line = line?;
                 if line.is_empty() {
                     continue;
@@ -451,13 +522,7 @@ impl RrdcachedQueue {
                 let record: RrdcachedJournalRecord = serde_json::from_str(&line)?;
                 match record {
                     RrdcachedJournalRecord::Update { id, path, samples } => {
-                        if !path.starts_with(root) {
-                            return Err(format!(
-                                "rrdcached journal path is outside base directory: {}",
-                                path.display()
-                            )
-                            .into());
-                        }
+                        let path = canonical_journal_path(root, &path, true)?;
                         next_id = next_id.max(id.saturating_add(1));
                         known.insert(path.clone(), replay_time);
                         paths_by_id.insert(id, path.clone());
@@ -485,13 +550,7 @@ impl RrdcachedQueue {
                         }
                     }
                     RrdcachedJournalRecord::Expired { path } => {
-                        if !path.starts_with(root) {
-                            return Err(format!(
-                                "rrdcached journal path is outside base directory: {}",
-                                path.display()
-                            )
-                            .into());
-                        }
+                        let path = canonical_journal_path(root, &path, true)?;
                         known.remove(&path);
                     }
                 }
@@ -525,15 +584,7 @@ impl RrdcachedQueue {
             )
             .into());
         }
-        let journal_bytes = std::fs::metadata(&journal_path).map_or(0, |metadata| metadata.len());
-        let mut options = OpenOptions::new();
-        options.create(true).append(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let journal = options.open(journal_path)?;
+        let journal_bytes = journal.metadata()?.len();
         Ok(Self {
             pending,
             pending_order,
@@ -634,22 +685,30 @@ impl RrdcachedQueue {
             .transpose()?
             .unwrap_or(info.last_update as f64);
         for sample in samples {
-            let Some((timestamp, _)) = sample.split_once(':') else {
+            let Some((timestamp, values)) = sample.split_once(':') else {
                 return Err(format!("Cannot find timestamp in '{sample}'!"));
             };
             let timestamp = timestamp
-                .parse::<f64>()
+                .parse::<i64>()
                 .map_err(|_| format!("Cannot find timestamp in '{sample}'!"))?;
-            if !timestamp.is_finite() {
-                return Err(format!("Cannot find timestamp in '{sample}'!"));
+            let values = values.split(':').collect::<Vec<_>>();
+            if values.len() != info.data_sources.len()
+                || values.iter().any(|value| {
+                    !value.eq_ignore_ascii_case("U")
+                        && value
+                            .parse::<f64>()
+                            .map_or(true, |number| !number.is_finite())
+                })
+            {
+                return Err(format!("Invalid update value: {sample}"));
             }
-            if timestamp <= last_timestamp {
+            if timestamp as f64 <= last_timestamp {
                 return Err(format!(
                     "illegal attempt to update using time {:.6} when last update time is {:.6} (minimum one second step)",
-                    timestamp, last_timestamp
+                    timestamp as f64, last_timestamp
                 ));
             }
-            last_timestamp = timestamp;
+            last_timestamp = timestamp as f64;
         }
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
@@ -975,6 +1034,49 @@ async fn flush_rrdcached_paths(
     }
 }
 
+async fn read_bounded_async_line<R>(
+    reader: &mut R,
+    line: &mut String,
+    max_bytes: usize,
+) -> std::io::Result<usize>
+where
+    R: AsyncBufRead + Unpin,
+{
+    line.clear();
+    let mut bytes = Vec::with_capacity(max_bytes.min(4096));
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            break;
+        }
+        let count = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        if bytes.len().saturating_add(count) > max_bytes {
+            let remaining = max_bytes.saturating_add(1).saturating_sub(bytes.len());
+            let consume = remaining.min(available.len());
+            bytes.extend_from_slice(&available[..consume]);
+            let _ = available;
+            reader.consume(consume);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "rrdcached request exceeds 1 MiB",
+            ));
+        }
+        let complete = available[count - 1] == b'\n';
+        bytes.extend_from_slice(&available[..count]);
+        reader.consume(count);
+        if complete {
+            break;
+        }
+    }
+    let length = bytes.len();
+    *line = String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(length)
+}
+
 async fn serve_rrdcached_connection(
     stream: UnixStream,
     root: PathBuf,
@@ -989,11 +1091,7 @@ async fn serve_rrdcached_connection(
     let mut line = String::new();
     loop {
         line.clear();
-        if reader.read_line(&mut line).await? == 0 {
-            return Ok(());
-        }
-        if line.len() > 1024 * 1024 {
-            writer.write_all(b"-1 Request exceeds 1 MiB\n").await?;
+        if read_bounded_async_line(&mut reader, &mut line, 1024 * 1024).await? == 0 {
             return Ok(());
         }
         if line
@@ -1040,17 +1138,13 @@ async fn serve_rrdcached_connection(
             let mut command_number = 0_u64;
             loop {
                 line.clear();
-                if reader.read_line(&mut line).await? == 0 {
+                if read_bounded_async_line(&mut reader, &mut line, 1024 * 1024).await? == 0 {
                     return Ok(());
                 }
                 if line.trim() == "." {
                     break;
                 }
                 command_number += 1;
-                if line.len() > 1024 * 1024 {
-                    errors.push(format!("{command_number} Request exceeds 1 MiB"));
-                    continue;
-                }
                 if line.split_ascii_whitespace().next().is_some_and(|command| {
                     command.eq_ignore_ascii_case("DUMP")
                         || command.eq_ignore_ascii_case("TUNE")
@@ -2389,6 +2483,62 @@ fn store_error(error: StoreError) -> Response<Full<Bytes>> {
 #[cfg(test)]
 mod rrdcached_queue_tests {
     use super::*;
+
+    #[test]
+    fn private_journal_refuses_symlink_and_preserves_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("victim");
+        std::fs::write(&target, b"do not replay").unwrap();
+        let journal = temp.path().join(".rrdcached.journal");
+        std::os::unix::fs::symlink(&target, &journal).unwrap();
+        assert!(open_private_rrdcached_journal(&journal).is_err());
+        assert_eq!(std::fs::read(target).unwrap(), b"do not replay");
+    }
+
+    #[test]
+    fn replay_rejects_canonical_paths_outside_the_storage_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("base");
+        let outside = temp.path().join("outside.rrd");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(&outside, b"outside").unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        let mut journal = File::create(root.join(".rrdcached.journal")).unwrap();
+        serde_json::to_writer(
+            &mut journal,
+            &RrdcachedJournalRecord::Update {
+                id: 1,
+                path: outside.clone(),
+                samples: vec!["1000000010:1".to_owned()],
+            },
+        )
+        .unwrap();
+        journal.write_all(b"\n").unwrap();
+        drop(journal);
+        assert!(RrdcachedQueue::open(&root, 1024, 300).is_err());
+        assert_eq!(std::fs::read(outside).unwrap(), b"outside");
+    }
+
+    #[test]
+    fn invalid_updates_are_rejected_before_journaling() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let file = root.join("metric.rrd");
+        rondi::create_rrd_file(
+            &file,
+            1_000_000_000,
+            10,
+            &["DS:value:GAUGE:30:U:U".to_owned()],
+            &["RRA:AVERAGE:0.5:1:8".to_owned()],
+            true,
+        )
+        .unwrap();
+        let mut queue = RrdcachedQueue::open(&root, 1024, 300).unwrap();
+        assert!(queue.enqueue(file.clone(), &["1000000010.5:1"]).is_err());
+        assert!(queue.enqueue(file.clone(), &["1000000010:1:2"]).is_err());
+        assert_eq!(queue.journal_bytes, 0);
+        assert!(!queue.pending.contains_key(&file));
+    }
 
     #[test]
     fn rrdcached_protocol_fields_unescape_spaces_and_backslashes() {
