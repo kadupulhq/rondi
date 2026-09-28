@@ -2619,6 +2619,116 @@ fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
 }
 
 #[test]
+fn rrdcached_fractional_update_timestamps_flush_byte_for_byte_like_rrdtool() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping fractional rrdcached update differential: rrdtool is not installed");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("rrds");
+    let socket = dir.path().join("run/rrdcached.sock");
+    let alias = dir.path().join("rrdcached");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let journal = dir.path().join("journal");
+    std::fs::create_dir_all(&journal).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+
+    let cached_file = root.join("fractional.rrd");
+    let oracle_file = dir.path().join("oracle.rrd");
+    let created = Command::new("rrdtool")
+        .args([
+            "create",
+            cached_file.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:x:GAUGE:30:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    std::fs::copy(&cached_file, &oracle_file).unwrap();
+
+    let mut child = Command::new(&alias)
+        .args(["-g", "-b"])
+        .arg(&root)
+        .args(["-f", "2h", "-w", "5m", "-p"])
+        .arg(dir.path().join("rrdcached.pid"))
+        .args(["-j"])
+        .arg(&journal)
+        .arg("-l")
+        .arg(format!("unix:{}", socket.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_socket(&mut child, &socket);
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut reader = BufReader::new(&mut stream);
+    assert_eq!(
+        rrdcached_request(
+            &mut reader,
+            "UPDATE fractional.rrd 1000000010.25:1 1000000010.75:3\n"
+        ),
+        "0 errors, enqueued 2 value(s).\n"
+    );
+    assert_eq!(
+        rrdcached_request(&mut reader, "FLUSH fractional.rrd\n"),
+        format!("0 Successfully flushed {}.\n", cached_file.display())
+    );
+
+    let updated = Command::new("rrdtool")
+        .arg("update")
+        .arg(&oracle_file)
+        .args(["1000000010.25:1", "1000000010.75:3"])
+        .env_remove("RRDCACHED_ADDRESS")
+        .output()
+        .unwrap();
+    assert!(
+        updated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    let cached_bytes = std::fs::read(&cached_file).unwrap();
+    let oracle_bytes = std::fs::read(&oracle_file).unwrap();
+    let differing_offsets = cached_bytes
+        .iter()
+        .zip(&oracle_bytes)
+        .enumerate()
+        .filter_map(|(offset, (cached, oracle))| (cached != oracle).then_some(offset))
+        .take(16)
+        .collect::<Vec<_>>();
+    let differing_values = differing_offsets
+        .iter()
+        .map(|offset| (*offset, cached_bytes[*offset], oracle_bytes[*offset]))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        cached_bytes, oracle_bytes,
+        "differing bytes (offset, cached, oracle): {differing_values:?}"
+    );
+    drop(reader);
+    drop(stream);
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[test]
 fn rrdtool_update_daemon_and_environment_route_writes_through_rrdcached() {
     if !Command::new("rrdtool")
         .arg("--version")
