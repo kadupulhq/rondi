@@ -4241,7 +4241,11 @@ fn send_rrdcached_command(
     let mut stream = connect_rrdcached(address)?;
     writeln!(stream, "{command}")?;
     let mut response = String::new();
-    std::io::BufReader::new(stream).read_line(&mut response)?;
+    read_bounded_line(
+        &mut std::io::BufReader::new(stream),
+        &mut response,
+        MAX_RRDCACHED_LINE_BYTES,
+    )?;
     let response = response.trim_end();
     if response.starts_with("0 ") {
         return Ok(response.to_owned());
@@ -4283,7 +4287,11 @@ fn send_rrdcached_update_on_stream(
         samples.join(" ")
     )?;
     let mut response = String::new();
-    std::io::BufReader::new(stream).read_line(&mut response)?;
+    read_bounded_line(
+        &mut std::io::BufReader::new(stream),
+        &mut response,
+        MAX_RRDCACHED_LINE_BYTES,
+    )?;
     let response = response.trim_end();
     if response.starts_with("0 ") {
         return Ok(());
@@ -5046,6 +5054,8 @@ fn read_bounded_line<R: BufRead>(
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     Ok(length)
 }
+
+const MAX_RRDCACHED_LINE_BYTES: usize = 1024 * 1024;
 
 #[cfg(unix)]
 trait RrdcachedStream: Read + Write {}
@@ -6443,5 +6453,33 @@ mod graph_stroke_tests {
             ),
             (1.0, 5.0)
         );
+    }
+}
+
+#[cfg(test)]
+mod rrdcached_response_tests {
+    use super::{MAX_RRDCACHED_LINE_BYTES, read_bounded_line};
+    use std::io::Cursor;
+
+    #[test]
+    fn bounded_rrdcached_line_accepts_the_configured_limit() {
+        let response = format!("{}\n", "x".repeat(MAX_RRDCACHED_LINE_BYTES - 1));
+        let mut reader = Cursor::new(response.as_bytes());
+        let mut line = String::new();
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut line, MAX_RRDCACHED_LINE_BYTES).unwrap(),
+            MAX_RRDCACHED_LINE_BYTES
+        );
+        assert_eq!(line.as_bytes().last(), Some(&b'\n'));
+    }
+
+    #[test]
+    fn bounded_rrdcached_line_rejects_an_oversized_unterminated_response() {
+        let response = "x".repeat(MAX_RRDCACHED_LINE_BYTES + 1);
+        let mut reader = Cursor::new(response.as_bytes());
+        let mut line = String::new();
+        let error =
+            read_bounded_line(&mut reader, &mut line, MAX_RRDCACHED_LINE_BYTES).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
 }
