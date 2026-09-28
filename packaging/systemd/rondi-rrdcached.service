@@ -1,0 +1,23 @@
+[Unit]
+Description=Rondi RRDtool-compatible cache daemon
+After=local-fs.target
+
+[Service]
+Type=simple
+User=rondi
+Group=rondi
+UMask=0007
+StateDirectory=rondi
+StateDirectoryMode=2770
+RuntimeDirectory=rondi
+RuntimeDirectoryMode=2770
+ExecStart=/usr/bin/rrdcached -g -b /var/lib/rondi -m 0660 -s rondi -l unix:/run/rondi/rrdcached.sock
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/rondi /run/rondi
+
+[Install]
+WantedBy=multi-user.target
