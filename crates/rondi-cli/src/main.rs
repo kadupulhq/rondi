@@ -2233,17 +2233,14 @@ fn render_xport_with_graph_prints(
     )?;
     let mut vdef_values = std::collections::HashMap::new();
     for vdef in &vdefs {
-        let column = exports
-            .iter()
-            .position(|export| export.variable == vdef.variable)
+        let values = result
+            .raw_variables
+            .get(&vdef.variable)
+            .cloned()
             .ok_or_else(|| format!("VDEF source variable {} is unavailable", vdef.variable))?;
-        let mut values = result
-            .rows
-            .iter()
-            .map(|row| row.get(column).copied().flatten().unwrap_or(f64::NAN))
-            .collect::<Vec<_>>();
-        // RRDtool's graph data buffer includes the right-edge boundary slot;
-        // VDEF walks that slot even though xport emits rows only through end.
+        // RRDtool's graph buffer includes an unknown right-edge boundary slot
+        // that is not part of the rows returned by xport.
+        let mut values = values;
         values.push(f64::NAN);
         let value = rondi::evaluate_vdef(
             vdef.function,
