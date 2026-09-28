@@ -4672,6 +4672,24 @@ fn rrdtool_list_alias_matches_directory_and_recursive_output() {
         );
     }
     std::fs::write(root.join("notes.txt"), "skip").unwrap();
+    let outside = temp.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let linked_rrd = outside.join("through-link.rrd");
+    let linked_created = Command::new("rrdtool")
+        .args([
+            "create",
+            linked_rrd.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:x:GAUGE:20:U:U",
+            "RRA:AVERAGE:0.5:1:4",
+        ])
+        .output()
+        .unwrap();
+    assert!(linked_created.status.success());
+    symlink(&outside, root.join("linked")).unwrap();
     let alias = temp.path().join("rrdtool");
     symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
     let rrd_pattern = root.join("*.rrd").to_string_lossy().into_owned();
@@ -4695,6 +4713,13 @@ fn rrdtool_list_alias_matches_directory_and_recursive_output() {
             String::from_utf8_lossy(&actual.stderr)
         );
         assert_eq!(actual.stdout, expected.stdout, "list mismatch for {args:?}");
+        if args.get(1) == Some(&"--recursive") {
+            assert!(
+                String::from_utf8_lossy(&expected.stdout)
+                    .lines()
+                    .any(|entry| entry == "linked/through-link.rrd")
+            );
+        }
     }
 
     let args = ["list", "--recursive", rrd_pattern.as_str()];
