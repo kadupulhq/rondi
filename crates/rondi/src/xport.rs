@@ -781,8 +781,10 @@ fn pop(stack: &mut Vec<f64>) -> Result<f64, StoreError> {
     stack.pop().ok_or_else(|| rpn_error("stack underflow"))
 }
 fn pop_count(stack: &mut Vec<f64>) -> Result<usize, StoreError> {
-    let value = pop(stack)?;
-    if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > 1_000_000.0 {
+    // RRDtool stores these RPN operands in C `int` variables, truncating
+    // fractional values toward zero before using them as stack counts.
+    let value = pop(stack)?.trunc();
+    if !value.is_finite() || value < 0.0 || value > 1_000_000.0 {
         return Err(rpn_error("invalid stack count"));
     }
     Ok(value as usize)
