@@ -1045,6 +1045,72 @@ fn rrdtool_update_fractional_timestamps_match_upstream_byte_for_byte() {
 }
 
 #[test]
+fn rrdtool_update_uses_rrd_strtod_rounding_for_epoch_fractions() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping rrd_strtod timestamp differential: rrdtool is not installed");
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let template = temp.path().join("template.rrd");
+    let created = Command::new("rrdtool")
+        .args([
+            "create",
+            template.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:x:GAUGE:30:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let upstream_file = temp.path().join("upstream.rrd");
+    let rondi_file = temp.path().join("rondi.rrd");
+    std::fs::copy(&template, &upstream_file).unwrap();
+    std::fs::copy(&template, &rondi_file).unwrap();
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let updates = [
+        "1000000010.0000001:1",
+        "1000000010.0000019:2",
+        "1000000010.9999999:3",
+        "1000000020.1234567:4",
+    ];
+    let upstream = Command::new("rrdtool")
+        .arg("update")
+        .arg(&upstream_file)
+        .args(updates)
+        .output()
+        .unwrap();
+    let rondi = Command::new(&alias)
+        .arg("update")
+        .arg(&rondi_file)
+        .args(updates)
+        .output()
+        .unwrap();
+    assert_eq!(rondi.status.code(), upstream.status.code());
+    assert_eq!(rondi.stdout, upstream.stdout);
+    assert_eq!(rondi.stderr, upstream.stderr);
+    assert!(upstream.status.success());
+    assert_eq!(
+        std::fs::read(&rondi_file).unwrap(),
+        std::fs::read(&upstream_file).unwrap()
+    );
+}
+
+#[test]
 fn rrdtool_update_at_style_calendar_timestamp_matches_upstream() {
     if !Command::new("rrdtool")
         .arg("--version")
