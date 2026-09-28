@@ -456,7 +456,7 @@ fn evaluate_rpn(
                 let mut values = stack.split_off(split);
                 match token {
                     "SORT" => {
-                        values.sort_by(f64::total_cmp);
+                        values.sort_by(rrd_percent_cmp);
                         stack.extend(values);
                     }
                     "REV" => {
