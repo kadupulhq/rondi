@@ -71,6 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return rrdcached_mode(&args).await;
     }
     if invoked_as == "rrdtool" {
+        initialize_rrdtool_locale();
         let args = std::env::args().collect::<Vec<_>>();
         if args.get(1).is_some_and(|arg| arg == "-") {
             return rrdtool_batch();
@@ -182,6 +183,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     Ok(())
 }
+
+#[cfg(unix)]
+fn initialize_rrdtool_locale() {
+    // The upstream rrdtool executable calls setlocale(LC_ALL, "") before
+    // command dispatch so graph time and calendar operators use the active
+    // environment locale.
+    unsafe {
+        libc::setlocale(libc::LC_ALL, c"".as_ptr());
+    }
+}
+
+#[cfg(not(unix))]
+fn initialize_rrdtool_locale() {}
 
 fn rrdproxy_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let version = format!(
