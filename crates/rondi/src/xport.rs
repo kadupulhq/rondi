@@ -505,8 +505,8 @@ fn evaluate_rpn(
             }
             "COPY" => {
                 let count = pop_count(&mut stack)?;
-                if count == 0 || stack.len() < count {
-                    return Err(rpn_error("stack underflow or invalid COPY count"));
+                if stack.len() < count {
+                    return Err(rpn_error("stack underflow"));
                 }
                 let start = stack.len() - count;
                 let copied = stack[start..].to_vec();
@@ -539,8 +539,11 @@ fn evaluate_rpn(
                     return Err(rpn_error("invalid ROLL shift"));
                 };
                 let count = pop_count(&mut stack)?;
-                if count == 0 || stack.len() < count {
-                    return Err(rpn_error("stack underflow or invalid ROLL count"));
+                if stack.len() < count {
+                    return Err(rpn_error("stack underflow"));
+                }
+                if count == 0 {
+                    continue;
                 }
                 let start = stack.len() - count;
                 let amount = shift.rem_euclid(count as isize) as usize;
