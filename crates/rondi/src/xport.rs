@@ -546,7 +546,7 @@ fn evaluate_rpn(
             "ROLL" => {
                 let shift = pop(&mut stack)?;
                 let shift = if shift.is_finite() {
-                    shift as isize
+                    shift as i32 as isize
                 } else {
                     return Err(rpn_error("invalid ROLL shift"));
                 };
@@ -558,8 +558,34 @@ fn evaluate_rpn(
                     continue;
                 }
                 let start = stack.len() - count;
-                let amount = shift.rem_euclid(count as isize) as usize;
-                stack[start..].rotate_right(amount);
+                if count <= 3 {
+                    // RRDtool 1.11.0 copies the top `count` slots starting at
+                    // the current stack pointer *after* popping the two ROLL
+                    // arguments. The copied slice therefore includes the top
+                    // data value and then the count/shift arguments. Preserve
+                    // that observable behavior for the bounded cases where the
+                    // source copy stays within initialized stack entries.
+                    let mut copied = Vec::with_capacity(count);
+                    copied.push(stack[stack.len() - 1]);
+                    if count >= 2 {
+                        copied.push(count as f64);
+                    }
+                    if count >= 3 {
+                        copied.push(shift as f64);
+                    }
+                    let mut j = count as isize + shift;
+                    let stack_len = stack.len();
+                    for i in (0..count).rev() {
+                        j = (j - 1).rem_euclid(count as isize);
+                        stack[stack_len - 1 - i] = copied[j as usize];
+                    }
+                } else {
+                    // Larger counts make RRDtool's memcpy read past the active
+                    // RPN stack. Keep the well-defined documented rotation
+                    // until that upstream undefined behavior can be bounded.
+                    let amount = shift.rem_euclid(count as isize) as usize;
+                    stack[start..].rotate_right(amount);
+                }
             }
             "PERCENT" => {
                 let count = pop_count(&mut stack)?;

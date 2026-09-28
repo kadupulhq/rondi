@@ -37,6 +37,91 @@ fn compatibility_names_select_their_named_mode() {
 }
 
 #[test]
+fn rpn_roll_small_stack_matches_rrdtool_1110_for_shift_range() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        eprintln!("skipping ROLL differential: pinned RRDtool 1.11.0 is not installed");
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("roll.rrd");
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let created = Command::new("rrdtool")
+        .args([
+            "create",
+            file.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:v:GAUGE:30:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let updated = Command::new("rrdtool")
+        .args(["update", file.to_str().unwrap(), "1000000010:1"])
+        .output()
+        .unwrap();
+    assert!(
+        updated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+
+    for (prefix, suffix) in [("9", ""), ("1,4", ",POP"), ("1,2,4", ",POP,+")] {
+        let count = prefix.split(',').count();
+        for shift in [-2, -1, 0, 1, 2] {
+            let expression = format!("CDEF:r=v,POP,{prefix},{count},{shift},ROLL{suffix}");
+            let args = [
+                "xport",
+                "--json",
+                "--start",
+                "1000000010",
+                "--end",
+                "1000000020",
+            ];
+            let run = |program: &std::path::Path| {
+                Command::new(program)
+                    .args(args)
+                    .arg(format!("DEF:v={}:v:AVERAGE", file.display()))
+                    .arg(&expression)
+                    .arg("XPORT:r:R")
+                    .output()
+                    .unwrap()
+            };
+            let expected = run(std::path::Path::new("rrdtool"));
+            let actual = run(&alias);
+            assert_eq!(
+                actual.status.code(),
+                expected.status.code(),
+                "count {count}, shift {shift}"
+            );
+            assert_eq!(
+                actual.stdout, expected.stdout,
+                "count {count}, shift {shift} stdout"
+            );
+            assert_eq!(
+                actual.stderr, expected.stderr,
+                "count {count}, shift {shift} stderr"
+            );
+        }
+    }
+}
+
+#[test]
 fn rrdcached_help_matches_pinned_stdout_and_exit_status() {
     if !Command::new("rrdcached")
         .arg("--help")
