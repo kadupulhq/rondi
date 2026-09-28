@@ -30,4 +30,5 @@ RUN rustc --version \
     && cargo fmt --all -- --check \
     && cargo clippy --workspace --all-targets --locked -- -D warnings \
     && cargo test --workspace --locked \
+    && cargo doc --workspace --no-deps --locked \
     && cargo build --release --workspace --locked

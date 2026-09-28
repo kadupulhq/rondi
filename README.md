@@ -71,9 +71,11 @@ Restore stages a new output file and refuses to replace an existing path unless 
 
 Fetch and `xport` use shared RRDtool-compatible locking. Update uses an exclusive RRDtool-compatible lock and accepts one value per supported data source, with one or more AVERAGE, MIN, MAX, or LAST archives. The raw-decimal update path preserves COUNTER/DERIVE input precision above 2^53; callers using the float-only library convenience API remain limited to exactly representable integers. `xport` supports DEF/XPORT XML and JSON exports and a row-wise CDEF/RPN subset covering arithmetic, comparisons, `IF`, numeric functions, stack operators, aggregate functions, and unknown handling. A byte-for-byte differential fixture exercises these operators against RRDtool 1.11.0. VDEF graph expressions remain partial. The `graph` command can write native PNG for a basic LINE/AREA/TICK/HRULE/VRULE subset, including STACK baselines and unknowns, alpha colors, AREA gradients, rule/line dashes, graph layout modes, ten color overrides, and basic limits. Selected option behavior and output dimensions are exercised against pinned RRDtool, but its pixels, typography, data-to-pixel mapping, and broader graph grammar still differ. The complete RPN vocabulary and some mixed-resolution and edge behavior remain unsupported or unverified. This does not imply full file, CLI, graph, or protocol compatibility; see the [compatibility matrix](docs/compatibility.md).
 
-## Docker validation
+## Continuous integration and Docker validation
 
-Run the pinned Rust workspace checks and differential tests in a disposable Linux container with:
+GitHub Actions builds the pinned RRDtool 1.11.0 oracle from its upstream release tarball, verifies the tarball SHA-256, and runs formatting, Clippy, the full workspace test suite, documentation generation, and release builds in the same container. This ensures the RRDtool differential tests execute instead of being skipped because the oracle is missing.
+
+Run the same checks locally in a disposable Linux container with:
 
 ```sh
 docker build --progress=plain -f docker/Dockerfile.test -t rondi-test .
