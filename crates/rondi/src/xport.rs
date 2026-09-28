@@ -517,7 +517,10 @@ fn evaluate_rpn(
                     .last()
                     .copied()
                     .ok_or_else(|| rpn_error("stack underflow"))?;
-                if !index.is_finite() || index < 0.0 || index.fract() != 0.0 {
+                // The upstream OP_INDEX implementation converts its RPN number
+                // to C `int`, truncating fractional values toward zero.
+                let index = index.trunc();
+                if !index.is_finite() || index < 0.0 || index > i32::MAX as f64 {
                     return Err(rpn_error("invalid INDEX value"));
                 }
                 let index = index as usize;
