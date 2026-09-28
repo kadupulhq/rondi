@@ -1749,6 +1749,140 @@ fn api_create_update_fetch_and_restart() {
 }
 
 #[test]
+fn rrdtool_fetch_daemon_resolution_matches_upstream_protocol_behavior() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!(
+            "skipping daemon FETCH resolution differential: upstream RRDtool is not installed"
+        );
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("data");
+    std::fs::create_dir_all(&root).unwrap();
+    let file = root.join("multi-resolution.rrd");
+    let created = Command::new("rrdtool")
+        .args([
+            "create",
+            file.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:value:GAUGE:30:U:U",
+            "RRA:AVERAGE:0.5:1:20",
+            "RRA:AVERAGE:0.5:2:20",
+            "RRA:AVERAGE:0.5:5:20",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    for index in 1..=10 {
+        let timestamp = 1_000_000_000 + index * 10;
+        let value = index * index;
+        let update = Command::new("rrdtool")
+            .args([
+                "update",
+                file.to_str().unwrap(),
+                &format!("{timestamp}:{value}"),
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            update.status.success(),
+            "{}",
+            String::from_utf8_lossy(&update.stderr)
+        );
+    }
+
+    let daemon_alias = dir.path().join("rrdcached");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &daemon_alias).unwrap();
+    let socket = dir.path().join("rrdcached.sock");
+    let journal = dir.path().join("journal");
+    std::fs::create_dir_all(&journal).unwrap();
+    let mut daemon = Command::new(&daemon_alias)
+        .args(["-B", "-b"])
+        .arg(&root)
+        .args(["-l"])
+        .arg(format!("unix:{}", socket.display()))
+        .arg("-j")
+        .arg(&journal)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_socket(&mut daemon, &socket);
+
+    let rondi_alias = dir.path().join("rrdtool");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &rondi_alias).unwrap();
+    let mut upstream_by_resolution = Vec::new();
+    for resolution in ["10", "20", "50"] {
+        let args = [
+            "fetch",
+            file.to_str().unwrap(),
+            "AVERAGE",
+            "--resolution",
+            resolution,
+            "--start",
+            "1000000000",
+            "--end",
+            "1000000100",
+            "--daemon",
+        ];
+        let daemon_address = format!("unix:{}", socket.display());
+        let expected = Command::new("rrdtool")
+            .args(args)
+            .arg(&daemon_address)
+            .output()
+            .unwrap();
+        let actual = Command::new(&rondi_alias)
+            .args(args)
+            .arg(&daemon_address)
+            .output()
+            .unwrap();
+        assert!(
+            expected.status.success(),
+            "{}",
+            String::from_utf8_lossy(&expected.stderr)
+        );
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "resolution {resolution}"
+        );
+        assert_eq!(
+            actual.stdout, expected.stdout,
+            "resolution {resolution} stdout"
+        );
+        assert_eq!(
+            actual.stderr, expected.stderr,
+            "resolution {resolution} stderr"
+        );
+        upstream_by_resolution.push(expected.stdout);
+    }
+    assert_eq!(
+        upstream_by_resolution[0], upstream_by_resolution[1],
+        "pinned rrdcached FETCH does not transmit --resolution"
+    );
+    assert_eq!(
+        upstream_by_resolution[1], upstream_by_resolution[2],
+        "pinned rrdcached FETCH does not transmit --resolution"
+    );
+
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}
+
+#[test]
 fn server_handles_interrupt_and_terminate_and_removes_its_socket() {
     let dir = tempfile::tempdir().unwrap();
     for (label, signal) in [("interrupt", libc::SIGINT), ("terminate", libc::SIGTERM)] {
