@@ -2160,6 +2160,280 @@ fn rrdtool_xport_raw_def_and_export_match_rrdtool_xml_and_json() {
 }
 
 #[test]
+fn graph_print_and_gprint_printf_grammar_matches_pinned_rrdtool() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping graph printf differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("format.rrd");
+    let created = Command::new("rrdtool")
+        .args([
+            "create",
+            database.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:x:GAUGE:30:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let updated = Command::new("rrdtool")
+        .args([
+            "update",
+            database.to_str().unwrap(),
+            "1000000010:1234.5",
+            "1000000020:2567.89",
+            "1000000030:2050.0",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        updated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let definition = format!("DEF:x={}:x:AVERAGE", database.display());
+    let formats = [
+        "%lf",
+        "%.2lf",
+        "%+lf",
+        "%-lf",
+        "% lf",
+        "%0lf",
+        "%#lf",
+        "%10lf",
+        "%010.2lf",
+        "%-10.3lg",
+        "% .2le",
+        "%#.0lf",
+        "%0.3lG",
+        "%1lF",
+        "value=%.2lf",
+        "%% %.2lf %%",
+        "%.2lf %s",
+        "%.2lf %S",
+        "-%10.4g +%%",
+        "%g",
+        "%010.2LE",
+        "%#10.4g",
+        "% 08.3e",
+        "%-#12.5G",
+        "%+12.0F",
+        "%010.0E",
+        "%0.1f",
+        "%9.3e",
+        "%.lf",
+        "%lf %lf",
+        "%lf %n",
+        "%s",
+    ];
+
+    for (index, format) in formats.iter().enumerate() {
+        for directive in ["PRINT", "GPRINT"] {
+            let arguments = |output: &std::path::Path| {
+                vec![
+                    "graphv".to_owned(),
+                    output.to_str().unwrap().to_owned(),
+                    "--imgformat".to_owned(),
+                    "JSON".to_owned(),
+                    "--start".to_owned(),
+                    "1000000010".to_owned(),
+                    "--end".to_owned(),
+                    "1000000030".to_owned(),
+                    definition.clone(),
+                    "XPORT:x:x".to_owned(),
+                    format!("{directive}:x:AVERAGE:{format}"),
+                ]
+            };
+            let upstream_output = temp
+                .path()
+                .join(format!("upstream-{index}-{directive}.json"));
+            let rondi_output = temp.path().join(format!("rondi-{index}-{directive}.json"));
+            let expected = Command::new("rrdtool")
+                .args(arguments(&upstream_output))
+                .output()
+                .unwrap();
+            let actual = Command::new(&alias)
+                .args(arguments(&rondi_output))
+                .output()
+                .unwrap();
+            assert_eq!(
+                actual.status.code(),
+                expected.status.code(),
+                "{directive} {format}"
+            );
+            assert_eq!(
+                actual.stdout, expected.stdout,
+                "{directive} {format} stdout"
+            );
+            assert_eq!(
+                actual.stderr, expected.stderr,
+                "{directive} {format} stderr"
+            );
+            if expected.status.success() {
+                let expected_file = std::fs::read(&upstream_output).unwrap_or_default();
+                let actual_file = std::fs::read(&rondi_output).unwrap_or_default();
+                assert_eq!(
+                    actual_file, expected_file,
+                    "{directive} {format} output file"
+                );
+            }
+        }
+    }
+
+    for (index, exponent) in (-6..=7).enumerate() {
+        let scale_file = temp.path().join(format!("scale-{exponent}.rrd"));
+        let created = Command::new("rrdtool")
+            .args([
+                "create",
+                scale_file.to_str().unwrap(),
+                "--start",
+                "1000000000",
+                "--step",
+                "10",
+                "DS:x:GAUGE:30:U:U",
+                "RRA:AVERAGE:0.5:1:4",
+            ])
+            .output()
+            .unwrap();
+        assert!(created.status.success());
+        let value = 1000_f64.powi(exponent);
+        let updated = Command::new("rrdtool")
+            .args([
+                "update",
+                scale_file.to_str().unwrap(),
+                &format!("1000000010:{value}"),
+            ])
+            .output()
+            .unwrap();
+        assert!(updated.status.success());
+        let scale_definition = format!("DEF:x={}:x:AVERAGE", scale_file.display());
+        let arguments = |output: &std::path::Path| {
+            vec![
+                "graphv".to_owned(),
+                output.to_str().unwrap().to_owned(),
+                "--imgformat".to_owned(),
+                "JSON".to_owned(),
+                "--start".to_owned(),
+                "1000000000".to_owned(),
+                "--end".to_owned(),
+                "1000000020".to_owned(),
+                scale_definition.clone(),
+                "XPORT:x:x".to_owned(),
+                "PRINT:x:AVERAGE:%0.2lf %s".to_owned(),
+            ]
+        };
+        let upstream_output = temp.path().join(format!("scale-upstream-{index}.json"));
+        let rondi_output = temp.path().join(format!("scale-rondi-{index}.json"));
+        let expected = Command::new("rrdtool")
+            .args(arguments(&upstream_output))
+            .output()
+            .unwrap();
+        let actual = Command::new(&alias)
+            .args(arguments(&rondi_output))
+            .output()
+            .unwrap();
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "SI exponent {exponent}"
+        );
+        assert_eq!(
+            actual.stdout, expected.stdout,
+            "SI exponent {exponent} stdout"
+        );
+        assert_eq!(
+            actual.stderr, expected.stderr,
+            "SI exponent {exponent} stderr"
+        );
+        assert_eq!(
+            std::fs::read(&rondi_output).unwrap_or_default(),
+            std::fs::read(&upstream_output).unwrap_or_default(),
+            "SI exponent {exponent} output file"
+        );
+    }
+
+    for (index, sample) in ["0", "-1234.5", "U"].iter().enumerate() {
+        let scale_file = temp.path().join(format!("scale-special-{index}.rrd"));
+        let created = Command::new("rrdtool")
+            .args([
+                "create",
+                scale_file.to_str().unwrap(),
+                "--start",
+                "1000000000",
+                "--step",
+                "10",
+                "DS:x:GAUGE:30:U:U",
+                "RRA:AVERAGE:0.5:1:4",
+            ])
+            .output()
+            .unwrap();
+        assert!(created.status.success());
+        let updated = Command::new("rrdtool")
+            .args([
+                "update",
+                scale_file.to_str().unwrap(),
+                &format!("1000000010:{sample}"),
+            ])
+            .output()
+            .unwrap();
+        assert!(updated.status.success());
+        let scale_definition = format!("DEF:x={}:x:AVERAGE", scale_file.display());
+        let arguments = |output: &std::path::Path| {
+            vec![
+                "graphv".to_owned(),
+                output.to_str().unwrap().to_owned(),
+                "--imgformat".to_owned(),
+                "JSON".to_owned(),
+                "--start".to_owned(),
+                "1000000000".to_owned(),
+                "--end".to_owned(),
+                "1000000020".to_owned(),
+                scale_definition.clone(),
+                "XPORT:x:x".to_owned(),
+                "PRINT:x:AVERAGE:%0.2lf %s".to_owned(),
+            ]
+        };
+        let upstream_output = temp.path().join(format!("special-upstream-{index}.json"));
+        let rondi_output = temp.path().join(format!("special-rondi-{index}.json"));
+        let expected = Command::new("rrdtool")
+            .args(arguments(&upstream_output))
+            .output()
+            .unwrap();
+        let actual = Command::new(&alias)
+            .args(arguments(&rondi_output))
+            .output()
+            .unwrap();
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "SI special {sample}"
+        );
+        assert_eq!(actual.stdout, expected.stdout, "SI special {sample} stdout");
+        assert_eq!(actual.stderr, expected.stderr, "SI special {sample} stderr");
+        assert_eq!(
+            std::fs::read(&rondi_output).unwrap_or_default(),
+            std::fs::read(&upstream_output).unwrap_or_default(),
+            "SI special {sample} output file"
+        );
+    }
+}
+
+#[test]
 fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
     if !Command::new("rrdtool")
         .arg("--version")
