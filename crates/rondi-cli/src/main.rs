@@ -3,7 +3,7 @@ use rondi::{
     DatabaseConfig, RrdDataSourceTune, RrdDumpHeader, RrdResizeAction, RrdTuneBound, Store, Update,
     create_rrd_file, dump_rrd_file_with_header, fetch_rrd_file, first_rrd_time,
     parse_rrd_scaled_duration, resize_rrd_file, restore_rrd_file, tune_rrd_data_sources,
-    update_rrd_raw_values, update_rrd_raw_values_verbose,
+    update_rrd_raw_values_precise, update_rrd_raw_values_precise_verbose,
 };
 use std::fmt::Write as FmtWrite;
 use std::io::{BufRead, Read, Seek, Write};
@@ -4105,8 +4105,11 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
         let update_now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs_f64();
-        let timestamp = if at_style {
-            parse_rrd_time(timestamp, update_now.floor() as i64)?
+        let update_time = if at_style {
+            UpdateTimestamp {
+                seconds: parse_rrd_time(timestamp, update_now.floor() as i64)?,
+                microseconds: 0,
+            }
         } else {
             parse_rrd_update_timestamp(timestamp, update_now).map_err(|_| {
                 format!(
@@ -4115,11 +4118,13 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 )
             })?
         };
-        if skip_past_updates
-            && daemon_address.is_none()
-            && timestamp <= inspect_rrd(&args[1])?.last_update
-        {
-            continue;
+        if skip_past_updates && daemon_address.is_none() {
+            let info = inspect_rrd(&args[1])?;
+            if (update_time.seconds, update_time.microseconds)
+                <= (info.last_update, info.last_update_usec)
+            {
+                continue;
+            }
         }
         if daemon_address.is_some() {
             let encoded_values = raw_values
@@ -4127,12 +4132,17 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 .map(|value| value.as_deref().unwrap_or("U"))
                 .collect::<Vec<_>>()
                 .join(":");
-            daemon_samples.push(format!("{timestamp}:{encoded_values}"));
+            daemon_samples.push(format!("{}:{encoded_values}", update_time.format_rrd()));
             continue;
         }
         if verbose {
             let raw_values = raw_values.iter().map(Option::as_deref).collect::<Vec<_>>();
-            let summaries = update_rrd_raw_values_verbose(&filename, timestamp, &raw_values)?;
+            let summaries = update_rrd_raw_values_precise_verbose(
+                &filename,
+                update_time.seconds,
+                update_time.microseconds,
+                &raw_values,
+            )?;
             for summary in summaries {
                 for (source_name, value) in verbose_source_names
                     .as_ref()
@@ -4152,7 +4162,12 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
             }
         } else {
             let raw_values = raw_values.iter().map(Option::as_deref).collect::<Vec<_>>();
-            update_rrd_raw_values(&filename, timestamp, &raw_values)?;
+            update_rrd_raw_values_precise(
+                &filename,
+                update_time.seconds,
+                update_time.microseconds,
+                &raw_values,
+            )?;
         }
     }
     if let Some(address) = daemon_address {
@@ -5742,10 +5757,28 @@ fn resolve_rrd_range_times(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UpdateTimestamp {
+    seconds: i64,
+    microseconds: u64,
+}
+
+impl UpdateTimestamp {
+    fn format_rrd(self) -> String {
+        if self.microseconds == 0 {
+            self.seconds.to_string()
+        } else {
+            format!("{}.{:06}", self.seconds, self.microseconds)
+        }
+    }
+}
+
 /// RRDtool accepts `N` for the current time and interprets negative numeric
-/// update times as offsets from the current time. Storage currently has
-/// second-level timestamps, so fractional seconds are rounded down.
-fn parse_rrd_update_timestamp(value: &str, now: f64) -> Result<i64, Box<dyn std::error::Error>> {
+/// update times as offsets from the current time.
+fn parse_rrd_update_timestamp(
+    value: &str,
+    now: f64,
+) -> Result<UpdateTimestamp, Box<dyn std::error::Error>> {
     let timestamp = if value == "N" {
         now
     } else {
@@ -5759,7 +5792,18 @@ fn parse_rrd_update_timestamp(value: &str, now: f64) -> Result<i64, Box<dyn std:
     if !timestamp.is_finite() || timestamp < i64::MIN as f64 || timestamp >= i64::MAX as f64 {
         return Err("update timestamp is outside the supported range".into());
     }
-    Ok(timestamp.floor() as i64)
+    let mut seconds = timestamp.floor() as i64;
+    let mut microseconds = ((timestamp - seconds as f64) * 1_000_000.0) as u64;
+    if microseconds >= 1_000_000 {
+        seconds = seconds
+            .checked_add(1)
+            .ok_or("update timestamp is outside the supported range")?;
+        microseconds = 0;
+    }
+    Ok(UpdateTimestamp {
+        seconds,
+        microseconds,
+    })
 }
 
 async fn server_mode(socket: PathBuf, command: Command) -> Result<(), Box<dyn std::error::Error>> {
@@ -5871,8 +5915,8 @@ mod xml_output_tests {
 #[cfg(test)]
 mod time_spec_tests {
     use super::{
-        RangeTimeSpec, parse_range_time_spec, parse_rrd_time, parse_rrd_update_timestamp,
-        resolve_rrd_range_times,
+        RangeTimeSpec, UpdateTimestamp, parse_range_time_spec, parse_rrd_time,
+        parse_rrd_update_timestamp, resolve_rrd_range_times,
     };
 
     #[test]
@@ -5951,15 +5995,24 @@ mod time_spec_tests {
     fn update_n_and_negative_times_are_relative_to_current_time() {
         assert_eq!(
             parse_rrd_update_timestamp("N", 2_000_000_000.75).unwrap(),
-            2_000_000_000
+            UpdateTimestamp {
+                seconds: 2_000_000_000,
+                microseconds: 750_000
+            }
         );
         assert_eq!(
             parse_rrd_update_timestamp("-60", 2_000_000_000.75).unwrap(),
-            1_999_999_940
+            UpdateTimestamp {
+                seconds: 1_999_999_940,
+                microseconds: 750_000
+            }
         );
         assert_eq!(
             parse_rrd_update_timestamp("10.9", 2_000_000_000.75).unwrap(),
-            10
+            UpdateTimestamp {
+                seconds: 10,
+                microseconds: 900_000
+            }
         );
         assert!(parse_rrd_update_timestamp("NaN", 2_000_000_000.75).is_err());
     }
