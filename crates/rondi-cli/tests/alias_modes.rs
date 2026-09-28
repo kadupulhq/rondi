@@ -3691,6 +3691,100 @@ fn rrdtool_xport_local_calendar_rpn_operators_match_at_new_year_boundary() {
 }
 
 #[test]
+fn rpn_newweek_matches_locale_first_weekday_from_rrdtool() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping NEWWEEK locale differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("newweek.rrd");
+    let start = 1_704_067_200_i64; // 2024-01-01 00:00:00 UTC
+    let step = 86_400_i64;
+    let end = start + step * 10;
+    let start_text = start.to_string();
+    let step_text = step.to_string();
+    let end_text = end.to_string();
+    let created = Command::new("rrdtool")
+        .env("TZ", "UTC")
+        .args([
+            "create",
+            file.to_str().unwrap(),
+            "--start",
+            &start_text,
+            "--step",
+            &step_text,
+            "DS:value:GAUGE:172800:U:U",
+            "RRA:AVERAGE:0.5:1:12",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let samples = (1..=10)
+        .map(|day| format!("{}:{day}", start + step * day))
+        .collect::<Vec<_>>();
+    let updated = Command::new("rrdtool")
+        .env("TZ", "UTC")
+        .arg("update")
+        .arg(&file)
+        .args(&samples)
+        .output()
+        .unwrap();
+    assert!(
+        updated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&updated.stderr)
+    );
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let definition = format!("DEF:value={}:value:AVERAGE", file.display());
+    let args = [
+        "xport",
+        "--start",
+        &start_text,
+        "--end",
+        &end_text,
+        "--step",
+        &step_text,
+        "--json",
+    ];
+    let expected = Command::new("rrdtool")
+        .env("TZ", "UTC")
+        .args(args)
+        .arg(&definition)
+        .arg("CDEF:newweek=value,POP,0,NEWWEEK,+")
+        .arg("XPORT:newweek:NewWeek")
+        .output()
+        .unwrap();
+    let actual = Command::new(alias)
+        .env("TZ", "UTC")
+        .args(args)
+        .arg(&definition)
+        .arg("CDEF:newweek=value,POP,0,NEWWEEK,+")
+        .arg("XPORT:newweek:NewWeek")
+        .output()
+        .unwrap();
+    assert!(
+        expected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+    assert!(
+        actual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(actual.stdout, expected.stdout);
+}
+
+#[test]
 fn rrdtool_xport_ltime_matches_across_daylight_saving_transition() {
     if !Command::new("rrdtool")
         .arg("--version")
