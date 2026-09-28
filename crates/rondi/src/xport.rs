@@ -41,6 +41,10 @@ pub struct RrdXportResult {
     pub step: u64,
     pub legends: Vec<String>,
     pub rows: Vec<Vec<Option<f64>>>,
+    /// Row-wise values before non-finite numbers are converted to unknowns for
+    /// XPORT output. Graph VDEF calculations need to distinguish infinities
+    /// from unknown data even though both serialize as null/unknown.
+    pub raw_variables: HashMap<String, Vec<f64>>,
 }
 
 struct FetchedDefinition {
@@ -238,6 +242,7 @@ pub fn fetch_xport_with_cdefs(
         step: output_step,
         legends: columns.iter().map(|column| column.legend.clone()).collect(),
         rows,
+        raw_variables: variables,
     })
 }
 
