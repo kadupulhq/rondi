@@ -2466,6 +2466,99 @@ fn rrdtool_xport_rpn_numeric_literals_follow_rrd_strtod() {
 }
 
 #[test]
+fn rrdtool_xport_trend_duration_rounding_matches_rrd_strtod() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping RRDtool TREND duration differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("trend-duration.rrd");
+    let step = 1_000_000_010_i64;
+    let start = 2 * step;
+    let first_update = start + step;
+    let second_update = first_update + step;
+    let create = Command::new("rrdtool")
+        .args([
+            "create",
+            database.to_str().unwrap(),
+            "--start",
+            &start.to_string(),
+            "--step",
+            &step.to_string(),
+            "DS:value:GAUGE:3000000000:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let update = Command::new("rrdtool")
+        .args([
+            "update",
+            database.to_str().unwrap(),
+            &format!("{first_update}:1"),
+            &format!("{second_update}:3"),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let def = format!("DEF:value={}:value:AVERAGE", database.display());
+    let args = [
+        "xport",
+        "--start",
+        &start.to_string(),
+        "--end",
+        &second_update.to_string(),
+        "--step",
+        &step.to_string(),
+        "--json",
+    ];
+    let elements = [
+        "CDEF:trend=value,1000000010.9999999,TREND",
+        "XPORT:trend:Trend",
+    ];
+    let expected = Command::new("rrdtool")
+        .args(args)
+        .arg(&def)
+        .args(elements)
+        .output()
+        .unwrap();
+    let actual = Command::new(&alias)
+        .args(args)
+        .arg(&def)
+        .args(elements)
+        .output()
+        .unwrap();
+    assert!(
+        expected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+    assert!(
+        actual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert!(String::from_utf8_lossy(&expected.stdout).contains("5.0000000000e-01"));
+}
+
+#[test]
 fn rrdtool_xport_cdef_limit_matches_upstream_bounds_and_unknowns() {
     if !Command::new("rrdtool")
         .arg("--version")
