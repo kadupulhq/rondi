@@ -83,7 +83,7 @@ fn rpn_roll_small_stack_matches_rrdtool_1110_for_shift_range() {
 
     for (prefix, suffix) in [("9", ""), ("1,4", ",POP"), ("1,2,4", ",POP,+")] {
         let count = prefix.split(',').count();
-        for shift in [-2, -1, 0, 1, 2] {
+        for shift in ["-2", "-1", "-0.9", "0", "0.9", "1", "1.9", "2"] {
             let expression = format!("CDEF:r=v,POP,{prefix},{count},{shift},ROLL{suffix}");
             let args = [
                 "xport",
