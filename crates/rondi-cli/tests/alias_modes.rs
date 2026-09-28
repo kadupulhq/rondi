@@ -2377,6 +2377,101 @@ fn rrdtool_xport_raw_def_and_export_match_rrdtool_xml_and_json() {
 }
 
 #[test]
+fn rrdtool_xport_cdef_limit_matches_upstream_bounds_and_unknowns() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping RRDtool LIMIT differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("limit.rrd");
+    let create = Command::new("rrdtool")
+        .args([
+            "create",
+            database.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:value:GAUGE:30:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let update = Command::new("rrdtool")
+        .args([
+            "update",
+            database.to_str().unwrap(),
+            "1000000010:2",
+            "1000000020:4",
+            "1000000030:6",
+            "1000000040:U",
+            "1000000050:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let def = format!("DEF:value={}:value:AVERAGE", database.display());
+    let args = [
+        "xport",
+        "--start",
+        "1000000000",
+        "--end",
+        "1000000050",
+        "--step",
+        "10",
+        "--json",
+    ];
+    let elements = [
+        "CDEF:limited=value,3,7,LIMIT",
+        "CDEF:unknown_min=value,UNKN,7,LIMIT",
+        "CDEF:unknown_max=value,3,UNKN,LIMIT",
+        "XPORT:limited:Limited",
+        "XPORT:unknown_min:Unknown minimum",
+        "XPORT:unknown_max:Unknown maximum",
+    ];
+    let expected = Command::new("rrdtool")
+        .args(args)
+        .arg(&def)
+        .args(elements)
+        .output()
+        .unwrap();
+    let actual = Command::new(&alias)
+        .args(args)
+        .arg(&def)
+        .args(elements)
+        .output()
+        .unwrap();
+    assert!(
+        expected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+    assert!(
+        actual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+}
+
+#[test]
 fn rrdtool_xport_rpn_aggregates_follow_upstream_stack_order() {
     if !Command::new("rrdtool")
         .arg("--version")
