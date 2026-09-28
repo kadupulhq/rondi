@@ -274,7 +274,9 @@ fn evaluate_rpn(
             "NOW" => {
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| duration.as_secs_f64())
+                    // RRDtool's OP_NOW uses time(NULL), which has whole-second
+                    // precision. Do not leak subsecond clock precision into RPN.
+                    .map(|duration| duration.as_secs() as f64)
                     .unwrap_or(f64::NAN);
                 stack.push(now);
                 continue;
