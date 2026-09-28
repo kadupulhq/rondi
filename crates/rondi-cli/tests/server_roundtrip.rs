@@ -39,6 +39,36 @@ fn wait_for_socket(child: &mut Child, socket: &std::path::Path) {
     panic!("server did not create its Unix socket");
 }
 
+fn wait_for_socket_metadata(
+    child: &mut Child,
+    socket: &std::path::Path,
+    expected_gid: u32,
+    expected_mode: u32,
+) {
+    use std::os::unix::fs::MetadataExt;
+
+    wait_for_socket(child, socket);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(metadata) = std::fs::metadata(socket)
+            && metadata.gid() == expected_gid
+            && metadata.mode() & 0o7777 == expected_mode
+        {
+            return;
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("server exited before socket metadata was ready: {status}");
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "socket {} did not reach group {expected_gid} and mode {expected_mode:o}",
+                socket.display()
+            );
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[test]
 fn flushcached_client_connects_to_upstream_tcp_daemon() {
     if !Command::new("rrdcached")
@@ -1349,7 +1379,7 @@ fn rrdcached_socket_group_matches_upstream() {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        wait_for_socket(&mut child, &socket);
+        wait_for_socket_metadata(&mut child, &socket, gid, 0o760);
         let metadata = std::fs::metadata(&socket).unwrap();
         socket_metadata.push((metadata.gid(), metadata.mode() & 0o7777));
         unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
