@@ -621,16 +621,13 @@ fn evaluate_rpn(
                 };
                 let source_step_i64 = i64::try_from(source_step)
                     .map_err(|_| rpn_error("trend source step overflows"))?;
-                let window = if duration_seconds <= 0 {
-                    1
-                } else {
-                    usize::try_from(
-                        duration_seconds.saturating_add(source_step_i64 - 1) / source_step_i64,
-                    )
-                    .map_err(|_| rpn_error("trend window is too large"))?
-                };
-                let required = window;
-                let value = if row + 1 < required {
+                // rrd_rpncalc.c first checks readiness using single-precision
+                // division, then separately consumes samples while the integer
+                // duration remains positive. The float rounding is visible for
+                // large durations just above a source-step boundary.
+                let required_rows = (duration_seconds as f32 / source_step_i64 as f32).ceil();
+                let ready = (row + 1) as f32 >= required_rows;
+                let value = if !ready {
                     f64::NAN
                 } else {
                     let stride = usize::try_from(source_step / step_width)
@@ -639,12 +636,16 @@ fn evaluate_rpn(
                     let mut sum = 0.0;
                     let mut count = 0_usize;
                     let mut unknown = false;
-                    for offset in 0..window {
-                        let Some(index) = row.checked_sub(offset.saturating_mul(stride)) else {
-                            unknown = true;
-                            break;
-                        };
-                        let sample = values.get(index).copied().unwrap_or(f64::NAN);
+                    let mut remaining_duration = duration_seconds;
+                    let mut offset = 0_usize;
+                    loop {
+                        let index = row.checked_sub(offset.saturating_mul(stride));
+                        // RRDtool's RPN history buffer is zero-initialized
+                        // before the first available row.
+                        let sample = index
+                            .and_then(|index| values.get(index))
+                            .copied()
+                            .unwrap_or(0.0);
                         if sample.is_nan() {
                             if token == "TREND" {
                                 unknown = true;
@@ -654,6 +655,11 @@ fn evaluate_rpn(
                             sum += sample;
                             count += 1;
                         }
+                        remaining_duration = remaining_duration.saturating_sub(source_step_i64);
+                        if remaining_duration <= 0 {
+                            break;
+                        }
+                        offset += 1;
                     }
                     if unknown || count == 0 {
                         f64::NAN
