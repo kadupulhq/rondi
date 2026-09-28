@@ -451,10 +451,14 @@ fn evaluate_rpn(
                     }
                     "AVG" => {
                         let known: Vec<f64> = values.into_iter().filter(|v| !v.is_nan()).collect();
+                        let known_count = known.len();
                         stack.push(if known.is_empty() {
                             f64::NAN
                         } else {
-                            known.iter().sum::<f64>() / known.len() as f64
+                            // RRDtool pops aggregate operands from the RPN stack, so it
+                            // adds the rightmost operand first. Floating point addition
+                            // is order-sensitive; preserve that operation order.
+                            known.into_iter().rev().sum::<f64>() / known_count as f64
                         });
                     }
                     "MEDIAN" => {
@@ -473,7 +477,9 @@ fn evaluate_rpn(
                         let mut n = 0.0;
                         let mut mean = 0.0;
                         let mut mean2 = 0.0;
-                        for datum in values.into_iter().filter(|v| !v.is_nan()) {
+                        // rrd_rpncalc.c consumes the aggregate operands by popping the
+                        // stack, which visits them in reverse expression order.
+                        for datum in values.into_iter().rev().filter(|v| !v.is_nan()) {
                             n += 1.0;
                             let delta = datum - mean;
                             mean += delta / n;
