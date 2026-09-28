@@ -1,5 +1,5 @@
 //! Query and resample existing RRD archives for RRDtool-style exports.
-use crate::{RrdFetchResult, StoreError, fetch_rrd_file};
+use crate::{RrdFetchResult, StoreError, fetch_rrd_file, rrd_number::parse_rrd_number};
 use std::{collections::HashMap, path::PathBuf};
 
 #[inline]
@@ -618,9 +618,8 @@ fn evaluate_rpn(
                     return Err(rpn_error("malformed trend arguments"));
                 }
                 let variable = tokens[token_index - 2];
-                let duration = tokens[token_index - 1]
-                    .parse::<f64>()
-                    .map_err(|_| rpn_error("trend duration must follow a variable"))?;
+                let duration = parse_rrd_number(tokens[token_index - 1])
+                    .ok_or_else(|| rpn_error("trend duration must follow a variable"))?;
                 let values = variables
                     .get(variable)
                     .ok_or_else(|| rpn_error("trend must immediately follow a variable"))?;
@@ -808,7 +807,7 @@ fn evaluate_rpn(
                 );
             }
             _ => {
-                if let Ok(number) = token.parse::<f64>() {
+                if let Some(number) = parse_rrd_number(token) {
                     stack.push(number);
                 } else if let Some(values) = variables.get(token) {
                     if !tokens.get(token_index + 1).is_some_and(|next| {
