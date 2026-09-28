@@ -19,6 +19,15 @@ const VALUE_LEN: usize = 8;
 const FLOAT_COOKIE: f64 = 8.642135E130;
 const MAX_HEADER_LEN: usize = 64 * 1024 * 1024;
 
+/// Generate the platform's arithmetic NaN as RRDtool's `0.0 / 0.0` helper
+/// does. The NaN sign bit is observable in the bytes written to an RRD.
+#[inline]
+#[allow(clippy::eq_op)] // The runtime invalid operation is required for RRDtool's host NaN bits.
+fn rrd_nan() -> f64 {
+    let zero = std::hint::black_box(0.0_f64);
+    zero / zero
+}
+
 /// Create an interoperable RRDtool file for the basic DS/RRA grammar.
 /// The archive row pointer is initialized deterministically; RRDtool itself may
 /// choose any row because every row in a newly created archive is unknown.
@@ -140,8 +149,8 @@ pub fn create_rrd_file(
         copy_fixed(&mut bytes[offset..offset + 20], name);
         copy_fixed(&mut bytes[offset + 20..offset + 40], kind);
         put_u64(&mut bytes, offset + 40, *heartbeat);
-        put_f64(&mut bytes, offset + 48, minimum.unwrap_or(f64::NAN));
-        put_f64(&mut bytes, offset + 56, maximum.unwrap_or(f64::NAN));
+        put_f64(&mut bytes, offset + 48, minimum.unwrap_or(rrd_nan()));
+        put_f64(&mut bytes, offset + 56, maximum.unwrap_or(rrd_nan()));
     }
     for (cf, xff, pdps, rows) in &rras {
         let offset = bytes.len();
@@ -162,7 +171,7 @@ pub fn create_rrd_file(
         bytes.resize(offset + PDP_PREP_LEN, 0);
         copy_fixed(&mut bytes[offset..offset + 30], "U");
         put_u64(&mut bytes, offset + 32, unknown);
-        put_f64(&mut bytes, offset + 40, f64::NAN);
+        put_f64(&mut bytes, offset + 40, rrd_nan());
     }
     let step_i64 =
         i64::try_from(step).map_err(|_| StoreError::RrdUnsupported("step too large".into()))?;
@@ -177,7 +186,7 @@ pub fn create_rrd_file(
         for _ in &sources {
             let offset = bytes.len();
             bytes.resize(offset + CDP_PREP_LEN, 0);
-            put_f64(&mut bytes, offset, f64::NAN);
+            put_f64(&mut bytes, offset, rrd_nan());
             put_u64(&mut bytes, offset + 8, unknown_pdps);
         }
     }
@@ -194,7 +203,7 @@ pub fn create_rrd_file(
             .ok_or_else(|| StoreError::RrdUnsupported("RRA size overflow".into()))?;
         bytes.reserve(byte_count);
         for _ in 0..cells {
-            bytes.extend_from_slice(&f64::NAN.to_le_bytes());
+            bytes.extend_from_slice(&rrd_nan().to_le_bytes());
         }
     }
     let path = path.as_ref();
@@ -720,7 +729,7 @@ fn update_path_values_with_raw(
                 pre_unknown = pre_interval;
             }
             let pdp = if interval > heartbeat || (info.step as f64 / 2.0) < old_unknown as f64 {
-                f64::NAN
+                rrd_nan()
             } else {
                 accumulated
                     / (info.step as f64 * elapsed_steps as f64 - old_unknown as f64 - pre_unknown)
@@ -728,7 +737,7 @@ fn update_path_values_with_raw(
             let (unknown, next_value) = if let Some(integral) = integral {
                 (0, integral / interval * post_interval)
             } else {
-                (post_interval.floor() as u64, f64::NAN)
+                (post_interval.floor() as u64, rrd_nan())
             };
             (unknown, next_value, Some(pdp))
         };
@@ -746,7 +755,7 @@ fn update_path_values_with_raw(
             };
             let denominator = info.step as f64 - old_unknown as f64 - pre_unknown;
             if denominator <= 0.0 || partial_value.is_nan() {
-                Some(f64::NAN)
+                Some(rrd_nan())
             } else {
                 Some(partial_value / denominator)
             }
@@ -754,13 +763,13 @@ fn update_path_values_with_raw(
             pdp
         };
         let fill_pdp = if elapsed_steps > 1 {
-            integral.map_or(f64::NAN, |integral| integral / interval)
+            integral.map_or(rrd_nan(), |integral| integral / interval)
         } else {
-            pdp.unwrap_or(f64::NAN)
+            pdp.unwrap_or(rrd_nan())
         };
         prep.push((next_unknown, next_pdp_value));
         completed_pdp.push(pdp);
-        first_completed_pdp.push(first_pdp.unwrap_or(f64::NAN));
+        first_completed_pdp.push(first_pdp.unwrap_or(rrd_nan()));
         fill_completed_pdp.push(fill_pdp);
         let mut last_ds = value.map_or_else(
             || "U".to_owned(),
@@ -857,7 +866,7 @@ fn update_path_values_with_raw(
                 let mut archive_rows = row_times
                     .into_iter()
                     .skip(skipped_rows as usize)
-                    .map(|timestamp| (timestamp, vec![f64::NAN; info.data_sources.len()]))
+                    .map(|timestamp| (timestamp, vec![rrd_nan(); info.data_sources.len()]))
                     .collect::<Vec<_>>();
 
                 for ds_index in 0..info.data_sources.len() {
@@ -874,20 +883,20 @@ fn update_path_values_with_raw(
                         if *phase_rows > 0 {
                             if pdp.is_nan() {
                                 unknown_count = unknown_count.saturating_add(*phase_start);
-                                secondary = f64::NAN;
+                                secondary = rrd_nan();
                             } else {
                                 secondary = pdp;
                             }
                             primary = if unknown_count as f64
                                 > archive.pdp_per_row as f64 * archive.xff
                             {
-                                f64::NAN
+                                rrd_nan()
                             } else {
                                 let identity = match archive.consolidation.as_str() {
                                     "AVERAGE" => 0.0,
                                     "MIN" => f64::INFINITY,
                                     "MAX" => f64::NEG_INFINITY,
-                                    "LAST" => f64::NAN,
+                                    "LAST" => rrd_nan(),
                                     _ => unreachable!("consolidation was checked above"),
                                 };
                                 let carried = if cdp_value.is_nan() {
@@ -913,14 +922,14 @@ fn update_path_values_with_raw(
                                     "AVERAGE" => 0.0,
                                     "MIN" => f64::INFINITY,
                                     "MAX" => f64::NEG_INFINITY,
-                                    "LAST" => f64::NAN,
+                                    "LAST" => rrd_nan(),
                                     _ => unreachable!("consolidation was checked above"),
                                 }
                             } else {
                                 match archive.consolidation.as_str() {
                                     "AVERAGE" => pdp * carry_count as f64,
                                     "MIN" | "MAX" => pdp,
-                                    "LAST" => f64::NAN,
+                                    "LAST" => rrd_nan(),
                                     _ => unreachable!("consolidation was checked above"),
                                 }
                             };
@@ -1005,7 +1014,7 @@ fn update_path_values_with_raw(
             }
             let mut archive_values = Vec::with_capacity(info.data_sources.len());
             for (ds_index, completed_value) in completed_pdp.iter().enumerate() {
-                let pdp = completed_value.unwrap_or(f64::NAN);
+                let pdp = completed_value.unwrap_or(rrd_nan());
                 let first_pdp = first_completed_pdp[ds_index];
                 let fill_pdp = fill_completed_pdp[ds_index];
                 let cdp_offset =
@@ -1022,18 +1031,18 @@ fn update_path_values_with_raw(
                 } else if rows_due > 0 {
                     if pdp.is_nan() {
                         unknown_count = unknown_count.saturating_add(start_offset);
-                        secondary = f64::NAN;
+                        secondary = rrd_nan();
                     } else {
                         secondary = pdp;
                     }
                     primary = if unknown_count as f64 > archive.pdp_per_row as f64 * archive.xff {
-                        f64::NAN
+                        rrd_nan()
                     } else {
                         let identity = match archive.consolidation.as_str() {
                             "AVERAGE" => 0.0,
                             "MIN" => f64::INFINITY,
                             "MAX" => f64::NEG_INFINITY,
-                            "LAST" => f64::NAN,
+                            "LAST" => rrd_nan(),
                             _ => unreachable!("consolidation was checked above"),
                         };
                         let carried = if cdp_value.is_nan() {
@@ -1059,14 +1068,14 @@ fn update_path_values_with_raw(
                             "AVERAGE" => 0.0,
                             "MIN" => f64::INFINITY,
                             "MAX" => f64::NEG_INFINITY,
-                            "LAST" => f64::NAN,
+                            "LAST" => rrd_nan(),
                             _ => unreachable!("consolidation was checked above"),
                         }
                     } else {
                         match archive.consolidation.as_str() {
                             "AVERAGE" => pdp * carry_count as f64,
                             "MIN" | "MAX" => pdp,
-                            "LAST" => f64::NAN,
+                            "LAST" => rrd_nan(),
                             _ => unreachable!("consolidation was checked above"),
                         }
                     };
@@ -1440,7 +1449,7 @@ pub fn tune_rrd_data_sources(
         for (bound, relative_offset) in [(change.minimum, 48_u64), (change.maximum, 56_u64)] {
             if let Some(bound) = bound {
                 let value = match bound {
-                    RrdTuneBound::Unbounded => f64::NAN,
+                    RrdTuneBound::Unbounded => rrd_nan(),
                     RrdTuneBound::Value(value) => value,
                 };
                 file.seek(SeekFrom::Start((offset as u64) + relative_offset))?;
@@ -1565,7 +1574,7 @@ pub fn resize_rrd_file(
 
     let result = (|| -> Result<(), StoreError> {
         output.write_all(&header)?;
-        let unknown_row = f64::NAN.to_le_bytes();
+        let unknown_row = rrd_nan().to_le_bytes();
         let mut row = vec![0_u8; row_bytes];
         for (index, current_archive) in info.archives.iter().enumerate() {
             input.seek(SeekFrom::Start(current_archive.data_offset))?;
@@ -1956,7 +1965,7 @@ pub fn restore_rrd_file(
     fn parse_f64(text: &str) -> Result<f64, StoreError> {
         let lower = text.to_ascii_lowercase();
         let value = match lower.as_str() {
-            "nan" | "+nan" | "-nan" => f64::NAN,
+            "nan" | "+nan" | "-nan" => rrd_nan(),
             "inf" | "+inf" | "infinity" | "+infinity" => f64::INFINITY,
             "-inf" | "-infinity" => f64::NEG_INFINITY,
             _ => text.parse::<f64>().map_err(|_| {
@@ -2205,7 +2214,7 @@ pub fn restore_rrd_file(
                                 .1
                                 .is_some_and(|maximum| value > maximum))
                     {
-                        value = f64::NAN;
+                        value = rrd_nan();
                     }
                     let offset = archive.data_offset
                         + ((row_index * ds_nodes.len() + ds_index) * VALUE_LEN) as u64;
