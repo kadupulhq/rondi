@@ -2684,9 +2684,9 @@ fn rrdcached_fractional_update_timestamps_flush_byte_for_byte_like_rrdtool() {
     assert_eq!(
         rrdcached_request(
             &mut reader,
-            "UPDATE fractional.rrd 1000000010.25:1 1000000010.75:3\n"
+            "UPDATE fractional.rrd 1000000010.0000001:1 1000000010.0000019:2 1000000010.9999999:3 1000000020.1234567:4\n"
         ),
-        "0 errors, enqueued 2 value(s).\n"
+        "0 errors, enqueued 4 value(s).\n"
     );
     assert_eq!(
         rrdcached_request(&mut reader, "FLUSH fractional.rrd\n"),
@@ -2696,7 +2696,12 @@ fn rrdcached_fractional_update_timestamps_flush_byte_for_byte_like_rrdtool() {
     let updated = Command::new("rrdtool")
         .arg("update")
         .arg(&oracle_file)
-        .args(["1000000010.25:1", "1000000010.75:3"])
+        .args([
+            "1000000010.0000001:1",
+            "1000000010.0000019:2",
+            "1000000010.9999999:3",
+            "1000000020.1234567:4",
+        ])
         .env_remove("RRDCACHED_ADDRESS")
         .output()
         .unwrap();
