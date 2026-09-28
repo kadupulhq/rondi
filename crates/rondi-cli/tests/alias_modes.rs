@@ -2434,6 +2434,56 @@ fn graph_print_and_gprint_printf_grammar_matches_pinned_rrdtool() {
 }
 
 #[test]
+fn graph_valstrftime_rejection_matches_pinned_rrdtool_1110() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping graph valstrftime differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("valstrftime.rrd");
+    let created = Command::new("rrdtool")
+        .args([
+            "create",
+            database.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:x:GAUGE:30:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let executable = env!("CARGO_BIN_EXE_rondi");
+    let alias = temp.path().join("rrdtool");
+    symlink(executable, &alias).unwrap();
+    let definition = format!("DEF:x={}:x:AVERAGE", database.display());
+    let args = [
+        "graphv",
+        "-",
+        "--imgformat=JSON",
+        "--start",
+        "1000000010",
+        "--end",
+        "1000000050",
+        definition.as_str(),
+        "XPORT:x:Series",
+        "VDEF:v=x,AVERAGE",
+        "PRINT:v:%F %T:valstrftime",
+    ];
+    let expected = Command::new("rrdtool").args(args).output().unwrap();
+    let actual = Command::new(alias).args(args).output().unwrap();
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+}
+
+#[test]
 fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
     if !Command::new("rrdtool")
         .arg("--version")
