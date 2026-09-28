@@ -19,13 +19,19 @@ const VALUE_LEN: usize = 8;
 const FLOAT_COOKIE: f64 = 8.642135E130;
 const MAX_HEADER_LEN: usize = 64 * 1024 * 1024;
 
-/// Generate the platform's arithmetic NaN as RRDtool's `0.0 / 0.0` helper
-/// does. The NaN sign bit is observable in the bytes written to an RRD.
+/// Match the NaN produced by RRDtool's `rrd_set_to_DNAN`: the pinned x86_64
+/// build uses a negative quiet NaN, while aarch64 and the other supported
+/// targets use the positive quiet NaN representation.
 #[inline]
-#[allow(clippy::eq_op)] // The runtime invalid operation is required for RRDtool's host NaN bits.
 fn rrd_nan() -> f64 {
-    let zero = std::hint::black_box(0.0_f64);
-    zero / zero
+    #[cfg(target_arch = "x86_64")]
+    {
+        f64::from_bits(0xfff8_0000_0000_0000)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        f64::NAN
+    }
 }
 
 /// Create an interoperable RRDtool file for the basic DS/RRA grammar.
