@@ -1284,7 +1284,11 @@ pub fn update_rrd_raw_values_precise(
         .iter()
         .map(|value| {
             value
-                .map(|value| value.parse::<f64>().map_err(|_| StoreError::InvalidValue))
+                .map(|value| {
+                    crate::parse_rrd_number(value)
+                        .filter(|number| number.is_finite())
+                        .ok_or(StoreError::InvalidValue)
+                })
                 .transpose()
         })
         .collect::<Result<Vec<_>, _>>()?;
