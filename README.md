@@ -90,3 +90,9 @@ mise exec -- bash scripts/smoke-kadupul-poller.sh
 ```
 
 Set `KADUPUL_ROOT`, `RRDTOOL_BIN`, or `RONDI_BIN` to override the checkout or executable paths. This exercises Kadupul's real `rrd_init()` process/session helper and update-template command stream; it does not run the database-backed poller loop.
+
+## License
+
+Rondi-authored code is dual-licensed under either the MIT License or Apache License, Version 2.0, at your option, matching the Rust project's license choice. See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+
+The RRDtool-compatible help text and other verbatim upstream compatibility strings retain their original upstream license terms; RRDtool material is covered by GPL-2.0-only as reproduced in [LICENSE-GPL-2.0](LICENSE-GPL-2.0). These portions are not relicensed under MIT or Apache-2.0. See the copyright notices in the relevant compatibility help text and upstream sources.
