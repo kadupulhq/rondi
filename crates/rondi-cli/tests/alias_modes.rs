@@ -2377,6 +2377,105 @@ fn rrdtool_xport_raw_def_and_export_match_rrdtool_xml_and_json() {
 }
 
 #[test]
+fn rrdtool_xport_prediction_matches_mixed_resolution_history() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping mixed-resolution prediction differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let fine_file = temp.path().join("fine.rrd");
+    let coarse_file = temp.path().join("coarse.rrd");
+    for (file, step, archive) in [
+        (&fine_file, "10", "RRA:AVERAGE:0.5:1:16"),
+        (&coarse_file, "20", "RRA:MAX:0.5:1:8"),
+    ] {
+        let created = Command::new("rrdtool")
+            .args([
+                "create",
+                file.to_str().unwrap(),
+                "--start",
+                "1000000000",
+                "--step",
+                step,
+                "DS:value:GAUGE:60:U:U",
+                archive,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+    }
+    for index in 1..=10 {
+        let fine_update = Command::new("rrdtool")
+            .args([
+                "update",
+                fine_file.to_str().unwrap(),
+                &format!("{}:{}", 1_000_000_000 + index * 10, index * 3),
+            ])
+            .output()
+            .unwrap();
+        assert!(fine_update.status.success());
+        if index % 2 == 0 {
+            let coarse_update = Command::new("rrdtool")
+                .args([
+                    "update",
+                    coarse_file.to_str().unwrap(),
+                    &format!("{}:{}", 1_000_000_000 + index * 10, index * 11),
+                ])
+                .output()
+                .unwrap();
+            assert!(coarse_update.status.success());
+        }
+    }
+
+    let fine = format!("DEF:fine={}:value:AVERAGE", fine_file.display());
+    let coarse = format!("DEF:coarse={}:value:MAX", coarse_file.display());
+    let args = [
+        "xport",
+        "--start",
+        "1000000000",
+        "--end",
+        "1000000100",
+        "--step",
+        "10",
+    ];
+    let run = |program: &std::path::Path| {
+        Command::new(program)
+            .args(args)
+            .arg(&fine)
+            .arg(&coarse)
+            .arg("CDEF:forecast=0,10,2,20,coarse,PREDICT")
+            .arg("XPORT:forecast:Forecast")
+            .output()
+            .unwrap()
+    };
+    let upstream = run(std::path::Path::new("rrdtool"));
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let actual = run(&alias);
+    assert!(
+        upstream.status.success(),
+        "{}",
+        String::from_utf8_lossy(&upstream.stderr)
+    );
+    assert!(
+        actual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(actual.status.code(), upstream.status.code());
+    assert_eq!(actual.stdout, upstream.stdout);
+    assert_eq!(actual.stderr, upstream.stderr);
+}
+
+#[test]
 fn rrdtool_xport_rpn_numeric_literals_follow_rrd_strtod() {
     if !Command::new("rrdtool")
         .arg("--version")
@@ -2463,6 +2562,99 @@ fn rrdtool_xport_rpn_numeric_literals_follow_rrd_strtod() {
     assert_eq!(actual.stdout, expected.stdout);
     assert_eq!(actual.stderr, expected.stderr);
     assert!(String::from_utf8_lossy(&expected.stdout).contains("1000000011.0000000"));
+}
+
+#[test]
+fn rrdtool_xport_trend_duration_rounding_matches_rrd_strtod() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping RRDtool TREND duration differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("trend-duration.rrd");
+    let step = 1_000_000_010_i64;
+    let start = 2 * step;
+    let first_update = start + step;
+    let second_update = first_update + step;
+    let create = Command::new("rrdtool")
+        .args([
+            "create",
+            database.to_str().unwrap(),
+            "--start",
+            &start.to_string(),
+            "--step",
+            &step.to_string(),
+            "DS:value:GAUGE:3000000000:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let update = Command::new("rrdtool")
+        .args([
+            "update",
+            database.to_str().unwrap(),
+            &format!("{first_update}:1"),
+            &format!("{second_update}:3"),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let def = format!("DEF:value={}:value:AVERAGE", database.display());
+    let args = [
+        "xport",
+        "--start",
+        &start.to_string(),
+        "--end",
+        &second_update.to_string(),
+        "--step",
+        &step.to_string(),
+        "--json",
+    ];
+    let elements = [
+        "CDEF:trend=value,1000000010.9999999,TREND",
+        "XPORT:trend:Trend",
+    ];
+    let expected = Command::new("rrdtool")
+        .args(args)
+        .arg(&def)
+        .args(elements)
+        .output()
+        .unwrap();
+    let actual = Command::new(&alias)
+        .args(args)
+        .arg(&def)
+        .args(elements)
+        .output()
+        .unwrap();
+    assert!(
+        expected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+    assert!(
+        actual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert!(String::from_utf8_lossy(&expected.stdout).contains("5.0000000000e-01"));
 }
 
 #[test]

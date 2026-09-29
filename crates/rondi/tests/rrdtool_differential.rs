@@ -165,15 +165,12 @@ fn heartbeat_and_unknown_intervals_match_rrdtool() {
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
             let timestamp = fields.next()?.trim_end_matches(':').parse::<i64>().ok()?;
-            let value = fields.next()?;
-            Some((
-                timestamp,
-                if value == "nan" {
-                    None
-                } else {
-                    value.parse::<f64>().ok()
-                },
-            ))
+            let value = fields
+                .next()?
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite());
+            Some((timestamp, value))
         })
         .filter(|(timestamp, _)| (1_000_000_010..=1_000_000_050).contains(timestamp))
         .collect::<Vec<_>>();
