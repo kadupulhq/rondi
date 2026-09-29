@@ -2377,6 +2377,105 @@ fn rrdtool_xport_raw_def_and_export_match_rrdtool_xml_and_json() {
 }
 
 #[test]
+fn rrdtool_xport_prediction_matches_mixed_resolution_history() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping mixed-resolution prediction differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let fine_file = temp.path().join("fine.rrd");
+    let coarse_file = temp.path().join("coarse.rrd");
+    for (file, step, archive) in [
+        (&fine_file, "10", "RRA:AVERAGE:0.5:1:16"),
+        (&coarse_file, "20", "RRA:MAX:0.5:1:8"),
+    ] {
+        let created = Command::new("rrdtool")
+            .args([
+                "create",
+                file.to_str().unwrap(),
+                "--start",
+                "1000000000",
+                "--step",
+                step,
+                "DS:value:GAUGE:60:U:U",
+                archive,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+    }
+    for index in 1..=10 {
+        let fine_update = Command::new("rrdtool")
+            .args([
+                "update",
+                fine_file.to_str().unwrap(),
+                &format!("{}:{}", 1_000_000_000 + index * 10, index * 3),
+            ])
+            .output()
+            .unwrap();
+        assert!(fine_update.status.success());
+        if index % 2 == 0 {
+            let coarse_update = Command::new("rrdtool")
+                .args([
+                    "update",
+                    coarse_file.to_str().unwrap(),
+                    &format!("{}:{}", 1_000_000_000 + index * 10, index * 11),
+                ])
+                .output()
+                .unwrap();
+            assert!(coarse_update.status.success());
+        }
+    }
+
+    let fine = format!("DEF:fine={}:value:AVERAGE", fine_file.display());
+    let coarse = format!("DEF:coarse={}:value:MAX", coarse_file.display());
+    let args = [
+        "xport",
+        "--start",
+        "1000000000",
+        "--end",
+        "1000000100",
+        "--step",
+        "10",
+    ];
+    let run = |program: &std::path::Path| {
+        Command::new(program)
+            .args(args)
+            .arg(&fine)
+            .arg(&coarse)
+            .arg("CDEF:forecast=0,10,2,20,coarse,PREDICT")
+            .arg("XPORT:forecast:Forecast")
+            .output()
+            .unwrap()
+    };
+    let upstream = run(std::path::Path::new("rrdtool"));
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let actual = run(&alias);
+    assert!(
+        upstream.status.success(),
+        "{}",
+        String::from_utf8_lossy(&upstream.stderr)
+    );
+    assert!(
+        actual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(actual.status.code(), upstream.status.code());
+    assert_eq!(actual.stdout, upstream.stdout);
+    assert_eq!(actual.stderr, upstream.stderr);
+}
+
+#[test]
 fn rrdtool_xport_rpn_numeric_literals_follow_rrd_strtod() {
     if !Command::new("rrdtool")
         .arg("--version")
