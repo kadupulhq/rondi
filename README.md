@@ -60,6 +60,10 @@ The server coordinates access to managed storage through a versioned internal AP
 
 The default branch runs Semgrep and CodeQL analysis for GitHub Actions. The implementation pull request adds RustSec `cargo-audit` and `cargo-deny` checks for known Rust advisories, dependency licenses, and registry sources. The Cargo policy allows crates.io sources and warns about duplicate dependency versions.
 
+## Releases
+
+Version tags (`vMAJOR.MINOR.PATCH`, with optional SemVer prerelease or build metadata) use GitHub-generated release notes, grouped by the pull request labels in [.github/release.yml](.github/release.yml). Label pull requests with `enhancement`, `bug`, or `documentation` so they appear under the matching section; unlabeled changes appear under “Other Changes.”
+
 ## Contributing
 
 Changes are reviewed through pull requests using the repository's [pull request template](.github/PULL_REQUEST_TEMPLATE.md). The current implementation is experimental; report compatibility differences with the exact RRDtool version, command, output, exit status, and a disposable `.rrd` fixture where possible.
