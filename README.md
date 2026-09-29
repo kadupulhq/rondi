@@ -73,7 +73,7 @@ Fetch and `xport` use shared RRDtool-compatible locking. Update uses an exclusiv
 
 ## Continuous integration and Docker validation
 
-GitHub Actions builds the pinned RRDtool 1.11.0 oracle from its upstream release tarball, verifies the tarball SHA-256, and runs formatting, Clippy, the full workspace test suite, documentation generation, and release builds in the same container. This ensures the RRDtool differential tests execute instead of being skipped because the oracle is missing.
+GitHub Actions builds the pinned RRDtool 1.11.0 oracle from its upstream release tarball, verifies the tarball SHA-256, and runs formatting, Clippy, the full workspace test suite, documentation generation, and release builds in the same container. This ensures the RRDtool differential tests execute instead of being skipped because the oracle is missing. The security workflow also runs RustSec `cargo-audit` against `Cargo.lock` and `cargo-deny` against dependency advisories, licenses, duplicate versions, and registry sources. CodeQL is configured for Rust and GitHub Actions; GitHub only runs its code scanning upload where repository visibility and plan settings enable it.
 
 Run the same checks locally in a disposable Linux container with:
 
