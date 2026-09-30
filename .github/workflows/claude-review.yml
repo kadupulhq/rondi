@@ -116,18 +116,8 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 1
-          persist-credentials: false
-
-      # workflow_dispatch runs from the base branch. The action restores its
-      # configuration from the base ref only on pull request events, so the
-      # head goes in a subdirectory, as the action's security guide advises.
-      - name: Check out pull request head
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: refs/pull/${{ steps.pr.outputs.number }}/head
-          path: pr-head
+          # Keep executable configuration on the trusted default branch.
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
           persist-credentials: false
 
@@ -146,11 +136,10 @@ jobs:
             - security: authorization checks, injection (SQL, shell, path),
               and output encoding
             - changed behaviour that has no test
-            ${{ github.event_name == 'workflow_dispatch' && 'The pull request head is checked out in pr-head/. Inline comments are not available on this run, so post all findings as one comment with `gh pr comment`, citing file and line for each.' || 'Post each finding as an inline review comment on the line it concerns. Post one short summary comment with `gh pr comment` only if there are findings that do not fit a line.' }}
+            ${{ github.event_name == 'workflow_dispatch' && 'Inline comments are not available on this run, so post all findings as one comment with `gh pr comment`, citing file and line for each.' || 'Post each finding as an inline review comment on the line it concerns. Post one short summary comment with `gh pr comment` only if there are findings that do not fit a line.' }}
             If there is nothing to report, say so in one comment.
           claude_args: >-
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
-            ${{ github.event_name == 'workflow_dispatch' && '--add-dir pr-head' || '' }}
 
   respond:
     name: Answer @claude
@@ -167,6 +156,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Comment events must never load PR-authored executable configuration.
+          ref: ${{ github.event.repository.default_branch }}
           fetch-depth: 1
           persist-credentials: false
 
