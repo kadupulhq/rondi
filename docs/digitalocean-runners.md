@@ -7,9 +7,9 @@ variable keeps the existing GitHub-hosted runner selection. The variable can be
 set for a single repository during rollout, then at organization scope with
 access to all repositories.
 
-Only push, schedule, and manual workflow events are eligible. Pull requests
-(including same-repository pull requests) and comment-triggered reviews stay
-on GitHub-hosted runners. Explicit Windows and Ubuntu 22.04 compatibility jobs
+Push, schedule, manual workflow events, and pull requests with branches in the
+same repository are eligible. Fork pull requests and comment-triggered reviews
+stay on GitHub-hosted runners. Explicit Windows and Ubuntu 22.04 compatibility jobs
 keep their existing platforms. Reusable release jobs follow the calling
 repository's event and variable.
 
@@ -23,8 +23,8 @@ Before enabling routing:
 1. Install [ephemeral-runners-tv](https://github.com/apps/ephemeral-runners-tv/installations/new)
    on kadupulhq with access to all repositories, including future repositories.
 2. Configure a dedicated Kadupul controller with that installation ID and all
-   six repository identities: kadupul, template, website, terraform, .github,
-   and rondi. Keep the existing somethingwithproof controller separate; its
+   five repository identities: kadupul, template, terraform, .github, and rondi.
+   The website repository is excluded from this rollout. Keep the existing somethingwithproof controller separate; its
    installation token cannot administer Kadupul repositories.
 3. Verify public-repository authorization in the controller. The infrastructure
    project's current main branch explicitly rejects public repositories; the
