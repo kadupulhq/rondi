@@ -43,7 +43,7 @@ jobs:
         github.event.pull_request.head.repo.full_name == github.repository &&
         contains(github.event.comment.body, '@claude') &&
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.DO_RUNNERS_ENABLED == 'true' && contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) && fromJSON('["self-hosted","Linux","X64","kadupul-do"]') || 'ubuntu-latest' }}
     outputs:
       configured: ${{ steps.check.outputs.configured }}
     steps:
@@ -76,7 +76,7 @@ jobs:
     if: >-
       needs.config.outputs.configured == 'true' &&
       (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch')
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.DO_RUNNERS_ENABLED == 'true' && contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) && fromJSON('["self-hosted","Linux","X64","kadupul-do"]') || 'ubuntu-latest' }}
     concurrency:
       group: claude-review-${{ github.event.pull_request.number || inputs.pr_number }}
       cancel-in-progress: true
@@ -147,7 +147,7 @@ jobs:
     if: >-
       needs.config.outputs.configured == 'true' &&
       (github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment')
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.DO_RUNNERS_ENABLED == 'true' && contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) && fromJSON('["self-hosted","Linux","X64","kadupul-do"]') || 'ubuntu-latest' }}
     # contents: read keeps @claude to answering and reviewing; it cannot push.
     permissions:
       contents: read

@@ -1,0 +1,31 @@
+name: DigitalOcean runner smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, Linux, X64, kadupul-do]
+    timeout-minutes: 10
+    steps:
+      - name: Check the single-job runner contract
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          RUNNER_OS: ${{ runner.os }}
+          RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = self-hosted
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          for tool in git curl jq unzip gh; do
+            command -v "$tool"
+          done
+          docker info >/dev/null
+          sudo -n true
+          test -d /opt/hostedtoolcache
+          test -w /opt/hostedtoolcache
+          printf 'Runner contract passed for %s on %s\n' "$GITHUB_REPOSITORY" "$RUNNER_NAME"
