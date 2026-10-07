@@ -1101,6 +1101,7 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
     tracing::info!(root = %root.display(), socket = %args.socket.display(), "rrdcached_started");
     let stats = Arc::new(RrdcachedStats::default());
     let mut connections = JoinSet::new();
+    let (shutdown_sender, shutdown) = tokio::sync::watch::channel(false);
     let flush_interval = Duration::from_secs(args.flush_interval_seconds.max(1));
     let mut expiry_tick =
         tokio::time::interval_at(tokio::time::Instant::now() + flush_interval, flush_interval);
@@ -1115,8 +1116,9 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
                 let no_overwrite = args.no_overwrite;
                 let allow_recursive_mkdir = args.allow_recursive_mkdir;
                 let socket_commands = args.socket_commands.clone();
+                let shutdown = shutdown.clone();
                 connections.spawn(async move {
-                    if let Err(error) = serve_rrdcached_connection(stream, root, echo_base, stats, queue, no_overwrite, allow_recursive_mkdir, socket_commands).await {
+                    if let Err(error) = serve_rrdcached_connection(stream, root, echo_base, stats, queue, no_overwrite, allow_recursive_mkdir, socket_commands, shutdown).await {
                         tracing::warn!(error = %error, "rrdcached_connection_failed");
                     }
                 });
@@ -1143,7 +1145,21 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
             _ = shutdown_signals.1.recv() => break,
         }
     }
-    while connections.join_next().await.is_some() {}
+    // An idle client must not hold the final flush hostage. Connections stop
+    // reading new requests now; any still busy after the grace period are
+    // aborted so the pending updates still reach disk.
+    let _ = shutdown_sender.send(true);
+    let drained = timeout(Duration::from_secs(5), async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await;
+    if drained.is_err() {
+        tracing::warn!(
+            connections = connections.len(),
+            "rrdcached_shutdown_aborted_connections"
+        );
+        connections.shutdown().await;
+    }
     let paths = queue
         .lock()
         .map(|queue| queue.pending.keys().cloned().collect::<Vec<_>>())
@@ -1241,13 +1257,18 @@ async fn serve_rrdcached_connection(
     no_overwrite: bool,
     allow_recursive_mkdir: bool,
     socket_commands: Option<Vec<String>>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
     loop {
         line.clear();
-        if read_bounded_async_line(&mut reader, &mut line, 1024 * 1024).await? == 0 {
+        let read = tokio::select! {
+            read = read_bounded_async_line(&mut reader, &mut line, 1024 * 1024) => read?,
+            _ = shutdown.wait_for(|stopping| *stopping) => return Ok(()),
+        };
+        if read == 0 {
             return Ok(());
         }
         if line
@@ -1295,7 +1316,11 @@ async fn serve_rrdcached_connection(
             let mut command_number = 0_u64;
             loop {
                 line.clear();
-                if read_bounded_async_line(&mut reader, &mut line, 1024 * 1024).await? == 0 {
+                let read = tokio::select! {
+                    read = read_bounded_async_line(&mut reader, &mut line, 1024 * 1024) => read?,
+                    _ = shutdown.wait_for(|stopping| *stopping) => return Ok(()),
+                };
+                if read == 0 {
                     return Ok(());
                 }
                 if line.trim() == "." {
