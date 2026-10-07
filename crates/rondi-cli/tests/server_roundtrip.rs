@@ -1920,10 +1920,12 @@ fn server_handles_interrupt_and_terminate_and_removes_its_socket() {
 #[test]
 fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("rra");
     let socket = dir.path().join("run/rrdcached.sock");
     let alias = dir.path().join("rrdcached");
-    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(dir.path().join("rra")).unwrap();
+    // Replies echo -b as given, and upstream rejects a symlinked -b, so both
+    // daemons use the canonical base (macOS temporary paths are symlinked).
+    let root = std::fs::canonicalize(dir.path().join("rra")).unwrap();
     std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
     let mut child = Command::new(&alias)
@@ -2136,6 +2138,28 @@ fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
             rrdcached_full_request(&mut reader, fetch_text),
             upstream_fetch_text
         );
+        // Replies echo the base directory joined with the requested name,
+        // not the resolved path.
+        for (command, full) in [
+            ("INFO ./poller.rrd\n", true),
+            ("FLUSH ./missing.rrd\n", false),
+        ] {
+            let upstream_echo = {
+                let mut upstream_reader = BufReader::new(&mut upstream_stream);
+                if full {
+                    rrdcached_full_request(&mut upstream_reader, command)
+                } else {
+                    rrdcached_request(&mut upstream_reader, command)
+                }
+            };
+            assert!(upstream_echo.contains("/./"), "{upstream_echo}");
+            let rondi_echo = if full {
+                rrdcached_full_request(&mut reader, command)
+            } else {
+                rrdcached_request(&mut reader, command)
+            };
+            assert_eq!(rondi_echo, upstream_echo);
+        }
         let upstream_forget_multi = {
             let mut upstream_reader = BufReader::new(&mut upstream_stream);
             rrdcached_request(&mut upstream_reader, "FORGET multi-fetchbin.rrd\n")
