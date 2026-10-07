@@ -2310,6 +2310,127 @@ struct GraphVdef {
     percentile: Option<f64>,
 }
 
+#[derive(Default)]
+struct GraphDefOptions {
+    start: Option<String>,
+    end: Option<String>,
+    daemon: Option<String>,
+}
+
+/// Parse `DEF:vname=rrd:ds:cf[:key=value...]` the way rrd_graph_helper.c
+/// splits graph arguments: `\:` escapes a colon, `key=value` fields may
+/// appear anywhere after the first, the last repeated key wins, and fields
+/// that nothing consumes are an error.
+fn parse_graph_def(
+    value: &str,
+) -> Result<(rondi::RrdXportDefinition, GraphDefOptions), Box<dyn std::error::Error>> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' if chars.peek() == Some(&':') => field.push(chars.next().unwrap_or(':')),
+            ':' => fields.push(std::mem::take(&mut field)),
+            _ => field.push(ch),
+        }
+    }
+    fields.push(field);
+    // (key, value, consumed) in argument order; positional fields have no key.
+    let mut entries = Vec::<(Option<String>, String, bool)>::new();
+    let mut vname_rrd = None;
+    for field in fields.iter().skip(1) {
+        match field.split_once('=') {
+            Some((key, rest)) if vname_rrd.is_none() => {
+                vname_rrd = Some((key.to_owned(), rest.to_owned()));
+            }
+            Some((key, rest)) => entries.push((Some(key.to_owned()), rest.to_owned(), false)),
+            None => entries.push((None, field.clone(), false)),
+        }
+    }
+    let mut take = |key: &str| {
+        entries
+            .iter_mut()
+            .rev()
+            .find(|(name, _, _)| name.as_deref() == Some(key))
+            .map(|(_, value, used)| {
+                *used = true;
+                value.clone()
+            })
+    };
+    let reduce = take("reduce");
+    let daemon = take("daemon");
+    let step = take("step");
+    let start = take("start");
+    let end = take("end");
+    if let Some(reduce) = &reduce
+        && !matches!(
+            reduce.as_str(),
+            "AVERAGE"
+                | "MIN"
+                | "MAX"
+                | "LAST"
+                | "HWPREDICT"
+                | "MHWPREDICT"
+                | "DEVPREDICT"
+                | "SEASONAL"
+                | "DEVSEASONAL"
+                | "FAILURES"
+        )
+    {
+        return Err(format!("bad reduce CF: {reduce}").into());
+    }
+    let step = match step {
+        Some(text) => match text.trim_start().parse::<i64>() {
+            Ok(step) if step >= 1 => Some(step.unsigned_abs()),
+            _ => return Err(format!("Bad step value: {text}").into()),
+        },
+        None => None,
+    };
+    let Some((name, file)) = vname_rrd else {
+        return Err(format!("No argument for definition of vdef/rrd in {value}").into());
+    };
+    let mut next_positional = |what: &str| {
+        entries
+            .iter_mut()
+            .find(|(key, _, used)| key.is_none() && !used)
+            .map(|(_, field, used)| {
+                *used = true;
+                field.clone()
+            })
+            .ok_or_else(|| format!("No argument for definition of {what} in {value}"))
+    };
+    let data_source = next_positional("DS")?;
+    let consolidation = next_positional("CF")?;
+    let unused = entries
+        .iter()
+        .filter(|(_, _, used)| !used)
+        .map(|(key, field, _)| match key {
+            Some(key) => format!("{key}={field}"),
+            None => field.clone(),
+        })
+        .collect::<Vec<_>>();
+    if !unused.is_empty() {
+        return Err(format!(
+            "Unused Arguments \"{}\" in command : {value}",
+            unused.join(":")
+        )
+        .into());
+    }
+    Ok((
+        rondi::RrdXportDefinition {
+            name,
+            file: PathBuf::from(file),
+            data_source,
+            consolidation: consolidation.to_ascii_uppercase(),
+            step,
+            start: None,
+            end: None,
+            reduce,
+        },
+        GraphDefOptions { start, end, daemon },
+    ))
+}
+
 fn parse_graph_vdef(definition: &str) -> Result<GraphVdef, Box<dyn std::error::Error>> {
     let (name, expression) = definition
         .strip_prefix("VDEF:")
@@ -2495,6 +2616,7 @@ fn render_xport_with_graph_prints(
     let mut show_time = false;
     let mut enum_ds = false;
     let mut definitions = Vec::<rondi::RrdXportDefinition>::new();
+    let mut definition_options = Vec::<GraphDefOptions>::new();
     let mut cdefs = Vec::<rondi::RrdXportCdef>::new();
     let mut vdefs = Vec::<GraphVdef>::new();
     let mut exports = Vec::<rondi::RrdXportColumn>::new();
@@ -2544,27 +2666,9 @@ fn render_xport_with_graph_prints(
                 index += 1;
             }
             value if value.starts_with("DEF:") => {
-                let definition = &value[4..];
-                let (name, source) = definition
-                    .split_once('=')
-                    .ok_or_else(|| format!("invalid DEF: {value}"))?;
-                let mut fields = source.rsplitn(3, ':');
-                let consolidation = fields.next().unwrap_or_default();
-                let data_source = fields.next().unwrap_or_default();
-                let file = fields.next().unwrap_or_default();
-                if name.is_empty()
-                    || file.is_empty()
-                    || data_source.is_empty()
-                    || consolidation.is_empty()
-                {
-                    return Err(format!("invalid DEF: {value}").into());
-                }
-                definitions.push(rondi::RrdXportDefinition {
-                    name: name.to_owned(),
-                    file: PathBuf::from(file),
-                    data_source: data_source.to_owned(),
-                    consolidation: consolidation.to_ascii_uppercase(),
-                });
+                let (definition, options) = parse_graph_def(value)?;
+                definitions.push(definition);
+                definition_options.push(options);
                 index += 1;
             }
             value if value.starts_with("XPORT:") => {
@@ -2617,16 +2721,36 @@ fn render_xport_with_graph_prints(
         return Err(format!("the first entry to fetch should be after 1980 ({start})").into());
     }
     let visible_export_count = exports.len();
-    if let Some(address) = daemon_address
+    for (definition, options) in definitions.iter_mut().zip(&definition_options) {
+        if options.start.is_none() && options.end.is_none() {
+            continue;
+        }
+        let start_spec = options.start.clone().unwrap_or_else(|| start.to_string());
+        let end_spec = options.end.clone().unwrap_or_else(|| end.to_string());
+        let (def_start, def_end) =
+            resolve_rrd_range_times(Some(&start_spec), Some(&end_spec), start, end, now)?;
+        if def_start < 315_360_000 {
+            return Err(
+                format!("the first entry to fetch should be after 1980 ({def_start})").into(),
+            );
+        }
+        if def_end < def_start {
+            return Err(format!("start ({def_start}) should be less than end ({def_end})").into());
+        }
+        definition.start = Some(def_start);
+        definition.end = Some(def_end);
+    }
+    let default_address = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
-        .filter(|address| !address.is_empty())
-    {
-        let mut flushed = std::collections::HashSet::new();
-        for definition in &definitions {
-            let filename = definition.file.to_string_lossy().into_owned();
-            if flushed.insert(filename.clone()) {
-                send_rrdcached_flush(&address, &filename)?;
-            }
+        .filter(|address| !address.is_empty());
+    let mut flushed = std::collections::HashSet::new();
+    for (definition, options) in definitions.iter().zip(&definition_options) {
+        let Some(address) = options.daemon.as_ref().or(default_address.as_ref()) else {
+            continue;
+        };
+        let filename = definition.file.to_string_lossy().into_owned();
+        if flushed.insert((address.clone(), filename.clone())) {
+            send_rrdcached_flush(address, &filename)?;
         }
     }
     for variable in vdefs.iter().map(|vdef| vdef.variable.as_str()).chain(

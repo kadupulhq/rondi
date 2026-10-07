@@ -344,3 +344,73 @@ fn graph_cdefs_and_vdefs_cover_the_right_edge_slot() {
         assert_same_prints(&fixture, &args);
     }
 }
+
+// rrd_graph_helper.c accepts DEF options anywhere after vname=rrd, with `\:`
+// escaping a colon. A step coarser than the fetched archive goes through
+// rrd_reduce_data, which also applies to the export-wide --step.
+#[test]
+fn def_options_match_rrdtool_graph_helper() {
+    let Some(fixture) = fixture() else { return };
+    let colon_path = fixture._temp.path().join("with:colon.rrd");
+    std::fs::copy(&fixture.database, &colon_path).unwrap();
+    let database = fixture.database.display().to_string();
+    let escaped = colon_path.display().to_string().replace(':', "\\:");
+    let cases = [
+        (vec![], format!("{database}:x:AVERAGE:step=30")),
+        (vec![], format!("{database}:step=30:x:AVERAGE")),
+        (vec![], format!("{database}:x:AVERAGE:step=25")),
+        (vec![], format!("{database}:x:AVERAGE:step=40:reduce=MAX")),
+        (vec![], format!("{database}:x:AVERAGE:reduce=MIN:step=60")),
+        (vec![], format!("{database}:x:AVERAGE:step=30:reduce=LAST")),
+        (vec![], format!("{database}:x:AVERAGE:start=1000000050")),
+        (vec![], format!("{database}:x:AVERAGE:end=1000000300")),
+        (
+            vec![],
+            format!("{database}:x:AVERAGE:start=end-90:end=1000000400"),
+        ),
+        (vec![], format!("{escaped}:x:AVERAGE")),
+        (vec!["--step", "30"], format!("{database}:x:AVERAGE")),
+        (vec!["--step", "20"], format!("{database}:x:MAX")),
+        (vec![], format!("{database}:x:AVERAGE:foo=1")),
+        (vec![], format!("{database}:x:AVERAGE:extra")),
+        (vec![], format!("{database}:x:AVERAGE:step=0")),
+        (vec![], format!("{database}:x:AVERAGE:step=3x")),
+        (vec![], format!("{database}:x:AVERAGE:step=30:step=20")),
+        (vec![], format!("{database}:x:AVERAGE:reduce=BOGUS")),
+        (vec![], format!("{database}:x")),
+        (
+            vec![],
+            format!("{database}:x:AVERAGE:start=1000000090:end=1000000050"),
+        ),
+    ];
+    for (options, definition) in cases {
+        let mut elements = vec![format!("DEF:x={definition}"), String::from("XPORT:x:x")];
+        // RRDtool limits a CDEF to the overlap of its inputs' fetch windows;
+        // Rondi does not model per-DEF windows inside CDEFs yet.
+        if !definition.contains("start=") && !definition.contains("end=") {
+            elements.extend(strings(&["CDEF:c=x,UN,0,x,IF", "XPORT:c:c"]));
+        }
+        let mut args = strings(&["xport", "--start", "1000000000", "--end", "1000000600"]);
+        args.extend(strings(&options));
+        args.extend(elements);
+        let expected = run(Path::new("rrdtool"), &args);
+        let actual = run(&fixture.alias, &args);
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "{args:?}\nupstream stderr: {}\nrondi stderr: {}",
+            String::from_utf8_lossy(&expected.stderr),
+            String::from_utf8_lossy(&actual.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stdout),
+            String::from_utf8_lossy(&expected.stdout),
+            "{args:?}"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stderr),
+            String::from_utf8_lossy(&expected.stderr),
+            "{args:?}"
+        );
+    }
+}
