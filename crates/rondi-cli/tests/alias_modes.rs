@@ -2309,6 +2309,87 @@ fn rrdtool_xport_rpn_percent_sorts_unknown_values_first() {
 }
 
 #[test]
+fn rrdtool_xport_now_uses_whole_seconds() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping RRDtool NOW differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("now.rrd");
+    let create = Command::new("rrdtool")
+        .args([
+            "create",
+            file.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:value:GAUGE:30:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(create.status.success());
+    let update = Command::new("rrdtool")
+        .args(["update", file.to_str().unwrap(), "1000000010:1"])
+        .output()
+        .unwrap();
+    assert!(update.status.success());
+
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let args = [
+        "--json".to_owned(),
+        "--start".to_owned(),
+        "1000000010".to_owned(),
+        "--end".to_owned(),
+        "1000000020".to_owned(),
+        format!("DEF:value={}:value:AVERAGE", file.display()),
+        "CDEF:now=value,POP,NOW,1000,%".to_owned(),
+        "XPORT:now:now".to_owned(),
+    ];
+    let mut matched_same_second = false;
+    let mut last_outputs = None;
+    for _ in 0..8 {
+        let upstream = Command::new("rrdtool")
+            .arg("xport")
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let rondi = Command::new(&alias)
+            .arg("xport")
+            .args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let upstream = upstream.wait_with_output().unwrap();
+        let rondi = rondi.wait_with_output().unwrap();
+        assert!(upstream.status.success());
+        assert!(rondi.status.success());
+        if upstream.stdout == rondi.stdout {
+            matched_same_second = true;
+            break;
+        }
+        last_outputs = Some((upstream.stdout, rondi.stdout));
+    }
+    assert!(
+        matched_same_second,
+        "NOW differential did not overlap the same second; latest outputs: {:?}",
+        last_outputs.map(|(upstream, rondi)| (
+            String::from_utf8_lossy(&upstream).into_owned(),
+            String::from_utf8_lossy(&rondi).into_owned()
+        ))
+    );
+}
+
+#[test]
 fn graph_print_and_gprint_printf_grammar_matches_pinned_rrdtool() {
     if !Command::new("rrdtool")
         .arg("--version")
