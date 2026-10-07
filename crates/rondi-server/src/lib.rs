@@ -894,6 +894,11 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
     }
     let _store = Store::open(&args.root)?;
     let root = std::fs::canonicalize(&args.root)?;
+    // RRDtool strips trailing slashes from -b before joining request names.
+    let echo_base = match args.root.to_string_lossy().trim_end_matches('/') {
+        "" => root.clone(),
+        base => PathBuf::from(base),
+    };
     let mut queue = match args.journal_directory.as_deref() {
         Some(directory) => RrdcachedQueue::open_in_directory(
             &root,
@@ -965,13 +970,14 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
             accepted = listener.accept() => {
                 let (stream, _) = accepted?;
                 let root = root.clone();
+                let echo_base = echo_base.clone();
                 let stats = Arc::clone(&stats);
                 let queue = Arc::clone(&queue);
                 let no_overwrite = args.no_overwrite;
                 let allow_recursive_mkdir = args.allow_recursive_mkdir;
                 let socket_commands = args.socket_commands.clone();
                 connections.spawn(async move {
-                    if let Err(error) = serve_rrdcached_connection(stream, root, stats, queue, no_overwrite, allow_recursive_mkdir, socket_commands).await {
+                    if let Err(error) = serve_rrdcached_connection(stream, root, echo_base, stats, queue, no_overwrite, allow_recursive_mkdir, socket_commands).await {
                         tracing::warn!(error = %error, "rrdcached_connection_failed");
                     }
                 });
@@ -1077,9 +1083,11 @@ where
     Ok(length)
 }
 
+#[allow(clippy::too_many_arguments)] // Per-connection settings fixed at startup.
 async fn serve_rrdcached_connection(
     stream: UnixStream,
     root: PathBuf,
+    echo_base: PathBuf,
     stats: Arc<RrdcachedStats>,
     queue: Arc<Mutex<RrdcachedQueue>>,
     no_overwrite: bool,
@@ -1114,6 +1122,7 @@ async fn serve_rrdcached_connection(
         }
         let Some(response) = handle_rrdcached_line(
             &root,
+            &echo_base,
             &line,
             &stats,
             &queue,
@@ -1156,6 +1165,7 @@ async fn serve_rrdcached_connection(
                 }
                 match handle_rrdcached_line(
                     &root,
+                    &echo_base,
                     &line,
                     &stats,
                     &queue,
@@ -1185,8 +1195,10 @@ async fn serve_rrdcached_connection(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Per-connection settings fixed at startup.
 fn handle_rrdcached_line(
     root: &Path,
+    echo_base: &Path,
     line: &str,
     stats: &RrdcachedStats,
     queue: &Mutex<RrdcachedQueue>,
@@ -1196,7 +1208,7 @@ fn handle_rrdcached_line(
 ) -> Option<String> {
     let mut fields = rrdcached_fields(line);
     let command = fields.first()?.to_ascii_uppercase();
-    fields.remove(0);
+    let raw_command = fields.remove(0);
     if let Some(allowed) = socket_commands {
         let permission_name = if command == "." { "BATCH" } else { &command };
         let known = matches!(
@@ -1240,8 +1252,13 @@ fn handle_rrdcached_line(
         "PING" if fields.is_empty() => "0 PONG\n".to_owned(),
         "UPDATE" => {
             stats.updates_received.fetch_add(1, Ordering::Relaxed);
-            if fields.len() < 2 {
-                "-1 Usage: UPDATE <filename> <timestamp:value> [<timestamp:value> ...]\n".to_owned()
+            if fields.is_empty() {
+                "-1 Usage: UPDATE <filename> <values> [<values> ...]\n".to_owned()
+            } else if fields.len() == 1 {
+                match resolve_rrdcached_path(root, &fields[0]) {
+                    Ok(_) => "-1 No values updated.\n".to_owned(),
+                    Err(error) => format!("-1 {error}\n"),
+                }
             } else {
                 match resolve_rrdcached_path(root, &fields[0]).and_then(|path| {
                     queue
@@ -1259,6 +1276,7 @@ fn handle_rrdcached_line(
         }
         "FLUSH" if fields.len() == 1 => {
             stats.flushes_received.fetch_add(1, Ordering::Relaxed);
+            let echo = rrdcached_echo_path(echo_base, &fields[0]);
             match resolve_rrdcached_path(root, &fields[0]) {
                 Ok(path) => {
                     let (known, suspended) = queue
@@ -1266,15 +1284,15 @@ fn handle_rrdcached_line(
                         .map(|queue| (queue.known.contains(&path), queue.suspended.contains(&path)))
                         .unwrap_or_default();
                     match flush_rrdcached_path(&path, queue, stats) {
-                        Ok(true) => format!("0 Successfully flushed {}.\n", path.display()),
+                        Ok(true) => format!("0 Successfully flushed {echo}.\n"),
                         Ok(false) if known || suspended => {
-                            format!("0 Successfully flushed {}.\n", path.display())
+                            format!("0 Successfully flushed {echo}.\n")
                         }
-                        Ok(false) => format!("0 Nothing to flush: {}.\n", path.display()),
+                        Ok(false) => format!("0 Nothing to flush: {echo}.\n"),
                         Err(error) => format!("-1 {error}\n"),
                     }
                 }
-                _ => format!("-1 No such file: {}.\n", fields[0]),
+                _ => format!("-1 No such file: {echo}.\n"),
             }
         }
         "FLUSHALL" if fields.is_empty() => {
@@ -1298,26 +1316,28 @@ fn handle_rrdcached_line(
             },
             Err(_) => "-1 No such file or directory\n".to_owned(),
         },
-        "SUSPEND" if fields.len() == 1 => match resolve_rrdcached_path(root, &fields[0]) {
-            Ok(path) => match suspend_rrdcached_path(&path, queue) {
-                Ok(SuspendResult::Changed) => format!("0 {} suspended\n", path.display()),
-                Ok(SuspendResult::Unchanged) => {
-                    format!("0 {} already suspended\n", path.display())
-                }
-                Err(()) => format!("-1 {} - No such file or directory\n", path.display()),
-            },
-            Err(_) => "-1 No such file or directory\n".to_owned(),
-        },
-        "RESUME" if fields.len() == 1 => match resolve_rrdcached_path(root, &fields[0]) {
-            Ok(path) => match resume_rrdcached_path(&path, queue) {
-                Ok(SuspendResult::Changed) => format!("0 {} resumed\n", path.display()),
-                Ok(SuspendResult::Unchanged) => {
-                    format!("0 {} not suspended\n", path.display())
-                }
-                Err(()) => format!("-1 {} - No such file or directory\n", path.display()),
-            },
-            Err(_) => "-1 No such file or directory\n".to_owned(),
-        },
+        "SUSPEND" if fields.len() == 1 => {
+            let echo = rrdcached_echo_path(echo_base, &fields[0]);
+            match resolve_rrdcached_path(root, &fields[0]) {
+                Ok(path) => match suspend_rrdcached_path(&path, queue) {
+                    Ok(SuspendResult::Changed) => format!("0 {echo} suspended\n"),
+                    Ok(SuspendResult::Unchanged) => format!("0 {echo} already suspended\n"),
+                    Err(()) => format!("-1 {echo} - No such file or directory\n"),
+                },
+                Err(_) => format!("-1 {echo} - No such file or directory\n"),
+            }
+        }
+        "RESUME" if fields.len() == 1 => {
+            let echo = rrdcached_echo_path(echo_base, &fields[0]);
+            match resolve_rrdcached_path(root, &fields[0]) {
+                Ok(path) => match resume_rrdcached_path(&path, queue) {
+                    Ok(SuspendResult::Changed) => format!("0 {echo} resumed\n"),
+                    Ok(SuspendResult::Unchanged) => format!("0 {echo} not suspended\n"),
+                    Err(()) => format!("-1 {echo} - No such file or directory\n"),
+                },
+                Err(_) => format!("-1 {echo} - No such file or directory\n"),
+            }
+        }
         "SUSPENDALL" if fields.is_empty() => {
             let count = suspend_all_rrdcached_paths(queue);
             format!("0 {count} rrds suspend\n")
@@ -1378,7 +1398,7 @@ fn handle_rrdcached_line(
                 (Err(error), _) => format!("-1 {error}\n"),
             }
         }
-        "INFO" if fields.len() == 1 => match rrdcached_info(root, &fields[0]) {
+        "INFO" if fields.len() == 1 => match rrdcached_info(root, echo_base, &fields[0]) {
             Ok(response) => response,
             Err(error) => format!("-1 RRD Error: {error}\n"),
         },
@@ -1467,14 +1487,49 @@ fn handle_rrdcached_line(
                 Err(error) => format!("-1 Got error {error}\n"),
             }
         }
-        "TUNE" => "-1 Usage: TUNE <filename> <argc> [<argv> ...]\n".to_owned(),
+        "TUNE" => "-1 Usage: TUNE <filename> [options]\n".to_owned(),
         "FIRST" => "-1 Usage: FIRST <filename> <rra index>\n".to_owned(),
         "BATCH" if fields.is_empty() => {
             "0 Go ahead.  End with dot '.' on its own line.\n".to_owned()
         }
         "BATCH" => "-1 Usage: BATCH\n".to_owned(),
         "HELP" => rrdcached_help(&fields.iter().map(String::as_str).collect::<Vec<_>>()),
-        _ => format!("-1 Unknown or invalid command: {command}\n"),
+        // Upstream handlers read only the fields they need, so extra
+        // arguments are ignored and a missing filename gets the usage text.
+        _ => {
+            let needed = match command.as_str() {
+                "PING" | "QUIT" | "QUEUE" | "STATS" | "FLUSHALL" | "SUSPENDALL" | "RESUMEALL" => {
+                    Some(0)
+                }
+                "FLUSH" | "PENDING" | "FORGET" | "INFO" | "LAST" | "SUSPEND" | "RESUME" => Some(1),
+                _ => None,
+            };
+            if let Some(needed) = needed.filter(|needed| fields.len() > *needed) {
+                let mut retry = command;
+                for field in &fields[..needed] {
+                    retry.push(' ');
+                    retry.push_str(&field.replace('\\', "\\\\").replace(' ', "\\ "));
+                }
+                return handle_rrdcached_line(
+                    root,
+                    echo_base,
+                    &retry,
+                    stats,
+                    queue,
+                    no_overwrite,
+                    allow_recursive_mkdir,
+                    socket_commands,
+                );
+            }
+            match command.as_str() {
+                "FETCH" => {
+                    "-1 Usage: FETCH <file> <CF> [<start> [<end>] [<column>...]]\n".to_owned()
+                }
+                _ if needed == Some(1) => format!("-1 Usage: {command} <filename>\n"),
+                "WROTE" => format!("-1 Can't use '{raw_command}' here.\n"),
+                _ => format!("-1 Unknown command: {raw_command}\n"),
+            }
+        }
     };
     Some(response)
 }
@@ -1643,11 +1698,12 @@ fn rrdcached_help(fields: &[&str]) -> String {
     response
 }
 
-fn rrdcached_info(root: &Path, filename: &str) -> Result<String, String> {
+fn rrdcached_info(root: &Path, echo_base: &Path, filename: &str) -> Result<String, String> {
     let path = resolve_rrdcached_path(root, filename)?;
+    let echo = rrdcached_echo_path(echo_base, filename);
     let info = rondi::inspect_rrd_file(&path).map_err(|error| error.to_string())?;
     let mut lines = vec![
-        format!("filename 2 {}", path.display()),
+        format!("filename 2 {echo}"),
         format!("rrd_version 2 {}", info.version),
         format!("step 1 {}", info.step),
         format!("last_update 1 {}", info.last_update),
@@ -1713,8 +1769,7 @@ fn rrdcached_info(root: &Path, filename: &str) -> Result<String, String> {
     }
     let count = lines.len();
     Ok(format!(
-        "{count} Info for {} follows\n{}\n",
-        path.display(),
+        "{count} Info for {echo} follows\n{}\n",
         lines.join("\n")
     ))
 }
@@ -1948,13 +2003,23 @@ fn rrdcached_fetch(root: &Path, fields: &[&str]) -> Result<String, String> {
     for row in result.rows {
         body.push_str(&format!("{:10}:", row.timestamp));
         for index in &selected {
-            let value = row.values[*index]
-                .map_or_else(|| "nan".to_owned(), |value| format!("{value:.17e}"));
+            let value = row.values[*index].map_or_else(|| "nan".to_owned(), format_c_exponent17);
             body.push_str(&format!(" {value}"));
         }
         body.push('\n');
     }
     Ok(body)
+}
+
+/// C `%0.17e`: Rust omits the exponent sign and padding that clients parse.
+fn format_c_exponent17(value: f64) -> String {
+    if !value.is_finite() {
+        return value.to_string();
+    }
+    let text = format!("{value:.17e}");
+    let (mantissa, exponent) = text.split_once('e').expect("scientific notation has e");
+    let exponent = exponent.parse::<i32>().expect("valid scientific exponent");
+    format!("{mantissa}e{exponent:+03}")
 }
 
 fn rrdcached_fetch_data(
@@ -2070,6 +2135,16 @@ fn resolve_rrdcached_path(root: &Path, requested: &str) -> Result<PathBuf, Strin
         return Err("Access denied: path is outside the configured base directory".to_owned());
     }
     Ok(canonical)
+}
+
+/// RRDtool echoes `-b` as given joined with the name the client sent, not
+/// the resolved file; access is still checked on the resolved path.
+fn rrdcached_echo_path(echo_base: &Path, requested: &str) -> String {
+    if requested.starts_with('/') {
+        requested.to_owned()
+    } else {
+        format!("{}/{requested}", echo_base.display())
+    }
 }
 
 fn rrdcached_pending_key(root: &Path, requested: &str) -> PathBuf {
@@ -2276,7 +2351,7 @@ fn rrdcached_create(
 ) -> Result<(), String> {
     if fields.len() < 3 {
         return Err(
-            "Usage: CREATE <filename> [-b start] [-s step] <DS definitions> <RRA definitions>"
+            "Usage: CREATE <filename> [-b start] [-s step] [-O] <DS definitions> <RRA definitions>"
                 .to_owned(),
         );
     }

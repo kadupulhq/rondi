@@ -17,26 +17,6 @@ fn normalize_rrdtool_compiled_stamp(output: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn compatibility_names_select_their_named_mode() {
-    let temp = tempfile::tempdir().unwrap();
-    let executable = env!("CARGO_BIN_EXE_rondi");
-    for (name, message) in [
-        ("rrdtool", "rrdtool mode selected"),
-        ("rrdcached", "rrdcached mode selected"),
-    ] {
-        let alias = temp.path().join(name);
-        symlink(executable, &alias).unwrap();
-        let output = Command::new(alias).arg("--version").output().unwrap();
-        assert!(!output.status.success());
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains(message),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-}
-
-#[test]
 fn rpn_roll_small_stack_matches_rrdtool_1110_for_shift_range() {
     if !Command::new("rrdtool")
         .arg("--version")
@@ -145,6 +125,60 @@ fn rrdcached_help_matches_pinned_stdout_and_exit_status() {
 }
 
 #[test]
+fn rrdcached_option_parsing_matches_pinned_daemon() {
+    if !Command::new("rrdcached")
+        .arg("--help")
+        .output()
+        .is_ok_and(|output| output.status.code() == Some(1))
+    {
+        eprintln!("skipping rrdcached option differential: pinned rrdcached is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let alias = temp.path().join("rrdcached");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    // Every case stops during option parsing, so neither daemon starts.
+    for args in [
+        &["--version"][..],
+        &["--help=x"],
+        &["--listen", "/x"],
+        &["-q"],
+        &["-xh"],
+        &["-hq"],
+        &["-gF", "-h"],
+        &["foo", "-h"],
+        &["-V"],
+        &["-V", "LOG_FOO", "-h"],
+        &["-w", "abc"],
+        &["-w", "0"],
+        &["-w", "5x"],
+        &["-f", "abc"],
+        &["-z", "abc"],
+        &["-w1800", "-z100", "-f3600", "-h"],
+        &["-z", "5000", "-h"],
+        &["-h", "-f", "10", "-w", "20"],
+        &["-U", "rondi-no-such-user"],
+        &["-G", "rondi-no-such-group"],
+        &["-t", ""],
+        &["-a", ""],
+        &["-B", "-h"],
+        &["-R", "-h"],
+        &["-P", "FOO,PING", "-h"],
+        &["-P", "FOO"],
+    ] {
+        let upstream = Command::new("rrdcached").args(args).output().unwrap();
+        let rondi = Command::new(&alias).args(args).output().unwrap();
+        assert_eq!(rondi.status.code(), upstream.status.code(), "{args:?}");
+        assert_eq!(rondi.stdout, upstream.stdout, "{args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&rondi.stderr),
+            String::from_utf8_lossy(&upstream.stderr),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
 fn rrdproxy_alias_preserves_pinned_version_and_help_invocations() {
     let temp = tempfile::tempdir().unwrap();
     let alias = temp.path().join("rrdtool-proxy.php");
@@ -197,6 +231,56 @@ fn php_rrdproxy_launcher_forwards_arguments_and_output() {
         assert_eq!(through_php.status, direct.status);
         assert_eq!(through_php.stdout, direct.stdout);
         assert_eq!(through_php.stderr, direct.stderr);
+    }
+}
+
+#[test]
+fn rrdtool_usage_and_version_invocations_match_pinned_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+
+    // Kadupul detects the installed version with /^RRDtool ([0-9.]+) / on
+    // the output of `rrdtool -v`.
+    let version = Command::new(&alias).arg("-v").output().unwrap();
+    assert!(version.status.success());
+    assert!(version.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("RRDtool 1.11.0 "));
+
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        eprintln!("skipping usage differential: pinned RRDtool 1.11.0 is not installed");
+        return;
+    }
+    for args in [
+        &[][..],
+        &["-v"],
+        &["--version"],
+        &["-h"],
+        &["bogus"],
+        &["fetch"],
+        &["ls"],
+        &["help", "fetch"],
+        &["help", "bogus"],
+        &["help", "a", "b"],
+        &["-v", "x"],
+        &["version", "x"],
+        &["bogus", "a", "b"],
+    ] {
+        let upstream = Command::new("rrdtool").args(args).output().unwrap();
+        let rondi = Command::new(&alias).args(args).output().unwrap();
+        assert_eq!(rondi.status.code(), upstream.status.code(), "{args:?}");
+        assert_eq!(
+            normalize_rrdtool_compiled_stamp(&rondi.stdout),
+            normalize_rrdtool_compiled_stamp(&upstream.stdout),
+            "{args:?}"
+        );
+        assert_eq!(rondi.stderr, upstream.stderr, "{args:?}");
     }
 }
 
@@ -556,6 +640,60 @@ fn rrdtool_batch_mode_runs_poller_commands_and_update_templates() {
 }
 
 #[test]
+fn rrdtool_batch_mode_usage_and_errors_match_pinned_tool() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        eprintln!(
+            "skipping RRDtool batch usage differential: pinned RRDtool 1.11.0 is not installed"
+        );
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let commands = "bogus a\n\nfetch\n   \nhelp x\n-v x\nfetch \"a\nquit x\n   ";
+    let run = |program: &std::path::Path| {
+        let mut child = Command::new(program)
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(commands.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let upstream = run(std::path::Path::new("rrdtool"));
+    let rondi = run(&alias);
+    let normalize = |output: &[u8]| {
+        String::from_utf8(normalize_rrdtool_compiled_stamp(output))
+            .unwrap()
+            .split_inclusive('\n')
+            .map(|line| {
+                if line.starts_with("OK u:") {
+                    "OK\n"
+                } else {
+                    line
+                }
+            })
+            .collect::<String>()
+    };
+    assert_eq!(rondi.status.code(), upstream.status.code());
+    assert_eq!(normalize(&rondi.stdout), normalize(&upstream.stdout));
+    assert_eq!(rondi.stderr, upstream.stderr);
+}
+
+#[test]
 fn aligned_multi_step_update_matches_upstream_bytes_for_multi_pdp_archive() {
     if !Command::new("rrdtool")
         .arg("--version")
@@ -675,6 +813,58 @@ fn update_daemon_equals_down_socket_matches_upstream_failure() {
     assert_eq!(ours_result.stderr, upstream_result.stderr);
     assert!(!ours_result.status.success());
     assert_eq!(std::fs::read(ours).unwrap(), std::fs::read(oracle).unwrap());
+}
+
+#[test]
+fn read_commands_with_down_daemon_report_upstream_connect_error() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping unavailable-daemon read differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("read.rrd");
+    let create = Command::new("rrdtool")
+        .args([
+            "create",
+            file.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:value:GAUGE:60:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(create.status.success());
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let unavailable = format!("unix:{}", temp.path().join("missing.sock").display());
+    let file = file.to_str().unwrap();
+    for args in [
+        &["fetch", file, "AVERAGE", "--daemon", &unavailable][..],
+        &["last", file, "--daemon", &unavailable],
+        &["first", file, "--daemon", &unavailable],
+        &["info", file, "--daemon", &unavailable],
+        &["dump", file, "--daemon", &unavailable],
+        &["flushcached", file, "--daemon", &unavailable],
+    ] {
+        let ours = Command::new(&alias).args(args).output().unwrap();
+        let upstream = Command::new("rrdtool").args(args).output().unwrap();
+        // RRDtool also prints a local read on stdout after the connect
+        // failure for fetch, last, first, info, and dump; Rondi does not fall
+        // back, so only the diagnostic and status are compared.
+        assert_eq!(ours.status.code(), upstream.status.code(), "{args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&ours.stderr),
+            String::from_utf8_lossy(&upstream.stderr),
+            "{args:?}"
+        );
+    }
 }
 
 #[test]
@@ -897,6 +1087,75 @@ fn rrdtool_update_skip_past_updates_matches_pinned_tool() {
         .take(20)
         .collect::<Vec<_>>();
     assert!(differences.is_empty(), "byte diffs: {differences:?}");
+}
+
+#[test]
+fn rrdtool_update_out_of_order_diagnostic_matches_upstream() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        eprintln!(
+            "skipping out-of-order update differential: pinned RRDtool 1.11.0 is not installed"
+        );
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let ours = temp.path().join("ours.rrd");
+    let oracle = temp.path().join("oracle.rrd");
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let created = Command::new("rrdtool")
+        .args([
+            "create",
+            ours.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:v:GAUGE:20:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    // RRDtool create randomizes the archive start row, so both runs share one file image.
+    std::fs::copy(&ours, &oracle).unwrap();
+    for samples in [
+        &["1000000010:1"][..],
+        &["1000000010:2"],
+        &["1000000005.5:2"],
+        &["1000000020:3", "1000000030:4", "1000000025:5"],
+    ] {
+        let upstream = Command::new("rrdtool")
+            .arg("update")
+            .arg(&oracle)
+            .args(samples)
+            .output()
+            .unwrap();
+        let rondi = Command::new(&alias)
+            .arg("update")
+            .arg(&ours)
+            .args(samples)
+            .output()
+            .unwrap();
+        let expected_stderr = String::from_utf8_lossy(&upstream.stderr)
+            .replace(oracle.to_str().unwrap(), ours.to_str().unwrap());
+        assert_eq!(rondi.status.code(), upstream.status.code(), "{samples:?}");
+        assert_eq!(rondi.stdout, upstream.stdout, "{samples:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&rondi.stderr),
+            expected_stderr,
+            "{samples:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(&ours).unwrap(),
+        std::fs::read(&oracle).unwrap()
+    );
 }
 
 #[test]
