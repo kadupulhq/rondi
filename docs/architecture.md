@@ -26,4 +26,4 @@ The daemon uses a bounded write channel. Full queues fail immediately with HTTP 
 6. Implement the pinned rrdcached and Cacti RRDProxy protocols, connection behavior, security, config, and service lifecycle in isolated adapters.
 7. Build and verify the `librrd`-compatible C ABI for discovered native consumers; the standalone executable cannot replace dynamically linked libraries.
 
-An upgrade creates a new `.rondi` file, verifies imported fetch ranges, and retains the old `.rrd` until the operator explicitly removes it. No command in this project edits production RRDs in place.
+The `rrdtool` compatibility alias updates existing `.rrd` files in place under RRDtool-compatible file locking. Its supported subset is not yet a drop-in replacement; use disposable copies until the compatibility matrix and the workflows you depend on have passed.

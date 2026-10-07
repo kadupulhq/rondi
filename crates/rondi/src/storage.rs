@@ -355,17 +355,6 @@ pub(crate) fn open_read_nofollow(path: &Path) -> Result<File, std::io::Error> {
     options.open(path)
 }
 
-pub(crate) fn open_write_nofollow(path: &Path) -> Result<File, std::io::Error> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
-    options.open(path)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

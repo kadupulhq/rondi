@@ -402,7 +402,7 @@ pub struct RrdCdpPrepInfo {
 }
 
 pub(crate) fn inspect_path(path: &Path) -> Result<RrdInfo, StoreError> {
-    let mut file = super::storage::open_read_nofollow(path)?;
+    let mut file = open_rrd_read(path)?;
     let _lock = RrdFileLock::shared(&file)?;
     read_info(&mut file)
 }
@@ -419,7 +419,7 @@ pub(crate) fn fetch_path(
             "RRD fetch requires a positive resolution and end >= start".into(),
         ));
     }
-    let mut file = super::storage::open_read_nofollow(path)?;
+    let mut file = open_rrd_read(path)?;
     let _lock = RrdFileLock::shared(&file)?;
     let info = read_info(&mut file)?;
     let archive_index = choose_archive(
@@ -449,7 +449,10 @@ pub(crate) fn fetch_path(
         ));
     }
 
-    let archive_end = info.last_update - info.last_update.rem_euclid(step_i64);
+    let archive_end = info
+        .last_update
+        .checked_sub(info.last_update.rem_euclid(step_i64))
+        .ok_or_else(|| rrd_error("RRD archive end overflows"))?;
     let archive_start = archive_end
         .checked_sub(
             step_i64
@@ -563,7 +566,7 @@ fn update_path_values_with_raw(
     if raw_values.is_some_and(|raw| raw.len() != values.len()) {
         return Err(StoreError::InvalidValue);
     }
-    let mut file = super::storage::open_write_nofollow(path)?;
+    let mut file = open_rrd_write(path)?;
     let _lock = RrdFileLock::exclusive(&file)?;
     let info = read_info(&mut file)?;
     if info.data_sources.len() != values.len()
@@ -611,9 +614,16 @@ fn update_path_values_with_raw(
     let interval = timestamp
         .checked_sub(last_update)
         .ok_or_else(|| rrd_error("RRD update interval overflows"))?;
-    let previous_boundary = last_update - last_update.rem_euclid(step);
-    let current_boundary = timestamp - timestamp.rem_euclid(step);
-    let elapsed_steps = (current_boundary - previous_boundary) / step;
+    let previous_boundary = last_update
+        .checked_sub(last_update.rem_euclid(step))
+        .ok_or_else(|| rrd_error("RRD timestamp alignment overflows"))?;
+    let current_boundary = timestamp
+        .checked_sub(timestamp.rem_euclid(step))
+        .ok_or_else(|| rrd_error("RRD timestamp alignment overflows"))?;
+    let elapsed_steps = current_boundary
+        .checked_sub(previous_boundary)
+        .ok_or_else(|| rrd_error("RRD elapsed steps overflow"))?
+        / step;
     let stat_len = STAT_HEAD_LEN;
     let ds_start = stat_len;
     let rra_start = ds_start + info.data_sources.len() * DS_DEF_LEN;
@@ -695,10 +705,18 @@ fn update_path_values_with_raw(
             };
             (unknown, next_value, None)
         } else {
-            let pre_interval = step - open_pdp_seconds;
             let post_interval = timestamp - current_boundary;
-            let mut pre_unknown = 0.0;
+            // When the previous update is on a PDP boundary and this update
+            // crosses multiple boundaries, all elapsed time belongs before
+            // the current boundary. RRDtool's calculate_elapsed_steps uses
+            // the full interval as pre_int in this case.
+            let pre_interval = if open_pdp_seconds == 0 {
+                interval - post_interval
+            } else {
+                step - open_pdp_seconds
+            };
             let mut accumulated = old_pdp_value;
+            let mut pre_unknown = 0.0;
             if let Some(integral) = integral {
                 if accumulated.is_nan() {
                     accumulated = 0.0;
@@ -1294,7 +1312,7 @@ pub fn tune_rrd_data_sources(
     path: impl AsRef<Path>,
     changes: &[RrdDataSourceTune],
 ) -> Result<(), StoreError> {
-    let mut file = super::storage::open_write_nofollow(path.as_ref())?;
+    let mut file = open_rrd_write(path.as_ref())?;
     let _lock = RrdFileLock::exclusive(&file)?;
     let info = read_info(&mut file)?;
     if info.data_sources.iter().any(|source| {
@@ -1433,7 +1451,7 @@ pub fn resize_rrd_file(
         ));
     }
 
-    let mut input = super::storage::open_write_nofollow(input_path)?;
+    let mut input = open_rrd_write(input_path)?;
     let _lock = RrdFileLock::exclusive(&input)?;
     let info = read_info(&mut input)?;
     if !matches!(info.version.as_str(), "0003" | "0004") {
@@ -1666,7 +1684,10 @@ pub fn first_rrd_time(path: impl AsRef<Path>, archive_index: usize) -> Result<i6
         .checked_mul(archive.pdp_per_row)
         .and_then(|value| i64::try_from(value).ok())
         .ok_or_else(|| rrd_error("RRD archive resolution overflows"))?;
-    let aligned_last = info.last_update - info.last_update.rem_euclid(resolution);
+    let aligned_last = info
+        .last_update
+        .checked_sub(info.last_update.rem_euclid(resolution))
+        .ok_or_else(|| rrd_error("RRD first timestamp alignment overflows"))?;
     let retained = i64::try_from(archive.rows - 1)
         .ok()
         .and_then(|rows| rows.checked_mul(resolution))
@@ -1692,7 +1713,7 @@ pub fn dump_rrd_file_with_header(
     path: impl AsRef<Path>,
     header: RrdDumpHeader,
 ) -> Result<String, StoreError> {
-    let mut file = super::storage::open_read_nofollow(path.as_ref())?;
+    let mut file = open_rrd_read(path.as_ref())?;
     let _lock = RrdFileLock::shared(&file)?;
     let info = read_info(&mut file)?;
     if info.data_sources.iter().any(|ds| {
@@ -1726,9 +1747,12 @@ pub fn dump_rrd_file_with_header(
     )
     .unwrap();
     for source in &info.data_sources {
+        let name = xml_escape_text(&source.name);
+        let kind = xml_escape_text(&source.kind);
+        let last_value = xml_escape_text(&source.last_value);
         out.push_str("\t<ds>\n");
-        writeln!(out, "\t\t<name> {} </name>", source.name).unwrap();
-        writeln!(out, "\t\t<type> {} </type>", source.kind).unwrap();
+        writeln!(out, "\t\t<name> {} </name>", name).unwrap();
+        writeln!(out, "\t\t<type> {} </type>", kind).unwrap();
         writeln!(
             out,
             "\t\t<minimal_heartbeat>{}</minimal_heartbeat>",
@@ -1748,7 +1772,7 @@ pub fn dump_rrd_file_with_header(
         )
         .unwrap();
         out.push_str("\n\t\t<!-- PDP Status -->\n");
-        writeln!(out, "\t\t<last_ds>{}</last_ds>", source.last_value).unwrap();
+        writeln!(out, "\t\t<last_ds>{}</last_ds>", last_value).unwrap();
         writeln!(
             out,
             "\t\t<value>{}</value>",
@@ -1772,7 +1796,10 @@ pub fn dump_rrd_file_with_header(
                     .map_err(|_| rrd_error("RRA resolution overflows"))?,
             )
             .ok_or_else(|| rrd_error("RRA resolution overflows"))?;
-        let aligned_last = info.last_update - info.last_update.rem_euclid(resolution);
+        let aligned_last = info
+            .last_update
+            .checked_sub(info.last_update.rem_euclid(resolution))
+            .ok_or_else(|| rrd_error("RRD last timestamp alignment overflows"))?;
         writeln!(out, "\t<rra>\n\t\t<cf>{}</cf>", archive.consolidation).unwrap();
         writeln!(
             out,
@@ -1869,6 +1896,22 @@ pub fn restore_rrd_file(
             .ok_or_else(|| StoreError::RrdUnsupported(format!("RRD XML is missing <{name}>")))
     }
 
+    fn single_text_child(node: Node<'_, '_>, name: &str) -> Result<String, StoreError> {
+        let element = child(node, name)?;
+        let mut text_nodes = element.children().filter(|child| child.is_text());
+        let Some(text) = text_nodes.next() else {
+            return Err(StoreError::RrdUnsupported(format!(
+                "RRD XML <{name}> must contain one text node"
+            )));
+        };
+        if element.children().any(|child| child.is_element()) || text_nodes.next().is_some() {
+            return Err(StoreError::RrdUnsupported(format!(
+                "RRD XML <{name}> must contain one text node"
+            )));
+        }
+        Ok(text.text().unwrap_or_default().trim().to_owned())
+    }
+
     fn child<'a, 'input>(
         node: Node<'a, 'input>,
         name: &str,
@@ -1936,7 +1979,7 @@ pub fn restore_rrd_file(
     let mut source_definitions = Vec::with_capacity(ds_nodes.len());
     let mut source_bounds = Vec::with_capacity(ds_nodes.len());
     for ds in &ds_nodes {
-        let name = child_text(*ds, "name")?;
+        let name = single_text_child(*ds, "name")?;
         let kind = child_text(*ds, "type")?;
         if version == "0003" && matches!(kind.as_str(), "DCOUNTER" | "DDERIVE") {
             return Err(StoreError::RrdUnsupported(
@@ -2021,10 +2064,19 @@ pub fn restore_rrd_file(
             true,
         )?;
         let info = inspect_path(&temporary)?;
-        let mut file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&temporary)?;
+        let mut restore_options = std::fs::OpenOptions::new();
+        restore_options.read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            restore_options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        }
+        let mut file = restore_options.open(&temporary)?;
+        if !file.metadata()?.file_type().is_file() {
+            return Err(StoreError::RrdUnsupported(
+                "restore temporary path is not a regular file".into(),
+            ));
+        }
         let ds_start = STAT_HEAD_LEN;
         let rra_start = ds_start + info.data_sources.len() * DS_DEF_LEN;
         let live_start = rra_start + info.archives.len() * RRA_DEF_LEN;
@@ -2039,7 +2091,7 @@ pub fn restore_rrd_file(
 
         for (index, ds) in ds_nodes.iter().enumerate() {
             let offset = pdp_start + index * PDP_PREP_LEN;
-            let last_ds = child_text(*ds, "last_ds")?;
+            let last_ds = single_text_child(*ds, "last_ds")?;
             if last_ds.len() >= 30 {
                 return Err(StoreError::RrdUnsupported(
                     "RRD XML last_ds value is too long".into(),
@@ -2435,7 +2487,10 @@ fn choose_archive(
             .ok_or_else(|| rrd_error("RRD archive step overflows"))?;
         let archive_step_i64 =
             i64::try_from(archive_step).map_err(|_| rrd_error("RRD archive step overflows"))?;
-        let archive_end = info.last_update - info.last_update.rem_euclid(archive_step_i64);
+        let archive_end = info
+            .last_update
+            .checked_sub(info.last_update.rem_euclid(archive_step_i64))
+            .ok_or_else(|| rrd_error("RRD archive end overflows"))?;
         let span = archive_step_i64
             .checked_mul(
                 i64::try_from(archive.rows).map_err(|_| rrd_error("RRD row count overflows"))?,
@@ -2552,6 +2607,26 @@ fn fixed_string(bytes: &[u8], offset: usize, length: usize) -> Result<String, St
     let value = std::str::from_utf8(&field[..end])
         .map_err(|_| StoreError::RrdFormat("RRD string field is not UTF-8/ASCII".into()))?;
     Ok(value.to_owned())
+}
+
+fn xml_escape_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+// RRDtool opens operator-supplied .rrd paths normally, following symlinks.
+// Keep that compatibility behavior separate from the stricter native-store
+// helpers, which intentionally refuse symlinked database files.
+fn open_rrd_read(path: &Path) -> Result<File, StoreError> {
+    Ok(File::open(path)?)
+}
+
+fn open_rrd_write(path: &Path) -> Result<File, StoreError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    Ok(options.open(path)?)
 }
 
 fn usize_at(bytes: &[u8], offset: usize) -> Result<usize, StoreError> {
