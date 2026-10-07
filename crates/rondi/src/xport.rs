@@ -611,22 +611,30 @@ fn evaluate_rpn(
                 }
             }
             "PERCENT" => {
+                if stack.len() < 3 {
+                    return Err(rpn_stack_underflow());
+                }
                 let count = pop_count(&mut stack)?;
                 let percent = pop(&mut stack)?;
-                if !(0.0..=100.0).contains(&percent) || !percent.is_finite() {
+                if !(0.0..=100.0).contains(&percent) {
                     return Err(rrdtool_rpn_error(
                         "percentile argument must be between 0 and 100",
                     ));
                 }
-                if count == 0 || stack.len() < count {
-                    return Err(rpn_error("stack underflow or invalid PERCENT count"));
+                if stack.len() < count {
+                    return Err(rpn_stack_underflow());
                 }
                 let start = stack.len() - count;
-                let mut values = stack.split_off(start);
-                values.sort_by(rrd_percent_cmp);
-                let rounded = (percent * count as f64 / 100.0).round() as usize;
-                let index = rounded.saturating_sub(1).min(count - 1);
-                let selected = values[index];
+                stack[start..].sort_by(rrd_percent_cmp);
+                let rank = (percent * count as f64 / 100.0).round() as usize;
+                // RRDtool reads s[start - 1 + rank]: rank 0 selects the
+                // unsorted slot below the window, and a zero count repeats the
+                // top value. Below the stack bottom it reads outside its
+                // buffer, which has no defined result.
+                let selected = (start + rank)
+                    .checked_sub(1)
+                    .map_or_else(rrd_nan, |index| stack[index]);
+                stack.truncate(start);
                 stack.push(selected);
             }
             "TREND" | "TRENDNAN" => {

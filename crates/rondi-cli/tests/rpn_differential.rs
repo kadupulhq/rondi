@@ -153,3 +153,19 @@ fn constant_cdef_is_rejected_like_rrdtool() {
         fixture.assert_matches(&fixture.xport_args(cdef));
     }
 }
+
+// rrd_rpncalc.c OP_PERCENT reads s[start - 1 + round(percent * n / 100)].
+#[test]
+fn rpn_percent_rank_and_count_edges_match_rrdtool() {
+    let Some(fixture) = fixture() else { return };
+    for cdef in [
+        "100,x,y,1,10,3,PERCENT,+",
+        "x,1,2,3,4,0,3,PERCENT,+,+",
+        "x,50,0,PERCENT,+",
+        "x,y,1,2,100,3,PERCENT,+,+",
+        "x,y,2,1,50,3,PERCENT,+",
+        "50,0,PERCENT,x,+",
+    ] {
+        fixture.assert_matches(&fixture.xport_args(cdef));
+    }
+}
