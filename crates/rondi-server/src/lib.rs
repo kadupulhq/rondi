@@ -681,34 +681,31 @@ impl RrdcachedQueue {
             .and_then(|entries| entries.last())
             .and_then(|entry| entry.samples.last())
             .and_then(|sample| sample.split_once(':'))
-            .map(|(timestamp, _)| timestamp.parse::<f64>().map_err(|error| error.to_string()))
+            .map(|(timestamp, _)| rrdcached_update_timestamp(timestamp))
             .transpose()?
-            .unwrap_or(info.last_update as f64 + info.last_update_usec as f64 / 1_000_000.0);
+            .unwrap_or((info.last_update, info.last_update_usec));
         for sample in samples {
             let Some((timestamp, values)) = sample.split_once(':') else {
                 return Err(format!("Cannot find timestamp in '{sample}'!"));
             };
-            let timestamp = timestamp
-                .parse::<f64>()
+            let timestamp = rrdcached_update_timestamp(timestamp)
                 .map_err(|_| format!("Cannot find timestamp in '{sample}'!"))?;
-            if !timestamp.is_finite() {
-                return Err(format!("Cannot find timestamp in '{sample}'!"));
-            }
             let values = values.split(':').collect::<Vec<_>>();
             if values.len() != info.data_sources.len()
                 || values.iter().any(|value| {
                     !value.eq_ignore_ascii_case("U")
-                        && value
-                            .parse::<f64>()
-                            .map_or(true, |number| !number.is_finite())
+                        && rondi::parse_rrd_number(value).is_none_or(|number| !number.is_finite())
                 })
             {
                 return Err(format!("Invalid update value: {sample}"));
             }
             if timestamp <= last_timestamp {
+                let timestamp_seconds = timestamp.0 as f64 + timestamp.1 as f64 / 1_000_000.0;
+                let last_timestamp_seconds =
+                    last_timestamp.0 as f64 + last_timestamp.1 as f64 / 1_000_000.0;
                 return Err(format!(
                     "illegal attempt to update using time {:.6} when last update time is {:.6} (minimum one second step)",
-                    timestamp, last_timestamp
+                    timestamp_seconds, last_timestamp_seconds
                 ));
             }
             last_timestamp = timestamp;
@@ -2213,7 +2210,9 @@ fn flush_rrdcached_path(
 }
 
 fn rrdcached_update_timestamp(value: &str) -> Result<(i64, u64), String> {
-    let timestamp = value.parse::<f64>().map_err(|error| format!("{error}"))?;
+    let timestamp = rondi::parse_rrd_number(value)
+        .filter(|timestamp| timestamp.is_finite())
+        .ok_or_else(|| "invalid numeric timestamp".to_owned())?;
     if !timestamp.is_finite() || timestamp < i64::MIN as f64 || timestamp >= i64::MAX as f64 {
         return Err("timestamp is outside the supported range".to_owned());
     }

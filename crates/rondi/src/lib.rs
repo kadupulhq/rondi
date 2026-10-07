@@ -6,6 +6,7 @@ mod format;
 pub mod import_export;
 mod queries;
 mod rrd_binary;
+mod rrd_number;
 pub(crate) mod storage;
 pub mod vdef;
 pub mod xport;
@@ -22,6 +23,7 @@ pub use rrd_binary::{
     update_rrd_raw_values_precise_verbose, update_rrd_raw_values_verbose, update_rrd_values,
     update_rrd_values_verbose,
 };
+pub use rrd_number::parse_rrd_number;
 pub use storage::{Store, StoreError};
 pub use vdef::{VdefError, VdefFunction, VdefResult, evaluate_vdef};
 pub use xport::{

@@ -5782,7 +5782,9 @@ fn parse_rrd_update_timestamp(
     let timestamp = if value == "N" {
         now
     } else {
-        let timestamp = value.parse::<f64>()?;
+        let timestamp = rondi::parse_rrd_number(value)
+            .filter(|timestamp| timestamp.is_finite())
+            .ok_or("invalid numeric timestamp")?;
         if timestamp < 0.0 {
             now + timestamp
         } else {
