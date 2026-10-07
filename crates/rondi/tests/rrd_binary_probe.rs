@@ -1291,3 +1291,24 @@ fn trailing_bytes_after_the_archives_are_accepted_like_rrd_open() {
     assert_eq!(fetched_value(&path, "LAST", 1_000_000_010, 10), Some(3.0));
     assert!(std::fs::read(&path).unwrap().ends_with(b"XXXXXXXX"));
 }
+
+#[test]
+fn extreme_fetch_ranges_return_errors_instead_of_overflowing() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("range.rrd");
+    create_single_source(
+        &path,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:20:U:U",
+        "RRA:LAST:0:1:5",
+    );
+    for (start, end) in [
+        (-9_000_000_000_000_000_000, 9_000_000_000_000_000_000),
+        (i64::MIN, i64::MIN + 10),
+    ] {
+        let result =
+            std::panic::catch_unwind(|| rondi::fetch_rrd_file(&path, "LAST", start, end, 10));
+        assert!(matches!(result, Ok(Err(_))), "{start}..{end}: {result:?}");
+    }
+}

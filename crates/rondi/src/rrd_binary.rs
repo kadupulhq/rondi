@@ -473,8 +473,10 @@ pub(crate) fn fetch_path(
     let mut end = requested_end
         .checked_add(step_i64 - requested_end.rem_euclid(step_i64))
         .ok_or_else(|| rrd_error("RRD fetch end overflows"))?;
-    let range_rows = usize::try_from((end - start) / step_i64 + 1)
-        .map_err(|_| rrd_error("RRD fetch range is too large"))?;
+    let range_rows = end
+        .checked_sub(start)
+        .and_then(|span| usize::try_from(span / step_i64 + 1).ok())
+        .ok_or_else(|| rrd_error("RRD fetch range is too large"))?;
     if range_rows > 10_000_000 {
         return Err(StoreError::RrdUnsupported(
             "RRD fetch range exceeds the 10 million row safety limit".into(),
@@ -500,7 +502,8 @@ pub(crate) fn fetch_path(
     let end_offset = (i128::from(archive_end) - i128::from(end)) / i128::from(step);
     let row_count = i128::from(archive.rows);
     let mut pointer = 0_i128;
-    let in_archive_range = start <= archive_end && end >= archive_start - step_i64;
+    let in_archive_range =
+        start <= archive_end && i128::from(end) >= i128::from(archive_start) - i128::from(step);
     if in_archive_range {
         pointer = if start_offset <= 0 {
             i128::from(archive.current_row) + 1
