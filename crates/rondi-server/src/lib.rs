@@ -2556,7 +2556,8 @@ fn store_error(error: StoreError) -> Response<Full<Bytes>> {
         StoreError::OutOfOrder { .. }
         | StoreError::RrdTimestamp(_)
         | StoreError::RequestIdConflict
-        | StoreError::Owned => (StatusCode::CONFLICT, "conflict"),
+        | StoreError::Owned
+        | StoreError::RrdLocked => (StatusCode::CONFLICT, "conflict"),
         StoreError::InvalidName
         | StoreError::InvalidConfig(_)
         | StoreError::InvalidValue

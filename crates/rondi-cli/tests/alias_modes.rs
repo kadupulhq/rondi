@@ -922,6 +922,111 @@ fn local_updates_to_different_files_in_one_directory_can_run_concurrently() {
 }
 
 #[test]
+fn held_rrd_lock_fails_fast_and_honors_rrd_locking_like_rrdtool() {
+    use std::os::fd::AsRawFd;
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        eprintln!("skipping lock differential: pinned RRDtool 1.11.0 is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let file = temp.path().join("held.rrd");
+    let created = Command::new("rrdtool")
+        .args(["create", file.to_str().unwrap(), "--start", "1000000000"])
+        .args(["--step", "10", "DS:v:GAUGE:30:U:U", "RRA:AVERAGE:0.5:1:8"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    // Each tool gets its own copy so RRD_LOCKING=none updates do not collide.
+    let ours_file = temp.path().join("ours.rrd");
+    std::fs::copy(&file, &ours_file).unwrap();
+    let holders = [&file, &ours_file].map(|path| {
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        // SAFETY: zeroed flock is a valid whole-file request once l_type is set.
+        let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+        lock.l_type = libc::F_WRLCK as _;
+        lock.l_whence = libc::SEEK_SET as _;
+        // SAFETY: the descriptor is open and `lock` is a valid flock structure.
+        assert_eq!(
+            unsafe { libc::fcntl(holder.as_raw_fd(), libc::F_SETLK, &lock) },
+            0
+        );
+        holder
+    });
+    let commands: [&[&str]; 4] = [
+        &["update", "FILE", "1000000010:1"],
+        &[
+            "fetch",
+            "FILE",
+            "AVERAGE",
+            "-s",
+            "1000000000",
+            "-e",
+            "1000000030",
+        ],
+        &["info", "FILE"],
+        &["dump", "FILE"],
+    ];
+    for locking in [None, Some("try"), Some("bogus"), Some("none")] {
+        for arguments in commands {
+            let run = |program: &std::path::Path, path: &std::path::Path| {
+                let mut command = Command::new(program);
+                for argument in arguments {
+                    if *argument == "FILE" {
+                        command.arg(path);
+                    } else {
+                        command.arg(argument);
+                    }
+                }
+                command.env("TZ", "UTC");
+                match locking {
+                    Some(mode) => command.env("RRD_LOCKING", mode),
+                    None => command.env_remove("RRD_LOCKING"),
+                };
+                let mut child = command
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while child.try_wait().unwrap().is_none() {
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        panic!("{program:?} {arguments:?} blocked on a held RRD lock");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                child.wait_with_output().unwrap()
+            };
+            let ours = run(&alias, &ours_file);
+            let theirs = run(std::path::Path::new("rrdtool"), &file);
+            assert_eq!(
+                ours.status.code(),
+                theirs.status.code(),
+                "{locking:?} {arguments:?}"
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&ours.stderr),
+                String::from_utf8_lossy(&theirs.stderr),
+                "{locking:?} {arguments:?}"
+            );
+        }
+    }
+    drop(holders);
+}
+
+#[test]
 fn update_through_rrd_symlink_follows_the_target_like_rrdtool() {
     if !Command::new("rrdtool")
         .arg("--version")

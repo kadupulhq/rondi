@@ -4504,9 +4504,9 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
     if daemon_address.is_none() {
         ensure_rrd_file_exists(&filename)?;
     }
-    // Local RRD writes use RRDtool's blocking per-file fcntl lock in the
-    // library. A directory-wide Rondi lock incorrectly serializes unrelated
-    // files and prevents the poller from updating them in parallel.
+    // Local RRD writes use RRDtool's per-file fcntl lock in the library, which
+    // tries once unless $RRD_LOCKING says otherwise. A directory-wide Rondi
+    // lock would serialize unrelated files and stop parallel poller updates.
     let source_names = if let Some(template) = &template {
         let info = inspect_rrd(&args[1])?;
         let mut indices = Vec::with_capacity(template.len());
