@@ -95,6 +95,10 @@ mise exec -- bash scripts/smoke-kadupul-poller.sh
 
 Set `KADUPUL_ROOT`, `RRDTOOL_BIN`, or `RONDI_BIN` to override the checkout or executable paths. This exercises Kadupul's real `rrd_init()` process/session helper and update-template command stream; it does not run the database-backed poller loop.
 
+## Releases
+
+Version tags (`vMAJOR.MINOR.PATCH`, with optional SemVer prerelease or build metadata) use GitHub-generated release notes, grouped by the pull request labels in [.github/release.yml](.github/release.yml). Label pull requests with `enhancement`, `bug`, or `documentation` so they appear under the matching section; unlabeled changes appear under “Other Changes.”
+
 ## Contributing
 
 Changes are reviewed through pull requests using the repository's [pull request template](.github/PULL_REQUEST_TEMPLATE.md). Report compatibility differences with the exact RRDtool version, command, output, exit status, and a disposable `.rrd` fixture where possible.
