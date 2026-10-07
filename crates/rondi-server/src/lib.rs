@@ -481,6 +481,7 @@ struct RrdcachedQueue {
     journal: File,
     next_id: u64,
     journal_bytes: u64,
+    journal_needs_truncate: bool,
     pending_bytes: usize,
     max_pending_bytes: usize,
     write_timeout_seconds: u64,
@@ -514,15 +515,47 @@ impl RrdcachedQueue {
         let mut known = CacheTree::default();
         let mut paths_by_id = std::collections::HashMap::<u64, PathBuf>::new();
         let mut next_id = 1;
-        if journal.metadata()?.len() > 0 {
+        let journal_length = journal.metadata()?.len();
+        let mut replayed_bytes = 0_u64;
+        if journal_length > 0 {
             let mut replay = journal.try_clone()?;
             replay.seek(SeekFrom::Start(0))?;
-            for line in StdBufReader::new(replay).lines() {
-                let line = line?;
-                if line.is_empty() {
+            let mut replay = StdBufReader::new(replay);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                if replay.read_until(b'\n', &mut line)? == 0 {
+                    break;
+                }
+                if line.last() != Some(&b'\n') {
+                    // A crash or a full disk mid-append leaves a partial final
+                    // record. It was never acknowledged, so drop it.
+                    tracing::warn!(
+                        journal = %journal_path.display(),
+                        offset = replayed_bytes,
+                        "rrdcached_journal_partial_record_dropped"
+                    );
+                    break;
+                }
+                replayed_bytes += line.len() as u64;
+                if line.len() == 1 {
                     continue;
                 }
-                let record: RrdcachedJournalRecord = serde_json::from_str(&line)?;
+                // Upstream journal_replay logs and skips malformed entries
+                // rather than refusing to start.
+                let record: RrdcachedJournalRecord =
+                    match serde_json::from_slice(&line[..line.len() - 1]) {
+                        Ok(record) => record,
+                        Err(error) => {
+                            tracing::warn!(
+                                journal = %journal_path.display(),
+                                offset = replayed_bytes - line.len() as u64,
+                                error = %error,
+                                "rrdcached_journal_record_skipped"
+                            );
+                            continue;
+                        }
+                    };
                 match record {
                     RrdcachedJournalRecord::Update { id, path, samples } => {
                         let path = canonical_journal_path(root, &path, true)?;
@@ -587,7 +620,11 @@ impl RrdcachedQueue {
             )
             .into());
         }
-        let journal_bytes = journal.metadata()?.len();
+        if replayed_bytes < journal_length {
+            journal.set_len(replayed_bytes)?;
+            journal.sync_data()?;
+        }
+        let journal_bytes = replayed_bytes;
         Ok(Self {
             pending,
             pending_order,
@@ -596,6 +633,7 @@ impl RrdcachedQueue {
             journal,
             next_id,
             journal_bytes,
+            journal_needs_truncate: false,
             pending_bytes,
             max_pending_bytes,
             write_timeout_seconds,
@@ -642,10 +680,22 @@ impl RrdcachedQueue {
     fn append(&mut self, record: &RrdcachedJournalRecord) -> Result<(), String> {
         let mut encoded = serde_json::to_vec(record).map_err(|error| error.to_string())?;
         encoded.push(b'\n');
-        self.journal
+        if self.journal_needs_truncate {
+            self.journal
+                .set_len(self.journal_bytes)
+                .map_err(|error| format!("rrdcached journal is damaged: {error}"))?;
+            self.journal_needs_truncate = false;
+        }
+        if let Err(error) = self
+            .journal
             .write_all(&encoded)
             .and_then(|()| self.journal.sync_data())
-            .map_err(|error| error.to_string())?;
+        {
+            // A partial record would swallow the next one on replay, so cut
+            // the journal back to its last complete record before reuse.
+            self.journal_needs_truncate = self.journal.set_len(self.journal_bytes).is_err();
+            return Err(error.to_string());
+        }
         self.journal_bytes = self.journal_bytes.saturating_add(encoded.len() as u64);
         Ok(())
     }
@@ -3048,5 +3098,50 @@ mod rrdcached_queue_tests {
             );
             assert_eq!(stats.updates_written.load(Ordering::Relaxed), 100);
         }
+    }
+
+    #[test]
+    fn torn_final_journal_line_does_not_prevent_startup() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let file = root.join("metric.rrd");
+        create_test_rrd(&file);
+        {
+            let mut queue = RrdcachedQueue::open(&root, 1024 * 1024, 100_000).unwrap();
+            queue.enqueue(file.clone(), &["1000000010:1"]).unwrap();
+        }
+        let journal_path = root.join(".rrdcached.journal");
+        let intact = std::fs::metadata(&journal_path).unwrap().len();
+        let mut journal = OpenOptions::new().append(true).open(&journal_path).unwrap();
+        journal
+            .write_all(br#"{"record":"update","id":2,"pa"#)
+            .unwrap();
+        drop(journal);
+        let mut queue = RrdcachedQueue::open(&root, 1024 * 1024, 100_000)
+            .expect("a torn final journal line must not prevent startup");
+        assert_eq!(queue.pending.get(&file).map(Vec::len), Some(1));
+        assert_eq!(std::fs::metadata(&journal_path).unwrap().len(), intact);
+        // The next record must start on its own line, not extend the torn one.
+        queue.enqueue(file.clone(), &["1000000020:2"]).unwrap();
+        drop(queue);
+        let queue = RrdcachedQueue::open(&root, 1024 * 1024, 100_000).unwrap();
+        assert_eq!(queue.pending.get(&file).map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn malformed_journal_lines_are_skipped_on_replay() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let file = root.join("metric.rrd");
+        create_test_rrd(&file);
+        {
+            let mut queue = RrdcachedQueue::open(&root, 1024 * 1024, 100_000).unwrap();
+            queue.enqueue(file.clone(), &["1000000010:1"]).unwrap();
+            queue.journal.write_all(b"not json\n\xff\xfe\n").unwrap();
+            queue.journal.sync_data().unwrap();
+            queue.enqueue(file.clone(), &["1000000020:2"]).unwrap();
+        }
+        let queue = RrdcachedQueue::open(&root, 1024 * 1024, 100_000).unwrap();
+        assert_eq!(queue.pending.get(&file).map(Vec::len), Some(2));
     }
 }
