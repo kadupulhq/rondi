@@ -485,6 +485,9 @@ struct RrdcachedQueue {
     max_pending_bytes: usize,
     write_timeout_seconds: u64,
     allocation_chunk: usize,
+    // A flusher owns a path while it applies a snapshot of its entries, so a
+    // concurrent FLUSH, FETCH, or worker waits instead of applying them again.
+    flush_owners: std::collections::HashMap<PathBuf, Arc<Mutex<()>>>,
 }
 
 impl RrdcachedQueue {
@@ -597,6 +600,7 @@ impl RrdcachedQueue {
             max_pending_bytes,
             write_timeout_seconds,
             allocation_chunk: 1,
+            flush_owners: std::collections::HashMap::new(),
         })
     }
 
@@ -2243,6 +2247,33 @@ fn flush_rrdcached_path(
     queue: &Mutex<RrdcachedQueue>,
     stats: &RrdcachedStats,
 ) -> Result<bool, String> {
+    let owner = Arc::clone(
+        queue
+            .lock()
+            .map_err(|_| "rrdcached queue lock poisoned".to_owned())?
+            .flush_owners
+            .entry(path.to_path_buf())
+            .or_default(),
+    );
+    let result = match owner.lock() {
+        Ok(_owned) => flush_owned_rrdcached_path(path, queue, stats),
+        Err(_) => Err("rrdcached flush lock poisoned".to_owned()),
+    };
+    if let Ok(mut queue) = queue.lock() {
+        // Owners are cloned only under the queue lock, so a count of two
+        // (the map and this caller) means nobody else is waiting.
+        if Arc::strong_count(&owner) == 2 {
+            queue.flush_owners.remove(path);
+        }
+    }
+    result
+}
+
+fn flush_owned_rrdcached_path(
+    path: &Path,
+    queue: &Mutex<RrdcachedQueue>,
+    stats: &RrdcachedStats,
+) -> Result<bool, String> {
     let entries = {
         let queue = queue
             .lock()
@@ -2935,5 +2966,70 @@ mod rrdcached_queue_tests {
         assert_eq!(reopened.pending.len(), 1);
         drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn create_test_rrd(path: &Path) {
+        rondi::create_rrd_file(
+            path,
+            1_000_000_000,
+            10,
+            &["DS:value:GAUGE:30:U:U".to_owned()],
+            &[
+                "RRA:AVERAGE:0.5:1:500".to_owned(),
+                "RRA:MAX:0.5:5:100".to_owned(),
+            ],
+            false,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn concurrent_flushes_of_one_file_apply_each_sample_once() {
+        for attempt in 0..5 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = std::fs::canonicalize(temp.path()).unwrap();
+            let file = root.join("metric.rrd");
+            let reference = root.join("reference.rrd");
+            create_test_rrd(&file);
+            std::fs::copy(&file, &reference).unwrap();
+            let mut queue = RrdcachedQueue::open(&root, 64 * 1024 * 1024, 100_000).unwrap();
+            let mut samples = Vec::new();
+            for step in 1..=100_i64 {
+                let sample = format!("{}:{}", 1_000_000_000 + step * 10, step % 37);
+                queue.enqueue(file.clone(), &[sample.as_str()]).unwrap();
+                samples.push(sample);
+            }
+            let queue = Arc::new(Mutex::new(queue));
+            let stats = Arc::new(RrdcachedStats::default());
+            let barrier = Arc::new(std::sync::Barrier::new(4));
+            let workers = (0..4)
+                .map(|_| {
+                    let queue = Arc::clone(&queue);
+                    let stats = Arc::clone(&stats);
+                    let barrier = Arc::clone(&barrier);
+                    let file = file.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        flush_rrdcached_path(&file, &queue, &stats)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let results = workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>();
+            let samples = samples.iter().map(String::as_str).collect::<Vec<_>>();
+            update_rrdcached_file(&reference, &samples).unwrap();
+            assert!(
+                results.iter().all(Result::is_ok),
+                "attempt {attempt}: concurrent FLUSH returned errors: {results:?}"
+            );
+            assert_eq!(
+                rondi::dump_rrd_file(&file).unwrap(),
+                rondi::dump_rrd_file(&reference).unwrap(),
+                "attempt {attempt}: concurrent flush produced a different RRD"
+            );
+            assert_eq!(stats.updates_written.load(Ordering::Relaxed), 100);
+        }
     }
 }
