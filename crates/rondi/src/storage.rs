@@ -588,6 +588,42 @@ mod tests {
     }
 
     #[test]
+    fn closing_interval_beyond_heartbeat_makes_the_whole_pdp_unknown() {
+        // RRDtool 1.11.0 fetches 1000000010 as nan for these updates.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .create(
+                "cpu",
+                DatabaseConfig {
+                    step: 10,
+                    heartbeat: 5,
+                    rows: 5,
+                    start: 1_000_000_000,
+                },
+            )
+            .unwrap();
+        for (timestamp, value) in [
+            (1_000_000_003, 4.0),
+            (1_000_000_006, 4.0),
+            (1_000_000_012, 8.0),
+        ] {
+            store
+                .update(
+                    "cpu",
+                    Update {
+                        timestamp,
+                        value: Some(value),
+                    },
+                )
+                .unwrap();
+        }
+        let points = store.fetch("cpu").unwrap().points;
+        assert_eq!(points[0].timestamp, 1_000_000_010);
+        assert_eq!(points[0].value, None);
+    }
+
+    #[test]
     fn reopen_and_out_of_order_validation() {
         let dir = tempfile::tempdir().unwrap();
         {
