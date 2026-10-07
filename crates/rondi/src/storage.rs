@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -51,11 +52,14 @@ struct JournalRecord {
     update: Update,
 }
 
-/// A process-exclusive store. The OS releases its advisory lock on exit, so a
-/// daemon crash does not leave stale ownership behind.
+/// A process-exclusive store. Mutations through one `Store` instance are
+/// serialized so read-modify-write and journal idempotency remain atomic for
+/// callers that share it across threads. The OS releases its advisory lock on
+/// exit, so a daemon crash does not leave stale ownership behind.
 pub struct Store {
     root: PathBuf,
     _lock: File,
+    mutations: Mutex<()>,
 }
 
 impl Store {
@@ -81,10 +85,15 @@ impl Store {
                 StoreError::Io(e)
             }
         })?;
-        Ok(Self { root, _lock: lock })
+        Ok(Self {
+            root,
+            _lock: lock,
+            mutations: Mutex::new(()),
+        })
     }
 
     pub fn create(&self, name: &str, config: DatabaseConfig) -> Result<(), StoreError> {
+        let _mutation = self.mutation_guard()?;
         validate_name(name)?;
         if config.step == 0 || config.heartbeat == 0 || config.rows == 0 {
             return Err(StoreError::InvalidConfig(
@@ -115,6 +124,11 @@ impl Store {
     }
 
     pub fn update(&self, name: &str, update: Update) -> Result<(), StoreError> {
+        let _mutation = self.mutation_guard()?;
+        self.update_unlocked(name, update)
+    }
+
+    fn update_unlocked(&self, name: &str, update: Update) -> Result<(), StoreError> {
         let mut db = self.read_db(name)?;
         apply_gauge_update(&mut db, &update)?;
         self.write_db(&self.path(name), &db)
@@ -125,6 +139,7 @@ impl Store {
     /// boundary. Recovery can replay a journal record after a crash between
     /// these writes.
     pub fn update_durable(&self, name: &str, update: Update, id: &str) -> Result<(), StoreError> {
+        let _mutation = self.mutation_guard()?;
         validate_name(name)?;
         if id.is_empty() || id.len() > 128 {
             return Err(StoreError::InvalidConfig(
@@ -167,6 +182,7 @@ impl Store {
     }
 
     pub fn recover(&self) -> Result<usize, StoreError> {
+        let _mutation = self.mutation_guard()?;
         let path = self.root.join("rondi.journal");
         if !path.exists() {
             return Ok(0);
@@ -184,7 +200,7 @@ impl Store {
             if record.update.timestamp <= db.last_update {
                 continue;
             }
-            self.update(&record.database, record.update)?;
+            self.update_unlocked(&record.database, record.update)?;
             replayed += 1;
         }
         Ok(replayed)
@@ -249,6 +265,7 @@ impl Store {
         timestamp: i64,
         value: Option<f64>,
     ) -> Result<(), StoreError> {
+        let _mutation = self.mutation_guard()?;
         validate_name(name)?;
         update_rrd_file(self.root.join(format!("{name}.rrd")), timestamp, value)
     }
@@ -261,6 +278,7 @@ impl Store {
     /// Import a Rondi snapshot as a new database under the configured root.
     /// This does not read or convert an RRDtool `.rrd` file.
     pub fn import_snapshot(&self, name: &str, snapshot: &[u8]) -> Result<(), StoreError> {
+        let _mutation = self.mutation_guard()?;
         validate_name(name)?;
         let path = self.path(name);
         let db = decode_snapshot(snapshot)?;
@@ -269,6 +287,12 @@ impl Store {
 
     fn path(&self, name: &str) -> PathBuf {
         self.root.join(format!("{name}.rondi"))
+    }
+
+    fn mutation_guard(&self) -> Result<MutexGuard<'_, ()>, StoreError> {
+        self.mutations
+            .lock()
+            .map_err(|_| StoreError::InvalidConfig("store mutation lock is poisoned".into()))
     }
 
     fn read_db(&self, name: &str) -> Result<DatabaseFile, StoreError> {
@@ -395,6 +419,37 @@ mod tests {
             [4.0, 8.0, 16.0]
         );
         assert_eq!(points[0].timestamp, 1_700_000_020);
+    }
+
+    #[test]
+    fn concurrent_retries_with_one_request_id_append_one_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = std::sync::Arc::new(Store::open(dir.path()).unwrap());
+        store.create("cpu", config()).unwrap();
+        let update = Update {
+            timestamp: 1_700_000_010,
+            value: Some(3.5),
+        };
+        let start = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let workers = (0..2)
+            .map(|_| {
+                let store = std::sync::Arc::clone(&store);
+                let start = std::sync::Arc::clone(&start);
+                let update = update.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    store.update_durable("cpu", update, "retry-1")
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+
+        let journal = fs::read_to_string(dir.path().join("rondi.journal")).unwrap();
+        assert_eq!(journal.lines().count(), 1);
+        assert_eq!(store.fetch("cpu").unwrap().points[0].value, Some(3.5));
     }
 
     #[test]
