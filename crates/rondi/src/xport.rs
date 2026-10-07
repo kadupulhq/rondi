@@ -41,9 +41,9 @@ pub struct RrdXportResult {
     pub step: u64,
     pub legends: Vec<String>,
     pub rows: Vec<Vec<Option<f64>>>,
-    /// Row-wise values before non-finite numbers are converted to unknowns for
-    /// XPORT output. Graph VDEF calculations need to distinguish infinities
-    /// from unknown data even though both serialize as null/unknown.
+    /// Row-wise values for every DEF and CDEF, including ones that are not
+    /// exported. `rows` keeps infinities because XML prints them while JSON
+    /// writes null; only NaN becomes `None`.
     pub raw_variables: HashMap<String, Vec<f64>>,
 }
 
@@ -253,7 +253,7 @@ pub fn fetch_xport_with_cdefs(
                 ))
             })?;
             let value = values[row_index];
-            output_row.push(if value.is_finite() { Some(value) } else { None });
+            output_row.push(if value.is_nan() { None } else { Some(value) });
         }
     }
     Ok(RrdXportResult {

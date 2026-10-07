@@ -4134,10 +4134,10 @@ fn format_xport_xml(
                 "v".to_owned()
             };
             match value {
-                Some(value) if value.is_finite() => {
+                Some(value) => {
                     write!(output, "<{tag}>{}</{tag}>", format_xport_value(*value)).unwrap();
                 }
-                _ => write!(output, "<{tag}>NaN</{tag}>").unwrap(),
+                None => write!(output, "<{tag}>NaN</{tag}>").unwrap(),
             }
         }
         output.push_str("</row>\n");

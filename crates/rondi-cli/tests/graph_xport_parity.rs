@@ -112,3 +112,17 @@ fn xport_prints_negative_zero_without_a_sign() {
         assert_same_stdout(&fixture, &xport_args(&fixture, extra, &elements));
     }
 }
+
+#[test]
+fn xport_xml_prints_infinities_and_json_prints_null() {
+    let Some(fixture) = fixture() else { return };
+    let elements = strings(&[
+        "CDEF:p=x,INF,+",
+        "CDEF:n=x,NEGINF,+",
+        "XPORT:p:p",
+        "XPORT:n:n",
+    ]);
+    for extra in [&[][..], &["--json"], &["--enumds"]] {
+        assert_same_stdout(&fixture, &xport_args(&fixture, extra, &elements));
+    }
+}
