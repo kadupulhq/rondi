@@ -2035,6 +2035,9 @@ fn parse_graph_print(definition: &str) -> Result<GraphPrint, Box<dyn std::error:
     let formatter = match suffix.unwrap_or_default() {
         "" => GraphPrintFormatter::Numeric,
         "strftime" => GraphPrintFormatter::Strftime,
+        // RRDtool 1.11.0 does not implement this suffix; it validates the
+        // format as a numeric printf format, so retain that observed behavior.
+        "valstrftime" => GraphPrintFormatter::Numeric,
         other => return Err(format!("unsupported graph print formatter: {other}").into()),
     };
     let kind = match directive {
