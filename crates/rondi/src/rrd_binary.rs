@@ -115,9 +115,9 @@ pub fn create_rrd_file(
         }
         let minimum = parse_rrd_bound(fields[4])?;
         let maximum = parse_rrd_bound(fields[5])?;
-        if minimum.zip(maximum).is_some_and(|(min, max)| min > max) {
+        if minimum.zip(maximum).is_some_and(|(min, max)| min >= max) {
             return Err(StoreError::RrdUnsupported(format!(
-                "minimum exceeds maximum for data source {}",
+                "minimum must be less than maximum for data source {}",
                 fields[1]
             )));
         }
@@ -345,19 +345,36 @@ pub fn parse_rrd_scaled_duration(text: &str, divisor: u64) -> Result<u64, StoreE
     Ok(value / divisor)
 }
 
+/// rrd_create.c parseGENERIC_DS reads bounds with rrd_strtodbl. A NaN bound
+/// is unbounded like `U`, but its bits are stored as parsed.
 fn parse_rrd_bound(text: &str) -> Result<Option<f64>, StoreError> {
     if text == "U" {
         return Ok(None);
     }
-    let value = text
-        .parse::<f64>()
-        .map_err(|_| StoreError::RrdUnsupported(format!("invalid DS bound: {text}")))?;
-    if !value.is_finite() {
-        return Err(StoreError::RrdUnsupported(format!(
-            "invalid DS bound: {text}"
-        )));
+    crate::parse_rrd_number(text)
+        .or_else(|| parse_rrd_special(text))
+        .map(Some)
+        .ok_or_else(|| StoreError::RrdUnsupported(format!("invalid DS bound: {text}")))
+}
+
+/// rrd_strtod.c parse_special: case-insensitive prefixes, with the sign of
+/// the NaN inverted as upstream does.
+fn parse_rrd_special(text: &str) -> Option<f64> {
+    let prefix = |special: &str| {
+        text.get(..special.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(special))
+    };
+    if prefix("-nan") {
+        Some(rrd_nan())
+    } else if prefix("nan") {
+        Some(-rrd_nan())
+    } else if prefix("inf") {
+        Some(f64::INFINITY)
+    } else if prefix("-inf") {
+        Some(f64::NEG_INFINITY)
+    } else {
+        None
     }
-    Ok(Some(value))
 }
 
 fn copy_fixed(destination: &mut [u8], value: &str) {
@@ -1948,12 +1965,12 @@ pub fn restore_rrd_file(
         let min_value = if minimum == "U" {
             None
         } else {
-            Some(parse_f64(&minimum)?).filter(|value| value.is_finite())
+            Some(parse_f64(&minimum)?).filter(|value| !value.is_nan())
         };
         let max_value = if maximum == "U" {
             None
         } else {
-            Some(parse_f64(&maximum)?).filter(|value| value.is_finite())
+            Some(parse_f64(&maximum)?).filter(|value| !value.is_nan())
         };
         let minimum = min_value.map_or_else(|| "U".to_owned(), |value| value.to_string());
         let maximum = max_value.map_or_else(|| "U".to_owned(), |value| value.to_string());
@@ -2292,8 +2309,9 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
             ));
         }
         let heartbeat = u64_at(bytes, checked_add(start, 40)?)?;
-        let minimum = known_number(f64_at(bytes, checked_add(start, 48)?)?);
-        let maximum = known_number(f64_at(bytes, checked_add(start, 56)?)?);
+        // NaN means unbounded; infinite bounds are kept as RRDtool prints them.
+        let minimum = Some(f64_at(bytes, checked_add(start, 48)?)?).filter(|v| !v.is_nan());
+        let maximum = Some(f64_at(bytes, checked_add(start, 56)?)?).filter(|v| !v.is_nan());
         data_sources.push(RrdDataSourceInfo {
             name,
             kind,
@@ -2700,10 +2718,6 @@ fn f64_at(bytes: &[u8], offset: usize) -> Result<f64, StoreError> {
     Ok(f64::from_le_bytes(
         bytes[offset..offset + 8].try_into().unwrap(),
     ))
-}
-
-fn known_number(value: f64) -> Option<f64> {
-    value.is_finite().then_some(value)
 }
 
 fn require(bytes: &[u8], offset: usize, length: usize) -> Result<(), StoreError> {

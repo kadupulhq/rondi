@@ -1178,3 +1178,96 @@ fn verbose_update_parses_numbers_like_plain_update() {
         std::fs::read(&verbose).unwrap()
     );
 }
+
+#[test]
+fn infinite_ds_bounds_survive_inspect_dump_and_restore() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("bounds.rrd");
+    create_single_source(
+        &path,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:20:-inf:inf",
+        "RRA:LAST:0:1:5",
+    );
+    let info = rondi::inspect_rrd_file(&path).unwrap();
+    assert_eq!(info.data_sources[0].minimum, Some(f64::NEG_INFINITY));
+    assert_eq!(info.data_sources[0].maximum, Some(f64::INFINITY));
+    let xml = rondi::dump_rrd_file(&path).unwrap();
+    assert!(xml.contains("<min>-inf</min>"), "{xml}");
+    assert!(xml.contains("<max>inf</max>"), "{xml}");
+    let restored = temp.path().join("restored.rrd");
+    rondi::restore_rrd_file(&xml, &restored, false, false).unwrap();
+    let info = rondi::inspect_rrd_file(&restored).unwrap();
+    assert_eq!(info.data_sources[0].minimum, Some(f64::NEG_INFINITY));
+    assert_eq!(info.data_sources[0].maximum, Some(f64::INFINITY));
+}
+
+#[test]
+fn create_parses_ds_bounds_like_rrdtool() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        eprintln!("skipping DS bound differential: pinned RRDtool 1.11.0 is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    for bounds in [
+        "U:U",
+        "nan:-nan",
+        "NaN:INF",
+        "-inf:inf",
+        "infinity:U",
+        "U:1e400",
+        "-1e400:0",
+        "5:5",
+        "6:5",
+        "1x:U",
+        "+inf:U",
+    ] {
+        let definition = format!("DS:x:GAUGE:20:{bounds}");
+        let ours = temp.path().join("ours.rrd");
+        let oracle = temp.path().join("oracle.rrd");
+        let _ = std::fs::remove_file(&ours);
+        let _ = std::fs::remove_file(&oracle);
+        let created = rondi::create_rrd_file(
+            &ours,
+            1_000_000_000,
+            10,
+            std::slice::from_ref(&definition),
+            &["RRA:LAST:0:1:5".to_owned()],
+            false,
+        );
+        let upstream = Command::new("rrdtool")
+            .args([
+                "create",
+                oracle.to_str().unwrap(),
+                "--start",
+                "1000000000",
+                "--step",
+                "10",
+                &definition,
+                "RRA:LAST:0:1:5",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            created.is_ok(),
+            upstream.status.success(),
+            "{bounds}: {created:?} {}",
+            String::from_utf8_lossy(&upstream.stderr)
+        );
+        if created.is_ok() {
+            // The DS definition holds the bounds; cur_row is random upstream.
+            assert_eq!(
+                std::fs::read(&ours).unwrap()[128..248],
+                std::fs::read(&oracle).unwrap()[128..248],
+                "{bounds}"
+            );
+        }
+    }
+}
