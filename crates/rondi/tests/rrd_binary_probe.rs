@@ -1043,3 +1043,116 @@ fn in_place_update_advances_each_basic_base_step_archive() {
         );
     }
 }
+
+fn create_single_source(path: &std::path::Path, start: i64, step: u64, ds: &str, rra: &str) {
+    rondi::create_rrd_file(
+        path,
+        start,
+        step,
+        &[ds.to_owned()],
+        &[rra.to_owned()],
+        false,
+    )
+    .unwrap();
+}
+
+fn fetched_value(path: &std::path::Path, cf: &str, timestamp: i64, step: u64) -> Option<f64> {
+    let fetched =
+        rondi::fetch_rrd_file(path, cf, timestamp - step as i64, timestamp - 1, step).unwrap();
+    fetched
+        .rows
+        .iter()
+        .find(|row| row.timestamp == timestamp)
+        .unwrap()
+        .values[0]
+}
+
+// Expected values in the tests below come from RRDtool 1.11.0 `update` and
+// `dump` on the same inputs.
+#[test]
+fn split_open_pdp_is_unknown_when_more_than_half_unknown() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("split.rrd");
+    create_single_source(
+        &path,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:30:U:U",
+        "RRA:AVERAGE:0.5:1:10",
+    );
+    rondi::update_rrd_file(&path, 1_000_000_006, None).unwrap();
+    rondi::update_rrd_file(&path, 1_000_000_008, Some(5.0)).unwrap();
+    rondi::update_rrd_file(&path, 1_000_000_035, Some(7.0)).unwrap();
+    assert_eq!(fetched_value(&path, "AVERAGE", 1_000_000_010, 10), None);
+    assert_eq!(
+        fetched_value(&path, "AVERAGE", 1_000_000_020, 10),
+        Some(7.0)
+    );
+}
+
+#[test]
+fn split_open_pdp_truncates_fractional_seconds_like_rrdtool() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("fraction.rrd");
+    create_single_source(
+        &path,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:100:U:U",
+        "RRA:AVERAGE:0.5:1:10",
+    );
+    rondi::update_rrd_file_precise(&path, 1_000_000_005, 500_000, Some(10.0)).unwrap();
+    rondi::update_rrd_file(&path, 1_000_000_025, Some(20.0)).unwrap();
+    assert_eq!(
+        fetched_value(&path, "AVERAGE", 1_000_000_010, 10),
+        Some(13.5)
+    );
+    assert_eq!(
+        fetched_value(&path, "AVERAGE", 1_000_000_020, 10),
+        Some(21.0)
+    );
+}
+
+#[test]
+fn last_archive_carries_the_pdp_into_the_next_cdp() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("last.rrd");
+    create_single_source(
+        &path,
+        1_000_000_440,
+        10,
+        "DS:x:GAUGE:100:U:U",
+        "RRA:LAST:0.9:5:2",
+    );
+    rondi::update_rrd_file(&path, 1_000_000_470, Some(1057.0)).unwrap();
+    let info = rondi::inspect_rrd_file(&path).unwrap();
+    assert_eq!(info.archives[0].cdp_prep[0].value, 1057.0);
+}
+
+#[test]
+fn verbose_update_reports_rrdtool_row_times() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("verbose.rrd");
+    create_single_source(
+        &path,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:100:U:U",
+        "RRA:AVERAGE:0.5:1:10",
+    );
+    rondi::update_rrd_raw_values_verbose(&path, 1_000_000_005, &[Some("1")]).unwrap();
+    let rows = rondi::update_rrd_raw_values_verbose(&path, 1_000_000_045, &[Some("2")]).unwrap();
+    // write_to_rras derives each row time from a step count it decrements
+    // while writing, so RRDtool reports 40 and 50 rather than 30 and 40.
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.timestamp, row.values[0]))
+            .collect::<Vec<_>>(),
+        [
+            (1_000_000_010, 1.5),
+            (1_000_000_020, 2.0),
+            (1_000_000_040, 2.0),
+            (1_000_000_050, 2.0)
+        ]
+    );
+}

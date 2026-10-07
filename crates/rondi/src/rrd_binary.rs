@@ -34,6 +34,21 @@ pub(crate) fn rrd_nan() -> f64 {
     }
 }
 
+/// Evaluate `a * b + c` the way the pinned RRDtool builds do. GCC and Clang
+/// contract this pattern into a fused multiply-add on aarch64, which always
+/// has the instruction, while baseline x86_64 builds round the product first.
+#[inline]
+fn rrd_mul_add(a: f64, b: f64, c: f64) -> f64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        a.mul_add(b, c)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        a * b + c
+    }
+}
+
 /// Create an interoperable RRDtool file for the basic DS/RRA grammar.
 /// The archive row pointer is initialized deterministically; RRDtool itself may
 /// choose any row because every row in a newly created archive is unknown.
@@ -637,148 +652,24 @@ fn update_path_values_with_raw(
         .checked_sub(previous_boundary)
         .ok_or_else(|| rrd_error("RRD elapsed steps overflow"))?
         / step;
-    let stat_len = STAT_HEAD_LEN;
-    let ds_start = stat_len;
-    let rra_start = ds_start + info.data_sources.len() * DS_DEF_LEN;
+    let ds_count = info.data_sources.len();
+    let rra_start = STAT_HEAD_LEN + ds_count * DS_DEF_LEN;
     let live_start = rra_start + info.archives.len() * RRA_DEF_LEN;
     let pdp_start = live_start + LIVE_HEAD_LEN;
-    let cdp_start = pdp_start + info.data_sources.len() * PDP_PREP_LEN;
-    let pointer_start = cdp_start + info.data_sources.len() * info.archives.len() * CDP_PREP_LEN;
-    let mut prep = Vec::with_capacity(values.len());
-    let mut completed_pdp = Vec::with_capacity(values.len());
-    let mut first_completed_pdp = Vec::with_capacity(values.len());
-    let mut fill_completed_pdp = Vec::with_capacity(values.len());
-    let mut last_ds_bytes = Vec::with_capacity(values.len());
-    let open_pdp_seconds =
-        (last_update - previous_boundary).max(0) as f64 + last_update_usec as f64 / 1_000_000.0;
+    let cdp_start = pdp_start + ds_count * PDP_PREP_LEN;
+    let pointer_start = cdp_start + ds_count * info.archives.len() * CDP_PREP_LEN;
+
+    // The steps below follow rrd_update.c process_arg so that every archive
+    // value is produced by the same sequence of floating-point operations.
+    let mut pdp_new = Vec::with_capacity(ds_count);
+    let mut last_ds_bytes = Vec::with_capacity(ds_count);
     for (index, (source, value)) in info.data_sources.iter().zip(values).enumerate() {
-        let prep_offset = pdp_start + index * PDP_PREP_LEN;
-        let old_unknown = u64_at_file(&mut file, prep_offset + 32)?;
-        let old_pdp_value = f64_at_file(&mut file, prep_offset + 40)?;
-        let old_last_ds = fixed_string_file(&mut file, prep_offset, 30)?;
-        let heartbeat = source.heartbeat as f64;
-        let rate = value.and_then(|sample| match source.kind.as_str() {
-            "GAUGE" => Some(sample),
-            "ABSOLUTE" => Some(sample / interval),
-            "COUNTER" | "DERIVE" if old_last_ds != "U" => {
-                let mut delta = if let Some(current) = raw_values.and_then(|raw| raw[index]) {
-                    exact_integer_delta(current, &old_last_ds)?
-                } else {
-                    sample - old_last_ds.parse::<f64>().ok()?
-                };
-                if source.kind == "COUNTER" && delta < 0.0 {
-                    delta += 4_294_967_295.0;
-                    if delta < 0.0 {
-                        delta += 18_446_744_069_414_584_320.0;
-                    }
-                }
-                Some(delta / interval)
-            }
-            "COUNTER" | "DERIVE" => None,
-            "DCOUNTER" | "DDERIVE" if old_last_ds != "U" => {
-                let previous = crate::parse_rrd_number(&old_last_ds)?;
-                if source.kind == "DCOUNTER"
-                    && ((sample > 0.0 && previous > sample) || (sample < 0.0 && sample > previous))
-                {
-                    None
-                } else {
-                    Some((sample - previous) / interval)
-                }
-            }
-            "DCOUNTER" | "DDERIVE" => None,
-            _ => unreachable!("data source types were checked above"),
-        });
-        let integral = rate
-            .filter(|rate| {
-                interval <= heartbeat
-                    && source.minimum.is_none_or(|minimum| *rate >= minimum)
-                    && source.maximum.is_none_or(|maximum| *rate <= maximum)
-            })
-            .map(|rate| rate * interval)
-            // A NaN contribution is accounted as unknown time, as in
-            // RRDtool's isnan(pdp_new) checks.
-            .filter(|integral| !integral.is_nan());
-        let (next_unknown, next_pdp_value, pdp) = if elapsed_steps == 0 {
-            let next_value = if let Some(integral) = integral {
-                if old_pdp_value.is_nan() {
-                    integral
-                } else {
-                    old_pdp_value + integral
-                }
-            } else {
-                old_pdp_value
-            };
-            let unknown = if integral.is_some() {
-                old_unknown
-            } else {
-                old_unknown.saturating_add(interval.floor() as u64)
-            };
-            (unknown, next_value, None)
-        } else {
-            let post_interval =
-                (timestamp - current_boundary) as f64 + timestamp_usec as f64 / 1_000_000.0;
-            // When the previous update is on a PDP boundary and this update
-            // crosses multiple boundaries, all elapsed time belongs before
-            // the current boundary. RRDtool's calculate_elapsed_steps uses
-            // the full interval as pre_int in this case.
-            let pre_interval = if open_pdp_seconds == 0.0 {
-                interval - post_interval
-            } else {
-                step as f64 - open_pdp_seconds
-            };
-            let mut accumulated = old_pdp_value;
-            let mut pre_unknown = 0.0;
-            if let Some(integral) = integral {
-                if accumulated.is_nan() {
-                    accumulated = 0.0;
-                }
-                accumulated += integral / interval * pre_interval;
-            } else {
-                pre_unknown = pre_interval;
-            }
-            let pdp = if interval > heartbeat || (info.step as f64 / 2.0) < old_unknown as f64 {
-                rrd_nan()
-            } else {
-                accumulated
-                    / (info.step as f64 * elapsed_steps as f64 - old_unknown as f64 - pre_unknown)
-            };
-            let (unknown, next_value) = if let Some(integral) = integral {
-                (0, integral / interval * post_interval)
-            } else {
-                (post_interval.floor() as u64, rrd_nan())
-            };
-            (unknown, next_value, Some(pdp))
-        };
-        let first_pdp = if elapsed_steps > 1 && open_pdp_seconds > 0.0 {
-            let pre_interval = step as f64 - open_pdp_seconds;
-            let (partial_value, pre_unknown) = if let Some(integral) = integral {
-                let old_value = if old_pdp_value.is_nan() {
-                    0.0
-                } else {
-                    old_pdp_value
-                };
-                (old_value + integral / interval * pre_interval, 0.0)
-            } else {
-                (old_pdp_value, pre_interval)
-            };
-            let denominator = info.step as f64 - old_unknown as f64 - pre_unknown;
-            if denominator <= 0.0 || partial_value.is_nan() {
-                Some(rrd_nan())
-            } else {
-                Some(partial_value / denominator)
-            }
-        } else {
-            pdp
-        };
-        let fill_pdp = if elapsed_steps > 1 {
-            integral.map_or(rrd_nan(), |integral| integral / interval)
-        } else {
-            pdp.unwrap_or(rrd_nan())
-        };
-        prep.push((next_unknown, next_pdp_value));
-        completed_pdp.push(pdp);
-        first_completed_pdp.push(first_pdp.unwrap_or(rrd_nan()));
-        fill_completed_pdp.push(fill_pdp);
+        pdp_new.push(update_pdp_new(
+            source,
+            *value,
+            raw_values.and_then(|raw| raw[index]),
+            interval,
+        ));
         let mut last_ds = value.map_or_else(
             || "U".to_owned(),
             |v| {
@@ -792,414 +683,462 @@ fn update_path_values_with_raw(
         encoded[..last_ds.len()].copy_from_slice(last_ds.as_bytes());
         last_ds_bytes.push(encoded);
     }
-
-    // All format and semantic checks precede the first write. These writes
-    // mirror RRDtool's live/PDP/CDP/pointer and archive-row state locations.
+    let mut pdp_prep = info
+        .data_sources
+        .iter()
+        .map(|source| (source.unknown_seconds, source.pdp_value))
+        .collect::<Vec<_>>();
+    let mut cdp_prep = info
+        .archives
+        .iter()
+        .flat_map(|archive| archive.cdp_prep.iter().cloned())
+        .collect::<Vec<_>>();
+    let mut current_rows = info
+        .archives
+        .iter()
+        .map(|archive| archive.current_row)
+        .collect::<Vec<_>>();
+    let mut row_writes = Vec::new();
     let mut summaries = Vec::new();
-    if elapsed_steps > 0 {
-        for (archive_index, archive) in info.archives.iter().enumerate() {
-            let prior_pdp_index = previous_boundary.div_euclid(step) as u64;
-            let start_offset = archive.pdp_per_row - prior_pdp_index % archive.pdp_per_row;
-            let has_open_pdp = elapsed_steps > 1 && open_pdp_seconds > 0.0;
-            let first_rows_due = u64::from(has_open_pdp && start_offset <= 1);
-            let remaining_elapsed = elapsed_steps as u64 - u64::from(has_open_pdp);
-            let remaining_start = if has_open_pdp {
-                archive.pdp_per_row - (prior_pdp_index + 1) % archive.pdp_per_row
+
+    if elapsed_steps == 0 {
+        for ((unknown, value), amount) in pdp_prep.iter_mut().zip(&pdp_new) {
+            if amount.is_nan() {
+                *unknown = (*unknown as f64 + interval.floor()) as u64;
+            } else if value.is_nan() {
+                *value = *amount;
             } else {
-                start_offset
-            };
-            let rows_due = first_rows_due
-                + if remaining_start <= remaining_elapsed {
-                    (((remaining_elapsed - remaining_start) / archive.pdp_per_row) + 1)
-                        .min(archive.rows)
-                } else {
-                    0
-                };
-            let rows_to_write = rows_due.min(archive.rows);
-            let skipped_rows = rows_due - rows_to_write;
-            let has_open_pdp = elapsed_steps > 1 && open_pdp_seconds > 0.0;
-            if has_open_pdp && archive.pdp_per_row > 1 {
-                let remaining_elapsed = elapsed_steps as u64 - 1;
-                let remaining_start =
-                    archive.pdp_per_row - (prior_pdp_index + 1) % archive.pdp_per_row;
-                let remaining_rows_due = if remaining_start <= remaining_elapsed {
-                    (((remaining_elapsed - remaining_start) / archive.pdp_per_row) + 1)
-                        .min(archive.rows)
-                } else {
-                    0
-                };
-                let first_phase_time = previous_boundary
-                    .checked_add(step)
-                    .ok_or_else(|| rrd_error("RRD update summary time overflows"))?;
-                let phases = [
-                    (
-                        1_u64,
-                        start_offset,
-                        first_rows_due,
-                        first_completed_pdp.clone(),
-                        first_phase_time,
-                    ),
-                    (
-                        remaining_elapsed,
-                        remaining_start,
-                        remaining_rows_due,
-                        fill_completed_pdp.clone(),
-                        current_boundary,
-                    ),
-                ];
-                let archive_step = info
-                    .step
-                    .checked_mul(archive.pdp_per_row)
-                    .ok_or_else(|| rrd_error("RRD archive step overflows"))?;
-                let mut row_times = Vec::with_capacity(rows_due as usize);
-                for (_, _, phase_rows, _, phase_end) in &phases {
-                    if *phase_rows == 0 {
-                        continue;
-                    }
-                    for row_index in 0..*phase_rows {
-                        let distance = phase_rows - row_index - 1;
-                        let row_time = i128::from(*phase_end)
-                            - i128::from(archive_step) * i128::from(distance);
-                        row_times.push(
-                            i64::try_from(row_time)
-                                .map_err(|_| rrd_error("RRD update summary time overflows"))?,
-                        );
-                    }
-                }
-                if row_times.len() != rows_due as usize {
-                    return Err(rrd_error(
-                        "RRD split PDP processing produced an invalid row count",
-                    ));
-                }
-                let mut archive_rows = row_times
-                    .into_iter()
-                    .skip(skipped_rows as usize)
-                    .map(|timestamp| (timestamp, vec![rrd_nan(); info.data_sources.len()]))
-                    .collect::<Vec<_>>();
-
-                for ds_index in 0..info.data_sources.len() {
-                    let cdp_offset = cdp_start
-                        + (archive_index * info.data_sources.len() + ds_index) * CDP_PREP_LEN;
-                    let mut cdp_value = f64_at_file(&mut file, cdp_offset)?;
-                    let mut unknown_count = u64_at_file(&mut file, cdp_offset + 8)?;
-                    let mut primary = f64_at_file(&mut file, cdp_offset + 64)?;
-                    let mut secondary = f64_at_file(&mut file, cdp_offset + 72)?;
-                    let mut phase_base = 0_u64;
-
-                    for (phase_elapsed, phase_start, phase_rows, phase_values, _) in &phases {
-                        let pdp = phase_values[ds_index];
-                        if *phase_rows > 0 {
-                            if pdp.is_nan() {
-                                unknown_count = unknown_count.saturating_add(*phase_start);
-                                secondary = rrd_nan();
-                            } else {
-                                secondary = pdp;
-                            }
-                            primary = if unknown_count as f64
-                                > archive.pdp_per_row as f64 * archive.xff
-                            {
-                                rrd_nan()
-                            } else {
-                                let identity = match archive.consolidation.as_str() {
-                                    "AVERAGE" => 0.0,
-                                    "MIN" => f64::INFINITY,
-                                    "MAX" => f64::NEG_INFINITY,
-                                    "LAST" => rrd_nan(),
-                                    _ => unreachable!("consolidation was checked above"),
-                                };
-                                let carried = if cdp_value.is_nan() {
-                                    identity
-                                } else {
-                                    cdp_value
-                                };
-                                let current = if pdp.is_nan() { identity } else { pdp };
-                                match archive.consolidation.as_str() {
-                                    "AVERAGE" => {
-                                        (carried + current * *phase_start as f64)
-                                            / (archive.pdp_per_row - unknown_count) as f64
-                                    }
-                                    "MIN" => carried.min(current),
-                                    "MAX" => carried.max(current),
-                                    "LAST" => pdp,
-                                    _ => unreachable!("consolidation was checked above"),
-                                }
-                            };
-                            let carry_count = (*phase_elapsed - *phase_start) % archive.pdp_per_row;
-                            cdp_value = if carry_count == 0 || pdp.is_nan() {
-                                match archive.consolidation.as_str() {
-                                    "AVERAGE" => 0.0,
-                                    "MIN" => f64::INFINITY,
-                                    "MAX" => f64::NEG_INFINITY,
-                                    "LAST" => rrd_nan(),
-                                    _ => unreachable!("consolidation was checked above"),
-                                }
-                            } else {
-                                match archive.consolidation.as_str() {
-                                    "AVERAGE" => pdp * carry_count as f64,
-                                    "MIN" | "MAX" => pdp,
-                                    "LAST" => rrd_nan(),
-                                    _ => unreachable!("consolidation was checked above"),
-                                }
-                            };
-                            unknown_count = if pdp.is_nan() { carry_count } else { 0 };
-
-                            for local_row in 0..*phase_rows {
-                                let global_row = phase_base + local_row;
-                                if global_row < skipped_rows {
-                                    continue;
-                                }
-                                let out_index = usize::try_from(global_row - skipped_rows)
-                                    .map_err(|_| rrd_error("RRD row index exceeds host size"))?;
-                                archive_rows[out_index].1[ds_index] =
-                                    if local_row == 0 { primary } else { secondary };
-                            }
-                        } else if pdp.is_nan() {
-                            unknown_count = unknown_count.saturating_add(*phase_elapsed);
-                        } else {
-                            cdp_value = match archive.consolidation.as_str() {
-                                "AVERAGE" => {
-                                    (if cdp_value.is_nan() { 0.0 } else { cdp_value })
-                                        + pdp * *phase_elapsed as f64
-                                }
-                                "MIN" => {
-                                    if cdp_value.is_nan() {
-                                        pdp
-                                    } else {
-                                        cdp_value.min(pdp)
-                                    }
-                                }
-                                "MAX" => {
-                                    if cdp_value.is_nan() {
-                                        pdp
-                                    } else {
-                                        cdp_value.max(pdp)
-                                    }
-                                }
-                                "LAST" => pdp,
-                                _ => unreachable!("consolidation was checked above"),
-                            };
-                        }
-                        phase_base += *phase_rows;
-                    }
-                    file.seek(SeekFrom::Start(cdp_offset as u64))?;
-                    file.write_all(&cdp_value.to_le_bytes())?;
-                    file.write_all(&unknown_count.to_le_bytes())?;
-                    file.seek(SeekFrom::Start((cdp_offset + 64) as u64))?;
-                    file.write_all(&primary.to_le_bytes())?;
-                    file.write_all(&secondary.to_le_bytes())?;
-                }
-
-                for (row_index, (row_time, row_values)) in archive_rows.into_iter().enumerate() {
-                    let current_row =
-                        (archive.current_row + skipped_rows + row_index as u64 + 1) % archive.rows;
-                    let row_offset = archive
-                        .data_offset
-                        .checked_add(
-                            current_row
-                                .checked_mul(info.data_sources.len() as u64 * VALUE_LEN as u64)
-                                .ok_or_else(|| rrd_error("RRD archive row offset overflows"))?,
-                        )
-                        .ok_or_else(|| rrd_error("RRD archive row offset overflows"))?;
-                    file.seek(SeekFrom::Start(row_offset))?;
-                    for value in &row_values {
-                        file.write_all(&value.to_le_bytes())?;
-                    }
-                    summaries.push(RrdUpdateSummary {
-                        timestamp: row_time,
-                        consolidation: archive.consolidation.clone(),
-                        pdp_per_row: archive.pdp_per_row,
-                        values: row_values,
-                    });
-                }
-                if rows_due > 0 {
-                    let current_row = (archive.current_row + rows_due) % archive.rows;
-                    file.seek(SeekFrom::Start(
-                        (pointer_start + archive_index * RRA_PTR_LEN) as u64,
-                    ))?;
-                    file.write_all(&current_row.to_le_bytes())?;
-                }
-                continue;
-            }
-            let mut archive_values = Vec::with_capacity(info.data_sources.len());
-            for (ds_index, completed_value) in completed_pdp.iter().enumerate() {
-                let pdp = completed_value.unwrap_or(rrd_nan());
-                let first_pdp = first_completed_pdp[ds_index];
-                let fill_pdp = fill_completed_pdp[ds_index];
-                let cdp_offset =
-                    cdp_start + (archive_index * info.data_sources.len() + ds_index) * CDP_PREP_LEN;
-                let mut cdp_value = f64_at_file(&mut file, cdp_offset)?;
-                let mut unknown_count = u64_at_file(&mut file, cdp_offset + 8)?;
-                let mut primary = f64_at_file(&mut file, cdp_offset + 64)?;
-                let mut secondary = f64_at_file(&mut file, cdp_offset + 72)?;
-                if archive.pdp_per_row == 1 {
-                    primary = fill_pdp;
-                    if elapsed_steps > 1 && (!has_open_pdp || elapsed_steps - 1 > 1) {
-                        secondary = fill_pdp;
-                    }
-                } else if rows_due > 0 {
-                    if pdp.is_nan() {
-                        unknown_count = unknown_count.saturating_add(start_offset);
-                        secondary = rrd_nan();
-                    } else {
-                        secondary = pdp;
-                    }
-                    primary = if unknown_count as f64 > archive.pdp_per_row as f64 * archive.xff {
-                        rrd_nan()
-                    } else {
-                        let identity = match archive.consolidation.as_str() {
-                            "AVERAGE" => 0.0,
-                            "MIN" => f64::INFINITY,
-                            "MAX" => f64::NEG_INFINITY,
-                            "LAST" => rrd_nan(),
-                            _ => unreachable!("consolidation was checked above"),
-                        };
-                        let carried = if cdp_value.is_nan() {
-                            identity
-                        } else {
-                            cdp_value
-                        };
-                        let current = if pdp.is_nan() { identity } else { pdp };
-                        match archive.consolidation.as_str() {
-                            "AVERAGE" => {
-                                (carried + current * start_offset as f64)
-                                    / (archive.pdp_per_row - unknown_count) as f64
-                            }
-                            "MIN" => carried.min(current),
-                            "MAX" => carried.max(current),
-                            "LAST" => pdp,
-                            _ => unreachable!("consolidation was checked above"),
-                        }
-                    };
-                    let carry_count = (elapsed_steps as u64 - start_offset) % archive.pdp_per_row;
-                    cdp_value = if carry_count == 0 || pdp.is_nan() {
-                        match archive.consolidation.as_str() {
-                            "AVERAGE" => 0.0,
-                            "MIN" => f64::INFINITY,
-                            "MAX" => f64::NEG_INFINITY,
-                            "LAST" => rrd_nan(),
-                            _ => unreachable!("consolidation was checked above"),
-                        }
-                    } else {
-                        match archive.consolidation.as_str() {
-                            "AVERAGE" => pdp * carry_count as f64,
-                            "MIN" | "MAX" => pdp,
-                            "LAST" => rrd_nan(),
-                            _ => unreachable!("consolidation was checked above"),
-                        }
-                    };
-                    unknown_count = if pdp.is_nan() { carry_count } else { 0 };
-                } else if pdp.is_nan() {
-                    unknown_count = unknown_count.saturating_add(elapsed_steps as u64);
-                } else {
-                    cdp_value = match archive.consolidation.as_str() {
-                        "AVERAGE" => {
-                            (if cdp_value.is_nan() { 0.0 } else { cdp_value })
-                                + pdp * elapsed_steps as f64
-                        }
-                        "MIN" => {
-                            if cdp_value.is_nan() {
-                                pdp
-                            } else {
-                                cdp_value.min(pdp)
-                            }
-                        }
-                        "MAX" => {
-                            if cdp_value.is_nan() {
-                                pdp
-                            } else {
-                                cdp_value.max(pdp)
-                            }
-                        }
-                        "LAST" => pdp,
-                        _ => unreachable!("consolidation was checked above"),
-                    };
-                }
-                file.seek(SeekFrom::Start(cdp_offset as u64))?;
-                file.write_all(&cdp_value.to_le_bytes())?;
-                file.write_all(&unknown_count.to_le_bytes())?;
-                file.seek(SeekFrom::Start((cdp_offset + 64) as u64))?;
-                file.write_all(&primary.to_le_bytes())?;
-                file.write_all(&secondary.to_le_bytes())?;
-                archive_values.push(if archive.pdp_per_row == 1 {
-                    first_pdp
-                } else {
-                    primary
-                });
-            }
-            if rows_due > 0 {
-                for row_index in 0..rows_to_write {
-                    let current_row =
-                        (archive.current_row + skipped_rows + row_index + 1) % archive.rows;
-                    let row_offset = archive
-                        .data_offset
-                        .checked_add(
-                            current_row
-                                .checked_mul(info.data_sources.len() as u64 * VALUE_LEN as u64)
-                                .ok_or_else(|| rrd_error("RRD archive row offset overflows"))?,
-                        )
-                        .ok_or_else(|| rrd_error("RRD archive row offset overflows"))?;
-                    file.seek(SeekFrom::Start(row_offset))?;
-                    let mut row_values = Vec::with_capacity(info.data_sources.len());
-                    for (ds_index, primary_value) in archive_values.iter().enumerate() {
-                        let value = if has_open_pdp && archive.pdp_per_row == 1 {
-                            if skipped_rows + row_index < first_rows_due {
-                                first_completed_pdp[ds_index]
-                            } else {
-                                fill_completed_pdp[ds_index]
-                            }
-                        } else if skipped_rows + row_index == 0 {
-                            *primary_value
-                        } else {
-                            f64_at_file(
-                                &mut file,
-                                cdp_start
-                                    + (archive_index * info.data_sources.len() + ds_index)
-                                        * CDP_PREP_LEN
-                                    + 72,
-                            )?
-                        };
-                        file.seek(SeekFrom::Start(
-                            row_offset + ds_index as u64 * VALUE_LEN as u64,
-                        ))?;
-                        file.write_all(&value.to_le_bytes())?;
-                        row_values.push(value);
-                    }
-                    let archive_step = info
-                        .step
-                        .checked_mul(archive.pdp_per_row)
-                        .ok_or_else(|| rrd_error("RRD archive step overflows"))?;
-                    let row_distance = rows_due - row_index - 1;
-                    let row_time = i128::from(current_boundary)
-                        - i128::from(archive_step) * i128::from(row_distance);
-                    summaries.push(RrdUpdateSummary {
-                        timestamp: i64::try_from(row_time)
-                            .map_err(|_| rrd_error("RRD update summary time overflows"))?,
-                        consolidation: archive.consolidation.clone(),
-                        pdp_per_row: archive.pdp_per_row,
-                        values: row_values,
-                    });
-                }
-                let current_row = (archive.current_row + rows_due) % archive.rows;
-                file.seek(SeekFrom::Start(
-                    (pointer_start + archive_index * RRA_PTR_LEN) as u64,
-                ))?;
-                file.write_all(&current_row.to_le_bytes())?;
+                *value += *amount;
             }
         }
+    } else {
+        let mut interval = interval;
+        let mut elapsed = elapsed_steps as u64;
+        let mut proc_pdp_count = previous_boundary.div_euclid(step) as u64;
+        let mut pre_interval =
+            (current_boundary - last_update) as f64 - last_update_usec as f64 / 1_000_000.0;
+        let post_interval =
+            (timestamp - current_boundary) as f64 + timestamp_usec as f64 / 1_000_000.0;
+        if elapsed > 1 {
+            // RRDtool closes the previously open PDP on its own before the
+            // remaining ones. The cast truncates fractional seconds, so a
+            // sub-second last update moves time between the two phases.
+            let open_seconds = (pre_interval as u64) % info.step;
+            if open_seconds > 0 {
+                let open_new = pdp_new
+                    .iter_mut()
+                    .map(|amount| {
+                        if amount.is_nan() || interval <= 0.0 {
+                            rrd_nan()
+                        } else {
+                            let open = *amount * open_seconds as f64 / interval;
+                            *amount -= open;
+                            open
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let pdp_temp = process_pdp_steps(
+                    &info,
+                    &mut pdp_prep,
+                    open_seconds as f64,
+                    open_seconds as f64,
+                    0.0,
+                    1,
+                    &open_new,
+                );
+                let row_counts =
+                    update_cdp_preps(&info, &mut cdp_prep, 1, proc_pdp_count, &pdp_temp);
+                let open_close_time = last_update
+                    .checked_add(open_seconds as i64)
+                    .ok_or_else(|| rrd_error("RRD timestamp alignment overflows"))?;
+                write_rra_rows(
+                    &info,
+                    &cdp_prep,
+                    &mut current_rows,
+                    &row_counts,
+                    open_close_time,
+                    &mut row_writes,
+                    &mut summaries,
+                )?;
+                interval -= open_seconds as f64;
+                pre_interval -= open_seconds as f64;
+                elapsed -= 1;
+                proc_pdp_count += 1;
+            }
+        }
+        let pdp_temp = process_pdp_steps(
+            &info,
+            &mut pdp_prep,
+            interval,
+            pre_interval,
+            post_interval,
+            elapsed,
+            &pdp_new,
+        );
+        let row_counts = update_cdp_preps(&info, &mut cdp_prep, elapsed, proc_pdp_count, &pdp_temp);
+        write_rra_rows(
+            &info,
+            &cdp_prep,
+            &mut current_rows,
+            &row_counts,
+            timestamp,
+            &mut row_writes,
+            &mut summaries,
+        )?;
     }
-    for (index, ((unknown, pdp_value), last_ds)) in prep.iter().zip(&last_ds_bytes).enumerate() {
-        let offset = pdp_start + index * PDP_PREP_LEN;
-        file.seek(SeekFrom::Start(offset as u64))?;
-        file.write_all(last_ds)?;
-        file.seek(SeekFrom::Start((offset + 32) as u64))?;
-        file.write_all(&unknown.to_le_bytes())?;
-        file.write_all(&pdp_value.to_le_bytes())?;
+
+    // All format and semantic checks precede the first write.
+    for (offset, row) in &row_writes {
+        file.seek(SeekFrom::Start(*offset))?;
+        let mut bytes = Vec::with_capacity(row.len() * VALUE_LEN);
+        for value in row {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        file.write_all(&bytes)?;
     }
+    let mut state = vec![0_u8; pointer_start + info.archives.len() * RRA_PTR_LEN - pdp_start];
+    file.seek(SeekFrom::Start(pdp_start as u64))?;
+    file.read_exact(&mut state)?;
+    for (index, ((unknown, value), last_ds)) in pdp_prep.iter().zip(&last_ds_bytes).enumerate() {
+        let offset = index * PDP_PREP_LEN;
+        state[offset..offset + 30].copy_from_slice(last_ds);
+        put_u64(&mut state, offset + 32, *unknown);
+        put_f64(&mut state, offset + 40, *value);
+    }
+    for (index, scratch) in cdp_prep.iter().enumerate() {
+        let offset = cdp_start - pdp_start + index * CDP_PREP_LEN;
+        put_f64(&mut state, offset, scratch.value);
+        put_u64(&mut state, offset + 8, scratch.unknown_datapoints);
+        put_f64(&mut state, offset + 64, scratch.primary_value);
+        put_f64(&mut state, offset + 72, scratch.secondary_value);
+    }
+    for (index, current_row) in current_rows.iter().enumerate() {
+        put_u64(
+            &mut state,
+            pointer_start - pdp_start + index * RRA_PTR_LEN,
+            *current_row,
+        );
+    }
+    file.seek(SeekFrom::Start(pdp_start as u64))?;
+    file.write_all(&state)?;
     file.seek(SeekFrom::Start(live_start as u64))?;
     file.write_all(&timestamp.to_le_bytes())?;
     file.write_all(&(timestamp_usec as i64).to_le_bytes())?;
     file.sync_data()?;
     Ok(summaries)
+}
+
+/// rrd_update.c update_pdp_prep: the rate times seconds contributed by one
+/// sample, or NaN when it is unknown, out of range, or past the heartbeat.
+fn update_pdp_new(
+    source: &RrdDataSourceInfo,
+    value: Option<f64>,
+    raw_value: Option<&str>,
+    interval: f64,
+) -> f64 {
+    let Some(sample) = value else {
+        return rrd_nan();
+    };
+    if (source.heartbeat as f64) < interval {
+        return rrd_nan();
+    }
+    let previous = source.last_value.as_str();
+    let (amount, rate) = match source.kind.as_str() {
+        "GAUGE" => (sample * interval, sample),
+        "ABSOLUTE" => (sample, sample / interval),
+        "COUNTER" | "DERIVE" if previous != "U" => {
+            let delta = if let Some(current) = raw_value {
+                exact_integer_delta(current, previous)
+            } else {
+                previous
+                    .parse::<f64>()
+                    .ok()
+                    .map(|previous| sample - previous)
+            };
+            let Some(mut delta) = delta else {
+                return rrd_nan();
+            };
+            if source.kind == "COUNTER" {
+                if delta < 0.0 {
+                    delta += 4_294_967_295.0;
+                }
+                if delta < 0.0 {
+                    delta += 18_446_744_069_414_584_320.0;
+                }
+            }
+            (delta, delta / interval)
+        }
+        "DCOUNTER" | "DDERIVE" if previous != "U" => {
+            let Ok(previous) = previous.parse::<f64>() else {
+                return rrd_nan();
+            };
+            if source.kind == "DCOUNTER"
+                && ((sample > 0.0 && previous > sample) || (sample < 0.0 && sample > previous))
+            {
+                return rrd_nan();
+            }
+            let delta = sample - previous;
+            (delta, delta / interval)
+        }
+        _ => return rrd_nan(),
+    };
+    if !rate.is_nan()
+        && (source.maximum.is_some_and(|maximum| rate > maximum)
+            || source.minimum.is_some_and(|minimum| rate < minimum))
+    {
+        return rrd_nan();
+    }
+    amount
+}
+
+/// rrd_update.c process_pdp_st for every data source. Returns the rate for
+/// each completed PDP and leaves the PDP prep area ready for the next update.
+fn process_pdp_steps(
+    info: &RrdInfo,
+    pdp_prep: &mut [(u64, f64)],
+    interval: f64,
+    pre_interval: f64,
+    post_interval: f64,
+    elapsed: u64,
+    pdp_new: &[f64],
+) -> Vec<f64> {
+    let elapsed_seconds = elapsed.wrapping_mul(info.step);
+    info.data_sources
+        .iter()
+        .zip(pdp_prep.iter_mut())
+        .zip(pdp_new)
+        .map(|((source, (unknown, value)), &amount)| {
+            let mut pre_unknown = 0.0;
+            if amount.is_nan() {
+                pre_unknown = pre_interval;
+            } else {
+                if value.is_nan() {
+                    *value = 0.0;
+                }
+                *value = rrd_mul_add(amount / interval, pre_interval, *value);
+            }
+            // RRDtool compares the unknown seconds through a signed int cast.
+            let rate = if interval > source.heartbeat as f64
+                || (info.step as f64 / 2.0) < f64::from(*unknown as i32)
+            {
+                rrd_nan()
+            } else {
+                *value / (elapsed_seconds.wrapping_sub(*unknown) as f64 - pre_unknown)
+            };
+            if amount.is_nan() {
+                *unknown = post_interval.floor() as u64;
+                *value = rrd_nan();
+            } else {
+                *unknown = 0;
+                *value = amount / interval * post_interval;
+            }
+            rate
+        })
+        .collect()
+}
+
+/// rrd_update.c update_all_cdp_prep for the basic consolidation functions.
+/// Returns how many rows each archive must write.
+fn update_cdp_preps(
+    info: &RrdInfo,
+    cdp_prep: &mut [RrdCdpPrepInfo],
+    elapsed: u64,
+    proc_pdp_count: u64,
+    pdp_temp: &[f64],
+) -> Vec<u64> {
+    let ds_count = pdp_temp.len();
+    info.archives
+        .iter()
+        .enumerate()
+        .map(|(archive_index, archive)| {
+            let pdp_count = archive.pdp_per_row;
+            let start_offset = pdp_count - proc_pdp_count % pdp_count;
+            let row_count = if start_offset <= elapsed {
+                ((elapsed - start_offset) / pdp_count + 1).min(archive.rows)
+            } else {
+                0
+            };
+            for (ds_index, &rate) in pdp_temp.iter().enumerate() {
+                let scratch = &mut cdp_prep[archive_index * ds_count + ds_index];
+                if pdp_count > 1 {
+                    update_cdp(scratch, archive, rate, row_count, elapsed, start_offset);
+                } else {
+                    // update_aberrant_CF sets the primary value and, when two
+                    // or more PDPs completed, reset_cdp or a second pass sets
+                    // the secondary value too.
+                    scratch.primary_value = rate;
+                    if elapsed > 1 {
+                        scratch.secondary_value = rate;
+                    }
+                }
+            }
+            row_count
+        })
+        .collect()
+}
+
+/// rrd_update.c update_cdp with initialize_cdp_val, initialize_carry_over
+/// and calculate_cdp_val.
+fn update_cdp(
+    scratch: &mut RrdCdpPrepInfo,
+    archive: &RrdArchiveInfo,
+    rate: f64,
+    row_count: u64,
+    elapsed: u64,
+    start_offset: u64,
+) {
+    let pdp_count = archive.pdp_per_row;
+    let consolidation = archive.consolidation.as_str();
+    if row_count > 0 {
+        if rate.is_nan() {
+            scratch.unknown_datapoints = scratch.unknown_datapoints.wrapping_add(start_offset);
+            scratch.secondary_value = rrd_nan();
+        } else {
+            scratch.secondary_value = rate;
+        }
+        if scratch.unknown_datapoints as f64 > pdp_count as f64 * archive.xff {
+            scratch.primary_value = rrd_nan();
+        } else {
+            scratch.primary_value = match consolidation {
+                "AVERAGE" => {
+                    let cumulative = if scratch.value.is_nan() {
+                        0.0
+                    } else {
+                        scratch.value
+                    };
+                    let current = if rate.is_nan() { 0.0 } else { rate };
+                    rrd_mul_add(current, start_offset as f64, cumulative)
+                        / pdp_count.wrapping_sub(scratch.unknown_datapoints) as f64
+                }
+                "MAX" => {
+                    let cumulative = if scratch.value.is_nan() {
+                        f64::NEG_INFINITY
+                    } else {
+                        scratch.value
+                    };
+                    let current = if rate.is_nan() {
+                        f64::NEG_INFINITY
+                    } else {
+                        rate
+                    };
+                    if current > cumulative {
+                        current
+                    } else {
+                        cumulative
+                    }
+                }
+                "MIN" => {
+                    let cumulative = if scratch.value.is_nan() {
+                        f64::INFINITY
+                    } else {
+                        scratch.value
+                    };
+                    let current = if rate.is_nan() { f64::INFINITY } else { rate };
+                    if current < cumulative {
+                        current
+                    } else {
+                        cumulative
+                    }
+                }
+                _ => rate,
+            };
+        }
+        let carried = (elapsed - start_offset) % pdp_count;
+        scratch.value = if carried == 0 || rate.is_nan() {
+            match consolidation {
+                "MAX" => f64::NEG_INFINITY,
+                "MIN" => f64::INFINITY,
+                "AVERAGE" => 0.0,
+                _ => rrd_nan(),
+            }
+        } else if consolidation == "AVERAGE" {
+            rate * carried as f64
+        } else {
+            rate
+        };
+        scratch.unknown_datapoints = if rate.is_nan() { carried } else { 0 };
+    } else if rate.is_nan() {
+        scratch.unknown_datapoints = scratch.unknown_datapoints.wrapping_add(elapsed);
+    } else if scratch.value.is_nan() {
+        scratch.value = if consolidation == "AVERAGE" {
+            rate * elapsed as f64
+        } else {
+            rate
+        };
+    } else {
+        scratch.value = match consolidation {
+            "AVERAGE" => rrd_mul_add(rate, elapsed as f64, scratch.value),
+            "MIN" if rate < scratch.value => rate,
+            "MAX" if rate > scratch.value => rate,
+            "MIN" | "MAX" => scratch.value,
+            _ => rate,
+        };
+    }
+}
+
+/// rrd_update.c write_to_rras: advance each archive pointer and queue the
+/// primary value for the first row and the secondary value for the rest.
+fn write_rra_rows(
+    info: &RrdInfo,
+    cdp_prep: &[RrdCdpPrepInfo],
+    current_rows: &mut [u64],
+    row_counts: &[u64],
+    current_time: i64,
+    row_writes: &mut Vec<(u64, Vec<f64>)>,
+    summaries: &mut Vec<RrdUpdateSummary>,
+) -> Result<(), StoreError> {
+    let ds_count = info.data_sources.len();
+    for (archive_index, archive) in info.archives.iter().enumerate() {
+        let mut remaining = row_counts[archive_index];
+        if remaining == 0 {
+            continue;
+        }
+        let step_time = archive
+            .pdp_per_row
+            .checked_mul(info.step)
+            .ok_or_else(|| rrd_error("RRD archive step overflows"))?;
+        let time = current_time as u64;
+        let base_time = time.wrapping_sub(time % step_time);
+        let mut step_subtract = 1_u64;
+        while remaining > 0 {
+            let current_row = &mut current_rows[archive_index];
+            *current_row += 1;
+            if *current_row >= archive.rows {
+                *current_row = 0;
+            }
+            let row = cdp_prep[archive_index * ds_count..(archive_index + 1) * ds_count]
+                .iter()
+                .map(|scratch| {
+                    if step_subtract == 1 {
+                        scratch.primary_value
+                    } else {
+                        scratch.secondary_value
+                    }
+                })
+                .collect::<Vec<_>>();
+            let offset = current_row
+                .checked_mul(ds_count as u64 * VALUE_LEN as u64)
+                .and_then(|offset| archive.data_offset.checked_add(offset))
+                .ok_or_else(|| rrd_error("RRD archive row offset overflows"))?;
+            // RRDtool derives the reported time from the count it is
+            // decrementing, so rows after the second report later times.
+            let row_time = base_time.wrapping_sub(
+                remaining
+                    .wrapping_sub(step_subtract)
+                    .wrapping_mul(step_time),
+            );
+            summaries.push(RrdUpdateSummary {
+                timestamp: row_time as i64,
+                consolidation: archive.consolidation.clone(),
+                pdp_per_row: archive.pdp_per_row,
+                values: row.clone(),
+            });
+            row_writes.push((offset, row));
+            remaining -= 1;
+            step_subtract = 2;
+        }
+    }
+    Ok(())
 }
 
 fn valid_integer_sample(value: &str, unsigned: bool) -> bool {
@@ -1675,27 +1614,6 @@ fn copy_exact(input: &mut File, output: &mut File, mut byte_count: u64) -> Resul
         byte_count -= count as u64;
     }
     Ok(())
-}
-
-fn u64_at_file(file: &mut File, offset: usize) -> Result<u64, StoreError> {
-    file.seek(SeekFrom::Start(offset as u64))?;
-    let mut bytes = [0; 8];
-    file.read_exact(&mut bytes)?;
-    Ok(u64::from_le_bytes(bytes))
-}
-
-fn fixed_string_file(file: &mut File, offset: usize, len: usize) -> Result<String, StoreError> {
-    file.seek(SeekFrom::Start(offset as u64))?;
-    let mut bytes = vec![0; len];
-    file.read_exact(&mut bytes)?;
-    fixed_string(&bytes, 0, len)
-}
-
-fn f64_at_file(file: &mut File, offset: usize) -> Result<f64, StoreError> {
-    file.seek(SeekFrom::Start(offset as u64))?;
-    let mut bytes = [0; 8];
-    file.read_exact(&mut bytes)?;
-    Ok(f64::from_le_bytes(bytes))
 }
 
 /// Fetch data from an existing RRDtool file by path. The file is opened
