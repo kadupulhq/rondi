@@ -7,7 +7,9 @@ RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         autoconf automake build-essential ca-certificates curl groff-base \
         libfreetype6-dev libglib2.0-dev libpango1.0-dev libpng-dev libtool \
-        libxml2-dev pkg-config \
+        libxml2-dev locales pkg-config \
+    && sed -i 's/^# de_DE.UTF-8 UTF-8/de_DE.UTF-8 UTF-8/' /etc/locale.gen \
+    && locale-gen \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl --fail --location --silent --show-error \
