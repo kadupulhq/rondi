@@ -1948,13 +1948,23 @@ fn rrdcached_fetch(root: &Path, fields: &[&str]) -> Result<String, String> {
     for row in result.rows {
         body.push_str(&format!("{:10}:", row.timestamp));
         for index in &selected {
-            let value = row.values[*index]
-                .map_or_else(|| "nan".to_owned(), |value| format!("{value:.17e}"));
+            let value = row.values[*index].map_or_else(|| "nan".to_owned(), format_c_exponent17);
             body.push_str(&format!(" {value}"));
         }
         body.push('\n');
     }
     Ok(body)
+}
+
+/// C `%0.17e`: Rust omits the exponent sign and padding that clients parse.
+fn format_c_exponent17(value: f64) -> String {
+    if !value.is_finite() {
+        return value.to_string();
+    }
+    let text = format!("{value:.17e}");
+    let (mantissa, exponent) = text.split_once('e').expect("scientific notation has e");
+    let exponent = exponent.parse::<i32>().expect("valid scientific exponent");
+    format!("{mantissa}e{exponent:+03}")
 }
 
 fn rrdcached_fetch_data(

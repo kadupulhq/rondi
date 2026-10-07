@@ -2121,6 +2121,21 @@ fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
                 .any(|window| window == b"DSName-temp: BinaryData")
         );
         assert_eq!(rondi_multi_fetchbin, upstream_multi_fetchbin);
+        // Only the known `load` column is compared because the printed sign
+        // of an unknown value depends on the C library.
+        let fetch_text = "FETCH multi-fetchbin.rrd AVERAGE 1000000000 1000000019 load\n";
+        let upstream_fetch_text = {
+            let mut upstream_reader = BufReader::new(&mut upstream_stream);
+            rrdcached_full_request(&mut upstream_reader, fetch_text)
+        };
+        assert!(
+            upstream_fetch_text.contains(" 5.00000000000000000e+00\n"),
+            "{upstream_fetch_text}"
+        );
+        assert_eq!(
+            rrdcached_full_request(&mut reader, fetch_text),
+            upstream_fetch_text
+        );
         let upstream_forget_multi = {
             let mut upstream_reader = BufReader::new(&mut upstream_stream);
             rrdcached_request(&mut upstream_reader, "FORGET multi-fetchbin.rrd\n")
