@@ -23,7 +23,7 @@ const MAX_HEADER_LEN: usize = 64 * 1024 * 1024;
 /// build uses a negative quiet NaN, while aarch64 and the other supported
 /// targets use the positive quiet NaN representation.
 #[inline]
-fn rrd_nan() -> f64 {
+pub(crate) fn rrd_nan() -> f64 {
     #[cfg(target_arch = "x86_64")]
     {
         f64::from_bits(0xfff8_0000_0000_0000)
@@ -572,7 +572,9 @@ fn update_path_values_with_raw(
     if timestamp_usec >= 1_000_000 {
         return Err(StoreError::InvalidValue);
     }
-    if values.iter().flatten().any(|value| !value.is_finite()) {
+    // RRDtool's text update path accepts nan and inf spellings; callers that
+    // pass numbers directly keep the stricter finite-only contract.
+    if raw_values.is_none() && values.iter().flatten().any(|value| !value.is_finite()) {
         return Err(StoreError::InvalidValue);
     }
     if raw_values.is_some_and(|raw| raw.len() != values.len()) {
@@ -677,7 +679,7 @@ fn update_path_values_with_raw(
             }
             "COUNTER" | "DERIVE" => None,
             "DCOUNTER" | "DDERIVE" if old_last_ds != "U" => {
-                let previous = old_last_ds.parse::<f64>().ok()?;
+                let previous = crate::parse_rrd_number(&old_last_ds)?;
                 if source.kind == "DCOUNTER"
                     && ((sample > 0.0 && previous > sample) || (sample < 0.0 && sample > previous))
                 {
@@ -695,7 +697,10 @@ fn update_path_values_with_raw(
                     && source.minimum.is_none_or(|minimum| *rate >= minimum)
                     && source.maximum.is_none_or(|maximum| *rate <= maximum)
             })
-            .map(|rate| rate * interval);
+            .map(|rate| rate * interval)
+            // A NaN contribution is accounted as unknown time, as in
+            // RRDtool's isnan(pdp_new) checks.
+            .filter(|integral| !integral.is_nan());
         let (next_unknown, next_pdp_value, pdp) = if elapsed_steps == 0 {
             let next_value = if let Some(integral) = integral {
                 if old_pdp_value.is_nan() {
@@ -1284,11 +1289,7 @@ pub fn update_rrd_raw_values_precise(
         .iter()
         .map(|value| {
             value
-                .map(|value| {
-                    crate::parse_rrd_number(value)
-                        .filter(|number| number.is_finite())
-                        .ok_or(StoreError::InvalidValue)
-                })
+                .map(|value| crate::parse_rrd_number(value).ok_or(StoreError::InvalidValue))
                 .transpose()
         })
         .collect::<Result<Vec<_>, _>>()?;

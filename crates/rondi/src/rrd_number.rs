@@ -1,9 +1,36 @@
 //! Numeric conversion used by RRDtool's update path.
 
 /// Parse a decimal using the conversion algorithm in RRDtool 1.11's
-/// `rrd_strtod`. The order of the floating-point operations is observable in
+/// `rrd_strtodbl`. The order of the floating-point operations is observable in
 /// epoch-sized values with fractional seconds.
 pub fn parse_rrd_number(input: &str) -> Option<f64> {
+    // rrd_strtodbl only consults the special spellings when rrd_strtod made
+    // no conversion, which also covers an out-of-range exponent.
+    parse_rrd_decimal(input).or_else(|| parse_special(input))
+}
+
+fn parse_special(input: &str) -> Option<f64> {
+    let starts_with = |prefix: &str| {
+        input
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    };
+    // RRDtool assigns the opposite NaN sign to each spelling and matches
+    // prefixes only, so trailing text such as "infinity" is accepted.
+    if starts_with("-nan") {
+        Some(crate::rrd_binary::rrd_nan())
+    } else if starts_with("nan") {
+        Some(-crate::rrd_binary::rrd_nan())
+    } else if starts_with("inf") {
+        Some(f64::INFINITY)
+    } else if starts_with("-inf") {
+        Some(f64::NEG_INFINITY)
+    } else {
+        None
+    }
+}
+
+fn parse_rrd_decimal(input: &str) -> Option<f64> {
     let bytes = input.as_bytes();
     let mut position = 0;
     while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
@@ -72,6 +99,10 @@ pub fn parse_rrd_number(input: &str) -> Option<f64> {
             exponent.checked_add(explicit_exponent)?
         };
     }
+    // DBL_MIN_EXP and DBL_MAX_EXP bound the decimal exponent in rrd_strtod.
+    if !(f64::MIN_EXP..=f64::MAX_EXP).contains(&exponent) {
+        return None;
+    }
     if position != bytes.len() {
         return None;
     }
@@ -123,5 +154,30 @@ mod tests {
         // RRDtool's converter consumes an exponent marker with no digits as
         // an exponent of zero; preserve that parser quirk.
         assert_eq!(parse_rrd_number("1e"), Some(1.0));
+    }
+
+    #[test]
+    fn rejects_exponents_outside_the_double_exponent_range() {
+        assert_eq!(parse_rrd_number("1e1024"), Some(f64::INFINITY));
+        assert_eq!(parse_rrd_number("1e1025"), None);
+        assert_eq!(parse_rrd_number("1e-1021"), Some(0.0));
+        assert_eq!(parse_rrd_number("1e-1022"), None);
+        assert_eq!(parse_rrd_number("1e-1100"), None);
+        assert_eq!(parse_rrd_number("0.1e-1021"), None);
+    }
+
+    #[test]
+    fn accepts_special_spellings_by_prefix() {
+        assert_eq!(parse_rrd_number("inf"), Some(f64::INFINITY));
+        assert_eq!(parse_rrd_number("Infinity"), Some(f64::INFINITY));
+        assert_eq!(parse_rrd_number("-INF"), Some(f64::NEG_INFINITY));
+        assert!(parse_rrd_number("NaN").is_some_and(f64::is_nan));
+        assert!(parse_rrd_number("-nanx").is_some_and(f64::is_nan));
+        assert!(
+            parse_rrd_number("nan").unwrap().is_sign_negative()
+                != parse_rrd_number("-nan").unwrap().is_sign_negative()
+        );
+        assert_eq!(parse_rrd_number("+inf"), None);
+        assert_eq!(parse_rrd_number(" inf"), None);
     }
 }
