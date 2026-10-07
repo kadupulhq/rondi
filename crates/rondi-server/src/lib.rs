@@ -22,6 +22,7 @@ use tokio::task::JoinSet;
 use tokio::time::{Duration, timeout};
 
 pub const DEFAULT_RRDCACHED_QUEUE_BYTES: usize = 64 * 1024 * 1024;
+const RRDCACHED_JOURNAL_NAME: &str = ".rrdcached.journal";
 
 fn open_private_rrdcached_journal(path: &Path) -> Result<File, Box<dyn std::error::Error>> {
     let mut options = OpenOptions::new();
@@ -507,7 +508,7 @@ impl RrdcachedQueue {
         write_timeout_seconds: u64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let replay_time = wall_time_seconds();
-        let journal_path = journal_directory.join(".rrdcached.journal");
+        let journal_path = journal_directory.join(RRDCACHED_JOURNAL_NAME);
         let journal = open_private_rrdcached_journal(&journal_path)?;
         let mut pending = std::collections::BTreeMap::<PathBuf, Vec<PendingRrdUpdate>>::new();
         let mut flushed = std::collections::HashSet::new();
@@ -2486,7 +2487,19 @@ fn rrdcached_create(
             "Access denied: parent resolves outside the configured base directory".to_owned(),
         );
     }
-    let output = canonical_parent.join(output.file_name().ok_or("invalid output filename")?);
+    let filename = output.file_name().ok_or("invalid output filename")?;
+    let output = canonical_parent.join(filename);
+    // Without -j the journal sits beside the RRD files, as do the store lock
+    // and journal. Replacing one would lose acknowledged updates.
+    if filename.to_str().is_some_and(|name| {
+        name == ".rondi.lock"
+            || name == "rondi.journal"
+            || name
+                .strip_prefix(RRDCACHED_JOURNAL_NAME)
+                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('.'))
+    }) {
+        return Err(format!("{}: Permission denied", output.display()));
+    }
     let mut step = 300_u64;
     let mut start = 1_000_000_000_i64;
     let mut no_overwrite = no_overwrite_default;
@@ -3143,5 +3156,33 @@ mod rrdcached_queue_tests {
         }
         let queue = RrdcachedQueue::open(&root, 1024 * 1024, 100_000).unwrap();
         assert_eq!(queue.pending.get(&file).map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn create_cannot_replace_daemon_owned_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let file = root.join("metric.rrd");
+        create_test_rrd(&file);
+        {
+            let mut queue = RrdcachedQueue::open(&root, 1024 * 1024, 100_000).unwrap();
+            queue.enqueue(file.clone(), &["1000000010:1"]).unwrap();
+        }
+        for reserved in [
+            ".rrdcached.journal",
+            ".rrdcached.journal.tmp",
+            ".rondi.lock",
+            "rondi.journal",
+        ] {
+            let created = rrdcached_create(
+                &root,
+                &[reserved, "DS:x:GAUGE:30:U:U", "RRA:AVERAGE:0.5:1:10"],
+                false,
+                false,
+            );
+            assert!(created.is_err(), "CREATE replaced {reserved}");
+        }
+        let queue = RrdcachedQueue::open(&root, 1024 * 1024, 100_000).unwrap();
+        assert_eq!(queue.pending.get(&file).map(Vec::len), Some(1));
     }
 }

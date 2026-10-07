@@ -7,17 +7,17 @@ Type=simple
 User=rondi
 Group=rondi
 UMask=0007
-StateDirectory=rondi
+StateDirectory=rondi rondi-journal
 StateDirectoryMode=2770
 RuntimeDirectory=rondi
 RuntimeDirectoryMode=2770
-ExecStart=/usr/bin/rrdcached -g -b /var/lib/rondi -m 0660 -s rondi -l unix:/run/rondi/rrdcached.sock
+ExecStart=/usr/bin/rrdcached -g -b /var/lib/rondi -j /var/lib/rondi-journal -m 0660 -s rondi -l unix:/run/rondi/rrdcached.sock
 Restart=on-failure
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
-ReadWritePaths=/var/lib/rondi /run/rondi
+ReadWritePaths=/var/lib/rondi /var/lib/rondi-journal /run/rondi
 
 [Install]
 WantedBy=multi-user.target
