@@ -1,0 +1,15 @@
+RRDtool 1.11.0  Copyright by Tobias Oetiker <tobi@oetiker.ch>
+               Compiled 
+
+Usage: rrdtool [options] command command_options
+* dump - dump an RRD to XML
+
+	rrdtool dump [--header|-h {none,xsd,dtd}]
+		[--no-header|-n]
+		[--daemon|-d address]
+		file.rrd [file.xml]
+RRDtool is distributed under the Terms of the GNU General
+Public License Version 2. (www.gnu.org/copyleft/gpl.html)
+
+For more information read the RRD manpages
+

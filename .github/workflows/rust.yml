@@ -1,0 +1,28 @@
+name: Rust
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The compatibility suite shells out to rrdtool. Build its pinned 1.11.0
+      # oracle and run every Rust check in that same environment so differential
+      # tests cannot silently pass by skipping when rrdtool is absent.
+      - name: Build pinned RRDtool oracle and run workspace checks
+        run: docker build --progress=plain -f docker/Dockerfile.test -t rondi-ci .

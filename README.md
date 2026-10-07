@@ -4,66 +4,91 @@
 [![CodeQL](https://github.com/kadupulhq/rondi/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/kadupulhq/rondi/actions/workflows/codeql.yml)
 [![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange.svg)](https://github.com/kadupulhq/rondi/pulls)
 
-Rondi is a Rust implementation project to replace RRDtool/librrd, `rrdcached`, and Cacti RRDProxy for the Kadupul monitoring platform.
+Rondi is the working name for a Rust-native round-robin storage foundation for Kadupul. One Cargo workspace and coordinated release contain the storage library, CLI, and daemon. The goal is to replace RRDtool/librrd implementations over time, not to wrap librrd permanently.
 
-> **Status:** Rondi is not a drop-in replacement. The default branch still contains repository scaffolding; the implementation is being developed in the [open pull request series](https://github.com/kadupulhq/rondi/pulls). Compatibility claims remain limited to behavior verified against pinned RRDtool 1.11.0.
+The native `.rondi` store implements GAUGE values, fixed sampling steps, AVERAGE consolidation, bounded retention, durable server update journaling, and a versioned local HTTP/JSON API over a Unix socket. Separately, the `rrdtool` compatibility alias can create, inspect, fetch, and update a tested subset of existing `.rrd` binary files in place. `.rondi` files are not binary-compatible `.rrd` files.
 
-## Project goals
-
-- Match existing RRDtool behavior and preserve interoperability with `.rrd` files.
-- Keep storage, data-source semantics, consolidation, queries, and compatibility logic in a reusable Rust library.
-- Provide one executable with `rrdtool`, `rrdcached`, and RRDProxy compatibility entry points.
-- Keep Kadupul's Symfony/PHP application and user workflows separate from Rust monitoring and time-series processing.
-- Keep GraphQL optional and graph rendering independently scoped.
-
-## Implementation under review
-
-The current implementation work is in [PR #27](https://github.com/kadupulhq/rondi/pull/27), stacked on earlier foundation and compatibility pull requests. It includes a Rust workspace with a storage library, CLI, and server; a native `.rondi` format; and a partial compatibility path for existing `.rrd` files.
-
-The `.rondi` format is distinct from `.rrd`. The compatibility executable updates supported `.rrd` files in place, but broad RRDtool command, graph, daemon protocol, RRDProxy protocol, and C library compatibility are still incomplete or unverified. See the pull request series for the current compatibility matrix and defects list.
-
-## Try the implementation branch
-
-Use GitHub CLI to check out the current stacked implementation branch, then build the executable:
+## Quick start
 
 ```sh
-gh pr checkout 27
+cargo run -p rondi-cli -- create temperature --step 10 --heartbeat 25 --rows 6 --start 1700000000
+cargo run -p rondi-cli -- update temperature 1700000010 21.5
+cargo run -p rondi-cli -- update temperature 1700000020 22
+cargo run -p rondi-cli -- fetch temperature
+```
+
+Run the daemon and use server mode:
+
+```sh
+cargo run -p rondi-cli -- --root ./data server --listen ./run/rondi.sock
+cargo run -p rondi-cli -- --socket ./run/rondi.sock update temperature 1700000030 22.5
+cargo run -p rondi-cli -- --socket ./run/rondi.sock fetch temperature
+```
+
+See [architecture](docs/architecture.md), [API and durability](docs/api.md), and [compatibility](docs/compatibility.md). Rondi is not currently a drop-in replacement. Its known compatibility defects are tracked in [docs/COMPATIBILITY_DEFECTS.md](docs/COMPATIBILITY_DEFECTS.md).
+
+Build the single executable and create the requested compatibility symlink names with:
+
+```sh
 mise exec -- cargo build --release -p rondi-cli --locked
+scripts/install-compat-links.sh "$PWD/target/release/rondi" "$HOME/.local/bin"
 ```
 
-Run basic native storage commands:
+The names are installed for packaging and mode selection; legacy-compatible behavior remains incomplete as listed in the defect register.
+
+The installer also installs `rrdtool-proxy.php` for service definitions that invoke the proxy through PHP. It delegates to the neighboring `rrdtool-proxy` alias; set `RONDI_BIN` when the executable is installed elsewhere. This adapter currently covers only the pinned launcher help/version/invalid-option responses, not the proxy daemon or wire protocol.
+
+The current `rrdtool` alias supports narrow numeric-time `fetch` and `update` paths against existing version 0003-0005 `.rrd` layouts on 64-bit little-endian targets. It also accepts RRDtool's stdin command mode (`rrdtool -`), used by Kadupul's poller, with tested `update --template` handling. For example:
 
 ```sh
-./target/release/rondi create temperature --step 10 --heartbeat 25 --rows 6 --start 1700000000
-./target/release/rondi update temperature 1700000010 21.5
-./target/release/rondi update temperature 1700000020 22
-./target/release/rondi fetch temperature
+rrdtool fetch /tmp/sample.rrd AVERAGE --start 1700000000 --end 1700003600 --resolution 300
+rrdtool update /tmp/sample.rrd 1700003610:42.5
+rrdtool update /tmp/sample.rrd --daemon unix:/run/rrdcached.sock 1700003620:43
+rrdtool updatev /tmp/sample.rrd 1700003630:43.5
+rrdtool xport --start 1700000000 --end 1700003600 --step 300 DEF:load=/tmp/sample.rrd:traffic_in:AVERAGE XPORT:load:Traffic
+rrdtool graph /tmp/sample.png --imgformat=PNG --width 400 --height 100 --start 1700000000 --end 1700003600 DEF:load=/tmp/sample.rrd:traffic_in:AVERAGE LINE1:load#00aa44:Traffic
+rrdtool tune /tmp/sample.rrd --heartbeat traffic_in:600 --minimum traffic_in:0
+printf 'update /tmp/sample.rrd --template traffic_in:traffic_out 1700003640:100:200\nquit\n' | rrdtool -
 ```
 
-The full differential and workspace checks use a disposable Linux container with pinned RRDtool 1.11.0:
+For supported basic data sources, `tune` also accepts `--maximum`, `--data-source-type`, and `--data-source-rename`.
+
+`resize` supports tested v3/v4 archives and follows RRDtool's fixed output filename. Run it from the directory where `resize.rrd` should be created; the destination must not already exist:
+
+```sh
+cd /tmp
+rrdtool resize sample.rrd 0 GROW 10
+```
+
+The v5 resize path and uncommon archive layouts remain unsupported or unverified.
+
+The tested `dump`/`restore` subset can also round-trip basic v3/v5 files through RRDtool XML:
+
+```sh
+rrdtool dump /tmp/sample.rrd /tmp/sample.xml
+rrdtool restore /tmp/sample.xml /tmp/sample-restored.rrd
+```
+
+Restore stages a new output file and refuses to replace an existing path unless `--force-overwrite` is specified. XML from specialized data-source or archive types remains unsupported.
+
+Fetch and `xport` use shared RRDtool-compatible locking. Update uses an exclusive RRDtool-compatible lock and accepts one value per supported data source, with one or more AVERAGE, MIN, MAX, or LAST archives. The raw-decimal update path preserves COUNTER/DERIVE input precision above 2^53; callers using the float-only library convenience API remain limited to exactly representable integers. `xport` supports DEF/XPORT XML and JSON exports and a row-wise CDEF/RPN subset covering arithmetic, comparisons, `IF`, numeric functions, stack operators, aggregate functions, and unknown handling. A byte-for-byte differential fixture exercises these operators against RRDtool 1.11.0. VDEF graph expressions remain partial. The `graph` command can write native PNG for a basic LINE/AREA/TICK/HRULE/VRULE subset, including STACK baselines and unknowns, alpha colors, AREA gradients, rule/line dashes, graph layout modes, ten color overrides, and basic limits. Selected option behavior and output dimensions are exercised against pinned RRDtool, but its pixels, typography, data-to-pixel mapping, and broader graph grammar still differ. The complete RPN vocabulary and some mixed-resolution and edge behavior remain unsupported or unverified. This does not imply full file, CLI, graph, or protocol compatibility; see the [compatibility matrix](docs/compatibility.md).
+
+## Continuous integration and Docker validation
+
+GitHub Actions builds the pinned RRDtool 1.11.0 oracle from its upstream release tarball, verifies the tarball SHA-256, and runs formatting, Clippy, the full workspace test suite, documentation generation, and release builds in the same container. This ensures the RRDtool differential tests execute instead of being skipped because the oracle is missing.
+
+Run the same checks locally in a disposable Linux container with:
 
 ```sh
 docker build --progress=plain -f docker/Dockerfile.test -t rondi-test .
 ```
 
-## Architecture
-
-The implementation is organized as one Cargo workspace and coordinated release:
-
-- `rondi`: reusable storage, processing, and compatibility library.
-- `rondi-cli`: the `rondi` executable and compatibility command entry points.
-- `rondi-server`: daemon, journaling, buffering, and storage coordination.
-
-The server coordinates access to managed storage through a versioned internal API. The local API uses HTTP/JSON over a Unix socket. Remote access, rendering, GraphQL, and a C ABI have separate compatibility and deployment requirements; none should be assumed from the current storage implementation.
-
-## Security and dependencies
-
-The default branch runs Semgrep and CodeQL analysis for GitHub Actions. The implementation pull request adds RustSec `cargo-audit` and `cargo-deny` checks for known Rust advisories, dependency licenses, and registry sources. The Cargo policy allows crates.io sources and warns about duplicate dependency versions.
+The test image builds RRDtool 1.11.0 from the upstream release tarball and verifies its SHA-256 before compiling it as the differential oracle.
 
 ## Contributing
 
-Changes are reviewed through pull requests using the repository's [pull request template](.github/PULL_REQUEST_TEMPLATE.md). The current implementation is experimental; report compatibility differences with the exact RRDtool version, command, output, exit status, and a disposable `.rrd` fixture where possible.
+Changes are reviewed through pull requests using the repository's [pull request template](.github/PULL_REQUEST_TEMPLATE.md). Report compatibility differences with the exact RRDtool version, command, output, exit status, and a disposable `.rrd` fixture where possible.
 
 ## License
 
-The implementation pull request declares GPL-2.0-only and includes the corresponding license file. That license is not yet present on the default branch; refer to the [implementation pull request](https://github.com/kadupulhq/rondi/pull/1) for the proposed project license until it lands.
+GPL-2.0-only. See [LICENSE](LICENSE).

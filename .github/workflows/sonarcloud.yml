@@ -74,6 +74,30 @@ jobs:
             echo '::warning::cargo clippy exited non-zero; the report may be incomplete.'
           fi
 
+      # Differential tests skip when rrdtool is absent, which would leave the
+      # code they exercise uncovered. Build the same pinned oracle as
+      # docker/Dockerfile.test.
+      - name: Build pinned RRDtool oracle
+        if: steps.cargo.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            autoconf automake build-essential groff-base libfreetype6-dev \
+            libglib2.0-dev libpango1.0-dev libpng-dev libtool libxml2-dev pkg-config
+          archive="$RUNNER_TEMP/rrdtool-1.11.0.tar.gz"
+          curl --fail --location --silent --show-error --retry 3 \
+            https://github.com/oetiker/rrdtool-1.x/releases/download/v1.11.0/rrdtool-1.11.0.tar.gz \
+            --output "$archive"
+          echo "24c345b5c077c1b2b2fcbc1a364f1da051650fb6743ad5213096adc04c862ed4  $archive" | sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP/rrdtool-1.11.0"
+          ./configure --prefix=/usr/local --disable-perl --disable-python --disable-ruby --disable-lua
+          make -j"$(nproc)"
+          sudo make install
+          sudo ldconfig
+          rrdtool --version | head -1
+
       - name: Coverage
         if: steps.cargo.outputs.present == 'true'
         run: mise exec -- cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
