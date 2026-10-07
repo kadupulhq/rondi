@@ -2398,9 +2398,9 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
             data_offset: data_offset as u64,
         });
     }
-    if archive_data_start != file_len {
+    if archive_data_start > file_len {
         return Err(StoreError::RrdFormat(
-            "RRD v3 file length does not match its declared archive layout".into(),
+            "RRD file is shorter than its declared archive layout".into(),
         ));
     }
 

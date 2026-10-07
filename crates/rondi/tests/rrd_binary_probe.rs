@@ -1271,3 +1271,23 @@ fn create_parses_ds_bounds_like_rrdtool() {
         }
     }
 }
+
+#[test]
+fn trailing_bytes_after_the_archives_are_accepted_like_rrd_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("trailing.rrd");
+    create_single_source(
+        &path,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:20:U:U",
+        "RRA:LAST:0:1:5",
+    );
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.extend_from_slice(b"XXXXXXXX");
+    std::fs::write(&path, &bytes).unwrap();
+    rondi::inspect_rrd_file(&path).unwrap();
+    rondi::update_rrd_file(&path, 1_000_000_010, Some(3.0)).unwrap();
+    assert_eq!(fetched_value(&path, "LAST", 1_000_000_010, 10), Some(3.0));
+    assert!(std::fs::read(&path).unwrap().ends_with(b"XXXXXXXX"));
+}
