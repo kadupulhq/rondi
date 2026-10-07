@@ -190,14 +190,15 @@ fn vdef_aggregates_match_pinned_rrdtool_graphv() {
                 String::from_utf8_lossy(output)
                     .lines()
                     .find(|line| line.starts_with("print[0] = "))
-                    .unwrap_or_default()
-                    .to_owned()
+                    .map(str::to_owned)
             };
-            assert_eq!(
-                print_line(&actual.stdout),
-                print_line(&expected.stdout),
-                "{name}"
+            let upstream_line = print_line(&expected.stdout);
+            assert!(
+                upstream_line.is_some(),
+                "{name}: {}",
+                String::from_utf8_lossy(&expected.stdout)
             );
+            assert_eq!(print_line(&actual.stdout), upstream_line, "{name}");
         }
     }
 }
@@ -304,12 +305,17 @@ fn vdef_percentiles_with_infinities_match_pinned_rrdtool_qsort() {
             String::from_utf8_lossy(output)
                 .lines()
                 .find(|line| line.starts_with("print[0] = "))
-                .unwrap_or_default()
-                .to_owned()
+                .map(str::to_owned)
         };
+        let upstream_line = print_line(&upstream.stdout);
+        assert!(
+            upstream_line.is_some(),
+            "{function}: {}",
+            String::from_utf8_lossy(&upstream.stdout)
+        );
         assert_eq!(
             print_line(&rondi.stdout),
-            print_line(&upstream.stdout),
+            upstream_line,
             "{function} PRINT value"
         );
     }
