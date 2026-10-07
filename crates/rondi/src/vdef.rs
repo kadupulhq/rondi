@@ -261,12 +261,21 @@ fn rrd_qsort_compatible(values: &mut [f64]) {
             return 1;
         }
         if left.is_infinite() {
-            return if left.is_sign_negative() { -1 } else { 1 };
+            return c_isinf(left);
         }
         if right.is_infinite() {
-            return if right.is_sign_negative() { -1 } else { 1 };
+            return c_isinf(right);
         }
         if left < right { -1 } else { 1 }
+    }
+    // The comparator returns isinf() directly. glibc's isinf() is -1 for
+    // negative infinity; the Apple and BSD libcs return 1 for both signs.
+    fn c_isinf(value: f64) -> libc::c_int {
+        if cfg!(target_env = "gnu") && value.is_sign_negative() {
+            -1
+        } else {
+            1
+        }
     }
     unsafe {
         libc::qsort(
@@ -357,10 +366,14 @@ mod tests {
     }
 
     #[test]
-    fn percentile_comparator_preserves_rrdtool_negative_infinity_sign() {
+    fn percentile_comparator_follows_the_libc_isinf_sign() {
         let mut values = [f64::NEG_INFINITY, 1.0];
         rrd_qsort_compatible(&mut values);
-        assert_eq!(values, [f64::NEG_INFINITY, 1.0]);
+        if cfg!(target_env = "gnu") {
+            assert_eq!(values, [f64::NEG_INFINITY, 1.0]);
+        } else {
+            assert_eq!(values, [1.0, f64::NEG_INFINITY]);
+        }
     }
 
     #[test]
