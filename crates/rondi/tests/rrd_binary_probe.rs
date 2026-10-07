@@ -1312,3 +1312,52 @@ fn extreme_fetch_ranges_return_errors_instead_of_overflowing() {
         assert!(matches!(result, Ok(Err(_))), "{start}..{end}: {result:?}");
     }
 }
+
+#[test]
+fn dderive_previous_sample_is_parsed_like_rrdtool() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        eprintln!("skipping DDERIVE differential: pinned RRDtool 1.11.0 is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let oracle = temp.path().join("oracle.rrd");
+    let ours = temp.path().join("ours.rrd");
+    let created = Command::new("rrdtool")
+        .args([
+            "create",
+            oracle.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:x:DDERIVE:100:U:U",
+            "RRA:LAST:0:1:5",
+        ])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    std::fs::copy(&oracle, &ours).unwrap();
+    // str::parse and rrd_strtod round "444.636" to neighbouring doubles.
+    for (timestamp, value) in [(1_000_000_005, "444.636"), (1_000_000_010, "43")] {
+        let updated = Command::new("rrdtool")
+            .args([
+                "update",
+                oracle.to_str().unwrap(),
+                &format!("{timestamp}:{value}"),
+            ])
+            .output()
+            .unwrap();
+        assert!(updated.status.success());
+        rondi::update_rrd_raw_values(&ours, timestamp, &[Some(value)]).unwrap();
+    }
+    assert_eq!(
+        std::fs::read(&ours).unwrap(),
+        std::fs::read(&oracle).unwrap()
+    );
+}

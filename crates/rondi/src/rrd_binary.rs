@@ -889,7 +889,8 @@ fn update_pdp_new(
             (delta, delta / interval)
         }
         "DCOUNTER" | "DDERIVE" if previous != "U" => {
-            let Ok(previous) = previous.parse::<f64>() else {
+            // update_pdp_prep converts the stored text with rrd_strtodbl too.
+            let Some(previous) = crate::parse_rrd_number(previous) else {
                 return rrd_nan();
             };
             if source.kind == "DCOUNTER"
