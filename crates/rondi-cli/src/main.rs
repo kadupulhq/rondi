@@ -1764,7 +1764,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             .iter()
             .any(|definition| definition.starts_with("XPORT:"))
     {
-        definitions.push(String::from("CDEF:__rondi_rule_anchor=0"));
+        definitions.push(String::from("CDEF:__rondi_rule_anchor=0,0,+"));
         definitions.push(String::from("XPORT:__rondi_rule_anchor:"));
     }
     xport_args.extend(definitions);

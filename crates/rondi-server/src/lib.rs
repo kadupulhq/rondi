@@ -2557,9 +2557,10 @@ fn store_error(error: StoreError) -> Response<Full<Bytes>> {
         | StoreError::RrdTimestamp(_)
         | StoreError::RequestIdConflict
         | StoreError::Owned => (StatusCode::CONFLICT, "conflict"),
-        StoreError::InvalidName | StoreError::InvalidConfig(_) | StoreError::InvalidValue => {
-            (StatusCode::BAD_REQUEST, "invalid_request")
-        }
+        StoreError::InvalidName
+        | StoreError::InvalidConfig(_)
+        | StoreError::InvalidValue
+        | StoreError::RrdExpression(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
         StoreError::Io(_) => (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable"),
         StoreError::FormatVersion(_)
         | StoreError::RrdFormat(_)

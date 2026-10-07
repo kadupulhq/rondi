@@ -347,17 +347,17 @@ fn evaluate_rpn(
                 continue;
             }
             "DUP" => {
-                let a = *stack.last().ok_or_else(|| rpn_error("stack underflow"))?;
+                let a = *stack.last().ok_or_else(rpn_stack_underflow)?;
                 stack.push(a);
                 continue;
             }
             "POP" => {
-                stack.pop().ok_or_else(|| rpn_error("stack underflow"))?;
+                stack.pop().ok_or_else(rpn_stack_underflow)?;
                 continue;
             }
             "EXC" => {
                 if stack.len() < 2 {
-                    return Err(rpn_error("stack underflow"));
+                    return Err(rpn_stack_underflow());
                 }
                 let n = stack.len();
                 stack.swap(n - 1, n - 2);
@@ -460,7 +460,7 @@ fn evaluate_rpn(
             continue;
         }
         match token {
-            token if token.starts_with("PREV(") && token.ends_with(')') => {
+            token if prev_variable(token).is_some() => {
                 let variable = &token[5..token.len() - 1];
                 let values = variables
                     .get(variable)
@@ -475,7 +475,7 @@ fn evaluate_rpn(
             "AVG" | "MEDIAN" | "STDEV" | "SMIN" | "SMAX" | "SORT" | "REV" => {
                 let count = pop_count(&mut stack)?;
                 if stack.len() < count {
-                    return Err(rpn_error("stack underflow"));
+                    return Err(rpn_stack_underflow());
                 }
                 let split = stack.len() - count;
                 let mut values = stack.split_off(split);
@@ -543,17 +543,14 @@ fn evaluate_rpn(
             "COPY" => {
                 let count = pop_count(&mut stack)?;
                 if stack.len() < count {
-                    return Err(rpn_error("stack underflow"));
+                    return Err(rpn_stack_underflow());
                 }
                 let start = stack.len() - count;
                 let copied = stack[start..].to_vec();
                 stack.extend(copied);
             }
             "INDEX" => {
-                let index = stack
-                    .last()
-                    .copied()
-                    .ok_or_else(|| rpn_error("stack underflow"))?;
+                let index = stack.last().copied().ok_or_else(rpn_stack_underflow)?;
                 // The upstream OP_INDEX implementation converts its RPN number
                 // to C `int`, truncating fractional values toward zero.
                 let index = index.trunc();
@@ -575,13 +572,10 @@ fn evaluate_rpn(
                 } else {
                     return Err(rpn_error("invalid ROLL shift"));
                 };
-                let count_value = stack
-                    .last()
-                    .copied()
-                    .ok_or_else(|| rpn_error("stack underflow"))?;
+                let count_value = stack.last().copied().ok_or_else(rpn_stack_underflow)?;
                 let count = pop_count(&mut stack)?;
                 if stack.len() < count {
-                    return Err(rpn_error("stack underflow"));
+                    return Err(rpn_stack_underflow());
                 }
                 if count == 0 {
                     continue;
@@ -620,7 +614,9 @@ fn evaluate_rpn(
                 let count = pop_count(&mut stack)?;
                 let percent = pop(&mut stack)?;
                 if !(0.0..=100.0).contains(&percent) || !percent.is_finite() {
-                    return Err(rpn_error("percentile argument must be between 0 and 100"));
+                    return Err(rrdtool_rpn_error(
+                        "percentile argument must be between 0 and 100",
+                    ));
                 }
                 if count == 0 || stack.len() < count {
                     return Err(rpn_error("stack underflow or invalid PERCENT count"));
@@ -634,15 +630,23 @@ fn evaluate_rpn(
                 stack.push(selected);
             }
             "TREND" | "TRENDNAN" => {
-                if token_index < 2 {
-                    return Err(rpn_error("malformed trend arguments"));
+                if stack.len() < 2 {
+                    return Err(rpn_stack_underflow());
                 }
-                let variable = tokens[token_index - 2];
-                let duration = parse_rrd_number(tokens[token_index - 1])
-                    .ok_or_else(|| rpn_error("trend duration must follow a variable"))?;
+                // RRDtool requires the operand two places back to be a plain
+                // variable and takes the duration from the stack top.
+                let variable = token_index
+                    .checked_sub(2)
+                    .map(|index| tokens[index])
+                    .filter(|variable| {
+                        parse_rpn_number(variable, true).is_none()
+                            && !RPN_OPERATORS.contains(variable)
+                    })
+                    .ok_or_else(|| rrdtool_rpn_error("malformed trend arguments"))?;
                 let values = variables
                     .get(variable)
-                    .ok_or_else(|| rpn_error("trend must immediately follow a variable"))?;
+                    .ok_or_else(|| rrdtool_rpn_error("malformed trend arguments"))?;
+                let duration = stack[stack.len() - 1];
                 let source_step = *variable_steps
                     .get(variable)
                     .ok_or_else(|| rpn_error("missing trend source step"))?;
@@ -833,7 +837,7 @@ fn evaluate_rpn(
                 );
             }
             _ => {
-                if let Some(number) = parse_rrd_number(token) {
+                if let Some(number) = parse_rpn_number(token, token_index + 1 < tokens.len()) {
                     stack.push(number);
                 } else if let Some(values) = variables.get(token) {
                     if !tokens.get(token_index + 1).is_some_and(|next| {
@@ -848,12 +852,12 @@ fn evaluate_rpn(
         }
     }
     if stack.len() != 1 {
-        return Err(rpn_error("expression must leave exactly one value"));
+        return Err(rrdtool_rpn_error("RPN final stack size != 1"));
     }
     Ok(stack[0])
 }
 fn pop(stack: &mut Vec<f64>) -> Result<f64, StoreError> {
-    stack.pop().ok_or_else(|| rpn_error("stack underflow"))
+    stack.pop().ok_or_else(rpn_stack_underflow)
 }
 fn pop_count(stack: &mut Vec<f64>) -> Result<usize, StoreError> {
     // RRDtool stores these RPN operands in C `int` variables, truncating
@@ -887,6 +891,133 @@ fn cmp(a: f64, b: f64, result: bool) -> f64 {
 }
 fn rpn_error(message: &str) -> StoreError {
     StoreError::RrdUnsupported(format!("invalid CDEF RPN: {message}"))
+}
+fn rrdtool_rpn_error(message: &str) -> StoreError {
+    StoreError::RrdExpression(message.to_owned())
+}
+fn rpn_stack_underflow() -> StoreError {
+    rrdtool_rpn_error("RPN stack underflow")
+}
+
+/// The operator names accepted by RRDtool 1.11.0's `rpn_parse`.
+const RPN_OPERATORS: &[&str] = &[
+    "+",
+    "-",
+    "*",
+    "/",
+    "%",
+    "SIN",
+    "COS",
+    "LOG",
+    "FLOOR",
+    "CEIL",
+    "EXP",
+    "DUP",
+    "EXC",
+    "POP",
+    "LTIME",
+    "NEWDAY",
+    "NEWWEEK",
+    "NEWMONTH",
+    "NEWYEAR",
+    "STEPWIDTH",
+    "LT",
+    "LE",
+    "GT",
+    "GE",
+    "EQ",
+    "IF",
+    "MIN",
+    "MAX",
+    "LIMIT",
+    "UNKN",
+    "UN",
+    "NEGINF",
+    "NE",
+    "COUNT",
+    "PREV",
+    "INF",
+    "ISINF",
+    "NOW",
+    "TIME",
+    "ATAN2",
+    "ATAN",
+    "SQRT",
+    "SORT",
+    "REV",
+    "TREND",
+    "TRENDNAN",
+    "PREDICT",
+    "PREDICTSIGMA",
+    "PREDICTPERC",
+    "RAD2DEG",
+    "DEG2RAD",
+    "AVG",
+    "ABS",
+    "ADDNAN",
+    "MINNAN",
+    "MAXNAN",
+    "MEDIAN",
+    "DEPTH",
+    "COPY",
+    "ROLL",
+    "INDEX",
+    "SMAX",
+    "SMIN",
+    "STDEV",
+    "PERCENT",
+    "POW",
+    "ROUND",
+];
+
+/// `rpn_parse` reads a number with `%40[0-9.e+-]` and only accepts it when a
+/// comma follows, so a trailing number or an uppercase exponent is not one.
+fn parse_rpn_number(token: &str, followed_by_comma: bool) -> Option<f64> {
+    if !followed_by_comma
+        || token.len() > 40
+        || !token
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'.' | b'e' | b'+' | b'-'))
+    {
+        return None;
+    }
+    parse_rrd_number(token)
+}
+
+fn prev_variable(token: &str) -> Option<&str> {
+    token
+        .strip_prefix("PREV(")
+        .and_then(|token| token.strip_suffix(')'))
+}
+
+/// Reject expressions that `rpn_parse` would not parse, before evaluation, so
+/// parse errors win over evaluation errors as they do upstream.
+fn validate_rpn(expression: &str, variable_steps: &HashMap<String, u64>) -> Result<(), StoreError> {
+    if expression.is_empty() {
+        return Err(rrdtool_rpn_error("can not parse an empty rpn expression"));
+    }
+    let tokens: Vec<_> = expression.split(',').collect();
+    for (index, token) in tokens.iter().enumerate() {
+        if parse_rpn_number(token, index + 1 < tokens.len()).is_some()
+            || RPN_OPERATORS.contains(token)
+            || variable_steps.contains_key(*token)
+        {
+            continue;
+        }
+        if let Some(variable) = prev_variable(token) {
+            if variable_steps.contains_key(variable) {
+                continue;
+            }
+            return Err(rrdtool_rpn_error(&format!(
+                "variable '{variable}' not found"
+            )));
+        }
+        return Err(rrdtool_rpn_error(&format!(
+            "don't understand '{}'",
+            tokens[index..].join(",")
+        )));
+    }
+    Ok(())
 }
 
 fn local_tm(timestamp: i64) -> Option<libc::tm> {
@@ -956,12 +1087,10 @@ fn expression_step(
     expression: &str,
     variable_steps: &HashMap<String, u64>,
 ) -> Result<u64, StoreError> {
+    validate_rpn(expression, variable_steps)?;
     let mut step = 0_u64;
     for token in expression.split(',') {
-        let variable = token
-            .strip_prefix("PREV(")
-            .and_then(|token| token.strip_suffix(')'))
-            .unwrap_or(token);
+        let variable = prev_variable(token).unwrap_or(token);
         if let Some(variable_step) = variable_steps.get(variable) {
             step = if step == 0 {
                 *variable_step

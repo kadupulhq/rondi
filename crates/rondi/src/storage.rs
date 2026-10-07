@@ -37,6 +37,9 @@ pub enum StoreError {
     RrdFormat(String),
     #[error("unsupported RRD operation: {0}")]
     RrdUnsupported(String),
+    /// An RPN expression error reported with RRDtool's own wording.
+    #[error("{0}")]
+    RrdExpression(String),
     #[error("storage ownership lock is held by another process")]
     Owned,
     #[error("I/O error: {0}")]
