@@ -2377,6 +2377,95 @@ fn rrdtool_xport_raw_def_and_export_match_rrdtool_xml_and_json() {
 }
 
 #[test]
+fn rrdtool_xport_rpn_numeric_literals_follow_rrd_strtod() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping RRDtool RPN numeric conversion differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("numeric.rrd");
+    let create = Command::new("rrdtool")
+        .args([
+            "create",
+            database.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:value:GAUGE:30:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        create.status.success(),
+        "{}",
+        String::from_utf8_lossy(&create.stderr)
+    );
+    let update = Command::new("rrdtool")
+        .args([
+            "update",
+            database.to_str().unwrap(),
+            "1000000010:1",
+            "1000000020:1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        update.status.success(),
+        "{}",
+        String::from_utf8_lossy(&update.stderr)
+    );
+
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let def = format!("DEF:value={}:value:AVERAGE", database.display());
+    let args = [
+        "graphv",
+        "-",
+        "--imgformat=XML",
+        "--start",
+        "1000000010",
+        "--end",
+        "1000000030",
+    ];
+    let elements = [
+        "CDEF:literal=value,0,*,1000000010.9999999,+",
+        "XPORT:literal:Literal",
+        "PRINT:literal:LAST:%0.7lf",
+    ];
+    let expected = Command::new("rrdtool")
+        .args(args)
+        .arg(&def)
+        .args(elements)
+        .output()
+        .unwrap();
+    let actual = Command::new(&alias)
+        .args(args)
+        .arg(&def)
+        .args(elements)
+        .output()
+        .unwrap();
+    assert!(
+        expected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+    assert!(
+        actual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert!(String::from_utf8_lossy(&expected.stdout).contains("1000000011.0000000"));
+}
+
+#[test]
 fn rrdtool_xport_cdef_limit_matches_upstream_bounds_and_unknowns() {
     if !Command::new("rrdtool")
         .arg("--version")
