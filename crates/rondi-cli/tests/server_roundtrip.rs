@@ -1810,10 +1810,12 @@ fn rrdtool_fetch_daemon_resolution_matches_upstream_protocol_behavior() {
     if !Command::new("rrdtool")
         .arg("--version")
         .output()
-        .is_ok_and(|output| output.status.success())
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
     {
         eprintln!(
-            "skipping daemon FETCH resolution differential: upstream RRDtool is not installed"
+            "skipping daemon FETCH resolution differential: pinned RRDtool 1.11.0 is not installed"
         );
         return;
     }

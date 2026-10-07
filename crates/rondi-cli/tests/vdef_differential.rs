@@ -3,12 +3,11 @@ use std::process::Command;
 
 #[test]
 fn vdef_aggregates_match_pinned_rrdtool_graphv() {
-    if !Command::new("rrdtool")
-        .arg("--version")
-        .output()
-        .is_ok_and(|output| output.status.success())
-    {
-        eprintln!("skipping VDEF differential: rrdtool is not installed");
+    let version = Command::new("rrdtool").arg("--version").output();
+    if !version.is_ok_and(|output| {
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+    }) {
+        eprintln!("skipping VDEF differential: pinned RRDtool 1.11.0 is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();

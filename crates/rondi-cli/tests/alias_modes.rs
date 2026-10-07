@@ -2999,9 +2999,11 @@ fn rrdtool_xport_cdef_limit_matches_upstream_bounds_and_unknowns() {
     if !Command::new("rrdtool")
         .arg("--version")
         .output()
-        .is_ok_and(|output| output.status.success())
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
     {
-        eprintln!("skipping RRDtool LIMIT differential: rrdtool is not installed");
+        eprintln!("skipping RRDtool LIMIT differential: pinned RRDtool 1.11.0 is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
