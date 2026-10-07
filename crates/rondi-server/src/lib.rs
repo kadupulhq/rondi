@@ -1208,7 +1208,7 @@ fn handle_rrdcached_line(
 ) -> Option<String> {
     let mut fields = rrdcached_fields(line);
     let command = fields.first()?.to_ascii_uppercase();
-    fields.remove(0);
+    let raw_command = fields.remove(0);
     if let Some(allowed) = socket_commands {
         let permission_name = if command == "." { "BATCH" } else { &command };
         let known = matches!(
@@ -1252,8 +1252,13 @@ fn handle_rrdcached_line(
         "PING" if fields.is_empty() => "0 PONG\n".to_owned(),
         "UPDATE" => {
             stats.updates_received.fetch_add(1, Ordering::Relaxed);
-            if fields.len() < 2 {
-                "-1 Usage: UPDATE <filename> <timestamp:value> [<timestamp:value> ...]\n".to_owned()
+            if fields.is_empty() {
+                "-1 Usage: UPDATE <filename> <values> [<values> ...]\n".to_owned()
+            } else if fields.len() == 1 {
+                match resolve_rrdcached_path(root, &fields[0]) {
+                    Ok(_) => "-1 No values updated.\n".to_owned(),
+                    Err(error) => format!("-1 {error}\n"),
+                }
             } else {
                 match resolve_rrdcached_path(root, &fields[0]).and_then(|path| {
                     queue
@@ -1482,14 +1487,49 @@ fn handle_rrdcached_line(
                 Err(error) => format!("-1 Got error {error}\n"),
             }
         }
-        "TUNE" => "-1 Usage: TUNE <filename> <argc> [<argv> ...]\n".to_owned(),
+        "TUNE" => "-1 Usage: TUNE <filename> [options]\n".to_owned(),
         "FIRST" => "-1 Usage: FIRST <filename> <rra index>\n".to_owned(),
         "BATCH" if fields.is_empty() => {
             "0 Go ahead.  End with dot '.' on its own line.\n".to_owned()
         }
         "BATCH" => "-1 Usage: BATCH\n".to_owned(),
         "HELP" => rrdcached_help(&fields.iter().map(String::as_str).collect::<Vec<_>>()),
-        _ => format!("-1 Unknown or invalid command: {command}\n"),
+        // Upstream handlers read only the fields they need, so extra
+        // arguments are ignored and a missing filename gets the usage text.
+        _ => {
+            let needed = match command.as_str() {
+                "PING" | "QUIT" | "QUEUE" | "STATS" | "FLUSHALL" | "SUSPENDALL" | "RESUMEALL" => {
+                    Some(0)
+                }
+                "FLUSH" | "PENDING" | "FORGET" | "INFO" | "LAST" | "SUSPEND" | "RESUME" => Some(1),
+                _ => None,
+            };
+            if let Some(needed) = needed.filter(|needed| fields.len() > *needed) {
+                let mut retry = command;
+                for field in &fields[..needed] {
+                    retry.push(' ');
+                    retry.push_str(&field.replace('\\', "\\\\").replace(' ', "\\ "));
+                }
+                return handle_rrdcached_line(
+                    root,
+                    echo_base,
+                    &retry,
+                    stats,
+                    queue,
+                    no_overwrite,
+                    allow_recursive_mkdir,
+                    socket_commands,
+                );
+            }
+            match command.as_str() {
+                "FETCH" => {
+                    "-1 Usage: FETCH <file> <CF> [<start> [<end>] [<column>...]]\n".to_owned()
+                }
+                _ if needed == Some(1) => format!("-1 Usage: {command} <filename>\n"),
+                "WROTE" => format!("-1 Can't use '{raw_command}' here.\n"),
+                _ => format!("-1 Unknown command: {raw_command}\n"),
+            }
+        }
     };
     Some(response)
 }
@@ -2311,7 +2351,7 @@ fn rrdcached_create(
 ) -> Result<(), String> {
     if fields.len() < 3 {
         return Err(
-            "Usage: CREATE <filename> [-b start] [-s step] <DS definitions> <RRA definitions>"
+            "Usage: CREATE <filename> [-b start] [-s step] [-O] <DS definitions> <RRA definitions>"
                 .to_owned(),
         );
     }

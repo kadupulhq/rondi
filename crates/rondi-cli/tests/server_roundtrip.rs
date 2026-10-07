@@ -2217,6 +2217,43 @@ fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
             };
             assert_eq!(rondi_echo, upstream_echo);
         }
+        // Upstream closes the connection after some errors, so each
+        // command uses its own connection.
+        let one_shot = |path: &std::path::Path, command: &str| {
+            let mut stream = UnixStream::connect(path).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            rrdcached_request(&mut BufReader::new(&mut stream), command)
+        };
+        for command in [
+            "BOGUS\n",
+            "bogus x\n",
+            "WROTE x\n",
+            "UPDATE\n",
+            "FLUSH\n",
+            "FLUSH ./missing.rrd extra\n",
+            "PENDING\n",
+            "PENDING poller.rrd extra\n",
+            "FORGET\n",
+            "INFO\n",
+            "LAST\n",
+            "SUSPEND\n",
+            "RESUME\n",
+            "FETCH\n",
+            "FETCH poller.rrd\n",
+            "TUNE\n",
+            "TUNE poller.rrd\n",
+            "CREATE\n",
+            "PING x\n",
+            "QUEUE x\n",
+        ] {
+            assert_eq!(
+                one_shot(&socket, command),
+                one_shot(&upstream_socket, command),
+                "{command:?}"
+            );
+        }
         let upstream_forget_multi = {
             let mut upstream_reader = BufReader::new(&mut upstream_stream);
             rrdcached_request(&mut upstream_reader, "FORGET multi-fetchbin.rrd\n")
@@ -2678,7 +2715,7 @@ fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
     batch_result.clear();
     reader.read_line(&mut batch_result).unwrap();
     assert!(
-        batch_result.starts_with("2 Unknown or invalid command: INVALID"),
+        batch_result.starts_with("2 Unknown command: INVALID"),
         "{batch_result:?}"
     );
     assert!(rrdcached_request(&mut reader, "STATS\n").starts_with("9 Statistics follow\n"));
