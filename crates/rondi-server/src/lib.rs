@@ -683,14 +683,17 @@ impl RrdcachedQueue {
             .and_then(|sample| sample.split_once(':'))
             .map(|(timestamp, _)| timestamp.parse::<f64>().map_err(|error| error.to_string()))
             .transpose()?
-            .unwrap_or(info.last_update as f64);
+            .unwrap_or(info.last_update as f64 + info.last_update_usec as f64 / 1_000_000.0);
         for sample in samples {
             let Some((timestamp, values)) = sample.split_once(':') else {
                 return Err(format!("Cannot find timestamp in '{sample}'!"));
             };
             let timestamp = timestamp
-                .parse::<i64>()
+                .parse::<f64>()
                 .map_err(|_| format!("Cannot find timestamp in '{sample}'!"))?;
+            if !timestamp.is_finite() {
+                return Err(format!("Cannot find timestamp in '{sample}'!"));
+            }
             let values = values.split(':').collect::<Vec<_>>();
             if values.len() != info.data_sources.len()
                 || values.iter().any(|value| {
@@ -702,13 +705,13 @@ impl RrdcachedQueue {
             {
                 return Err(format!("Invalid update value: {sample}"));
             }
-            if timestamp as f64 <= last_timestamp {
+            if timestamp <= last_timestamp {
                 return Err(format!(
                     "illegal attempt to update using time {:.6} when last update time is {:.6} (minimum one second step)",
-                    timestamp as f64, last_timestamp
+                    timestamp, last_timestamp
                 ));
             }
-            last_timestamp = timestamp as f64;
+            last_timestamp = timestamp;
         }
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
@@ -2209,18 +2212,33 @@ fn flush_rrdcached_path(
     Ok(true)
 }
 
+fn rrdcached_update_timestamp(value: &str) -> Result<(i64, u64), String> {
+    let timestamp = value.parse::<f64>().map_err(|error| format!("{error}"))?;
+    if !timestamp.is_finite() || timestamp < i64::MIN as f64 || timestamp >= i64::MAX as f64 {
+        return Err("timestamp is outside the supported range".to_owned());
+    }
+    let mut seconds = timestamp.floor() as i64;
+    let mut microseconds = ((timestamp - seconds as f64) * 1_000_000.0) as u64;
+    if microseconds >= 1_000_000 {
+        seconds = seconds
+            .checked_add(1)
+            .ok_or_else(|| "timestamp is outside the supported range".to_owned())?;
+        microseconds = 0;
+    }
+    Ok((seconds, microseconds))
+}
+
 fn update_rrdcached_file(path: &Path, samples: &[&str]) -> Result<u64, String> {
     let info = rondi::inspect_rrd_file(path).map_err(|error| error.to_string())?;
-    let mut last_update = info.last_update;
+    let mut last_update = (info.last_update, info.last_update_usec);
     let mut count = 0;
     for sample in samples {
         let (timestamp, values) = sample
             .split_once(':')
             .ok_or_else(|| format!("Invalid update value: {sample}"))?;
-        let timestamp = timestamp
-            .parse::<i64>()
+        let (timestamp, timestamp_usec) = rrdcached_update_timestamp(timestamp)
             .map_err(|error| format!("Invalid timestamp in {sample}: {error}"))?;
-        if timestamp <= last_update {
+        if (timestamp, timestamp_usec) <= last_update {
             continue;
         }
         let values = values
@@ -2243,9 +2261,9 @@ fn update_rrdcached_file(path: &Path, samples: &[&str]) -> Result<u64, String> {
                 values.len()
             ));
         }
-        rondi::update_rrd_raw_values(path, timestamp, &values)
+        rondi::update_rrd_raw_values_precise(path, timestamp, timestamp_usec, &values)
             .map_err(|error| error.to_string())?;
-        last_update = timestamp;
+        last_update = (timestamp, timestamp_usec);
         count += values.len() as u64;
     }
     Ok(count)
@@ -2534,7 +2552,7 @@ mod rrdcached_queue_tests {
         )
         .unwrap();
         let mut queue = RrdcachedQueue::open(&root, 1024, 300).unwrap();
-        assert!(queue.enqueue(file.clone(), &["1000000010.5:1"]).is_err());
+        assert!(queue.enqueue(file.clone(), &["1000000010.x:1"]).is_err());
         assert!(queue.enqueue(file.clone(), &["1000000010:1:2"]).is_err());
         assert_eq!(queue.journal_bytes, 0);
         assert!(!queue.pending.contains_key(&file));

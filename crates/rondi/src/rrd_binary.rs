@@ -365,6 +365,8 @@ pub struct RrdInfo {
     pub version: String,
     pub step: u64,
     pub last_update: i64,
+    /// Microsecond component of the RRDtool live header's last update time.
+    pub last_update_usec: u64,
     pub header_size: usize,
     pub data_sources: Vec<RrdDataSourceInfo>,
     pub archives: Vec<RrdArchiveInfo>,
@@ -542,24 +544,34 @@ pub(crate) fn fetch_path(
     })
 }
 
-fn update_path(path: &Path, timestamp: i64, value: Option<f64>) -> Result<(), StoreError> {
-    update_path_values(path, timestamp, &[value]).map(|_| ())
+fn update_path(
+    path: &Path,
+    timestamp: i64,
+    timestamp_usec: u64,
+    value: Option<f64>,
+) -> Result<(), StoreError> {
+    update_path_values(path, timestamp, timestamp_usec, &[value]).map(|_| ())
 }
 
 fn update_path_values(
     path: &Path,
     timestamp: i64,
+    timestamp_usec: u64,
     values: &[Option<f64>],
 ) -> Result<Vec<RrdUpdateSummary>, StoreError> {
-    update_path_values_with_raw(path, timestamp, values, None)
+    update_path_values_with_raw(path, timestamp, timestamp_usec, values, None)
 }
 
 fn update_path_values_with_raw(
     path: &Path,
     timestamp: i64,
+    timestamp_usec: u64,
     values: &[Option<f64>],
     raw_values: Option<&[Option<&str>]>,
 ) -> Result<Vec<RrdUpdateSummary>, StoreError> {
+    if timestamp_usec >= 1_000_000 {
+        return Err(StoreError::InvalidValue);
+    }
     if values.iter().flatten().any(|value| !value.is_finite()) {
         return Err(StoreError::InvalidValue);
     }
@@ -605,15 +617,17 @@ fn update_path_values_with_raw(
         }
     }
     let last_update = info.last_update;
-    if timestamp <= last_update {
+    let last_update_usec = info.last_update_usec;
+    if (timestamp, timestamp_usec) <= (last_update, last_update_usec) {
         return Err(StoreError::RrdTimestamp(format!(
-            "update time {timestamp} is not later than last update {last_update}"
+            "update time {timestamp}.{timestamp_usec:06} is not later than last update {last_update}.{last_update_usec:06}"
         )));
     }
     let step = i64::try_from(info.step).map_err(|_| rrd_error("RRD PDP step overflows"))?;
-    let interval = timestamp
+    let interval = (timestamp
         .checked_sub(last_update)
-        .ok_or_else(|| rrd_error("RRD update interval overflows"))?;
+        .ok_or_else(|| rrd_error("RRD update interval overflows"))? as f64)
+        + (timestamp_usec as f64 - last_update_usec as f64) / 1_000_000.0;
     let previous_boundary = last_update
         .checked_sub(last_update.rem_euclid(step))
         .ok_or_else(|| rrd_error("RRD timestamp alignment overflows"))?;
@@ -631,28 +645,22 @@ fn update_path_values_with_raw(
     let pdp_start = live_start + LIVE_HEAD_LEN;
     let cdp_start = pdp_start + info.data_sources.len() * PDP_PREP_LEN;
     let pointer_start = cdp_start + info.data_sources.len() * info.archives.len() * CDP_PREP_LEN;
-    let last_update_usec = i64_at_file(&mut file, live_start + 8)?;
-    if last_update_usec != 0 {
-        return Err(StoreError::RrdUnsupported(
-            "fractional-second last updates are not yet supported by the in-place writer".into(),
-        ));
-    }
     let mut prep = Vec::with_capacity(values.len());
     let mut completed_pdp = Vec::with_capacity(values.len());
     let mut first_completed_pdp = Vec::with_capacity(values.len());
     let mut fill_completed_pdp = Vec::with_capacity(values.len());
     let mut last_ds_bytes = Vec::with_capacity(values.len());
-    let open_pdp_seconds = (last_update - previous_boundary).max(0);
+    let open_pdp_seconds =
+        (last_update - previous_boundary).max(0) as f64 + last_update_usec as f64 / 1_000_000.0;
     for (index, (source, value)) in info.data_sources.iter().zip(values).enumerate() {
         let prep_offset = pdp_start + index * PDP_PREP_LEN;
         let old_unknown = u64_at_file(&mut file, prep_offset + 32)?;
         let old_pdp_value = f64_at_file(&mut file, prep_offset + 40)?;
         let old_last_ds = fixed_string_file(&mut file, prep_offset, 30)?;
-        let heartbeat =
-            i64::try_from(source.heartbeat).map_err(|_| rrd_error("RRD heartbeat overflows"))?;
+        let heartbeat = source.heartbeat as f64;
         let rate = value.and_then(|sample| match source.kind.as_str() {
             "GAUGE" => Some(sample),
-            "ABSOLUTE" => Some(sample / interval as f64),
+            "ABSOLUTE" => Some(sample / interval),
             "COUNTER" | "DERIVE" if old_last_ds != "U" => {
                 let mut delta = if let Some(current) = raw_values.and_then(|raw| raw[index]) {
                     exact_integer_delta(current, &old_last_ds)?
@@ -665,7 +673,7 @@ fn update_path_values_with_raw(
                         delta += 18_446_744_069_414_584_320.0;
                     }
                 }
-                Some(delta / interval as f64)
+                Some(delta / interval)
             }
             "COUNTER" | "DERIVE" => None,
             "DCOUNTER" | "DDERIVE" if old_last_ds != "U" => {
@@ -675,7 +683,7 @@ fn update_path_values_with_raw(
                 {
                     None
                 } else {
-                    Some((sample - previous) / interval as f64)
+                    Some((sample - previous) / interval)
                 }
             }
             "DCOUNTER" | "DDERIVE" => None,
@@ -687,7 +695,7 @@ fn update_path_values_with_raw(
                     && source.minimum.is_none_or(|minimum| *rate >= minimum)
                     && source.maximum.is_none_or(|maximum| *rate <= maximum)
             })
-            .map(|rate| rate * interval as f64);
+            .map(|rate| rate * interval);
         let (next_unknown, next_pdp_value, pdp) = if elapsed_steps == 0 {
             let next_value = if let Some(integral) = integral {
                 if old_pdp_value.is_nan() {
@@ -701,19 +709,20 @@ fn update_path_values_with_raw(
             let unknown = if integral.is_some() {
                 old_unknown
             } else {
-                old_unknown.saturating_add(interval as u64)
+                old_unknown.saturating_add(interval.floor() as u64)
             };
             (unknown, next_value, None)
         } else {
-            let post_interval = timestamp - current_boundary;
+            let post_interval =
+                (timestamp - current_boundary) as f64 + timestamp_usec as f64 / 1_000_000.0;
             // When the previous update is on a PDP boundary and this update
             // crosses multiple boundaries, all elapsed time belongs before
             // the current boundary. RRDtool's calculate_elapsed_steps uses
             // the full interval as pre_int in this case.
-            let pre_interval = if open_pdp_seconds == 0 {
+            let pre_interval = if open_pdp_seconds == 0.0 {
                 interval - post_interval
             } else {
-                step - open_pdp_seconds
+                step as f64 - open_pdp_seconds
             };
             let mut accumulated = old_pdp_value;
             let mut pre_unknown = 0.0;
@@ -721,9 +730,9 @@ fn update_path_values_with_raw(
                 if accumulated.is_nan() {
                     accumulated = 0.0;
                 }
-                accumulated += integral / interval as f64 * pre_interval as f64;
+                accumulated += integral / interval * pre_interval;
             } else {
-                pre_unknown = pre_interval as f64;
+                pre_unknown = pre_interval;
             }
             let pdp = if interval > heartbeat || (info.step as f64 / 2.0) < old_unknown as f64 {
                 rrd_nan()
@@ -732,26 +741,23 @@ fn update_path_values_with_raw(
                     / (info.step as f64 * elapsed_steps as f64 - old_unknown as f64 - pre_unknown)
             };
             let (unknown, next_value) = if let Some(integral) = integral {
-                (0, integral / interval as f64 * post_interval as f64)
+                (0, integral / interval * post_interval)
             } else {
-                (post_interval as u64, rrd_nan())
+                (post_interval.floor() as u64, rrd_nan())
             };
             (unknown, next_value, Some(pdp))
         };
-        let first_pdp = if elapsed_steps > 1 && open_pdp_seconds > 0 {
-            let pre_interval = step - open_pdp_seconds;
+        let first_pdp = if elapsed_steps > 1 && open_pdp_seconds > 0.0 {
+            let pre_interval = step as f64 - open_pdp_seconds;
             let (partial_value, pre_unknown) = if let Some(integral) = integral {
                 let old_value = if old_pdp_value.is_nan() {
                     0.0
                 } else {
                     old_pdp_value
                 };
-                (
-                    old_value + integral / interval as f64 * pre_interval as f64,
-                    0.0,
-                )
+                (old_value + integral / interval * pre_interval, 0.0)
             } else {
-                (old_pdp_value, pre_interval as f64)
+                (old_pdp_value, pre_interval)
             };
             let denominator = info.step as f64 - old_unknown as f64 - pre_unknown;
             if denominator <= 0.0 || partial_value.is_nan() {
@@ -763,7 +769,7 @@ fn update_path_values_with_raw(
             pdp
         };
         let fill_pdp = if elapsed_steps > 1 {
-            integral.map_or(rrd_nan(), |integral| integral / interval as f64)
+            integral.map_or(rrd_nan(), |integral| integral / interval)
         } else {
             pdp.unwrap_or(rrd_nan())
         };
@@ -792,7 +798,7 @@ fn update_path_values_with_raw(
         for (archive_index, archive) in info.archives.iter().enumerate() {
             let prior_pdp_index = previous_boundary.div_euclid(step) as u64;
             let start_offset = archive.pdp_per_row - prior_pdp_index % archive.pdp_per_row;
-            let has_open_pdp = elapsed_steps > 1 && open_pdp_seconds > 0;
+            let has_open_pdp = elapsed_steps > 1 && open_pdp_seconds > 0.0;
             let first_rows_due = u64::from(has_open_pdp && start_offset <= 1);
             let remaining_elapsed = elapsed_steps as u64 - u64::from(has_open_pdp);
             let remaining_start = if has_open_pdp {
@@ -809,7 +815,7 @@ fn update_path_values_with_raw(
                 };
             let rows_to_write = rows_due.min(archive.rows);
             let skipped_rows = rows_due - rows_to_write;
-            let has_open_pdp = elapsed_steps > 1 && open_pdp_seconds > 0;
+            let has_open_pdp = elapsed_steps > 1 && open_pdp_seconds > 0.0;
             if has_open_pdp && archive.pdp_per_row > 1 {
                 let remaining_elapsed = elapsed_steps as u64 - 1;
                 let remaining_start =
@@ -1189,7 +1195,7 @@ fn update_path_values_with_raw(
     }
     file.seek(SeekFrom::Start(live_start as u64))?;
     file.write_all(&timestamp.to_le_bytes())?;
-    file.write_all(&0_i64.to_le_bytes())?;
+    file.write_all(&(timestamp_usec as i64).to_le_bytes())?;
     file.sync_data()?;
     Ok(summaries)
 }
@@ -1233,7 +1239,18 @@ pub fn update_rrd_file(
     timestamp: i64,
     value: Option<f64>,
 ) -> Result<(), StoreError> {
-    update_path(path.as_ref(), timestamp, value)
+    update_path(path.as_ref(), timestamp, 0, value)
+}
+
+/// Update an existing RRDtool file at a normalized timestamp with microsecond
+/// precision, preserving the timestamp representation used by RRDtool 1.11.0.
+pub fn update_rrd_file_precise(
+    path: impl AsRef<Path>,
+    timestamp: i64,
+    timestamp_usec: u64,
+    value: Option<f64>,
+) -> Result<(), StoreError> {
+    update_path(path.as_ref(), timestamp, timestamp_usec, value)
 }
 
 /// Update one timestamp in an existing v3 file using one value per data source.
@@ -1242,7 +1259,7 @@ pub fn update_rrd_values(
     timestamp: i64,
     values: &[Option<f64>],
 ) -> Result<(), StoreError> {
-    update_path_values(path.as_ref(), timestamp, values).map(|_| ())
+    update_path_values(path.as_ref(), timestamp, 0, values).map(|_| ())
 }
 
 /// Update an RRD while preserving the caller's exact decimal text for each
@@ -1253,6 +1270,16 @@ pub fn update_rrd_raw_values(
     timestamp: i64,
     values: &[Option<&str>],
 ) -> Result<(), StoreError> {
+    update_rrd_raw_values_precise(path, timestamp, 0, values)
+}
+
+/// Raw-text counterpart to [`update_rrd_file_precise`].
+pub fn update_rrd_raw_values_precise(
+    path: impl AsRef<Path>,
+    timestamp: i64,
+    timestamp_usec: u64,
+    values: &[Option<&str>],
+) -> Result<(), StoreError> {
     let numeric = values
         .iter()
         .map(|value| {
@@ -1261,7 +1288,14 @@ pub fn update_rrd_raw_values(
                 .transpose()
         })
         .collect::<Result<Vec<_>, _>>()?;
-    update_path_values_with_raw(path.as_ref(), timestamp, &numeric, Some(values)).map(|_| ())
+    update_path_values_with_raw(
+        path.as_ref(),
+        timestamp,
+        timestamp_usec,
+        &numeric,
+        Some(values),
+    )
+    .map(|_| ())
 }
 
 /// Update an RRD and return the archive rows written, in RRA and row order.
@@ -1270,13 +1304,23 @@ pub fn update_rrd_values_verbose(
     timestamp: i64,
     values: &[Option<f64>],
 ) -> Result<Vec<RrdUpdateSummary>, StoreError> {
-    update_path_values(path.as_ref(), timestamp, values)
+    update_path_values(path.as_ref(), timestamp, 0, values)
 }
 
 /// Raw-text counterpart to [`update_rrd_values_verbose`].
 pub fn update_rrd_raw_values_verbose(
     path: impl AsRef<Path>,
     timestamp: i64,
+    values: &[Option<&str>],
+) -> Result<Vec<RrdUpdateSummary>, StoreError> {
+    update_rrd_raw_values_precise_verbose(path, timestamp, 0, values)
+}
+
+/// Raw-text verbose counterpart to [`update_rrd_file_precise`].
+pub fn update_rrd_raw_values_precise_verbose(
+    path: impl AsRef<Path>,
+    timestamp: i64,
+    timestamp_usec: u64,
     values: &[Option<&str>],
 ) -> Result<Vec<RrdUpdateSummary>, StoreError> {
     let numeric = values
@@ -1287,7 +1331,13 @@ pub fn update_rrd_raw_values_verbose(
                 .transpose()
         })
         .collect::<Result<Vec<_>, _>>()?;
-    update_path_values_with_raw(path.as_ref(), timestamp, &numeric, Some(values))
+    update_path_values_with_raw(
+        path.as_ref(),
+        timestamp,
+        timestamp_usec,
+        &numeric,
+        Some(values),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1646,13 +1696,6 @@ fn f64_at_file(file: &mut File, offset: usize) -> Result<f64, StoreError> {
     let mut bytes = [0; 8];
     file.read_exact(&mut bytes)?;
     Ok(f64::from_le_bytes(bytes))
-}
-
-fn i64_at_file(file: &mut File, offset: usize) -> Result<i64, StoreError> {
-    file.seek(SeekFrom::Start(offset as u64))?;
-    let mut bytes = [0; 8];
-    file.read_exact(&mut bytes)?;
-    Ok(i64::from_le_bytes(bytes))
 }
 
 /// Fetch data from an existing RRDtool file by path. The file is opened
@@ -2310,6 +2353,12 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
     let rra_start = checked_add(ds_start, checked_mul(ds_count, DS_DEF_LEN)?)?;
     let live_start = checked_add(rra_start, checked_mul(rra_count, RRA_DEF_LEN)?)?;
     let last_update = i64_at(bytes, live_start)?;
+    let last_update_usec = u64_at(bytes, checked_add(live_start, 8)?)?;
+    if last_update_usec >= 1_000_000 {
+        return Err(StoreError::RrdFormat(
+            "RRD last update microseconds are out of range".into(),
+        ));
+    }
     let pdp_start = checked_add(live_start, LIVE_HEAD_LEN)?;
     let cdp_start = checked_add(pdp_start, checked_mul(ds_count, PDP_PREP_LEN)?)?;
     let pointer_start = checked_add(
@@ -2428,6 +2477,7 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
         version,
         step,
         last_update,
+        last_update_usec,
         header_size: data_start,
         data_sources,
         archives,
