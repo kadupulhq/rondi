@@ -1839,6 +1839,19 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             print!("{output}");
         }
     } else {
+        // rrd_tool.c only recognizes the separate `--imginfo`/`-f` spelling
+        // when deciding whether to print the canvas size.
+        let print_dimensions = !verbose
+            && !args[1..]
+                .iter()
+                .any(|argument| argument == "--imginfo" || argument == "-f");
+        if print_dimensions {
+            let (width, height) = match graph_image.as_deref() {
+                Some(image) => png_dimensions(image)?,
+                None => (0, 0),
+            };
+            println!("{width}x{height}");
+        }
         if let Some(image) = graph_image.as_deref() {
             std::fs::write(filename, image)?;
             if let Some(format) = imginfo.as_deref() {
@@ -1856,6 +1869,10 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             print!("graph_start = {start}\ngraph_end = {end}\ngraph_step = {step}\n");
             for (index, value) in prints.iter().enumerate() {
                 println!("print[{index}] = {}", serde_json::to_string(value)?);
+            }
+        } else {
+            for value in &prints {
+                println!("{value}");
             }
         }
     }

@@ -156,3 +156,83 @@ fn xml_output_writes_legend_and_print_text_verbatim() {
     ]);
     assert_same_stdout(&fixture, &graph);
 }
+
+// rrd_tool.c prints "WxH" unless an exact --imginfo/-f argument is present,
+// then the image_info line and every PRINT result. Rondi's PNG canvas size
+// is not pixel-compatible yet, so its dimension line is checked against the
+// written file instead of the upstream text.
+#[test]
+fn graph_to_file_prints_dimensions_and_print_lines() {
+    let Some(fixture) = fixture() else { return };
+    let def = format!("DEF:x={}:x:AVERAGE", fixture.database.display());
+    let image = fixture._temp.path().join("graph.png");
+    let elements = [
+        def.as_str(),
+        "LINE1:x#ff0000",
+        "VDEF:v=x,MAXIMUM",
+        "PRINT:v:%6.2lf",
+        "GPRINT:v:%6.2lf",
+        "PRINT:x:AVERAGE:%6.2lf",
+    ];
+    let graph = |output: &Path, options: &[&str]| {
+        let mut args = vec![String::from("graph"), output.display().to_string()];
+        args.extend(strings(&["--start", "1000000000", "--end", "1000000600"]));
+        args.extend(strings(options));
+        args.extend(strings(&elements));
+        args
+    };
+    let lines = |output: Output| -> Vec<String> {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    };
+    // Canvas sizes are replaced by placeholders before comparing, so only
+    // which lines appear and their order are checked against upstream.
+    let normalize = |lines: &[String]| -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| {
+                let is_size = line.split_once('x').is_some_and(|(width, height)| {
+                    [width, height]
+                        .iter()
+                        .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+                });
+                if is_size {
+                    String::from("<size>")
+                } else if line.starts_with("<IMG ") {
+                    String::from("<imginfo>")
+                } else {
+                    line.clone()
+                }
+            })
+            .collect()
+    };
+    let imginfo = "<IMG %s %lu %lu>";
+    let imginfo_equals = format!("--imginfo={imginfo}");
+    for options in [
+        vec![],
+        vec!["--imginfo", imginfo],
+        vec!["-f", imginfo],
+        vec![imginfo_equals.as_str()],
+    ] {
+        let args = graph(&image, &options);
+        let expected = lines(run(Path::new("rrdtool"), &args));
+        let actual = lines(run(&fixture.alias, &args));
+        assert_eq!(normalize(&actual), normalize(&expected), "{options:?}");
+        if normalize(&actual)[0] == "<size>" {
+            let bytes = std::fs::read(&image).unwrap();
+            let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
+            let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
+            assert_eq!(actual[0], format!("{width}x{height}"));
+        }
+    }
+    let xml = fixture._temp.path().join("graph.xml");
+    assert_same_stdout(&fixture, &graph(&xml, &["--imgformat", "XML"]));
+    assert_same_stdout(&fixture, &graph(Path::new("-"), &["--imgformat", "XML"]));
+}
