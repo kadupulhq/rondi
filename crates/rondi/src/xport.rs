@@ -1,5 +1,7 @@
 //! Query and resample existing RRD archives for RRDtool-style exports.
-use crate::{RrdFetchResult, StoreError, fetch_rrd_file, rrd_number::parse_rrd_number};
+use crate::{
+    RrdFetchResult, RrdFetchRow, StoreError, fetch_rrd_file, rrd_number::parse_rrd_number,
+};
 use std::{collections::HashMap, path::PathBuf};
 
 #[inline]
@@ -20,6 +22,14 @@ pub struct RrdXportDefinition {
     pub file: PathBuf,
     pub data_source: String,
     pub consolidation: String,
+    /// `:step=` resolution requested for this DEF instead of the export step.
+    pub step: Option<u64>,
+    /// `:start=`/`:end=` fetch window, replacing the export range.
+    pub start: Option<i64>,
+    pub end: Option<i64>,
+    /// `:reduce=` consolidation used when the fetched rows are finer than the
+    /// requested step; defaults to the DEF's own CF.
+    pub reduce: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,9 +51,10 @@ pub struct RrdXportResult {
     pub step: u64,
     pub legends: Vec<String>,
     pub rows: Vec<Vec<Option<f64>>>,
-    /// Row-wise values before non-finite numbers are converted to unknowns for
-    /// XPORT output. Graph VDEF calculations need to distinguish infinities
-    /// from unknown data even though both serialize as null/unknown.
+    /// Row-wise values for every DEF and CDEF, including ones that are not
+    /// exported, over RRDtool's graph buffer. That buffer has one more slot
+    /// than `rows` when `end` is step-aligned. `rows` keeps infinities because
+    /// XML prints them while JSON writes null; only NaN becomes `None`.
     pub raw_variables: HashMap<String, Vec<f64>>,
 }
 
@@ -107,13 +118,25 @@ pub fn fetch_xport_with_cdefs(
 
     let mut fetched_definitions = Vec::with_capacity(definitions.len());
     for definition in definitions {
-        let fetched = fetch_rrd_file(
+        let requested = definition.step.unwrap_or(fetch_resolution);
+        let mut fetched = fetch_rrd_file(
             &definition.file,
             &definition.consolidation,
-            start,
-            end,
-            fetch_resolution,
+            definition.start.unwrap_or(start),
+            definition.end.unwrap_or(end),
+            requested,
         )?;
+        let target_step = requested.max(fetch_resolution);
+        if fetched.step < target_step {
+            reduce_fetched_rows(
+                &mut fetched,
+                definition
+                    .reduce
+                    .as_deref()
+                    .unwrap_or(&definition.consolidation),
+                target_step,
+            )?;
+        }
         let source_index = fetched
             .data_sources
             .iter()
@@ -185,13 +208,21 @@ pub fn fetch_xport_with_cdefs(
             "xport output exceeds the 10 million row safety limit".into(),
         ));
     }
+    // RRDtool's fetched buffer, and so every CDEF and graph VDEF, ends one
+    // step after the last full row at or before `end`. With an aligned end
+    // that is one slot beyond the exported rows.
+    let buffer_rows = if end == floor_end {
+        row_count + 1
+    } else {
+        row_count
+    };
 
     let mut variables: HashMap<String, Vec<f64>> = HashMap::new();
     for definition in &fetched_definitions {
         let source_step = i64::try_from(definition.fetched.step)
             .map_err(|_| StoreError::RrdUnsupported("DEF step overflows".into()))?;
-        let mut values = Vec::with_capacity(row_count);
-        for row_index in 0..row_count {
+        let mut values = Vec::with_capacity(buffer_rows);
+        for row_index in 0..buffer_rows {
             let row_offset = i64::try_from(row_index)
                 .ok()
                 .and_then(|row| row.checked_mul(step_i64))
@@ -222,8 +253,8 @@ pub fn fetch_xport_with_cdefs(
                 cdef.name
             )));
         }
-        let mut values = Vec::with_capacity(row_count);
-        for row_index in 0..row_count {
+        let mut values = Vec::with_capacity(buffer_rows);
+        for row_index in 0..buffer_rows {
             let timestamp = i64::try_from(row_index)
                 .ok()
                 .and_then(|row| row.checked_add(1))
@@ -253,7 +284,7 @@ pub fn fetch_xport_with_cdefs(
                 ))
             })?;
             let value = values[row_index];
-            output_row.push(if value.is_finite() { Some(value) } else { None });
+            output_row.push(if value.is_nan() { None } else { Some(value) });
         }
     }
     Ok(RrdXportResult {
@@ -1161,6 +1192,115 @@ fn expression_step(
         ));
     }
     Ok(step)
+}
+
+/// Port of `rrd_reduce_data`: widen the fetched window to multiples of the
+/// new step, pad partial edge rows with unknowns, and consolidate each group
+/// of source rows with `consolidation`.
+fn reduce_fetched_rows(
+    fetched: &mut RrdFetchResult,
+    consolidation: &str,
+    step: u64,
+) -> Result<(), StoreError> {
+    let overflow = || StoreError::RrdUnsupported("DEF reduce step overflows".into());
+    let current = i64::try_from(fetched.step).map_err(|_| overflow())?;
+    let factor = step.div_ceil(fetched.step);
+    let new_step = fetched.step.checked_mul(factor).ok_or_else(overflow)?;
+    let new_step_i64 = i64::try_from(new_step).map_err(|_| overflow())?;
+    let factor = usize::try_from(factor).map_err(|_| overflow())?;
+    let columns = fetched.data_sources.len();
+    let mut start = fetched.start;
+    let mut end = fetched.end;
+    let mut remaining = usize::try_from((end - start) / current).map_err(|_| overflow())?;
+    let start_offset = start.rem_euclid(new_step_i64);
+    let end_offset = end.rem_euclid(new_step_i64);
+    let mut source = 0_usize;
+    let mut reduced = Vec::new();
+    let sanity = |remaining: usize| {
+        StoreError::RrdUnsupported(format!(
+            "SANITY CHECK: {remaining} rows cannot be reduced by {factor} "
+        ))
+    };
+    if start_offset != 0 {
+        start -= start_offset;
+        source = factor - usize::try_from(start_offset / current).map_err(|_| overflow())?;
+        reduced.push(vec![None; columns]);
+        remaining = remaining
+            .checked_sub(source)
+            .ok_or_else(|| sanity(remaining))?;
+    }
+    if end_offset != 0 {
+        end = end - end_offset + new_step_i64;
+        let skipped = usize::try_from(end_offset / current).map_err(|_| overflow())?;
+        remaining = remaining
+            .checked_sub(skipped)
+            .ok_or_else(|| sanity(remaining))?;
+    }
+    if remaining % factor != 0 {
+        return Err(sanity(remaining));
+    }
+    while remaining >= factor {
+        let mut row = Vec::with_capacity(columns);
+        for column in 0..columns {
+            let mut value = None::<f64>;
+            let mut valid = 0_u32;
+            for offset in 0..factor {
+                let Some(sample) = fetched
+                    .rows
+                    .get(source + offset)
+                    .and_then(|row| row.values.get(column).copied().flatten())
+                    .filter(|sample| !sample.is_nan())
+                else {
+                    continue;
+                };
+                valid += 1;
+                value = Some(match value {
+                    None => sample,
+                    Some(value) => match consolidation {
+                        "MIN" => {
+                            if value < sample {
+                                value
+                            } else {
+                                sample
+                            }
+                        }
+                        "MAX" | "FAILURES" => {
+                            if value > sample {
+                                value
+                            } else {
+                                sample
+                            }
+                        }
+                        "LAST" => sample,
+                        _ => value + sample,
+                    },
+                });
+            }
+            row.push(match (value, consolidation) {
+                (Some(value), "MIN" | "MAX" | "FAILURES" | "LAST") => Some(value),
+                (Some(value), _) => Some(value / f64::from(valid)),
+                (None, _) => None,
+            });
+        }
+        reduced.push(row);
+        source += factor;
+        remaining -= factor;
+    }
+    if end_offset != 0 {
+        reduced.push(vec![None; columns]);
+    }
+    let mut timestamp = start;
+    fetched.rows = reduced
+        .into_iter()
+        .map(|values| {
+            timestamp += new_step_i64;
+            RrdFetchRow { timestamp, values }
+        })
+        .collect();
+    fetched.start = start;
+    fetched.end = end;
+    fetched.step = new_step;
+    Ok(())
 }
 
 fn gcd(mut left: u64, mut right: u64) -> u64 {

@@ -1336,7 +1336,7 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{:>10}:", row.timestamp);
         for value in row.values {
             match value {
-                Some(value) => print!(" {}", format_rrd_float(value)),
+                Some(value) => print!(" {}", format_fetch_value(value)),
                 None if from_daemon => print!(" {}", rrd_daemon_unknown_text()),
                 None => print!(" {}", rrd_unknown_text()),
             }
@@ -1358,8 +1358,11 @@ fn rrd_nan() -> f64 {
     }
 }
 
+// RRDtool prints unknowns with printf. glibc spells a NaN with its sign bit
+// set as `-nan`; the Apple and BSD libcs print `nan` for every NaN. Which
+// path carries the sign bit depends on the CPU's default NaN.
 fn rrd_unknown_text() -> &'static str {
-    if cfg!(target_arch = "x86_64") {
+    if cfg!(all(target_env = "gnu", target_arch = "x86_64")) {
         "-nan"
     } else {
         "nan"
@@ -1367,10 +1370,10 @@ fn rrd_unknown_text() -> &'static str {
 }
 
 fn rrd_daemon_unknown_text() -> &'static str {
-    if cfg!(target_arch = "x86_64") {
-        "nan"
-    } else {
+    if cfg!(all(target_env = "gnu", not(target_arch = "x86_64"))) {
         "-nan"
+    } else {
+        "nan"
     }
 }
 
@@ -1492,6 +1495,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     let mut graph_colors = GraphColors::default();
     let mut grid_dash = Vec::<f64>::new();
     let mut border_width = 2_u32;
+    let mut si_base = 1000_u32;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
@@ -1512,6 +1516,11 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         }
         if let Some(value) = argument.strip_prefix("--imginfo=") {
             imginfo = Some(value.to_owned());
+            index += 1;
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--base=") {
+            si_base = parse_graph_base(value)?;
             index += 1;
             continue;
         }
@@ -1540,6 +1549,10 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                 }
                 xport_args.push(argument.clone());
                 xport_args.push(value.clone());
+                index += 2;
+            }
+            "--base" | "-b" => {
+                si_base = parse_graph_base(args.get(index + 1).ok_or("--base requires a value")?)?;
                 index += 2;
             }
             "--width" | "-w" | "--height" | "-h" => {
@@ -1769,7 +1782,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     }
     xport_args.extend(definitions);
     let rendered =
-        render_xport_with_graph_prints(&xport_args, Some(&graph_gprints), &graph_prints)?;
+        render_xport_with_graph_prints(&xport_args, Some(&graph_gprints), &graph_prints, si_base)?;
     let graph_image = if format == "PNG" {
         Some(render_graph_png(
             &rendered,
@@ -1839,6 +1852,19 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             print!("{output}");
         }
     } else {
+        // rrd_tool.c only recognizes the separate `--imginfo`/`-f` spelling
+        // when deciding whether to print the canvas size.
+        let print_dimensions = !verbose
+            && !args[1..]
+                .iter()
+                .any(|argument| argument == "--imginfo" || argument == "-f");
+        if print_dimensions {
+            let (width, height) = match graph_image.as_deref() {
+                Some(image) => png_dimensions(image)?,
+                None => (0, 0),
+            };
+            println!("{width}x{height}");
+        }
         if let Some(image) = graph_image.as_deref() {
             std::fs::write(filename, image)?;
             if let Some(format) = imginfo.as_deref() {
@@ -1857,9 +1883,34 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             for (index, value) in prints.iter().enumerate() {
                 println!("print[{index}] = {}", serde_json::to_string(value)?);
             }
+        } else {
+            for value in &prints {
+                println!("{value}");
+            }
         }
     }
     Ok(())
+}
+
+// rrd_graph.c reads --base with atol, so trailing text after the digits is
+// ignored before the 1000/1024 check.
+fn parse_graph_base(value: &str) -> Result<u32, Box<dyn std::error::Error>> {
+    let trimmed = value.trim_start();
+    let negative = trimmed.starts_with('-');
+    let unsigned = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
+    let base = unsigned
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .fold(0_u64, |total, digit| {
+            total
+                .saturating_mul(10)
+                .saturating_add(u64::from(digit - b'0'))
+        });
+    match (negative, base) {
+        (false, 1000) => Ok(1000),
+        (false, 1024) => Ok(1024),
+        _ => Err("the only sensible value for base apart from 1000 is 1024".into()),
+    }
 }
 
 fn parse_graph_series(
@@ -2259,6 +2310,127 @@ struct GraphVdef {
     percentile: Option<f64>,
 }
 
+#[derive(Default)]
+struct GraphDefOptions {
+    start: Option<String>,
+    end: Option<String>,
+    daemon: Option<String>,
+}
+
+/// Parse `DEF:vname=rrd:ds:cf[:key=value...]` the way rrd_graph_helper.c
+/// splits graph arguments: `\:` escapes a colon, `key=value` fields may
+/// appear anywhere after the first, the last repeated key wins, and fields
+/// that nothing consumes are an error.
+fn parse_graph_def(
+    value: &str,
+) -> Result<(rondi::RrdXportDefinition, GraphDefOptions), Box<dyn std::error::Error>> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' if chars.peek() == Some(&':') => field.push(chars.next().unwrap_or(':')),
+            ':' => fields.push(std::mem::take(&mut field)),
+            _ => field.push(ch),
+        }
+    }
+    fields.push(field);
+    // (key, value, consumed) in argument order; positional fields have no key.
+    let mut entries = Vec::<(Option<String>, String, bool)>::new();
+    let mut vname_rrd = None;
+    for field in fields.iter().skip(1) {
+        match field.split_once('=') {
+            Some((key, rest)) if vname_rrd.is_none() => {
+                vname_rrd = Some((key.to_owned(), rest.to_owned()));
+            }
+            Some((key, rest)) => entries.push((Some(key.to_owned()), rest.to_owned(), false)),
+            None => entries.push((None, field.clone(), false)),
+        }
+    }
+    let mut take = |key: &str| {
+        entries
+            .iter_mut()
+            .rev()
+            .find(|(name, _, _)| name.as_deref() == Some(key))
+            .map(|(_, value, used)| {
+                *used = true;
+                value.clone()
+            })
+    };
+    let reduce = take("reduce");
+    let daemon = take("daemon");
+    let step = take("step");
+    let start = take("start");
+    let end = take("end");
+    if let Some(reduce) = &reduce
+        && !matches!(
+            reduce.as_str(),
+            "AVERAGE"
+                | "MIN"
+                | "MAX"
+                | "LAST"
+                | "HWPREDICT"
+                | "MHWPREDICT"
+                | "DEVPREDICT"
+                | "SEASONAL"
+                | "DEVSEASONAL"
+                | "FAILURES"
+        )
+    {
+        return Err(format!("bad reduce CF: {reduce}").into());
+    }
+    let step = match step {
+        Some(text) => match text.trim_start().parse::<i64>() {
+            Ok(step) if step >= 1 => Some(step.unsigned_abs()),
+            _ => return Err(format!("Bad step value: {text}").into()),
+        },
+        None => None,
+    };
+    let Some((name, file)) = vname_rrd else {
+        return Err(format!("No argument for definition of vdef/rrd in {value}").into());
+    };
+    let mut next_positional = |what: &str| {
+        entries
+            .iter_mut()
+            .find(|(key, _, used)| key.is_none() && !used)
+            .map(|(_, field, used)| {
+                *used = true;
+                field.clone()
+            })
+            .ok_or_else(|| format!("No argument for definition of {what} in {value}"))
+    };
+    let data_source = next_positional("DS")?;
+    let consolidation = next_positional("CF")?;
+    let unused = entries
+        .iter()
+        .filter(|(_, _, used)| !used)
+        .map(|(key, field, _)| match key {
+            Some(key) => format!("{key}={field}"),
+            None => field.clone(),
+        })
+        .collect::<Vec<_>>();
+    if !unused.is_empty() {
+        return Err(format!(
+            "Unused Arguments \"{}\" in command : {value}",
+            unused.join(":")
+        )
+        .into());
+    }
+    Ok((
+        rondi::RrdXportDefinition {
+            name,
+            file: PathBuf::from(file),
+            data_source,
+            consolidation: consolidation.to_ascii_uppercase(),
+            step,
+            start: None,
+            end: None,
+            reduce,
+        },
+        GraphDefOptions { start, end, daemon },
+    ))
+}
+
 fn parse_graph_vdef(definition: &str) -> Result<GraphVdef, Box<dyn std::error::Error>> {
     let (name, expression) = definition
         .strip_prefix("VDEF:")
@@ -2412,7 +2584,7 @@ fn render_xport_with_gprints(
     args: &[String],
     graph_gprints: Option<&[(String, String)]>,
 ) -> Result<(String, i64, i64, u64), Box<dyn std::error::Error>> {
-    let rendered = render_xport_with_graph_prints(args, graph_gprints, &[])?;
+    let rendered = render_xport_with_graph_prints(args, graph_gprints, &[], 1000)?;
     Ok((rendered.output, rendered.start, rendered.end, rendered.step))
 }
 
@@ -2430,6 +2602,7 @@ fn render_xport_with_graph_prints(
     args: &[String],
     graph_gprints: Option<&[(String, String)]>,
     graph_prints: &[GraphPrint],
+    si_base: u32,
 ) -> Result<RenderedGraphXport, Box<dyn std::error::Error>> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -2443,6 +2616,7 @@ fn render_xport_with_graph_prints(
     let mut show_time = false;
     let mut enum_ds = false;
     let mut definitions = Vec::<rondi::RrdXportDefinition>::new();
+    let mut definition_options = Vec::<GraphDefOptions>::new();
     let mut cdefs = Vec::<rondi::RrdXportCdef>::new();
     let mut vdefs = Vec::<GraphVdef>::new();
     let mut exports = Vec::<rondi::RrdXportColumn>::new();
@@ -2492,27 +2666,9 @@ fn render_xport_with_graph_prints(
                 index += 1;
             }
             value if value.starts_with("DEF:") => {
-                let definition = &value[4..];
-                let (name, source) = definition
-                    .split_once('=')
-                    .ok_or_else(|| format!("invalid DEF: {value}"))?;
-                let mut fields = source.rsplitn(3, ':');
-                let consolidation = fields.next().unwrap_or_default();
-                let data_source = fields.next().unwrap_or_default();
-                let file = fields.next().unwrap_or_default();
-                if name.is_empty()
-                    || file.is_empty()
-                    || data_source.is_empty()
-                    || consolidation.is_empty()
-                {
-                    return Err(format!("invalid DEF: {value}").into());
-                }
-                definitions.push(rondi::RrdXportDefinition {
-                    name: name.to_owned(),
-                    file: PathBuf::from(file),
-                    data_source: data_source.to_owned(),
-                    consolidation: consolidation.to_ascii_uppercase(),
-                });
+                let (definition, options) = parse_graph_def(value)?;
+                definitions.push(definition);
+                definition_options.push(options);
                 index += 1;
             }
             value if value.starts_with("XPORT:") => {
@@ -2565,16 +2721,36 @@ fn render_xport_with_graph_prints(
         return Err(format!("the first entry to fetch should be after 1980 ({start})").into());
     }
     let visible_export_count = exports.len();
-    if let Some(address) = daemon_address
+    for (definition, options) in definitions.iter_mut().zip(&definition_options) {
+        if options.start.is_none() && options.end.is_none() {
+            continue;
+        }
+        let start_spec = options.start.clone().unwrap_or_else(|| start.to_string());
+        let end_spec = options.end.clone().unwrap_or_else(|| end.to_string());
+        let (def_start, def_end) =
+            resolve_rrd_range_times(Some(&start_spec), Some(&end_spec), start, end, now)?;
+        if def_start < 315_360_000 {
+            return Err(
+                format!("the first entry to fetch should be after 1980 ({def_start})").into(),
+            );
+        }
+        if def_end < def_start {
+            return Err(format!("start ({def_start}) should be less than end ({def_end})").into());
+        }
+        definition.start = Some(def_start);
+        definition.end = Some(def_end);
+    }
+    let default_address = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
-        .filter(|address| !address.is_empty())
-    {
-        let mut flushed = std::collections::HashSet::new();
-        for definition in &definitions {
-            let filename = definition.file.to_string_lossy().into_owned();
-            if flushed.insert(filename.clone()) {
-                send_rrdcached_flush(&address, &filename)?;
-            }
+        .filter(|address| !address.is_empty());
+    let mut flushed = std::collections::HashSet::new();
+    for (definition, options) in definitions.iter().zip(&definition_options) {
+        let Some(address) = options.daemon.as_ref().or(default_address.as_ref()) else {
+            continue;
+        };
+        let filename = definition.file.to_string_lossy().into_owned();
+        if flushed.insert((address.clone(), filename.clone())) {
+            send_rrdcached_flush(address, &filename)?;
         }
     }
     for variable in vdefs.iter().map(|vdef| vdef.variable.as_str()).chain(
@@ -2606,10 +2782,6 @@ fn render_xport_with_graph_prints(
             .get(&vdef.variable)
             .cloned()
             .ok_or_else(|| format!("VDEF source variable {} is unavailable", vdef.variable))?;
-        // RRDtool's graph buffer includes an unknown right-edge boundary slot
-        // that is not part of the rows returned by xport.
-        let mut values = values;
-        values.push(rrd_nan());
         let value = rondi::evaluate_vdef(
             vdef.function,
             vdef.percentile,
@@ -2621,6 +2793,7 @@ fn render_xport_with_graph_prints(
     }
     let mut graph_gprints_out = graph_gprints.unwrap_or_default().to_vec();
     let mut print_values = Vec::new();
+    let mut si_scale = GraphSiScale::new(si_base);
     for graph_print in graph_prints {
         let (value, timestamp) = if let Some(value) = vdef_values.get(&graph_print.variable) {
             (value.value, value.timestamp)
@@ -2636,14 +2809,12 @@ fn render_xport_with_graph_prints(
                     graph_print.variable
                 )
             })?;
-            let column = exports
-                .iter()
-                .position(|export| export.variable == graph_print.variable)
-                .ok_or_else(|| format!("unknown graph print variable {}", graph_print.variable))?;
             let values = result
-                .rows
+                .raw_variables
+                .get(&graph_print.variable)
+                .ok_or_else(|| format!("unknown graph print variable {}", graph_print.variable))?
                 .iter()
-                .filter_map(|row| row.get(column).copied().flatten())
+                .copied()
                 .filter(|value| value.is_finite())
                 .collect::<Vec<_>>();
             let value = match consolidation {
@@ -2664,8 +2835,13 @@ fn render_xport_with_graph_prints(
             };
             (value, None)
         };
-        let formatted =
-            format_graph_print(value, timestamp, graph_print.formatter, &graph_print.format)?;
+        let formatted = format_graph_print(
+            value,
+            timestamp,
+            graph_print.formatter,
+            &graph_print.format,
+            &mut si_scale,
+        )?;
         if graph_print.kind == "gprint" {
             graph_gprints_out.push((String::from("gprint"), formatted));
         } else {
@@ -3813,9 +3989,10 @@ fn format_graph_print(
     timestamp: Option<i64>,
     formatter: GraphPrintFormatter,
     format: &str,
+    si_scale: &mut GraphSiScale,
 ) -> Result<String, Box<dyn std::error::Error>> {
     match formatter {
-        GraphPrintFormatter::Numeric => format_graph_numeric(value, format),
+        GraphPrintFormatter::Numeric => format_graph_numeric(value, format, si_scale),
         GraphPrintFormatter::Strftime => match timestamp {
             Some(timestamp) => format_graph_time(timestamp, format),
             None => Ok(clean_graph_time_format(format)),
@@ -3881,16 +4058,51 @@ fn clean_graph_time_format(format: &str) -> String {
     result
 }
 
-fn format_graph_numeric(value: f64, format: &str) -> Result<String, Box<dyn std::error::Error>> {
+/// SI scaling state that RRDtool's print_calc shares across every PRINT and
+/// GPRINT of one graph.
+struct GraphSiScale {
+    base: u32,
+    magnitude: Option<f64>,
+    symbol: &'static str,
+}
+
+impl GraphSiScale {
+    fn new(base: u32) -> Self {
+        Self {
+            base,
+            magnitude: None,
+            symbol: "",
+        }
+    }
+}
+
+fn format_graph_numeric(
+    value: f64,
+    format: &str,
+    si_scale: &mut GraphSiScale,
+) -> Result<String, Box<dyn std::error::Error>> {
     use std::ffi::CString;
 
     let parsed = parse_graph_numeric_format(format)
         .map_err(|_| format!("bad format for PRINT in \"{format}'"))?;
-    let (scaled_value, si_symbol) = if parsed.si_symbol.is_some() {
-        graph_si_scale(value)
-    } else {
-        (value, "")
+    let scaled_value = match parsed.si_symbol {
+        Some(index) => {
+            // %S reuses the magnitude chosen by the first scaled value, unless
+            // that value scaled to zero; %s always picks a new one.
+            let reuse = format.as_bytes()[parsed.substitutions[index].end - 1] == b'S';
+            match si_scale.magnitude {
+                Some(magnitude) if reuse => value / magnitude,
+                _ => {
+                    let (scaled, magnitude, symbol) = graph_si_scale(value, si_scale.base);
+                    si_scale.magnitude = (!reuse || scaled != 0.0).then_some(magnitude);
+                    si_scale.symbol = symbol;
+                    scaled
+                }
+            }
+        }
+        None => value,
     };
+    let si_symbol = si_scale.symbol;
     let mut output = String::with_capacity(format.len() + 32);
     let mut cursor = 0;
     for substitution in parsed.substitutions {
@@ -4045,30 +4257,32 @@ fn append_graph_format_literal(output: &mut String, literal: &str) {
     }
 }
 
-fn graph_si_scale(value: f64) -> (f64, &'static str) {
+fn graph_si_scale(value: f64, base: u32) -> (f64, f64, &'static str) {
     const SYMBOLS: [&str; 13] = [
         "a", "f", "p", "n", "u", "m", " ", "k", "M", "G", "T", "P", "E",
     ];
     if value == 0.0 || value.is_nan() {
-        return (value, SYMBOLS[6]);
+        return (value, 1.0, SYMBOLS[6]);
     }
     if value.is_infinite() {
         // auto_scale converts floor(log(inf)) to int: aarch64 saturates to
         // INT_MAX and divides by pow(base, INT_MAX) = inf, while x86_64 yields
         // INT_MIN and divides by zero. Either index is outside the table.
         #[cfg(target_arch = "x86_64")]
-        return (value, "?");
+        let factor = 0.0;
         #[cfg(not(target_arch = "x86_64"))]
-        return (f64::NAN, "?");
+        let factor = f64::INFINITY;
+        return (value / factor, factor, "?");
     }
-    let exponent = (value.abs().log10() / 3.0).floor() as i32;
-    let factor = 1000.0_f64.powi(exponent);
+    let base = f64::from(base);
+    let exponent = (value.abs().ln() / base.ln()).floor() as i32;
+    let factor = base.powf(f64::from(exponent));
     let symbol = usize::try_from(exponent + 6)
         .ok()
         .and_then(|index| SYMBOLS.get(index))
         .copied()
         .unwrap_or("?");
-    (value / factor, symbol)
+    (value / factor, factor, symbol)
 }
 
 fn format_xport_xml(
@@ -4092,30 +4306,20 @@ fn format_xport_xml(
     writeln!(output, "    <columns>{}</columns>", exports.len()).unwrap();
     output.push_str("    <legend>\n");
     for export in exports {
-        writeln!(
-            output,
-            "      <entry>{}</entry>",
-            xml_escape_text(&export.legend)
-        )
-        .unwrap();
+        writeln!(output, "      <entry>{}</entry>", export.legend).unwrap();
     }
     output.push_str("    </legend>\n");
     if let Some(prints) = options.graph_prints.filter(|values| !values.is_empty()) {
         output.push_str("    <prints>\n");
         for value in prints {
-            writeln!(output, "        <print>{}</print>", xml_escape_text(value)).unwrap();
+            writeln!(output, "        <print>{value}</print>").unwrap();
         }
         output.push_str("    </prints>\n");
     }
     if let Some(gprints) = options.graph_gprints.filter(|values| !values.is_empty()) {
         output.push_str("    <gprints>\n");
         for (kind, value) in gprints {
-            writeln!(
-                output,
-                "        <{kind}>{}</{kind}>",
-                xml_escape_text(value)
-            )
-            .unwrap();
+            writeln!(output, "        <{kind}>{value}</{kind}>").unwrap();
         }
         output.push_str("    </gprints>\n");
     }
@@ -4134,23 +4338,16 @@ fn format_xport_xml(
                 "v".to_owned()
             };
             match value {
-                Some(value) if value.is_finite() => {
-                    write!(output, "<{tag}>{}</{tag}>", format_rrd_scientific(*value)).unwrap();
+                Some(value) => {
+                    write!(output, "<{tag}>{}</{tag}>", format_xport_value(*value)).unwrap();
                 }
-                _ => write!(output, "<{tag}>NaN</{tag}>").unwrap(),
+                None => write!(output, "<{tag}>NaN</{tag}>").unwrap(),
             }
         }
         output.push_str("</row>\n");
     }
     output.push_str("  </data>\n</xport>\n");
     output
-}
-
-fn xml_escape_text(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 fn normalize_json_graph_nan(value: &str) -> String {
@@ -4224,7 +4421,7 @@ fn format_xport_json(
             }
             match value {
                 Some(value) if value.is_finite() => {
-                    write!(output, "{}", format_rrd_scientific(*value)).unwrap()
+                    write!(output, "{}", format_xport_value(*value)).unwrap()
                 }
                 _ => output.push_str("null"),
             }
@@ -4663,6 +4860,12 @@ fn send_rrdcached_update_on_stream(
         .unwrap_or(response)
         .to_owned()
         .into())
+}
+
+// xport rows go through rrd_snprintf, which only emits '-' for values below
+// zero, so -0 prints unsigned. updatev uses libc printf and keeps the sign.
+fn format_xport_value(value: f64) -> String {
+    format_rrd_scientific(if value == 0.0 { 0.0 } else { value })
 }
 
 fn format_rrd_scientific(value: f64) -> String {
@@ -5590,6 +5793,21 @@ fn inspect_rrd(path: &str) -> Result<rondi::RrdInfo, Box<dyn std::error::Error>>
     Ok(rondi::inspect_rrd_file(path)?)
 }
 
+// rrd_tool.c prints fetch rows with printf, so LC_NUMERIC picks the decimal
+// separator.
+fn format_fetch_value(value: f64) -> String {
+    let mut buffer = [0 as libc::c_char; 64];
+    let length =
+        unsafe { libc::snprintf(buffer.as_mut_ptr(), buffer.len(), c"%0.10e".as_ptr(), value) };
+    match usize::try_from(length) {
+        Ok(length) if length < buffer.len() => {
+            let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), length) };
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+        _ => format_rrd_float(value),
+    }
+}
+
 fn format_rrd_float(value: f64) -> String {
     let formatted = format!("{value:0.10e}");
     let Some((mantissa, exponent)) = formatted.split_once('e') else {
@@ -6247,11 +6465,13 @@ async fn server_mode(socket: PathBuf, command: Command) -> Result<(), Box<dyn st
 
 #[cfg(test)]
 mod xml_output_tests {
-    use super::{XportFormatOptions, format_xport_xml, xml_escape_text};
+    use super::{XportFormatOptions, format_xport_xml};
     use rondi::RrdXportColumn;
 
+    // rrd_xport.c writes these text nodes unescaped, so the document is not
+    // well-formed XML when they contain markup characters.
     #[test]
-    fn escapes_graph_xport_text_nodes() {
+    fn writes_graph_xport_text_nodes_verbatim() {
         let exports = [RrdXportColumn {
             variable: "rate".to_owned(),
             legend: "load & <peak>".to_owned(),
@@ -6272,14 +6492,9 @@ mod xml_output_tests {
             },
         );
 
-        assert!(xml.contains("<entry>load &amp; &lt;peak&gt;</entry>"));
-        assert!(xml.contains("<print>value &gt; 1 &amp; &lt; 2</print>"));
-        assert!(xml.contains("<gprint>&lt;ok &amp; done&gt;</gprint>"));
-    }
-
-    #[test]
-    fn xml_escaper_handles_ampersands_before_entities() {
-        assert_eq!(xml_escape_text("&amp; <x>"), "&amp;amp; &lt;x&gt;");
+        assert!(xml.contains("<entry>load & <peak></entry>"));
+        assert!(xml.contains("<print>value > 1 & < 2</print>"));
+        assert!(xml.contains("<gprint><ok & done></gprint>"));
     }
 }
 
