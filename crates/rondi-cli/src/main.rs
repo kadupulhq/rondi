@@ -1358,8 +1358,11 @@ fn rrd_nan() -> f64 {
     }
 }
 
+// RRDtool prints unknowns with printf. glibc spells a NaN with its sign bit
+// set as `-nan`; the Apple and BSD libcs print `nan` for every NaN. Which
+// path carries the sign bit depends on the CPU's default NaN.
 fn rrd_unknown_text() -> &'static str {
-    if cfg!(target_arch = "x86_64") {
+    if cfg!(all(target_env = "gnu", target_arch = "x86_64")) {
         "-nan"
     } else {
         "nan"
@@ -1367,10 +1370,10 @@ fn rrd_unknown_text() -> &'static str {
 }
 
 fn rrd_daemon_unknown_text() -> &'static str {
-    if cfg!(target_arch = "x86_64") {
-        "nan"
-    } else {
+    if cfg!(all(target_env = "gnu", not(target_arch = "x86_64"))) {
         "-nan"
+    } else {
+        "nan"
     }
 }
 
