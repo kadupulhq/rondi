@@ -672,13 +672,18 @@ impl RrdcachedQueue {
             .count()
     }
 
+    #[cfg(test)]
     fn enqueue(&mut self, path: PathBuf, samples: &[&str]) -> Result<(), String> {
-        let metadata =
-            std::fs::metadata(&path).map_err(|error| format!("No such file: {error}"))?;
-        if !metadata.is_file() {
-            return Err(format!("Not a regular file: {}", path.display()));
-        }
-        let info = rondi::inspect_rrd_file(&path).map_err(|error| error.to_string())?;
+        let info = inspect_rrdcached_target(&path)?;
+        self.enqueue_inspected(path, &info, samples)
+    }
+
+    fn enqueue_inspected(
+        &mut self,
+        path: PathBuf,
+        info: &rondi::RrdInfo,
+        samples: &[&str],
+    ) -> Result<(), String> {
         let mut last_timestamp = self
             .pending
             .get(&path)
@@ -742,6 +747,16 @@ impl RrdcachedQueue {
         self.schedule_path(&path, wall_time_seconds());
         Ok(())
     }
+}
+
+/// Reading the RRD can wait on another process's file lock, so callers do it
+/// before taking the queue lock (as upstream does before cache_lock).
+fn inspect_rrdcached_target(path: &Path) -> Result<rondi::RrdInfo, String> {
+    let metadata = std::fs::metadata(path).map_err(|error| format!("No such file: {error}"))?;
+    if !metadata.is_file() {
+        return Err(format!("Not a regular file: {}", path.display()));
+    }
+    rondi::inspect_rrd_file(path).map_err(|error| error.to_string())
 }
 
 #[derive(Deserialize)]
@@ -1265,11 +1280,13 @@ fn handle_rrdcached_line(
                 }
             } else {
                 match resolve_rrdcached_path(root, &fields[0]).and_then(|path| {
+                    let info = inspect_rrdcached_target(&path)?;
                     queue
                         .lock()
                         .map_err(|_| "rrdcached queue lock poisoned".to_owned())?
-                        .enqueue(
+                        .enqueue_inspected(
                             path,
+                            &info,
                             &fields[1..].iter().map(String::as_str).collect::<Vec<_>>(),
                         )
                 }) {
