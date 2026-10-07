@@ -308,7 +308,10 @@ fn evaluate_rpn(
                     .zip(prior)
                     .is_some_and(|(current, prior)| match token {
                         "NEWDAY" => current.tm_mday != prior.tm_mday,
-                        "NEWWEEK" => current.tm_wday == 0 && current.tm_wday != prior.tm_wday,
+                        "NEWWEEK" => {
+                            current.tm_wday == rrd_first_weekday()
+                                && current.tm_wday != prior.tm_wday
+                        }
                         "NEWMONTH" => current.tm_mon != prior.tm_mon,
                         "NEWYEAR" => current.tm_year != prior.tm_year,
                         _ => unreachable!(),
@@ -837,6 +840,38 @@ fn local_time_offset(timestamp: i64) -> Option<i64> {
         offset -= 86_400;
     }
     Some(offset)
+}
+
+/// Matches RRDtool's `find_first_weekday`: glibc uses the active LC_TIME
+/// metadata, while platforms without its private langinfo items use Sunday.
+#[cfg(all(unix, target_env = "gnu"))]
+fn rrd_first_weekday() -> i32 {
+    const NL_TIME_WEEK_1STDAY: libc::nl_item = 131_174;
+    const NL_TIME_FIRST_WEEKDAY: libc::nl_item = 131_176;
+
+    // These item values are glibc's private LC_TIME langinfo entries, also
+    // used by RRDtool 1.11.0's find_first_weekday implementation.
+    let (first_weekday, week_start) = unsafe {
+        let first_weekday = libc::nl_langinfo(NL_TIME_FIRST_WEEKDAY);
+        let week_start = libc::nl_langinfo(NL_TIME_WEEK_1STDAY);
+        if first_weekday.is_null() || week_start.is_null() {
+            return 1;
+        }
+        (*first_weekday as i32, week_start as usize as u64)
+    };
+    let week_start = if week_start == 19_971_130 || week_start >> 32 == 19_971_130 {
+        0
+    } else if week_start == 19_971_201 || week_start >> 32 == 19_971_201 {
+        1
+    } else {
+        return 1;
+    };
+    (week_start + first_weekday - 1).rem_euclid(7)
+}
+
+#[cfg(not(all(unix, target_env = "gnu")))]
+fn rrd_first_weekday() -> i32 {
+    0
 }
 
 fn gcd(mut left: u64, mut right: u64) -> u64 {
