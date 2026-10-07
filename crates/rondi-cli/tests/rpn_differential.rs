@@ -249,3 +249,26 @@ fn print_si_scale_of_infinity_matches_rrdtool() {
         "PRINT:w:%6.2lf %s",
     ]);
 }
+
+// rrd_rpncalc.c keeps one data cursor per variable and advances it only when
+// TIME % step == 0, so PREV(var), TREND, and PREDICT read z's own 30-second
+// rows inside a CDEF that x makes 10-second. The COUNT mask hides the first
+// and last rows, where RRDtool reads outside its buffers and the result
+// depends on the heap.
+#[test]
+fn mixed_resolution_variable_cursor_matches_rrdtool() {
+    let Some(fixture) = fixture() else { return };
+    for expression in [
+        "PREV(z)",
+        "z,60,TREND",
+        "z,90,TREND",
+        "z,120,TRENDNAN",
+        "1,1,60,z,PREDICT",
+        "0,30,2,60,z,PREDICTSIGMA",
+        "0,30,2,60,50,z,PREDICTPERC",
+        "30,-3,60,z,PREDICT",
+    ] {
+        let cdef = format!("x,POP,COUNT,12,GT,COUNT,58,LT,*,{expression},UNKN,IF");
+        fixture.assert_matches(&fixture.xport_args(&cdef));
+    }
+}

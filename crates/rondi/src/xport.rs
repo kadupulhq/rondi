@@ -465,11 +465,15 @@ fn evaluate_rpn(
                 let values = variables
                     .get(variable)
                     .ok_or_else(|| rpn_error(&format!("unknown variable '{variable}'")))?;
-                let prior = row
-                    .checked_sub(1)
-                    .and_then(|prior_row| values.get(prior_row))
-                    .copied()
-                    .unwrap_or(rrd_nan());
+                let source_step = source_step_seconds(variable_steps, variable)?;
+                // PREV(var) reads the source row before the variable's cursor,
+                // which sits on the source row that ends at or after TIME.
+                let prior = if row == 0 {
+                    rrd_nan()
+                } else {
+                    let cursor_end = timestamp + (-timestamp).rem_euclid(source_step);
+                    source_row_value(values, row, timestamp, step_width, cursor_end - source_step)
+                };
                 stack.push(prior);
             }
             "AVG" | "MEDIAN" | "STDEV" | "SMIN" | "SMAX" | "SORT" | "REV" => {
@@ -657,16 +661,12 @@ fn evaluate_rpn(
                     .get(variable)
                     .ok_or_else(|| rrdtool_rpn_error("malformed trend arguments"))?;
                 let duration = stack[stack.len() - 1];
-                let source_step = *variable_steps
-                    .get(variable)
-                    .ok_or_else(|| rpn_error("missing trend source step"))?;
+                let source_step_i64 = source_step_seconds(variable_steps, variable)?;
                 let duration_seconds = if duration.is_finite() {
                     duration as i64
                 } else {
                     return Err(rpn_error("invalid trend duration"));
                 };
-                let source_step_i64 = i64::try_from(source_step)
-                    .map_err(|_| rpn_error("trend source step overflows"))?;
                 // rrd_rpncalc.c first checks readiness using single-precision
                 // division, then separately consumes samples while the integer
                 // duration remains positive. The float rounding is visible for
@@ -676,22 +676,19 @@ fn evaluate_rpn(
                 let value = if !ready {
                     rrd_nan()
                 } else {
-                    let stride = usize::try_from(source_step / step_width)
-                        .map_err(|_| rpn_error("trend step ratio overflows"))?
-                        .max(1);
+                    // The variable's cursor has already advanced past the
+                    // current source row only when TIME ends that row, so
+                    // the newest sample is the last row ending at or before
+                    // TIME.
+                    let newest_end = timestamp - timestamp.rem_euclid(source_step_i64);
                     let mut sum = 0.0;
                     let mut count = 0_usize;
                     let mut unknown = false;
                     let mut remaining_duration = duration_seconds;
-                    let mut offset = 0_usize;
+                    let mut sample_end = newest_end;
                     loop {
-                        let index = row.checked_sub(offset.saturating_mul(stride));
-                        // RRDtool's RPN history buffer is zero-initialized
-                        // before the first available row.
-                        let sample = index
-                            .and_then(|index| values.get(index))
-                            .copied()
-                            .unwrap_or(0.0);
+                        let sample =
+                            source_row_value(values, row, timestamp, step_width, sample_end);
                         if sample.is_nan() {
                             if token == "TREND" {
                                 unknown = true;
@@ -705,7 +702,7 @@ fn evaluate_rpn(
                         if remaining_duration <= 0 {
                             break;
                         }
-                        offset += 1;
+                        sample_end = sample_end.saturating_sub(source_step_i64);
                     }
                     if unknown || count == 0 {
                         rrd_nan()
@@ -753,12 +750,10 @@ fn evaluate_rpn(
                 let values = variables
                     .get(*x)
                     .ok_or_else(|| rpn_error("prediction must immediately follow a variable"))?;
-                let source_step = *variable_steps
-                    .get(*x)
-                    .ok_or_else(|| rpn_error("missing prediction source step"))?;
-                let stride = usize::try_from(source_step / step_width.max(1))
-                    .map_err(|_| rpn_error("prediction step ratio overflows"))?
-                    .max(1);
+                let source_step = source_step_seconds(variable_steps, x)?;
+                // Offset zero is the variable's cursor after its push: the
+                // source row after the last row ending at or before TIME.
+                let cursor_end = timestamp - timestamp.rem_euclid(source_step) + source_step;
                 let locstepsize = window_seconds.trunc() as i64;
                 let locstep = if locstepsize <= 0 {
                     0
@@ -784,13 +779,14 @@ fn evaluate_rpn(
                         if offset >= row {
                             continue;
                         }
-                        let Some(index) = row
-                            .saturating_add(1)
-                            .checked_sub(offset.saturating_mul(stride))
-                        else {
-                            continue;
-                        };
-                        if let Some(value) = values.get(index).copied().filter(|v| !v.is_nan()) {
+                        let end = i64::try_from(offset)
+                            .ok()
+                            .and_then(|offset| offset.checked_mul(source_step))
+                            .and_then(|back| cursor_end.checked_sub(back));
+                        if let Some(value) = end
+                            .map(|end| source_row_value(values, row, timestamp, step_width, end))
+                            .filter(|value| !value.is_nan())
+                        {
                             observations.push(value);
                         }
                     }
@@ -867,6 +863,41 @@ fn evaluate_rpn(
     }
     Ok(stack[0])
 }
+fn source_step_seconds(
+    variable_steps: &HashMap<String, u64>,
+    variable: &str,
+) -> Result<i64, StoreError> {
+    variable_steps
+        .get(variable)
+        .and_then(|step| i64::try_from(*step).ok())
+        .filter(|step| *step > 0)
+        .ok_or_else(|| rpn_error("missing variable step"))
+}
+
+/// Reads a variable's source row by its end time from the evaluation grid,
+/// where row `row` ends at `timestamp`. RRDtool keeps a separate data cursor
+/// per variable that only advances when TIME ends a source row, so a variable
+/// coarser than the CDEF step repeats each source row on the grid. Reads
+/// before the buffer are out of bounds upstream; the pinned builds observed
+/// on aarch64 and x86_64 return zero or a denormal there, so use zero. Rows
+/// past the end read as unknown.
+fn source_row_value(values: &[f64], row: usize, timestamp: i64, step_width: u64, end: i64) -> f64 {
+    let index = i64::try_from(step_width)
+        .ok()
+        .filter(|step| *step > 0)
+        .zip(timestamp.checked_sub(end))
+        .and_then(|(step, back)| i64::try_from(row).ok()?.checked_sub(back.div_euclid(step)));
+    match index {
+        Some(index) if index < 0 => 0.0,
+        Some(index) => usize::try_from(index)
+            .ok()
+            .and_then(|index| values.get(index))
+            .copied()
+            .unwrap_or_else(rrd_nan),
+        None => rrd_nan(),
+    }
+}
+
 fn pop(stack: &mut Vec<f64>) -> Result<f64, StoreError> {
     stack.pop().ok_or_else(rpn_stack_underflow)
 }
