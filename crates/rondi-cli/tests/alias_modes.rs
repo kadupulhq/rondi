@@ -2589,6 +2589,122 @@ fn deterministic_irregular_gauge_sequences_match_pinned_rrdtool() {
 }
 
 #[test]
+fn deterministic_mixed_data_source_sequences_match_pinned_rrdtool() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping mixed data-source differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let executable = env!("CARGO_BIN_EXE_rondi");
+    let alias = temp.path().join("rrdtool");
+    symlink(executable, &alias).unwrap();
+
+    for initial_seed in 11_u64..=13 {
+        let oracle = temp.path().join(format!("oracle-{initial_seed}.rrd"));
+        let rondi = temp.path().join(format!("rondi-{initial_seed}.rrd"));
+        let created = Command::new("rrdtool")
+            .args([
+                "create",
+                oracle.to_str().unwrap(),
+                "--start",
+                "1000000000",
+                "--step",
+                "10",
+                "DS:c:COUNTER:40:U:4294967295",
+                "DS:d:DERIVE:40:U:U",
+                "DS:a:ABSOLUTE:40:U:U",
+                "DS:dc:DCOUNTER:40:U:U",
+                "DS:dd:DDERIVE:40:U:U",
+                "RRA:AVERAGE:0.5:2:24",
+                "RRA:MAX:0.5:2:24",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+        std::fs::copy(&oracle, &rondi).unwrap();
+
+        let mut state = initial_seed;
+        let mut timestamp = 1_000_000_000_i64;
+        let mut counter = 4_u64;
+        let mut samples = Vec::new();
+        for sample_index in 0..24 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            timestamp += 10 * (1 + (state % 3) as i64);
+            if sample_index > 1 {
+                counter = (counter + 1 + state % 97) % (1_u64 << 32);
+            }
+            let derive = (state % 20_001) as i64 - 10_000;
+            let absolute = (state >> 11) % 500_000;
+            let dcounter = ((state >> 19) % 100_000) as f64 / 16.0;
+            let dderive = ((state >> 27) % 20_001) as i64 - 10_000;
+            let counter_text = match sample_index {
+                0 => "4294967290".to_owned(),
+                1 => "4".to_owned(),
+                _ => counter.to_string(),
+            };
+            samples.push(format!(
+                "{timestamp}:{counter_text}:{derive}:{absolute}:{dcounter:.4}:{dderive}"
+            ));
+        }
+
+        for batch in samples.chunks(4) {
+            let expected = Command::new("rrdtool")
+                .arg("update")
+                .arg(&oracle)
+                .args(batch)
+                .output()
+                .unwrap();
+            let actual = Command::new(&alias)
+                .arg("update")
+                .arg(&rondi)
+                .args(batch)
+                .output()
+                .unwrap();
+            assert_eq!(actual.status.code(), expected.status.code());
+            assert_eq!(actual.stdout, expected.stdout);
+            assert_eq!(actual.stderr, expected.stderr);
+            assert_eq!(
+                std::fs::read(&rondi).unwrap(),
+                std::fs::read(&oracle).unwrap(),
+                "seed={initial_seed}, batch={batch:?}"
+            );
+        }
+
+        let end = (timestamp + 30).to_string();
+        for consolidation in ["AVERAGE", "MAX"] {
+            let options = ["--resolution", "20", "--start", "1000000000", "--end", &end];
+            let expected = Command::new("rrdtool")
+                .arg("fetch")
+                .arg(&oracle)
+                .arg(consolidation)
+                .args(options)
+                .output()
+                .unwrap();
+            let actual = Command::new(&alias)
+                .arg("fetch")
+                .arg(&rondi)
+                .arg(consolidation)
+                .args(options)
+                .output()
+                .unwrap();
+            assert_eq!(actual.status.code(), expected.status.code());
+            assert_eq!(actual.stdout, expected.stdout, "seed={initial_seed}");
+            assert_eq!(actual.stderr, expected.stderr, "seed={initial_seed}");
+        }
+    }
+}
+
+#[test]
 fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
     if !Command::new("rrdtool")
         .arg("--version")
