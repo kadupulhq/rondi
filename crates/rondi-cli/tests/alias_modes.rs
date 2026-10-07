@@ -20,10 +20,7 @@ fn normalize_rrdtool_compiled_stamp(output: &[u8]) -> Vec<u8> {
 fn compatibility_names_select_their_named_mode() {
     let temp = tempfile::tempdir().unwrap();
     let executable = env!("CARGO_BIN_EXE_rondi");
-    for (name, message) in [
-        ("rrdtool", "rrdtool mode selected"),
-        ("rrdcached", "rrdcached mode selected"),
-    ] {
+    for (name, message) in [("rrdcached", "rrdcached mode selected")] {
         let alias = temp.path().join(name);
         symlink(executable, &alias).unwrap();
         let output = Command::new(alias).arg("--version").output().unwrap();
@@ -197,6 +194,56 @@ fn php_rrdproxy_launcher_forwards_arguments_and_output() {
         assert_eq!(through_php.status, direct.status);
         assert_eq!(through_php.stdout, direct.stdout);
         assert_eq!(through_php.stderr, direct.stderr);
+    }
+}
+
+#[test]
+fn rrdtool_usage_and_version_invocations_match_pinned_tool() {
+    let temp = tempfile::tempdir().unwrap();
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+
+    // Kadupul detects the installed version with /^RRDtool ([0-9.]+) / on
+    // the output of `rrdtool -v`.
+    let version = Command::new(&alias).arg("-v").output().unwrap();
+    assert!(version.status.success());
+    assert!(version.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&version.stdout).starts_with("RRDtool 1.11.0 "));
+
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        eprintln!("skipping usage differential: pinned RRDtool 1.11.0 is not installed");
+        return;
+    }
+    for args in [
+        &[][..],
+        &["-v"],
+        &["--version"],
+        &["-h"],
+        &["bogus"],
+        &["fetch"],
+        &["ls"],
+        &["help", "fetch"],
+        &["help", "bogus"],
+        &["help", "a", "b"],
+        &["-v", "x"],
+        &["version", "x"],
+        &["bogus", "a", "b"],
+    ] {
+        let upstream = Command::new("rrdtool").args(args).output().unwrap();
+        let rondi = Command::new(&alias).args(args).output().unwrap();
+        assert_eq!(rondi.status.code(), upstream.status.code(), "{args:?}");
+        assert_eq!(
+            normalize_rrdtool_compiled_stamp(&rondi.stdout),
+            normalize_rrdtool_compiled_stamp(&upstream.stdout),
+            "{args:?}"
+        );
+        assert_eq!(rondi.stderr, upstream.stderr, "{args:?}");
     }
 }
 

@@ -76,55 +76,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if args.get(1).is_some_and(|arg| arg == "-") {
             return rrdtool_batch();
         }
-        if args.get(1).is_some_and(|arg| {
-            matches!(
-                arg.as_str(),
-                "create"
-                    | "fetch"
-                    | "update"
-                    | "updatev"
-                    | "last"
-                    | "lastupdate"
-                    | "first"
-                    | "info"
-                    | "dump"
-                    | "restore"
-                    | "tune"
-                    | "list"
-                    | "resize"
-                    | "xport"
-                    | "graph"
-                    | "graphv"
-                    | "flushcached"
-            )
-        }) {
-            let result = match args[1].as_str() {
-                "create" => rrdtool_create(&args[1..]),
-                "fetch" => rrdtool_fetch(&args[1..]),
-                "update" => rrdtool_update(&args[1..]),
-                "updatev" => rrdtool_updatev(&args[1..]),
-                "last" => rrdtool_last(&args[1..]),
-                "lastupdate" => rrdtool_lastupdate(&args[1..]),
-                "first" => rrdtool_first(&args[1..]),
-                "info" => rrdtool_info(&args[1..]),
-                "dump" => rrdtool_dump(&args[1..]),
-                "restore" => rrdtool_restore(&args[1..]),
-                "tune" => rrdtool_tune(&args[1..]),
-                "list" => rrdtool_list(&args[1..]),
-                "resize" => rrdtool_resize(&args[1..]),
-                "xport" => rrdtool_xport(&args[1..]),
-                "graph" => rrdtool_graph(&args[1..], false),
-                "graphv" => rrdtool_graph(&args[1..], true),
-                "flushcached" => rrdtool_flushcached(&args[1..]),
-                _ => unreachable!(),
-            };
-            if let Err(error) = result {
-                eprintln!("ERROR: {error}");
-                std::process::exit(1);
-            }
+        if args.len() == 1 {
+            print!("{}", rrdtool_usage(false));
             return Ok(());
         }
-        return Err("rrdtool mode selected, but only numeric-time fetch and a narrow update subset are implemented".into());
+        // `rrdtool help <command>` is the three-argument spelling of
+        // `rrdtool <command>`; both print that command's usage.
+        let command_args = if args.len() == 3 && args[1] == "help" {
+            &args[2..]
+        } else {
+            &args[1..]
+        };
+        if command_args.len() == 1 && !RRDTOOL_COMMANDS.contains(&command_args[0].as_str()) {
+            print!("{}", rrdtool_command_usage(&command_args[0]));
+            return Ok(());
+        }
+        if let Some(text) = rrdtool_builtin_reply(command_args, false) {
+            print!("{text}");
+            return Ok(());
+        }
+        let result = match command_args[0].as_str() {
+            "create" => rrdtool_create(command_args),
+            "fetch" => rrdtool_fetch(command_args),
+            "update" => rrdtool_update(command_args),
+            "updatev" => rrdtool_updatev(command_args),
+            "last" => rrdtool_last(command_args),
+            "lastupdate" => rrdtool_lastupdate(command_args),
+            "first" => rrdtool_first(command_args),
+            "info" => rrdtool_info(command_args),
+            "dump" => rrdtool_dump(command_args),
+            "restore" => rrdtool_restore(command_args),
+            "tune" => rrdtool_tune(command_args),
+            "list" => rrdtool_list(command_args),
+            "resize" => rrdtool_resize(command_args),
+            "xport" => rrdtool_xport(command_args),
+            "graph" => rrdtool_graph(command_args, false),
+            "graphv" => rrdtool_graph(command_args, true),
+            "flushcached" => rrdtool_flushcached(command_args),
+            command => Err(format!("unknown function '{command}'").into()),
+        };
+        if let Err(error) = result {
+            eprintln!("ERROR: {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
     }
     if invoked_as == "rrdtool-proxy"
         || invoked_as == "rrdtool-proxy.php"
@@ -527,6 +522,78 @@ const RRDCACHED_HELP: &str = concat!(
     "For more information and a detailed description of all options please refer\n",
     "to the rrdcached(1) manual page.\n",
 );
+
+const RRDTOOL_COMMANDS: &[&str] = &[
+    "create",
+    "fetch",
+    "update",
+    "updatev",
+    "last",
+    "lastupdate",
+    "first",
+    "info",
+    "dump",
+    "restore",
+    "tune",
+    "list",
+    "resize",
+    "xport",
+    "graph",
+    "graphv",
+    "flushcached",
+];
+
+const RRDTOOL_USAGE_HEADER: &str = concat!(
+    "RRDtool 1.11.0  Copyright by Tobias Oetiker <tobi@oetiker.ch>\n",
+    "               Compiled \n\n",
+    "Usage: rrdtool [options] command command_options\n",
+);
+
+const RRDTOOL_USAGE_FOOTER: &str = concat!(
+    "RRDtool is distributed under the Terms of the GNU General\n",
+    "Public License Version 2. (www.gnu.org/copyleft/gpl.html)\n\n",
+    "For more information read the RRD manpages\n\n",
+);
+
+fn rrdtool_usage(remote: bool) -> String {
+    let mut text = String::from(RRDTOOL_USAGE_HEADER);
+    text.push_str(concat!(
+        "Valid commands: create, update, updatev, graph, graphv,  dump, restore,\n",
+        "\t\tlast, lastupdate, first, info, list, fetch, tune,\n",
+        "\t\tresize, xport, flushcached\n\n",
+    ));
+    if remote {
+        text.push_str("Valid remote commands: quit, ls, cd, mkdir, pwd\n\n");
+    }
+    text.push_str(RRDTOOL_USAGE_FOOTER);
+    text
+}
+
+/// Usage for a lone argument that is not a data command. Kadupul reads the
+/// version from this banner, so `-v` and unknown words print it and succeed.
+fn rrdtool_command_usage(command: &str) -> String {
+    let body = match command {
+        "quit" => " * quit - closing a session in remote mode\n\n\trrdtool quit\n",
+        "ls" => " * ls - lists all *.rrd files in current directory\n\n\trrdtool ls\n",
+        "cd" => " * cd - changes the current directory\n\n\trrdtool cd new directory\n",
+        "mkdir" => " * mkdir - creates a new directory\n\n\trrdtool mkdir newdirectoryname\n",
+        "pwd" => " * pwd - returns the current working directory\n\n\trrdtool pwd\n",
+        _ => return rrdtool_usage(false),
+    };
+    format!("{RRDTOOL_USAGE_HEADER}{body}\n{RRDTOOL_USAGE_FOOTER}")
+}
+
+/// Replies RRDtool produces before command dispatch once at least a command
+/// and one argument are present.
+fn rrdtool_builtin_reply(args: &[String], remote: bool) -> Option<String> {
+    match args.first()?.as_str() {
+        "help" | "--help" | "-help" | "-?" | "-h" => Some(rrdtool_usage(remote)),
+        "--version" | "version" | "v" | "-v" | "-version" => {
+            Some("RRDtool 1.11.0  Copyright by Tobi Oetiker (1.011000)\n".to_owned())
+        }
+        _ => None,
+    }
+}
 
 /// RRDtool's `-` mode accepts one command per input line and flushes a result
 /// marker after every successful command. Cacti keeps this process open while
