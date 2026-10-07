@@ -603,6 +603,60 @@ fn rrdtool_batch_mode_runs_poller_commands_and_update_templates() {
 }
 
 #[test]
+fn rrdtool_batch_mode_usage_and_errors_match_pinned_tool() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        eprintln!(
+            "skipping RRDtool batch usage differential: pinned RRDtool 1.11.0 is not installed"
+        );
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let commands = "bogus a\n\nfetch\n   \nhelp x\n-v x\nfetch \"a\nquit x\n   ";
+    let run = |program: &std::path::Path| {
+        let mut child = Command::new(program)
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(commands.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+    let upstream = run(std::path::Path::new("rrdtool"));
+    let rondi = run(&alias);
+    let normalize = |output: &[u8]| {
+        String::from_utf8(normalize_rrdtool_compiled_stamp(output))
+            .unwrap()
+            .split_inclusive('\n')
+            .map(|line| {
+                if line.starts_with("OK u:") {
+                    "OK\n"
+                } else {
+                    line
+                }
+            })
+            .collect::<String>()
+    };
+    assert_eq!(rondi.status.code(), upstream.status.code());
+    assert_eq!(normalize(&rondi.stdout), normalize(&upstream.stdout));
+    assert_eq!(rondi.stderr, upstream.stderr);
+}
+
+#[test]
 fn aligned_multi_step_update_matches_upstream_bytes_for_multi_pdp_archive() {
     if !Command::new("rrdtool")
         .arg("--version")

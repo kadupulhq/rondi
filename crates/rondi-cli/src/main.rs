@@ -600,28 +600,52 @@ fn rrdtool_builtin_reply(args: &[String], remote: bool) -> Option<String> {
 /// polling, so commands must be handled without terminating the process.
 fn rrdtool_batch() -> Result<(), Box<dyn std::error::Error>> {
     let started = std::time::Instant::now();
-    let stdin = std::io::stdin();
+    let mut stdin = std::io::stdin().lock();
     let mut stdout = std::io::stdout().lock();
-    for line in stdin.lock().lines() {
-        let line = line?;
-        let arguments = match shell_words::split(&line) {
-            Ok(arguments) if !arguments.is_empty() => arguments,
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if stdin.read_line(&mut line)? == 0 {
+            break;
+        }
+        // RRDtool counts the newline itself as an argument, so only an
+        // unterminated blank final line is "not enough arguments"; a blank
+        // terminated line falls through to the usage text below.
+        let terminated = line.ends_with('\n');
+        let arguments = match shell_words::split(line.trim_end_matches(['\n', '\r'])) {
+            Ok(arguments) if !arguments.is_empty() || terminated => arguments,
             Ok(_) => {
                 writeln!(stdout, "ERROR: not enough arguments")?;
                 stdout.flush()?;
                 continue;
             }
-            Err(error) => {
-                writeln!(stdout, "ERROR: creating arguments: {error}")?;
+            Err(_) => {
+                writeln!(stdout, "ERROR: creating arguments")?;
                 stdout.flush()?;
                 continue;
             }
         };
-        if arguments[0] == "quit" {
+        if arguments.first().is_some_and(|command| command == "quit") {
             if arguments.len() == 1 {
                 break;
             }
             writeln!(stdout, "ERROR: invalid parameter count for quit")?;
+            stdout.flush()?;
+            continue;
+        }
+        // The remote directory commands (ls, cd, mkdir, pwd) are not
+        // implemented, so they report an unknown function instead of usage.
+        let remote_directory_command = arguments
+            .first()
+            .is_some_and(|command| matches!(command.as_str(), "ls" | "cd" | "mkdir" | "pwd"));
+        let builtin = if arguments.len() < 2 && !remote_directory_command {
+            Some(rrdtool_usage(true))
+        } else {
+            rrdtool_builtin_reply(&arguments, true)
+        };
+        if let Some(text) = builtin {
+            write!(stdout, "{text}")?;
+            writeln!(stdout, "{}", rrdtool_batch_ack(started))?;
             stdout.flush()?;
             continue;
         }
@@ -639,7 +663,7 @@ fn rrdtool_batch() -> Result<(), Box<dyn std::error::Error>> {
             "tune" => rrdtool_tune(&arguments),
             "list" => rrdtool_list(&arguments),
             "resize" => rrdtool_resize(&arguments),
-            command => Err(format!("unknown command '{command}'").into()),
+            command => Err(format!("unknown function '{command}'").into()),
         };
         match result {
             Ok(()) => writeln!(stdout, "{}", rrdtool_batch_ack(started))?,
