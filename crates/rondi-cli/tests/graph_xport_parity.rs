@@ -126,3 +126,33 @@ fn xport_xml_prints_infinities_and_json_prints_null() {
         assert_same_stdout(&fixture, &xport_args(&fixture, extra, &elements));
     }
 }
+
+// rrd_xport.c copies legend and PRINT text into the XML document without
+// escaping it.
+#[test]
+fn xml_output_writes_legend_and_print_text_verbatim() {
+    let Some(fixture) = fixture() else { return };
+    let def = format!("DEF:x={}:x:AVERAGE", fixture.database.display());
+    assert_same_stdout(
+        &fixture,
+        &xport_args(&fixture, &[], &strings(&["XPORT:x:a & <b>"])),
+    );
+    let mut graph = strings(&[
+        "graph",
+        "-",
+        "--imgformat",
+        "XML",
+        "--start",
+        "1000000000",
+        "--end",
+        "1000000600",
+    ]);
+    graph.extend([
+        def,
+        String::from("LINE1:x#ff0000:x & <y>"),
+        String::from("VDEF:v=x,MAXIMUM"),
+        String::from("PRINT:v:%6.2lf & <z>"),
+        String::from("GPRINT:v:%6.2lf <&>"),
+    ]);
+    assert_same_stdout(&fixture, &graph);
+}

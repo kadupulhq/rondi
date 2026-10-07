@@ -4092,30 +4092,20 @@ fn format_xport_xml(
     writeln!(output, "    <columns>{}</columns>", exports.len()).unwrap();
     output.push_str("    <legend>\n");
     for export in exports {
-        writeln!(
-            output,
-            "      <entry>{}</entry>",
-            xml_escape_text(&export.legend)
-        )
-        .unwrap();
+        writeln!(output, "      <entry>{}</entry>", export.legend).unwrap();
     }
     output.push_str("    </legend>\n");
     if let Some(prints) = options.graph_prints.filter(|values| !values.is_empty()) {
         output.push_str("    <prints>\n");
         for value in prints {
-            writeln!(output, "        <print>{}</print>", xml_escape_text(value)).unwrap();
+            writeln!(output, "        <print>{value}</print>").unwrap();
         }
         output.push_str("    </prints>\n");
     }
     if let Some(gprints) = options.graph_gprints.filter(|values| !values.is_empty()) {
         output.push_str("    <gprints>\n");
         for (kind, value) in gprints {
-            writeln!(
-                output,
-                "        <{kind}>{}</{kind}>",
-                xml_escape_text(value)
-            )
-            .unwrap();
+            writeln!(output, "        <{kind}>{value}</{kind}>").unwrap();
         }
         output.push_str("    </gprints>\n");
     }
@@ -4144,13 +4134,6 @@ fn format_xport_xml(
     }
     output.push_str("  </data>\n</xport>\n");
     output
-}
-
-fn xml_escape_text(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 fn normalize_json_graph_nan(value: &str) -> String {
@@ -6253,11 +6236,13 @@ async fn server_mode(socket: PathBuf, command: Command) -> Result<(), Box<dyn st
 
 #[cfg(test)]
 mod xml_output_tests {
-    use super::{XportFormatOptions, format_xport_xml, xml_escape_text};
+    use super::{XportFormatOptions, format_xport_xml};
     use rondi::RrdXportColumn;
 
+    // rrd_xport.c writes these text nodes unescaped, so the document is not
+    // well-formed XML when they contain markup characters.
     #[test]
-    fn escapes_graph_xport_text_nodes() {
+    fn writes_graph_xport_text_nodes_verbatim() {
         let exports = [RrdXportColumn {
             variable: "rate".to_owned(),
             legend: "load & <peak>".to_owned(),
@@ -6278,14 +6263,9 @@ mod xml_output_tests {
             },
         );
 
-        assert!(xml.contains("<entry>load &amp; &lt;peak&gt;</entry>"));
-        assert!(xml.contains("<print>value &gt; 1 &amp; &lt; 2</print>"));
-        assert!(xml.contains("<gprint>&lt;ok &amp; done&gt;</gprint>"));
-    }
-
-    #[test]
-    fn xml_escaper_handles_ampersands_before_entities() {
-        assert_eq!(xml_escape_text("&amp; <x>"), "&amp;amp; &lt;x&gt;");
+        assert!(xml.contains("<entry>load & <peak></entry>"));
+        assert!(xml.contains("<print>value > 1 & < 2</print>"));
+        assert!(xml.contains("<gprint><ok & done></gprint>"));
     }
 }
 
