@@ -76,55 +76,50 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         if args.get(1).is_some_and(|arg| arg == "-") {
             return rrdtool_batch();
         }
-        if args.get(1).is_some_and(|arg| {
-            matches!(
-                arg.as_str(),
-                "create"
-                    | "fetch"
-                    | "update"
-                    | "updatev"
-                    | "last"
-                    | "lastupdate"
-                    | "first"
-                    | "info"
-                    | "dump"
-                    | "restore"
-                    | "tune"
-                    | "list"
-                    | "resize"
-                    | "xport"
-                    | "graph"
-                    | "graphv"
-                    | "flushcached"
-            )
-        }) {
-            let result = match args[1].as_str() {
-                "create" => rrdtool_create(&args[1..]),
-                "fetch" => rrdtool_fetch(&args[1..]),
-                "update" => rrdtool_update(&args[1..]),
-                "updatev" => rrdtool_updatev(&args[1..]),
-                "last" => rrdtool_last(&args[1..]),
-                "lastupdate" => rrdtool_lastupdate(&args[1..]),
-                "first" => rrdtool_first(&args[1..]),
-                "info" => rrdtool_info(&args[1..]),
-                "dump" => rrdtool_dump(&args[1..]),
-                "restore" => rrdtool_restore(&args[1..]),
-                "tune" => rrdtool_tune(&args[1..]),
-                "list" => rrdtool_list(&args[1..]),
-                "resize" => rrdtool_resize(&args[1..]),
-                "xport" => rrdtool_xport(&args[1..]),
-                "graph" => rrdtool_graph(&args[1..], false),
-                "graphv" => rrdtool_graph(&args[1..], true),
-                "flushcached" => rrdtool_flushcached(&args[1..]),
-                _ => unreachable!(),
-            };
-            if let Err(error) = result {
-                eprintln!("ERROR: {error}");
-                std::process::exit(1);
-            }
+        if args.len() == 1 {
+            print!("{}", rrdtool_usage(false));
             return Ok(());
         }
-        return Err("rrdtool mode selected, but only numeric-time fetch and a narrow update subset are implemented".into());
+        // `rrdtool help <command>` is the three-argument spelling of
+        // `rrdtool <command>`; both print that command's usage.
+        let command_args = if args.len() == 3 && args[1] == "help" {
+            &args[2..]
+        } else {
+            &args[1..]
+        };
+        if command_args.len() == 1 && !RRDTOOL_COMMANDS.contains(&command_args[0].as_str()) {
+            print!("{}", rrdtool_command_usage(&command_args[0]));
+            return Ok(());
+        }
+        if let Some(text) = rrdtool_builtin_reply(command_args, false) {
+            print!("{text}");
+            return Ok(());
+        }
+        let result = match command_args[0].as_str() {
+            "create" => rrdtool_create(command_args),
+            "fetch" => rrdtool_fetch(command_args),
+            "update" => rrdtool_update(command_args),
+            "updatev" => rrdtool_updatev(command_args),
+            "last" => rrdtool_last(command_args),
+            "lastupdate" => rrdtool_lastupdate(command_args),
+            "first" => rrdtool_first(command_args),
+            "info" => rrdtool_info(command_args),
+            "dump" => rrdtool_dump(command_args),
+            "restore" => rrdtool_restore(command_args),
+            "tune" => rrdtool_tune(command_args),
+            "list" => rrdtool_list(command_args),
+            "resize" => rrdtool_resize(command_args),
+            "xport" => rrdtool_xport(command_args),
+            "graph" => rrdtool_graph(command_args, false),
+            "graphv" => rrdtool_graph(command_args, true),
+            "flushcached" => rrdtool_flushcached(command_args),
+            command => Err(format!("unknown function '{command}'").into()),
+        };
+        if let Err(error) = result {
+            eprintln!("ERROR: {error}");
+            std::process::exit(1);
+        }
+        return Ok(());
     }
     if invoked_as == "rrdtool-proxy"
         || invoked_as == "rrdtool-proxy.php"
@@ -248,75 +243,71 @@ fn current_local_year() -> i32 {
 
 async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut root = PathBuf::from("/tmp");
-    let mut socket = PathBuf::from("/tmp/rrdcached.sock");
+    let mut base_seen = false;
     let mut journal_directory = None;
     let mut pid_file = None;
     let mut log_file = None;
     let mut no_overwrite = false;
+    let mut base_only = false;
     let mut allow_recursive_mkdir = false;
-    let mut socket_mode = None;
     let mut active_socket_mode = None;
     let mut active_socket_commands = None;
-    let mut socket_commands = None;
     let mut active_socket_group = None;
-    let mut socket_group = None;
-    let mut listen_seen = false;
+    // Each listener takes the -m/-P/-s values in effect when it was named.
+    let mut listeners = Vec::<(String, Option<u32>, Option<Vec<String>>, Option<u32>)>::new();
+    let mut daemon_user = None;
+    let mut daemon_group = None;
     let mut write_timeout_seconds = 300;
+    let mut write_jitter_seconds = 0;
     let mut flush_interval_seconds = 3600;
     let mut queue_threads = 4_usize;
     let mut allocation_chunk = 1_usize;
+    // read_options keeps parsing after most errors; the last status wins and a
+    // negative status (an unknown option) still exits successfully.
+    let mut status = 0_i32;
     let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--help" | "-h" => {
+    let mut offset = 0;
+    while let Some(parsed) = next_rrdcached_option(args, &mut index, &mut offset) {
+        let (option, value) = match parsed {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                eprintln!("{message}");
                 print!("{RRDCACHED_HELP}");
-                std::process::exit(1);
+                status = -1;
+                continue;
             }
-            "-l" | "--listen" => {
-                index += 1;
-                let address = args.get(index).ok_or("rrdcached -l requires an address")?;
-                listen_seen = true;
-                socket_mode = active_socket_mode;
-                socket_commands = active_socket_commands.clone();
-                socket_group = active_socket_group;
-                if let Some(path) = address.strip_prefix("unix:") {
-                    socket = PathBuf::from(path);
-                } else if address.starts_with('/') {
-                    socket = PathBuf::from(address);
-                } else {
-                    return Err(
-                        "rrdcached network listeners are not enabled; use a Unix socket".into(),
-                    );
-                }
+        };
+        let value = value.unwrap_or_default();
+        match option {
+            'h' => {
+                print!("{RRDCACHED_HELP}");
+                status = 1;
             }
-            "-b" | "--base-dir" => {
-                index += 1;
-                root = PathBuf::from(args.get(index).ok_or("rrdcached -b requires a directory")?);
-            }
-            "-j" => {
-                index += 1;
-                journal_directory = Some(PathBuf::from(
-                    args.get(index).ok_or("rrdcached -j requires a directory")?,
+            'l' | 'L' => {
+                let address = if option == 'L' { String::new() } else { value };
+                listeners.push((
+                    address,
+                    active_socket_mode,
+                    active_socket_commands.clone(),
+                    active_socket_group,
                 ));
             }
-            "-p" => {
-                index += 1;
-                pid_file = Some(PathBuf::from(
-                    args.get(index).ok_or("rrdcached -p requires a file")?,
-                ));
+            'b' => {
+                base_seen = true;
+                root = PathBuf::from(value);
             }
-            "-o" => {
-                index += 1;
-                log_file = Some(PathBuf::from(
-                    args.get(index).ok_or("rrdcached -o requires a file")?,
-                ));
-            }
-            "-O" => no_overwrite = true,
-            "-R" => allow_recursive_mkdir = true,
-            "-m" => {
-                index += 1;
-                let value = args.get(index).ok_or("rrdcached -m requires a mode")?;
-                let mode = u32::from_str_radix(value, 8)
+            'j' => journal_directory = Some(PathBuf::from(value)),
+            'p' => pid_file = Some(PathBuf::from(value)),
+            'o' => log_file = Some(PathBuf::from(value)),
+            'O' => no_overwrite = true,
+            'R' => allow_recursive_mkdir = true,
+            'B' => base_only = true,
+            // Rondi always stays in the foreground and flushes accepted
+            // entries during graceful shutdown, so these request behavior
+            // already enabled.
+            'F' | 'g' => {}
+            'm' => {
+                let mode = u32::from_str_radix(&value, 8)
                     .ok()
                     .filter(|mode| *mode <= 0o7777);
                 let Some(mode) = mode else {
@@ -324,99 +315,88 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
                     std::process::exit(5);
                 };
                 active_socket_mode = Some(mode);
-                if !listen_seen {
-                    socket_mode = active_socket_mode;
-                }
             }
-            "-P" => {
-                index += 1;
-                let value = args.get(index).ok_or("rrdcached -P requires permissions")?;
+            'P' => {
                 let commands = value
                     .split([',', ' '])
                     .filter(|command| !command.is_empty())
                     .map(str::to_ascii_uppercase)
                     .collect::<Vec<_>>();
-                const COMMANDS: &[&str] = &[
-                    "UPDATE",
-                    "WROTE",
-                    "TUNE",
-                    "DUMP",
-                    "FLUSH",
-                    "FLUSHALL",
-                    "PENDING",
-                    "FORGET",
-                    "QUEUE",
-                    "STATS",
-                    "HELP",
-                    "PING",
-                    "BATCH",
-                    ".",
-                    "FETCH",
-                    "FETCHBIN",
-                    "INFO",
-                    "FIRST",
-                    "LAST",
-                    "CREATE",
-                    "LIST",
-                    "SUSPEND",
-                    "RESUME",
-                    "SUSPENDALL",
-                    "RESUMEALL",
-                    "QUIT",
-                ];
-                if let Some(invalid) = commands
-                    .iter()
-                    .find(|command| !COMMANDS.contains(&command.as_str()))
-                {
-                    eprintln!(
-                        "read_options: Adding permission \"{invalid}\" to socket failed. Most likely, this permission doesn't exist. Check your command line."
-                    );
-                    std::process::exit(4);
+                let mut valid = Vec::new();
+                for command in commands {
+                    if RRDCACHED_COMMANDS.contains(&command.as_str()) {
+                        valid.push(command);
+                    } else {
+                        eprintln!(
+                            "read_options: Adding permission \"{command}\" to socket failed. Most likely, this permission doesn't exist. Check your command line."
+                        );
+                        status = 4;
+                    }
                 }
-                active_socket_commands = if commands.is_empty() {
-                    None
-                } else {
-                    Some(commands)
-                };
-                if !listen_seen {
-                    socket_commands = active_socket_commands.clone();
-                }
+                active_socket_commands = if valid.is_empty() { None } else { Some(valid) };
             }
-            "-s" => {
-                index += 1;
-                let value = args.get(index).ok_or("rrdcached -s requires a group")?;
-                let Some(group) = resolve_rrdcached_group(value) else {
+            's' => {
+                let Some(group) = resolve_rrdcached_group(&value) else {
                     eprintln!("read_options: couldn't map \"{value}\" to a group, Sorry");
                     std::process::exit(5);
                 };
                 active_socket_group = Some(group);
-                if !listen_seen {
-                    socket_group = active_socket_group;
+            }
+            'G' => {
+                let Some(group) = resolve_rrdcached_daemon_group(&value) else {
+                    eprintln!("read_options: couldn't map \"{value}\" to a group, Sorry");
+                    std::process::exit(5);
+                };
+                daemon_group = Some(group);
+            }
+            'U' => {
+                let Some(user) = resolve_rrdcached_daemon_user(&value) else {
+                    eprintln!("read_options: couldn't map \"{value}\" to a user, Sorry");
+                    std::process::exit(5);
+                };
+                daemon_user = Some(user);
+            }
+            'V' => {
+                if !matches!(
+                    value.as_str(),
+                    "LOG_EMERG"
+                        | "LOG_ALERT"
+                        | "LOG_CRIT"
+                        | "LOG_ERR"
+                        | "LOG_WARNING"
+                        | "LOG_NOTICE"
+                        | "LOG_INFO"
+                        | "LOG_DEBUG"
+                ) {
+                    eprintln!("Unrecognized log level '{value}'; falling back to default LOG_ERR.");
                 }
             }
-            // Rondi always stays in the foreground, confines paths to `-b`,
-            // and flushes accepted entries during graceful shutdown. These
-            // upstream switches therefore request behavior already enabled.
-            "-B" | "-F" | "-g" => {}
-            "-w" | "--write-timeout" => {
-                index += 1;
-                write_timeout_seconds = rondi::parse_rrd_scaled_duration(
-                    args.get(index).ok_or("rrdcached -w requires seconds")?,
-                    1,
-                )?;
-            }
-            "-f" | "--flush-interval" => {
-                index += 1;
-                flush_interval_seconds = rondi::parse_rrd_scaled_duration(
-                    args.get(index).ok_or("rrdcached -f requires seconds")?,
-                    1,
-                )?;
-            }
-            "-t" => {
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or("rrdcached -t requires a thread count")?;
+            'w' => match rrdcached_duration(&value) {
+                Ok(seconds) => write_timeout_seconds = seconds,
+                Err(detail) => {
+                    eprintln!("Invalid write interval {value}: {detail}");
+                    status = 2;
+                }
+            },
+            'f' => match rrdcached_duration(&value) {
+                Ok(seconds) => flush_interval_seconds = seconds,
+                Err(detail) => {
+                    eprintln!("Invalid flush interval {value}: {detail}");
+                    status = 3;
+                }
+            },
+            'z' => match rrdcached_duration(&value) {
+                Ok(seconds) => write_jitter_seconds = seconds,
+                Err(detail) => {
+                    eprintln!("Invalid write jitter {value}: {detail}");
+                    status = 2;
+                }
+            },
+            't' => {
+                if value.is_empty() {
+                    eprintln!("Missing argument for -t");
+                    std::process::exit(1);
+                }
                 let parsed = value.parse::<i32>().ok().filter(|threads| *threads > 0);
                 let Some(parsed) = parsed else {
                     eprintln!("Invalid thread count: -t {value}");
@@ -424,12 +404,11 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 };
                 queue_threads = parsed as usize;
             }
-            "-a" => {
-                index += 1;
-                let Some(value) = args.get(index) else {
+            'a' => {
+                if value.is_empty() {
                     eprintln!("Missing argument for -a");
                     std::process::exit(10);
-                };
+                }
                 let parsed = value.parse::<i32>().ok().filter(|size| *size > 0);
                 let Some(parsed) = parsed else {
                     eprintln!("Invalid allocation size: {value}");
@@ -437,17 +416,64 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 };
                 allocation_chunk = parsed as usize;
             }
-            option => {
-                return Err(
-                    format!("rrdcached mode selected; unsupported option: {option}").into(),
-                );
-            }
+            _ => unreachable!("next_rrdcached_option returns only known options"),
         }
-        index += 1;
     }
     if flush_interval_seconds < write_timeout_seconds.saturating_mul(2) {
         eprintln!("WARNING: flush interval (-f) should be at least 2x write interval (-w) !");
     }
+    if write_jitter_seconds > write_timeout_seconds {
+        eprintln!("WARNING: write delay (-z) should NOT be larger than write interval (-w) !");
+    }
+    if base_only && !base_seen {
+        eprintln!(
+            "WARNING: -B does not make sense without -b!\n  Consult the rrdcached documentation"
+        );
+    }
+    if allow_recursive_mkdir && !base_only {
+        eprintln!(
+            "WARNING: -R does not make sense without -B!\n  Consult the rrdcached documentation"
+        );
+    }
+    if status != 0 {
+        std::process::exit(status.max(0));
+    }
+    // Rondi does not change identity after startup. Refusing a different
+    // account keeps the daemon from silently running with more privilege
+    // than the operator asked for.
+    // SAFETY: geteuid and getegid have no preconditions.
+    let (euid, egid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    if daemon_user.is_some_and(|user| user != euid)
+        || daemon_group.is_some_and(|group| group != egid)
+    {
+        return Err(
+            "rrdcached -U/-G cannot switch accounts in Rondi; start the service as that user and group"
+                .into(),
+        );
+    }
+    if listeners.len() > 1 {
+        return Err("rrdcached mode supports one listener; give -l only once".into());
+    }
+    let (socket, socket_mode, socket_commands, socket_group) = match listeners.pop() {
+        Some((address, mode, commands, group)) => {
+            let socket = if let Some(path) = address.strip_prefix("unix:") {
+                PathBuf::from(path)
+            } else if address.starts_with('/') {
+                PathBuf::from(address)
+            } else {
+                return Err(
+                    "rrdcached network listeners are not enabled; use a Unix socket".into(),
+                );
+            };
+            (socket, mode, commands, group)
+        }
+        None => (
+            PathBuf::from("/tmp/rrdcached.sock"),
+            active_socket_mode,
+            active_socket_commands,
+            active_socket_group,
+        ),
+    };
     rondi_server::run_rrdcached(rondi_server::RrdcachedConfig {
         root,
         socket,
@@ -466,6 +492,146 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
         max_pending_bytes: rondi_server::DEFAULT_RRDCACHED_QUEUE_BYTES,
     })
     .await
+}
+
+const RRDCACHED_COMMANDS: &[&str] = &[
+    "UPDATE",
+    "WROTE",
+    "TUNE",
+    "DUMP",
+    "FLUSH",
+    "FLUSHALL",
+    "PENDING",
+    "FORGET",
+    "QUEUE",
+    "STATS",
+    "HELP",
+    "PING",
+    "BATCH",
+    ".",
+    "FETCH",
+    "FETCHBIN",
+    "INFO",
+    "FIRST",
+    "LAST",
+    "CREATE",
+    "LIST",
+    "SUSPEND",
+    "RESUME",
+    "SUSPENDALL",
+    "RESUMEALL",
+    "QUIT",
+];
+
+/// One step of RRDtool's bundled optparse for rrdcached: short options may
+/// be clustered (`-gF`) or carry an attached argument (`-w1800`), `--help` is
+/// the only long option, non-option words are skipped, and `--` ends parsing.
+fn next_rrdcached_option(
+    args: &[String],
+    index: &mut usize,
+    offset: &mut usize,
+) -> Option<Result<(char, Option<String>), String>> {
+    const WITH_ARGUMENT: &str = "abfGjlmoPpstUVwz";
+    const WITHOUT_ARGUMENT: &str = "BFghLOR";
+    loop {
+        let arg = args.get(*index)?;
+        if *offset == 0 {
+            if arg == "--" {
+                return None;
+            }
+            if let Some(name) = arg.strip_prefix("--") {
+                *index += 1;
+                return Some(match name.split_once('=') {
+                    None if name == "help" => Ok(('h', None)),
+                    Some(("help", _)) => Err("option takes no arguments -- 'help'".to_owned()),
+                    _ => Err(format!("invalid option -- '{name}'")),
+                });
+            }
+            if !arg.starts_with('-') || arg.len() == 1 {
+                *index += 1;
+                continue;
+            }
+            *offset = 1;
+        }
+        let option = arg[*offset..].chars().next()?;
+        let rest = &arg[*offset + option.len_utf8()..];
+        if WITH_ARGUMENT.contains(option) {
+            *offset = 0;
+            *index += 1;
+            if !rest.is_empty() {
+                return Some(Ok((option, Some(rest.to_owned()))));
+            }
+            let Some(value) = args.get(*index) else {
+                return Some(Err(format!("option requires an argument -- '{option}'")));
+            };
+            *index += 1;
+            return Some(Ok((option, Some(value.clone()))));
+        }
+        if !WITHOUT_ARGUMENT.contains(option) {
+            // optparse abandons the rest of a cluster after an unknown option.
+            *offset = 0;
+            *index += 1;
+            return Some(Err(format!("invalid option -- '{option}'")));
+        }
+        if rest.is_empty() {
+            *offset = 0;
+            *index += 1;
+        } else {
+            *offset += option.len_utf8();
+        }
+        return Some(Ok((option, None)));
+    }
+}
+
+/// `rrd_scaled_duration` with a divisor of one, reporting RRDtool's text.
+fn rrdcached_duration(value: &str) -> Result<u64, &'static str> {
+    if !value.starts_with(|first: char| first.is_ascii_digit()) {
+        return Err("value must be (suffixed) positive number");
+    }
+    if is_rrd_zero_duration(value) {
+        return Err("value must be positive");
+    }
+    parse_rrd_scaled_duration(value, 1).map_err(|_| "value has trailing garbage")
+}
+
+fn resolve_rrdcached_daemon_user(value: &str) -> Option<libc::uid_t> {
+    use std::ffi::CString;
+    // RRDtool treats any all-digit argument (including an empty one) as a
+    // numeric id and everything else as a name.
+    let user = if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        let uid = value.parse::<libc::uid_t>().unwrap_or(0);
+        // SAFETY: getpwuid returns a pointer to libc-owned static data.
+        unsafe { libc::getpwuid(uid) }
+    } else {
+        let name = CString::new(value).ok()?;
+        // SAFETY: name is NUL terminated and remains alive for the call.
+        unsafe { libc::getpwnam(name.as_ptr()) }
+    };
+    if user.is_null() {
+        None
+    } else {
+        // SAFETY: non-null user points to libc-owned passwd data.
+        Some(unsafe { (*user).pw_uid })
+    }
+}
+
+fn resolve_rrdcached_daemon_group(value: &str) -> Option<libc::gid_t> {
+    use std::ffi::CString;
+    let group = if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        let gid = value.parse::<libc::gid_t>().unwrap_or(0);
+        // SAFETY: getgrgid returns a pointer to libc-owned static data.
+        unsafe { libc::getgrgid(gid) }
+    } else {
+        let name = CString::new(value).ok()?;
+        // SAFETY: name is NUL terminated and remains alive for the call.
+        unsafe { libc::getgrnam(name.as_ptr()) }
+    };
+    if group.is_null() {
+        None
+    } else {
+        // SAFETY: non-null group points to libc-owned group data.
+        Some(unsafe { (*group).gr_gid })
+    }
 }
 
 fn resolve_rrdcached_group(value: &str) -> Option<u32> {
@@ -528,33 +694,129 @@ const RRDCACHED_HELP: &str = concat!(
     "to the rrdcached(1) manual page.\n",
 );
 
+const RRDTOOL_COMMANDS: &[&str] = &[
+    "create",
+    "fetch",
+    "update",
+    "updatev",
+    "last",
+    "lastupdate",
+    "first",
+    "info",
+    "dump",
+    "restore",
+    "tune",
+    "list",
+    "resize",
+    "xport",
+    "graph",
+    "graphv",
+    "flushcached",
+];
+
+const RRDTOOL_USAGE_HEADER: &str = concat!(
+    "RRDtool 1.11.0  Copyright by Tobias Oetiker <tobi@oetiker.ch>\n",
+    "               Compiled \n\n",
+    "Usage: rrdtool [options] command command_options\n",
+);
+
+const RRDTOOL_USAGE_FOOTER: &str = concat!(
+    "RRDtool is distributed under the Terms of the GNU General\n",
+    "Public License Version 2. (www.gnu.org/copyleft/gpl.html)\n\n",
+    "For more information read the RRD manpages\n\n",
+);
+
+fn rrdtool_usage(remote: bool) -> String {
+    let mut text = String::from(RRDTOOL_USAGE_HEADER);
+    text.push_str(concat!(
+        "Valid commands: create, update, updatev, graph, graphv,  dump, restore,\n",
+        "\t\tlast, lastupdate, first, info, list, fetch, tune,\n",
+        "\t\tresize, xport, flushcached\n\n",
+    ));
+    if remote {
+        text.push_str("Valid remote commands: quit, ls, cd, mkdir, pwd\n\n");
+    }
+    text.push_str(RRDTOOL_USAGE_FOOTER);
+    text
+}
+
+/// Usage for a lone argument that is not a data command. Kadupul reads the
+/// version from this banner, so `-v` and unknown words print it and succeed.
+fn rrdtool_command_usage(command: &str) -> String {
+    let body = match command {
+        "quit" => " * quit - closing a session in remote mode\n\n\trrdtool quit\n",
+        "ls" => " * ls - lists all *.rrd files in current directory\n\n\trrdtool ls\n",
+        "cd" => " * cd - changes the current directory\n\n\trrdtool cd new directory\n",
+        "mkdir" => " * mkdir - creates a new directory\n\n\trrdtool mkdir newdirectoryname\n",
+        "pwd" => " * pwd - returns the current working directory\n\n\trrdtool pwd\n",
+        _ => return rrdtool_usage(false),
+    };
+    format!("{RRDTOOL_USAGE_HEADER}{body}\n{RRDTOOL_USAGE_FOOTER}")
+}
+
+/// Replies RRDtool produces before command dispatch once at least a command
+/// and one argument are present.
+fn rrdtool_builtin_reply(args: &[String], remote: bool) -> Option<String> {
+    match args.first()?.as_str() {
+        "help" | "--help" | "-help" | "-?" | "-h" => Some(rrdtool_usage(remote)),
+        "--version" | "version" | "v" | "-v" | "-version" => {
+            Some("RRDtool 1.11.0  Copyright by Tobi Oetiker (1.011000)\n".to_owned())
+        }
+        _ => None,
+    }
+}
+
 /// RRDtool's `-` mode accepts one command per input line and flushes a result
 /// marker after every successful command. Cacti keeps this process open while
 /// polling, so commands must be handled without terminating the process.
 fn rrdtool_batch() -> Result<(), Box<dyn std::error::Error>> {
     let started = std::time::Instant::now();
-    let stdin = std::io::stdin();
+    let mut stdin = std::io::stdin().lock();
     let mut stdout = std::io::stdout().lock();
-    for line in stdin.lock().lines() {
-        let line = line?;
-        let arguments = match shell_words::split(&line) {
-            Ok(arguments) if !arguments.is_empty() => arguments,
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if stdin.read_line(&mut line)? == 0 {
+            break;
+        }
+        // RRDtool counts the newline itself as an argument, so only an
+        // unterminated blank final line is "not enough arguments"; a blank
+        // terminated line falls through to the usage text below.
+        let terminated = line.ends_with('\n');
+        let arguments = match shell_words::split(line.trim_end_matches(['\n', '\r'])) {
+            Ok(arguments) if !arguments.is_empty() || terminated => arguments,
             Ok(_) => {
                 writeln!(stdout, "ERROR: not enough arguments")?;
                 stdout.flush()?;
                 continue;
             }
-            Err(error) => {
-                writeln!(stdout, "ERROR: creating arguments: {error}")?;
+            Err(_) => {
+                writeln!(stdout, "ERROR: creating arguments")?;
                 stdout.flush()?;
                 continue;
             }
         };
-        if arguments[0] == "quit" {
+        if arguments.first().is_some_and(|command| command == "quit") {
             if arguments.len() == 1 {
                 break;
             }
             writeln!(stdout, "ERROR: invalid parameter count for quit")?;
+            stdout.flush()?;
+            continue;
+        }
+        // The remote directory commands (ls, cd, mkdir, pwd) are not
+        // implemented, so they report an unknown function instead of usage.
+        let remote_directory_command = arguments
+            .first()
+            .is_some_and(|command| matches!(command.as_str(), "ls" | "cd" | "mkdir" | "pwd"));
+        let builtin = if arguments.len() < 2 && !remote_directory_command {
+            Some(rrdtool_usage(true))
+        } else {
+            rrdtool_builtin_reply(&arguments, true)
+        };
+        if let Some(text) = builtin {
+            write!(stdout, "{text}")?;
+            writeln!(stdout, "{}", rrdtool_batch_ack(started))?;
             stdout.flush()?;
             continue;
         }
@@ -572,7 +834,7 @@ fn rrdtool_batch() -> Result<(), Box<dyn std::error::Error>> {
             "tune" => rrdtool_tune(&arguments),
             "list" => rrdtool_list(&arguments),
             "resize" => rrdtool_resize(&arguments),
-            command => Err(format!("unknown command '{command}'").into()),
+            command => Err(format!("unknown function '{command}'").into()),
         };
         match result {
             Ok(()) => writeln!(stdout, "{}", rrdtool_batch_ack(started))?,
@@ -1074,7 +1336,7 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{:>10}:", row.timestamp);
         for value in row.values {
             match value {
-                Some(value) => print!(" {}", format_rrd_float(value)),
+                Some(value) => print!(" {}", format_fetch_value(value)),
                 None if from_daemon => print!(" {}", rrd_daemon_unknown_text()),
                 None => print!(" {}", rrd_unknown_text()),
             }
@@ -1096,8 +1358,11 @@ fn rrd_nan() -> f64 {
     }
 }
 
+// RRDtool prints unknowns with printf. glibc spells a NaN with its sign bit
+// set as `-nan`; the Apple and BSD libcs print `nan` for every NaN. Which
+// path carries the sign bit depends on the CPU's default NaN.
 fn rrd_unknown_text() -> &'static str {
-    if cfg!(target_arch = "x86_64") {
+    if cfg!(all(target_env = "gnu", target_arch = "x86_64")) {
         "-nan"
     } else {
         "nan"
@@ -1105,10 +1370,10 @@ fn rrd_unknown_text() -> &'static str {
 }
 
 fn rrd_daemon_unknown_text() -> &'static str {
-    if cfg!(target_arch = "x86_64") {
-        "nan"
-    } else {
+    if cfg!(all(target_env = "gnu", not(target_arch = "x86_64"))) {
         "-nan"
+    } else {
+        "nan"
     }
 }
 
@@ -1230,6 +1495,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     let mut graph_colors = GraphColors::default();
     let mut grid_dash = Vec::<f64>::new();
     let mut border_width = 2_u32;
+    let mut si_base = 1000_u32;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
@@ -1250,6 +1516,11 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         }
         if let Some(value) = argument.strip_prefix("--imginfo=") {
             imginfo = Some(value.to_owned());
+            index += 1;
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--base=") {
+            si_base = parse_graph_base(value)?;
             index += 1;
             continue;
         }
@@ -1278,6 +1549,10 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                 }
                 xport_args.push(argument.clone());
                 xport_args.push(value.clone());
+                index += 2;
+            }
+            "--base" | "-b" => {
+                si_base = parse_graph_base(args.get(index + 1).ok_or("--base requires a value")?)?;
                 index += 2;
             }
             "--width" | "-w" | "--height" | "-h" => {
@@ -1502,12 +1777,12 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             .iter()
             .any(|definition| definition.starts_with("XPORT:"))
     {
-        definitions.push(String::from("CDEF:__rondi_rule_anchor=0"));
+        definitions.push(String::from("CDEF:__rondi_rule_anchor=0,0,+"));
         definitions.push(String::from("XPORT:__rondi_rule_anchor:"));
     }
     xport_args.extend(definitions);
     let rendered =
-        render_xport_with_graph_prints(&xport_args, Some(&graph_gprints), &graph_prints)?;
+        render_xport_with_graph_prints(&xport_args, Some(&graph_gprints), &graph_prints, si_base)?;
     let graph_image = if format == "PNG" {
         Some(render_graph_png(
             &rendered,
@@ -1577,6 +1852,19 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             print!("{output}");
         }
     } else {
+        // rrd_tool.c only recognizes the separate `--imginfo`/`-f` spelling
+        // when deciding whether to print the canvas size.
+        let print_dimensions = !verbose
+            && !args[1..]
+                .iter()
+                .any(|argument| argument == "--imginfo" || argument == "-f");
+        if print_dimensions {
+            let (width, height) = match graph_image.as_deref() {
+                Some(image) => png_dimensions(image)?,
+                None => (0, 0),
+            };
+            println!("{width}x{height}");
+        }
         if let Some(image) = graph_image.as_deref() {
             std::fs::write(filename, image)?;
             if let Some(format) = imginfo.as_deref() {
@@ -1595,9 +1883,34 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             for (index, value) in prints.iter().enumerate() {
                 println!("print[{index}] = {}", serde_json::to_string(value)?);
             }
+        } else {
+            for value in &prints {
+                println!("{value}");
+            }
         }
     }
     Ok(())
+}
+
+// rrd_graph.c reads --base with atol, so trailing text after the digits is
+// ignored before the 1000/1024 check.
+fn parse_graph_base(value: &str) -> Result<u32, Box<dyn std::error::Error>> {
+    let trimmed = value.trim_start();
+    let negative = trimmed.starts_with('-');
+    let unsigned = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
+    let base = unsigned
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .fold(0_u64, |total, digit| {
+            total
+                .saturating_mul(10)
+                .saturating_add(u64::from(digit - b'0'))
+        });
+    match (negative, base) {
+        (false, 1000) => Ok(1000),
+        (false, 1024) => Ok(1024),
+        _ => Err("the only sensible value for base apart from 1000 is 1024".into()),
+    }
 }
 
 fn parse_graph_series(
@@ -1997,28 +2310,210 @@ struct GraphVdef {
     percentile: Option<f64>,
 }
 
+#[derive(Default)]
+struct GraphDefOptions {
+    start: Option<String>,
+    end: Option<String>,
+    daemon: Option<String>,
+}
+
+/// Parse `DEF:vname=rrd:ds:cf[:key=value...]` the way rrd_graph_helper.c
+/// splits graph arguments: `\:` escapes a colon, `key=value` fields may
+/// appear anywhere after the first, the last repeated key wins, and fields
+/// that nothing consumes are an error.
+fn parse_graph_def(
+    value: &str,
+) -> Result<(rondi::RrdXportDefinition, GraphDefOptions), Box<dyn std::error::Error>> {
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' if chars.peek() == Some(&':') => field.push(chars.next().unwrap_or(':')),
+            ':' => fields.push(std::mem::take(&mut field)),
+            _ => field.push(ch),
+        }
+    }
+    fields.push(field);
+    // (key, value, consumed) in argument order; positional fields have no key.
+    let mut entries = Vec::<(Option<String>, String, bool)>::new();
+    let mut vname_rrd = None;
+    for field in fields.iter().skip(1) {
+        match field.split_once('=') {
+            Some((key, rest)) if vname_rrd.is_none() => {
+                vname_rrd = Some((key.to_owned(), rest.to_owned()));
+            }
+            Some((key, rest)) => entries.push((Some(key.to_owned()), rest.to_owned(), false)),
+            None => entries.push((None, field.clone(), false)),
+        }
+    }
+    let mut take = |key: &str| {
+        entries
+            .iter_mut()
+            .rev()
+            .find(|(name, _, _)| name.as_deref() == Some(key))
+            .map(|(_, value, used)| {
+                *used = true;
+                value.clone()
+            })
+    };
+    let reduce = take("reduce");
+    let daemon = take("daemon");
+    let step = take("step");
+    let start = take("start");
+    let end = take("end");
+    if let Some(reduce) = &reduce
+        && !matches!(
+            reduce.as_str(),
+            "AVERAGE"
+                | "MIN"
+                | "MAX"
+                | "LAST"
+                | "HWPREDICT"
+                | "MHWPREDICT"
+                | "DEVPREDICT"
+                | "SEASONAL"
+                | "DEVSEASONAL"
+                | "FAILURES"
+        )
+    {
+        return Err(format!("bad reduce CF: {reduce}").into());
+    }
+    let step = match step {
+        Some(text) => match text.trim_start().parse::<i64>() {
+            Ok(step) if step >= 1 => Some(step.unsigned_abs()),
+            _ => return Err(format!("Bad step value: {text}").into()),
+        },
+        None => None,
+    };
+    let Some((name, file)) = vname_rrd else {
+        return Err(format!("No argument for definition of vdef/rrd in {value}").into());
+    };
+    let mut next_positional = |what: &str| {
+        entries
+            .iter_mut()
+            .find(|(key, _, used)| key.is_none() && !used)
+            .map(|(_, field, used)| {
+                *used = true;
+                field.clone()
+            })
+            .ok_or_else(|| format!("No argument for definition of {what} in {value}"))
+    };
+    let data_source = next_positional("DS")?;
+    let consolidation = next_positional("CF")?;
+    let unused = entries
+        .iter()
+        .filter(|(_, _, used)| !used)
+        .map(|(key, field, _)| match key {
+            Some(key) => format!("{key}={field}"),
+            None => field.clone(),
+        })
+        .collect::<Vec<_>>();
+    if !unused.is_empty() {
+        return Err(format!(
+            "Unused Arguments \"{}\" in command : {value}",
+            unused.join(":")
+        )
+        .into());
+    }
+    Ok((
+        rondi::RrdXportDefinition {
+            name,
+            file: PathBuf::from(file),
+            data_source,
+            consolidation: consolidation.to_ascii_uppercase(),
+            step,
+            start: None,
+            end: None,
+            reduce,
+        },
+        GraphDefOptions { start, end, daemon },
+    ))
+}
+
 fn parse_graph_vdef(definition: &str) -> Result<GraphVdef, Box<dyn std::error::Error>> {
     let (name, expression) = definition
         .strip_prefix("VDEF:")
         .and_then(|value| value.split_once('='))
         .ok_or_else(|| format!("invalid VDEF: {definition}"))?;
-    let fields = expression.split(',').collect::<Vec<_>>();
-    if name.is_empty() || fields.len() < 2 || fields.len() > 3 || fields[0].is_empty() {
+    if name.is_empty() {
         return Err(format!("invalid VDEF: {definition}").into());
     }
-    let (function_name, percentile) = if fields.len() == 3 {
-        (fields[2], Some(fields[1].parse::<f64>()?))
-    } else {
-        (fields[1], None)
-    };
+    let (variable, specification) = expression
+        .split_once(',')
+        .ok_or_else(|| format!("Comma expected in VDEF definition {expression}"))?;
+    if variable.is_empty() {
+        return Err(format!("invalid VDEF: {definition}").into());
+    }
+    let (function_name, percentile) = parse_vdef_specification(name, specification)?;
     let function = rondi::VdefFunction::parse(function_name)
-        .ok_or_else(|| format!("unsupported VDEF function: {function_name}"))?;
+        .ok_or_else(|| format!("Unknown function '{function_name}' in VDEF '{name}'\n"))?;
+    let needs_percentile = matches!(
+        function,
+        rondi::VdefFunction::Percent | rondi::VdefFunction::PercentNan
+    );
+    match percentile {
+        None if needs_percentile => {
+            return Err(
+                format!("Function '{function_name}' needs parameter in VDEF '{name}'\n").into(),
+            );
+        }
+        Some(percentile) if needs_percentile && !(0.0..=100.0).contains(&percentile) => {
+            return Err(
+                format!("Parameter '{percentile:.6}' out of range in VDEF '{name}'\n").into(),
+            );
+        }
+        Some(_) if !needs_percentile => {
+            return Err(format!(
+                "Function '{function_name}' needs no parameter in VDEF '{name}'\n"
+            )
+            .into());
+        }
+        _ => {}
+    }
     Ok(GraphVdef {
         name: name.to_owned(),
-        variable: fields[0].to_owned(),
+        variable: variable.to_owned(),
         function,
         percentile,
     })
+}
+
+/// Mirrors `vdef_parse`: it scans `%40[0-9.e+-],%29[A-Z]` and converts the
+/// number with `rrd_strtodbl`, falling back to a bare function name. Text
+/// after a parsed `number,FUNCTION` pair is not checked upstream.
+fn parse_vdef_specification<'a>(
+    name: &str,
+    specification: &'a str,
+) -> Result<(&'a str, Option<f64>), String> {
+    let function_length = |text: &str| {
+        text.bytes()
+            .take(29)
+            .take_while(u8::is_ascii_uppercase)
+            .count()
+    };
+    let number_length = specification
+        .bytes()
+        .take(40)
+        .take_while(|byte| matches!(byte, b'0'..=b'9' | b'.' | b'e' | b'+' | b'-'))
+        .count();
+    let mut function = "";
+    let mut parameter = None;
+    if number_length > 0 {
+        if let Some(rest) = specification[number_length..].strip_prefix(',') {
+            function = &rest[..function_length(rest)];
+        }
+        parameter = rondi::parse_rrd_number(&specification[..number_length]);
+    }
+    if parameter.is_none() {
+        if function_length(specification) != specification.len() {
+            return Err(format!(
+                "Unknown function string '{specification}' in VDEF '{name}'"
+            ));
+        }
+        function = specification;
+    }
+    Ok((function, parameter))
 }
 
 fn parse_graph_print(definition: &str) -> Result<GraphPrint, Box<dyn std::error::Error>> {
@@ -2089,7 +2584,7 @@ fn render_xport_with_gprints(
     args: &[String],
     graph_gprints: Option<&[(String, String)]>,
 ) -> Result<(String, i64, i64, u64), Box<dyn std::error::Error>> {
-    let rendered = render_xport_with_graph_prints(args, graph_gprints, &[])?;
+    let rendered = render_xport_with_graph_prints(args, graph_gprints, &[], 1000)?;
     Ok((rendered.output, rendered.start, rendered.end, rendered.step))
 }
 
@@ -2107,6 +2602,7 @@ fn render_xport_with_graph_prints(
     args: &[String],
     graph_gprints: Option<&[(String, String)]>,
     graph_prints: &[GraphPrint],
+    si_base: u32,
 ) -> Result<RenderedGraphXport, Box<dyn std::error::Error>> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -2120,6 +2616,7 @@ fn render_xport_with_graph_prints(
     let mut show_time = false;
     let mut enum_ds = false;
     let mut definitions = Vec::<rondi::RrdXportDefinition>::new();
+    let mut definition_options = Vec::<GraphDefOptions>::new();
     let mut cdefs = Vec::<rondi::RrdXportCdef>::new();
     let mut vdefs = Vec::<GraphVdef>::new();
     let mut exports = Vec::<rondi::RrdXportColumn>::new();
@@ -2169,27 +2666,9 @@ fn render_xport_with_graph_prints(
                 index += 1;
             }
             value if value.starts_with("DEF:") => {
-                let definition = &value[4..];
-                let (name, source) = definition
-                    .split_once('=')
-                    .ok_or_else(|| format!("invalid DEF: {value}"))?;
-                let mut fields = source.rsplitn(3, ':');
-                let consolidation = fields.next().unwrap_or_default();
-                let data_source = fields.next().unwrap_or_default();
-                let file = fields.next().unwrap_or_default();
-                if name.is_empty()
-                    || file.is_empty()
-                    || data_source.is_empty()
-                    || consolidation.is_empty()
-                {
-                    return Err(format!("invalid DEF: {value}").into());
-                }
-                definitions.push(rondi::RrdXportDefinition {
-                    name: name.to_owned(),
-                    file: PathBuf::from(file),
-                    data_source: data_source.to_owned(),
-                    consolidation: consolidation.to_ascii_uppercase(),
-                });
+                let (definition, options) = parse_graph_def(value)?;
+                definitions.push(definition);
+                definition_options.push(options);
                 index += 1;
             }
             value if value.starts_with("XPORT:") => {
@@ -2242,16 +2721,36 @@ fn render_xport_with_graph_prints(
         return Err(format!("the first entry to fetch should be after 1980 ({start})").into());
     }
     let visible_export_count = exports.len();
-    if let Some(address) = daemon_address
+    for (definition, options) in definitions.iter_mut().zip(&definition_options) {
+        if options.start.is_none() && options.end.is_none() {
+            continue;
+        }
+        let start_spec = options.start.clone().unwrap_or_else(|| start.to_string());
+        let end_spec = options.end.clone().unwrap_or_else(|| end.to_string());
+        let (def_start, def_end) =
+            resolve_rrd_range_times(Some(&start_spec), Some(&end_spec), start, end, now)?;
+        if def_start < 315_360_000 {
+            return Err(
+                format!("the first entry to fetch should be after 1980 ({def_start})").into(),
+            );
+        }
+        if def_end < def_start {
+            return Err(format!("start ({def_start}) should be less than end ({def_end})").into());
+        }
+        definition.start = Some(def_start);
+        definition.end = Some(def_end);
+    }
+    let default_address = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
-        .filter(|address| !address.is_empty())
-    {
-        let mut flushed = std::collections::HashSet::new();
-        for definition in &definitions {
-            let filename = definition.file.to_string_lossy().into_owned();
-            if flushed.insert(filename.clone()) {
-                send_rrdcached_flush(&address, &filename)?;
-            }
+        .filter(|address| !address.is_empty());
+    let mut flushed = std::collections::HashSet::new();
+    for (definition, options) in definitions.iter().zip(&definition_options) {
+        let Some(address) = options.daemon.as_ref().or(default_address.as_ref()) else {
+            continue;
+        };
+        let filename = definition.file.to_string_lossy().into_owned();
+        if flushed.insert((address.clone(), filename.clone())) {
+            send_rrdcached_flush(address, &filename)?;
         }
     }
     for variable in vdefs.iter().map(|vdef| vdef.variable.as_str()).chain(
@@ -2283,10 +2782,6 @@ fn render_xport_with_graph_prints(
             .get(&vdef.variable)
             .cloned()
             .ok_or_else(|| format!("VDEF source variable {} is unavailable", vdef.variable))?;
-        // RRDtool's graph buffer includes an unknown right-edge boundary slot
-        // that is not part of the rows returned by xport.
-        let mut values = values;
-        values.push(rrd_nan());
         let value = rondi::evaluate_vdef(
             vdef.function,
             vdef.percentile,
@@ -2298,6 +2793,7 @@ fn render_xport_with_graph_prints(
     }
     let mut graph_gprints_out = graph_gprints.unwrap_or_default().to_vec();
     let mut print_values = Vec::new();
+    let mut si_scale = GraphSiScale::new(si_base);
     for graph_print in graph_prints {
         let (value, timestamp) = if let Some(value) = vdef_values.get(&graph_print.variable) {
             (value.value, value.timestamp)
@@ -2313,14 +2809,12 @@ fn render_xport_with_graph_prints(
                     graph_print.variable
                 )
             })?;
-            let column = exports
-                .iter()
-                .position(|export| export.variable == graph_print.variable)
-                .ok_or_else(|| format!("unknown graph print variable {}", graph_print.variable))?;
             let values = result
-                .rows
+                .raw_variables
+                .get(&graph_print.variable)
+                .ok_or_else(|| format!("unknown graph print variable {}", graph_print.variable))?
                 .iter()
-                .filter_map(|row| row.get(column).copied().flatten())
+                .copied()
                 .filter(|value| value.is_finite())
                 .collect::<Vec<_>>();
             let value = match consolidation {
@@ -2341,8 +2835,13 @@ fn render_xport_with_graph_prints(
             };
             (value, None)
         };
-        let formatted =
-            format_graph_print(value, timestamp, graph_print.formatter, &graph_print.format)?;
+        let formatted = format_graph_print(
+            value,
+            timestamp,
+            graph_print.formatter,
+            &graph_print.format,
+            &mut si_scale,
+        )?;
         if graph_print.kind == "gprint" {
             graph_gprints_out.push((String::from("gprint"), formatted));
         } else {
@@ -3490,9 +3989,10 @@ fn format_graph_print(
     timestamp: Option<i64>,
     formatter: GraphPrintFormatter,
     format: &str,
+    si_scale: &mut GraphSiScale,
 ) -> Result<String, Box<dyn std::error::Error>> {
     match formatter {
-        GraphPrintFormatter::Numeric => format_graph_numeric(value, format),
+        GraphPrintFormatter::Numeric => format_graph_numeric(value, format, si_scale),
         GraphPrintFormatter::Strftime => match timestamp {
             Some(timestamp) => format_graph_time(timestamp, format),
             None => Ok(clean_graph_time_format(format)),
@@ -3558,16 +4058,51 @@ fn clean_graph_time_format(format: &str) -> String {
     result
 }
 
-fn format_graph_numeric(value: f64, format: &str) -> Result<String, Box<dyn std::error::Error>> {
+/// SI scaling state that RRDtool's print_calc shares across every PRINT and
+/// GPRINT of one graph.
+struct GraphSiScale {
+    base: u32,
+    magnitude: Option<f64>,
+    symbol: &'static str,
+}
+
+impl GraphSiScale {
+    fn new(base: u32) -> Self {
+        Self {
+            base,
+            magnitude: None,
+            symbol: "",
+        }
+    }
+}
+
+fn format_graph_numeric(
+    value: f64,
+    format: &str,
+    si_scale: &mut GraphSiScale,
+) -> Result<String, Box<dyn std::error::Error>> {
     use std::ffi::CString;
 
     let parsed = parse_graph_numeric_format(format)
         .map_err(|_| format!("bad format for PRINT in \"{format}'"))?;
-    let (scaled_value, si_symbol) = if parsed.si_symbol.is_some() {
-        graph_si_scale(value)
-    } else {
-        (value, "")
+    let scaled_value = match parsed.si_symbol {
+        Some(index) => {
+            // %S reuses the magnitude chosen by the first scaled value, unless
+            // that value scaled to zero; %s always picks a new one.
+            let reuse = format.as_bytes()[parsed.substitutions[index].end - 1] == b'S';
+            match si_scale.magnitude {
+                Some(magnitude) if reuse => value / magnitude,
+                _ => {
+                    let (scaled, magnitude, symbol) = graph_si_scale(value, si_scale.base);
+                    si_scale.magnitude = (!reuse || scaled != 0.0).then_some(magnitude);
+                    si_scale.symbol = symbol;
+                    scaled
+                }
+            }
+        }
+        None => value,
     };
+    let si_symbol = si_scale.symbol;
     let mut output = String::with_capacity(format.len() + 32);
     let mut cursor = 0;
     for substitution in parsed.substitutions {
@@ -3722,21 +4257,32 @@ fn append_graph_format_literal(output: &mut String, literal: &str) {
     }
 }
 
-fn graph_si_scale(value: f64) -> (f64, &'static str) {
+fn graph_si_scale(value: f64, base: u32) -> (f64, f64, &'static str) {
     const SYMBOLS: [&str; 13] = [
         "a", "f", "p", "n", "u", "m", " ", "k", "M", "G", "T", "P", "E",
     ];
     if value == 0.0 || value.is_nan() {
-        return (value, SYMBOLS[6]);
+        return (value, 1.0, SYMBOLS[6]);
     }
-    let exponent = (value.abs().log10() / 3.0).floor() as i32;
-    let factor = 1000.0_f64.powi(exponent);
+    if value.is_infinite() {
+        // auto_scale converts floor(log(inf)) to int: aarch64 saturates to
+        // INT_MAX and divides by pow(base, INT_MAX) = inf, while x86_64 yields
+        // INT_MIN and divides by zero. Either index is outside the table.
+        #[cfg(target_arch = "x86_64")]
+        let factor = 0.0;
+        #[cfg(not(target_arch = "x86_64"))]
+        let factor = f64::INFINITY;
+        return (value / factor, factor, "?");
+    }
+    let base = f64::from(base);
+    let exponent = (value.abs().ln() / base.ln()).floor() as i32;
+    let factor = base.powf(f64::from(exponent));
     let symbol = usize::try_from(exponent + 6)
         .ok()
         .and_then(|index| SYMBOLS.get(index))
         .copied()
         .unwrap_or("?");
-    (value / factor, symbol)
+    (value / factor, factor, symbol)
 }
 
 fn format_xport_xml(
@@ -3760,30 +4306,20 @@ fn format_xport_xml(
     writeln!(output, "    <columns>{}</columns>", exports.len()).unwrap();
     output.push_str("    <legend>\n");
     for export in exports {
-        writeln!(
-            output,
-            "      <entry>{}</entry>",
-            xml_escape_text(&export.legend)
-        )
-        .unwrap();
+        writeln!(output, "      <entry>{}</entry>", export.legend).unwrap();
     }
     output.push_str("    </legend>\n");
     if let Some(prints) = options.graph_prints.filter(|values| !values.is_empty()) {
         output.push_str("    <prints>\n");
         for value in prints {
-            writeln!(output, "        <print>{}</print>", xml_escape_text(value)).unwrap();
+            writeln!(output, "        <print>{value}</print>").unwrap();
         }
         output.push_str("    </prints>\n");
     }
     if let Some(gprints) = options.graph_gprints.filter(|values| !values.is_empty()) {
         output.push_str("    <gprints>\n");
         for (kind, value) in gprints {
-            writeln!(
-                output,
-                "        <{kind}>{}</{kind}>",
-                xml_escape_text(value)
-            )
-            .unwrap();
+            writeln!(output, "        <{kind}>{value}</{kind}>").unwrap();
         }
         output.push_str("    </gprints>\n");
     }
@@ -3802,23 +4338,16 @@ fn format_xport_xml(
                 "v".to_owned()
             };
             match value {
-                Some(value) if value.is_finite() => {
-                    write!(output, "<{tag}>{}</{tag}>", format_rrd_scientific(*value)).unwrap();
+                Some(value) => {
+                    write!(output, "<{tag}>{}</{tag}>", format_xport_value(*value)).unwrap();
                 }
-                _ => write!(output, "<{tag}>NaN</{tag}>").unwrap(),
+                None => write!(output, "<{tag}>NaN</{tag}>").unwrap(),
             }
         }
         output.push_str("</row>\n");
     }
     output.push_str("  </data>\n</xport>\n");
     output
-}
-
-fn xml_escape_text(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 fn normalize_json_graph_nan(value: &str) -> String {
@@ -3892,7 +4421,7 @@ fn format_xport_json(
             }
             match value {
                 Some(value) if value.is_finite() => {
-                    write!(output, "{}", format_rrd_scientific(*value)).unwrap()
+                    write!(output, "{}", format_xport_value(*value)).unwrap()
                 }
                 _ => output.push_str("null"),
             }
@@ -3975,9 +4504,9 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
     if daemon_address.is_none() {
         ensure_rrd_file_exists(&filename)?;
     }
-    // Local RRD writes use RRDtool's blocking per-file fcntl lock in the
-    // library. A directory-wide Rondi lock incorrectly serializes unrelated
-    // files and prevents the poller from updating them in parallel.
+    // Local RRD writes use RRDtool's per-file fcntl lock in the library, which
+    // tries once unless $RRD_LOCKING says otherwise. A directory-wide Rondi
+    // lock would serialize unrelated files and stop parallel poller updates.
     let source_names = if let Some(template) = &template {
         let info = inspect_rrd(&args[1])?;
         let mut indices = Vec::with_capacity(template.len());
@@ -4054,7 +4583,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
             .split(':')
             .enumerate()
             .map(|(value_index, value)| {
-                parse_value(value).map_err(|_| {
+                parse_rrd_update_value(value).ok_or_else(|| {
                     let data_sources = inspect_rrd(&args[1])
                         .map(|info| info.data_sources)
                         .unwrap_or_default();
@@ -4142,7 +4671,8 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 update_time.seconds,
                 update_time.microseconds,
                 &raw_values,
-            )?;
+            )
+            .map_err(|error| rrd_update_error(&filename, error))?;
             for summary in summaries {
                 for (source_name, value) in verbose_source_names
                     .as_ref()
@@ -4167,34 +4697,33 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 update_time.seconds,
                 update_time.microseconds,
                 &raw_values,
-            )?;
+            )
+            .map_err(|error| rrd_update_error(&filename, error))?;
         }
     }
     if let Some(address) = daemon_address {
         if !daemon_samples.is_empty() {
             #[cfg(unix)]
-            match connect_rrdcached(&address) {
-                Ok(stream) => {
-                    send_rrdcached_update_on_stream(
-                        stream,
-                        PathBuf::from(&args[1]).as_path(),
-                        &daemon_samples,
-                    )?;
-                }
-                Err(error) => {
-                    let error_text = error.to_string();
-                    let detail = error_text
-                        .split(" (os error ")
-                        .next()
-                        .unwrap_or("Internal error");
-                    return Err(format!("Unable to connect to rrdcached: {detail}").into());
-                }
-            }
+            send_rrdcached_update_on_stream(
+                connect_rrdcached(&address)?,
+                PathBuf::from(&args[1]).as_path(),
+                &daemon_samples,
+            )?;
             #[cfg(not(unix))]
             return Err("rrdcached updates are unavailable on this platform".into());
         }
     }
     Ok(())
+}
+
+/// RRDtool prefixes per-sample update failures with the file name.
+fn rrd_update_error(filename: &Path, error: rondi::StoreError) -> Box<dyn std::error::Error> {
+    match error {
+        rondi::StoreError::RrdTimestamp(message) => {
+            format!("{}: {message}", filename.display()).into()
+        }
+        error => error.into(),
+    }
 }
 
 fn rrdtool_flushcached(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -4236,6 +4765,9 @@ fn rrdtool_flushcached(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     };
     for filename in &files {
         if let Err(error) = send_rrdcached_flush(&daemon, filename) {
+            if error.is::<RrdcachedConnectError>() {
+                return Err(error);
+            }
             // RRDtool 1.11.0 reports the number of filenames after the
             // command name, independent of the point at which flushing failed.
             let remaining = files.len().saturating_sub(1);
@@ -4328,6 +4860,12 @@ fn send_rrdcached_update_on_stream(
         .unwrap_or(response)
         .to_owned()
         .into())
+}
+
+// xport rows go through rrd_snprintf, which only emits '-' for values below
+// zero, so -0 prints unsigned. updatev uses libc printf and keeps the sign.
+fn format_xport_value(value: f64) -> String {
+    format_rrd_scientific(if value == 0.0 { 0.0 } else { value })
 }
 
 fn format_rrd_scientific(value: f64) -> String {
@@ -5093,6 +5631,33 @@ impl<T: Read + Write> RrdcachedStream for T {}
 fn connect_rrdcached(
     address: &str,
 ) -> Result<Box<dyn RrdcachedStream>, Box<dyn std::error::Error>> {
+    open_rrdcached_stream(address).map_err(|error| {
+        let error_text = error.to_string();
+        let detail = error_text
+            .split(" (os error ")
+            .next()
+            .unwrap_or("Internal error");
+        RrdcachedConnectError(format!("Unable to connect to rrdcached: {detail}")).into()
+    })
+}
+
+/// A failed connection, kept distinct so `flushcached` can report it without
+/// the per-file wrapper, as RRDtool connects once before flushing any file.
+#[derive(Debug)]
+struct RrdcachedConnectError(String);
+
+impl std::fmt::Display for RrdcachedConnectError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RrdcachedConnectError {}
+
+#[cfg(unix)]
+fn open_rrdcached_stream(
+    address: &str,
+) -> Result<Box<dyn RrdcachedStream>, Box<dyn std::error::Error>> {
     use std::os::unix::net::UnixStream;
 
     if let Some(path) = address.strip_prefix("unix:") {
@@ -5228,6 +5793,21 @@ fn inspect_rrd(path: &str) -> Result<rondi::RrdInfo, Box<dyn std::error::Error>>
     Ok(rondi::inspect_rrd_file(path)?)
 }
 
+// rrd_tool.c prints fetch rows with printf, so LC_NUMERIC picks the decimal
+// separator.
+fn format_fetch_value(value: f64) -> String {
+    let mut buffer = [0 as libc::c_char; 64];
+    let length =
+        unsafe { libc::snprintf(buffer.as_mut_ptr(), buffer.len(), c"%0.10e".as_ptr(), value) };
+    match usize::try_from(length) {
+        Ok(length) if length < buffer.len() => {
+            let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), length) };
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+        _ => format_rrd_float(value),
+    }
+}
+
 fn format_rrd_float(value: f64) -> String {
     let formatted = format!("{value:0.10e}");
     let Some((mantissa, exponent)) = formatted.split_once('e') else {
@@ -5235,6 +5815,13 @@ fn format_rrd_float(value: f64) -> String {
     };
     let exponent = exponent.parse::<i32>().unwrap_or_default();
     format!("{mantissa}e{exponent:+03}")
+}
+
+fn parse_rrd_update_value(value: &str) -> Option<Option<f64>> {
+    if value.eq_ignore_ascii_case("U") || value.eq_ignore_ascii_case("UNKNOWN") {
+        return Some(None);
+    }
+    rondi::parse_rrd_number(value).map(Some)
 }
 
 fn parse_value(value: &str) -> Result<Option<f64>, Box<dyn std::error::Error>> {
@@ -5878,11 +6465,13 @@ async fn server_mode(socket: PathBuf, command: Command) -> Result<(), Box<dyn st
 
 #[cfg(test)]
 mod xml_output_tests {
-    use super::{XportFormatOptions, format_xport_xml, xml_escape_text};
+    use super::{XportFormatOptions, format_xport_xml};
     use rondi::RrdXportColumn;
 
+    // rrd_xport.c writes these text nodes unescaped, so the document is not
+    // well-formed XML when they contain markup characters.
     #[test]
-    fn escapes_graph_xport_text_nodes() {
+    fn writes_graph_xport_text_nodes_verbatim() {
         let exports = [RrdXportColumn {
             variable: "rate".to_owned(),
             legend: "load & <peak>".to_owned(),
@@ -5903,14 +6492,9 @@ mod xml_output_tests {
             },
         );
 
-        assert!(xml.contains("<entry>load &amp; &lt;peak&gt;</entry>"));
-        assert!(xml.contains("<print>value &gt; 1 &amp; &lt; 2</print>"));
-        assert!(xml.contains("<gprint>&lt;ok &amp; done&gt;</gprint>"));
-    }
-
-    #[test]
-    fn xml_escaper_handles_ampersands_before_entities() {
-        assert_eq!(xml_escape_text("&amp; <x>"), "&amp;amp; &lt;x&gt;");
+        assert!(xml.contains("<entry>load & <peak></entry>"));
+        assert!(xml.contains("<print>value > 1 & < 2</print>"));
+        assert!(xml.contains("<gprint><ok & done></gprint>"));
     }
 }
 
@@ -6547,5 +7131,75 @@ mod rrdcached_response_tests {
         let error =
             read_bounded_line(&mut reader, &mut line, MAX_RRDCACHED_LINE_BYTES).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    // The helper tests above pass even if a call site reads with an unbounded
+    // read_line, so drive each client path against a daemon that never sends a
+    // newline. The daemon stops writing once the client hangs up.
+    #[cfg(unix)]
+    fn serve_oversized_response(prefix: &'static str) -> (tempfile::TempDir, String) {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("rrdcached.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            let _ = stream.write_all(prefix.as_bytes());
+            let chunk = [b'x'; 64 * 1024];
+            for _ in 0..(2 * MAX_RRDCACHED_LINE_BYTES / chunk.len()) {
+                if stream.write_all(&chunk).is_err() {
+                    break;
+                }
+            }
+        });
+        (dir, format!("unix:{}", socket.display()))
+    }
+
+    #[cfg(unix)]
+    fn assert_oversized_line_error(error: &dyn std::error::Error) {
+        let message = error.to_string();
+        // An unbounded read surfaces the payload itself as the error text.
+        assert!(
+            message == "rrdcached response line exceeds 1 MiB",
+            "{message:.80}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn single_line_commands_reject_an_oversized_daemon_response() {
+        let (_dir, address) = serve_oversized_response("");
+        let error = super::send_rrdcached_command(&address, "FLUSH x.rrd").unwrap_err();
+        assert_oversized_line_error(&*error);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn updates_reject_an_oversized_daemon_response() {
+        let (_dir, address) = serve_oversized_response("");
+        let stream = super::connect_rrdcached(&address).unwrap();
+        let error = super::send_rrdcached_update_on_stream(
+            stream,
+            std::path::Path::new("x.rrd"),
+            &["1000000010:1".to_owned()],
+        )
+        .unwrap_err();
+        assert_oversized_line_error(&*error);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multiline_commands_reject_an_oversized_header_or_body_line() {
+        for prefix in ["", "1 entries follow\n"] {
+            let (_dir, address) = serve_oversized_response(prefix);
+            let error = super::send_rrdcached_multiline_command(&address, "LIST /").unwrap_err();
+            assert_oversized_line_error(&*error);
+        }
     }
 }

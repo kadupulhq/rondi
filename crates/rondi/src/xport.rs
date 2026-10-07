@@ -1,5 +1,7 @@
 //! Query and resample existing RRD archives for RRDtool-style exports.
-use crate::{RrdFetchResult, StoreError, fetch_rrd_file, rrd_number::parse_rrd_number};
+use crate::{
+    RrdFetchResult, RrdFetchRow, StoreError, fetch_rrd_file, rrd_number::parse_rrd_number,
+};
 use std::{collections::HashMap, path::PathBuf};
 
 #[inline]
@@ -20,6 +22,14 @@ pub struct RrdXportDefinition {
     pub file: PathBuf,
     pub data_source: String,
     pub consolidation: String,
+    /// `:step=` resolution requested for this DEF instead of the export step.
+    pub step: Option<u64>,
+    /// `:start=`/`:end=` fetch window, replacing the export range.
+    pub start: Option<i64>,
+    pub end: Option<i64>,
+    /// `:reduce=` consolidation used when the fetched rows are finer than the
+    /// requested step; defaults to the DEF's own CF.
+    pub reduce: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,9 +51,10 @@ pub struct RrdXportResult {
     pub step: u64,
     pub legends: Vec<String>,
     pub rows: Vec<Vec<Option<f64>>>,
-    /// Row-wise values before non-finite numbers are converted to unknowns for
-    /// XPORT output. Graph VDEF calculations need to distinguish infinities
-    /// from unknown data even though both serialize as null/unknown.
+    /// Row-wise values for every DEF and CDEF, including ones that are not
+    /// exported, over RRDtool's graph buffer. That buffer has one more slot
+    /// than `rows` when `end` is step-aligned. `rows` keeps infinities because
+    /// XML prints them while JSON writes null; only NaN becomes `None`.
     pub raw_variables: HashMap<String, Vec<f64>>,
 }
 
@@ -107,13 +118,25 @@ pub fn fetch_xport_with_cdefs(
 
     let mut fetched_definitions = Vec::with_capacity(definitions.len());
     for definition in definitions {
-        let fetched = fetch_rrd_file(
+        let requested = definition.step.unwrap_or(fetch_resolution);
+        let mut fetched = fetch_rrd_file(
             &definition.file,
             &definition.consolidation,
-            start,
-            end,
-            fetch_resolution,
+            definition.start.unwrap_or(start),
+            definition.end.unwrap_or(end),
+            requested,
         )?;
+        let target_step = requested.max(fetch_resolution);
+        if fetched.step < target_step {
+            reduce_fetched_rows(
+                &mut fetched,
+                definition
+                    .reduce
+                    .as_deref()
+                    .unwrap_or(&definition.consolidation),
+                target_step,
+            )?;
+        }
         let source_index = fetched
             .data_sources
             .iter()
@@ -140,7 +163,7 @@ pub fn fetch_xport_with_cdefs(
         .map(|definition| (definition.name.clone(), definition.fetched.step))
         .collect();
     for cdef in cdefs {
-        let step = expression_step(&cdef.expression, &variable_steps)?;
+        let step = expression_step(&cdef.name, &cdef.expression, &variable_steps)?;
         variable_steps.insert(cdef.name.clone(), step);
     }
     let mut output_step = 0_u64;
@@ -185,13 +208,21 @@ pub fn fetch_xport_with_cdefs(
             "xport output exceeds the 10 million row safety limit".into(),
         ));
     }
+    // RRDtool's fetched buffer, and so every CDEF and graph VDEF, ends one
+    // step after the last full row at or before `end`. With an aligned end
+    // that is one slot beyond the exported rows.
+    let buffer_rows = if end == floor_end {
+        row_count + 1
+    } else {
+        row_count
+    };
 
     let mut variables: HashMap<String, Vec<f64>> = HashMap::new();
     for definition in &fetched_definitions {
         let source_step = i64::try_from(definition.fetched.step)
             .map_err(|_| StoreError::RrdUnsupported("DEF step overflows".into()))?;
-        let mut values = Vec::with_capacity(row_count);
-        for row_index in 0..row_count {
+        let mut values = Vec::with_capacity(buffer_rows);
+        for row_index in 0..buffer_rows {
             let row_offset = i64::try_from(row_index)
                 .ok()
                 .and_then(|row| row.checked_mul(step_i64))
@@ -222,8 +253,8 @@ pub fn fetch_xport_with_cdefs(
                 cdef.name
             )));
         }
-        let mut values = Vec::with_capacity(row_count);
-        for row_index in 0..row_count {
+        let mut values = Vec::with_capacity(buffer_rows);
+        for row_index in 0..buffer_rows {
             let timestamp = i64::try_from(row_index)
                 .ok()
                 .and_then(|row| row.checked_add(1))
@@ -253,7 +284,7 @@ pub fn fetch_xport_with_cdefs(
                 ))
             })?;
             let value = values[row_index];
-            output_row.push(if value.is_finite() { Some(value) } else { None });
+            output_row.push(if value.is_nan() { None } else { Some(value) });
         }
     }
     Ok(RrdXportResult {
@@ -347,17 +378,17 @@ fn evaluate_rpn(
                 continue;
             }
             "DUP" => {
-                let a = *stack.last().ok_or_else(|| rpn_error("stack underflow"))?;
+                let a = *stack.last().ok_or_else(rpn_stack_underflow)?;
                 stack.push(a);
                 continue;
             }
             "POP" => {
-                stack.pop().ok_or_else(|| rpn_error("stack underflow"))?;
+                stack.pop().ok_or_else(rpn_stack_underflow)?;
                 continue;
             }
             "EXC" => {
                 if stack.len() < 2 {
-                    return Err(rpn_error("stack underflow"));
+                    return Err(rpn_stack_underflow());
                 }
                 let n = stack.len();
                 stack.swap(n - 1, n - 2);
@@ -460,22 +491,26 @@ fn evaluate_rpn(
             continue;
         }
         match token {
-            token if token.starts_with("PREV(") && token.ends_with(')') => {
+            token if prev_variable(token).is_some() => {
                 let variable = &token[5..token.len() - 1];
                 let values = variables
                     .get(variable)
                     .ok_or_else(|| rpn_error(&format!("unknown variable '{variable}'")))?;
-                let prior = row
-                    .checked_sub(1)
-                    .and_then(|prior_row| values.get(prior_row))
-                    .copied()
-                    .unwrap_or(rrd_nan());
+                let source_step = source_step_seconds(variable_steps, variable)?;
+                // PREV(var) reads the source row before the variable's cursor,
+                // which sits on the source row that ends at or after TIME.
+                let prior = if row == 0 {
+                    rrd_nan()
+                } else {
+                    let cursor_end = timestamp + (-timestamp).rem_euclid(source_step);
+                    source_row_value(values, row, timestamp, step_width, cursor_end - source_step)
+                };
                 stack.push(prior);
             }
             "AVG" | "MEDIAN" | "STDEV" | "SMIN" | "SMAX" | "SORT" | "REV" => {
                 let count = pop_count(&mut stack)?;
                 if stack.len() < count {
-                    return Err(rpn_error("stack underflow"));
+                    return Err(rpn_stack_underflow());
                 }
                 let split = stack.len() - count;
                 let mut values = stack.split_off(split);
@@ -497,7 +532,9 @@ fn evaluate_rpn(
                             // RRDtool pops aggregate operands from the RPN stack, so it
                             // adds the rightmost operand first. Floating point addition
                             // is order-sensitive; preserve that operation order.
-                            known.into_iter().rev().sum::<f64>() / known_count as f64
+                            // The sum starts at +0.0 as in C, not Rust's -0.0.
+                            known.into_iter().rev().fold(0.0, |sum, value| sum + value)
+                                / known_count as f64
                         });
                     }
                     "MEDIAN" => {
@@ -543,17 +580,14 @@ fn evaluate_rpn(
             "COPY" => {
                 let count = pop_count(&mut stack)?;
                 if stack.len() < count {
-                    return Err(rpn_error("stack underflow"));
+                    return Err(rpn_stack_underflow());
                 }
                 let start = stack.len() - count;
                 let copied = stack[start..].to_vec();
                 stack.extend(copied);
             }
             "INDEX" => {
-                let index = stack
-                    .last()
-                    .copied()
-                    .ok_or_else(|| rpn_error("stack underflow"))?;
+                let index = stack.last().copied().ok_or_else(rpn_stack_underflow)?;
                 // The upstream OP_INDEX implementation converts its RPN number
                 // to C `int`, truncating fractional values toward zero.
                 let index = index.trunc();
@@ -575,13 +609,10 @@ fn evaluate_rpn(
                 } else {
                     return Err(rpn_error("invalid ROLL shift"));
                 };
-                let count_value = stack
-                    .last()
-                    .copied()
-                    .ok_or_else(|| rpn_error("stack underflow"))?;
+                let count_value = stack.last().copied().ok_or_else(rpn_stack_underflow)?;
                 let count = pop_count(&mut stack)?;
                 if stack.len() < count {
-                    return Err(rpn_error("stack underflow"));
+                    return Err(rpn_stack_underflow());
                 }
                 if count == 0 {
                     continue;
@@ -617,42 +648,56 @@ fn evaluate_rpn(
                 }
             }
             "PERCENT" => {
+                if stack.len() < 3 {
+                    return Err(rpn_stack_underflow());
+                }
                 let count = pop_count(&mut stack)?;
                 let percent = pop(&mut stack)?;
-                if !(0.0..=100.0).contains(&percent) || !percent.is_finite() {
-                    return Err(rpn_error("percentile argument must be between 0 and 100"));
+                if !(0.0..=100.0).contains(&percent) {
+                    return Err(rrdtool_rpn_error(
+                        "percentile argument must be between 0 and 100",
+                    ));
                 }
-                if count == 0 || stack.len() < count {
-                    return Err(rpn_error("stack underflow or invalid PERCENT count"));
+                if stack.len() < count {
+                    return Err(rpn_stack_underflow());
                 }
                 let start = stack.len() - count;
-                let mut values = stack.split_off(start);
-                values.sort_by(rrd_percent_cmp);
-                let rounded = (percent * count as f64 / 100.0).round() as usize;
-                let index = rounded.saturating_sub(1).min(count - 1);
-                let selected = values[index];
+                stack[start..].sort_by(rrd_percent_cmp);
+                let rank = (percent * count as f64 / 100.0).round() as usize;
+                // RRDtool reads s[start - 1 + rank]: rank 0 selects the
+                // unsorted slot below the window, and a zero count repeats the
+                // top value. Below the stack bottom it reads outside its
+                // buffer, which has no defined result.
+                let selected = (start + rank)
+                    .checked_sub(1)
+                    .map_or_else(rrd_nan, |index| stack[index]);
+                stack.truncate(start);
                 stack.push(selected);
             }
             "TREND" | "TRENDNAN" => {
-                if token_index < 2 {
-                    return Err(rpn_error("malformed trend arguments"));
+                if stack.len() < 2 {
+                    return Err(rpn_stack_underflow());
                 }
-                let variable = tokens[token_index - 2];
-                let duration = parse_rrd_number(tokens[token_index - 1])
-                    .ok_or_else(|| rpn_error("trend duration must follow a variable"))?;
+                // RRDtool requires the operand two places back to be a plain
+                // variable and takes the duration from the stack top.
+                let variable = token_index
+                    .checked_sub(2)
+                    .map(|index| tokens[index])
+                    .filter(|variable| {
+                        parse_rpn_number(variable, true).is_none()
+                            && !RPN_OPERATORS.contains(variable)
+                    })
+                    .ok_or_else(|| rrdtool_rpn_error("malformed trend arguments"))?;
                 let values = variables
                     .get(variable)
-                    .ok_or_else(|| rpn_error("trend must immediately follow a variable"))?;
-                let source_step = *variable_steps
-                    .get(variable)
-                    .ok_or_else(|| rpn_error("missing trend source step"))?;
+                    .ok_or_else(|| rrdtool_rpn_error("malformed trend arguments"))?;
+                let duration = stack[stack.len() - 1];
+                let source_step_i64 = source_step_seconds(variable_steps, variable)?;
                 let duration_seconds = if duration.is_finite() {
                     duration as i64
                 } else {
                     return Err(rpn_error("invalid trend duration"));
                 };
-                let source_step_i64 = i64::try_from(source_step)
-                    .map_err(|_| rpn_error("trend source step overflows"))?;
                 // rrd_rpncalc.c first checks readiness using single-precision
                 // division, then separately consumes samples while the integer
                 // duration remains positive. The float rounding is visible for
@@ -662,22 +707,19 @@ fn evaluate_rpn(
                 let value = if !ready {
                     rrd_nan()
                 } else {
-                    let stride = usize::try_from(source_step / step_width)
-                        .map_err(|_| rpn_error("trend step ratio overflows"))?
-                        .max(1);
+                    // The variable's cursor has already advanced past the
+                    // current source row only when TIME ends that row, so
+                    // the newest sample is the last row ending at or before
+                    // TIME.
+                    let newest_end = timestamp - timestamp.rem_euclid(source_step_i64);
                     let mut sum = 0.0;
                     let mut count = 0_usize;
                     let mut unknown = false;
                     let mut remaining_duration = duration_seconds;
-                    let mut offset = 0_usize;
+                    let mut sample_end = newest_end;
                     loop {
-                        let index = row.checked_sub(offset.saturating_mul(stride));
-                        // RRDtool's RPN history buffer is zero-initialized
-                        // before the first available row.
-                        let sample = index
-                            .and_then(|index| values.get(index))
-                            .copied()
-                            .unwrap_or(0.0);
+                        let sample =
+                            source_row_value(values, row, timestamp, step_width, sample_end);
                         if sample.is_nan() {
                             if token == "TREND" {
                                 unknown = true;
@@ -691,7 +733,7 @@ fn evaluate_rpn(
                         if remaining_duration <= 0 {
                             break;
                         }
-                        offset += 1;
+                        sample_end = sample_end.saturating_sub(source_step_i64);
                     }
                     if unknown || count == 0 {
                         rrd_nan()
@@ -739,12 +781,10 @@ fn evaluate_rpn(
                 let values = variables
                     .get(*x)
                     .ok_or_else(|| rpn_error("prediction must immediately follow a variable"))?;
-                let source_step = *variable_steps
-                    .get(*x)
-                    .ok_or_else(|| rpn_error("missing prediction source step"))?;
-                let stride = usize::try_from(source_step / step_width.max(1))
-                    .map_err(|_| rpn_error("prediction step ratio overflows"))?
-                    .max(1);
+                let source_step = source_step_seconds(variable_steps, x)?;
+                // Offset zero is the variable's cursor after its push: the
+                // source row after the last row ending at or before TIME.
+                let cursor_end = timestamp - timestamp.rem_euclid(source_step) + source_step;
                 let locstepsize = window_seconds.trunc() as i64;
                 let locstep = if locstepsize <= 0 {
                     0
@@ -770,13 +810,14 @@ fn evaluate_rpn(
                         if offset >= row {
                             continue;
                         }
-                        let Some(index) = row
-                            .saturating_add(1)
-                            .checked_sub(offset.saturating_mul(stride))
-                        else {
-                            continue;
-                        };
-                        if let Some(value) = values.get(index).copied().filter(|v| !v.is_nan()) {
+                        let end = i64::try_from(offset)
+                            .ok()
+                            .and_then(|offset| offset.checked_mul(source_step))
+                            .and_then(|back| cursor_end.checked_sub(back));
+                        if let Some(value) = end
+                            .map(|end| source_row_value(values, row, timestamp, step_width, end))
+                            .filter(|value| !value.is_nan())
+                        {
                             observations.push(value);
                         }
                     }
@@ -784,13 +825,14 @@ fn evaluate_rpn(
                 let prediction = if observations.is_empty() {
                     rrd_nan()
                 } else if token == "PREDICT" {
-                    observations.iter().sum::<f64>() / observations.len() as f64
+                    observations.iter().fold(0.0, |sum, value| sum + value)
+                        / observations.len() as f64
                 } else if token == "PREDICTSIGMA" {
                     let count = observations.len() as f64;
                     if count < 2.0 {
                         rrd_nan()
                     } else {
-                        let sum = observations.iter().sum::<f64>();
+                        let sum = observations.iter().fold(0.0, |sum, value| sum + value);
                         let sum2 = observations.iter().map(|value| value * value).sum::<f64>();
                         ((count * sum2 - sum * sum) / (count * (count - 1.0))).sqrt()
                     }
@@ -833,7 +875,7 @@ fn evaluate_rpn(
                 );
             }
             _ => {
-                if let Some(number) = parse_rrd_number(token) {
+                if let Some(number) = parse_rpn_number(token, token_index + 1 < tokens.len()) {
                     stack.push(number);
                 } else if let Some(values) = variables.get(token) {
                     if !tokens.get(token_index + 1).is_some_and(|next| {
@@ -848,12 +890,47 @@ fn evaluate_rpn(
         }
     }
     if stack.len() != 1 {
-        return Err(rpn_error("expression must leave exactly one value"));
+        return Err(rrdtool_rpn_error("RPN final stack size != 1"));
     }
     Ok(stack[0])
 }
+fn source_step_seconds(
+    variable_steps: &HashMap<String, u64>,
+    variable: &str,
+) -> Result<i64, StoreError> {
+    variable_steps
+        .get(variable)
+        .and_then(|step| i64::try_from(*step).ok())
+        .filter(|step| *step > 0)
+        .ok_or_else(|| rpn_error("missing variable step"))
+}
+
+/// Reads a variable's source row by its end time from the evaluation grid,
+/// where row `row` ends at `timestamp`. RRDtool keeps a separate data cursor
+/// per variable that only advances when TIME ends a source row, so a variable
+/// coarser than the CDEF step repeats each source row on the grid. Reads
+/// before the buffer are out of bounds upstream; the pinned builds observed
+/// on aarch64 and x86_64 return zero or a denormal there, so use zero. Rows
+/// past the end read as unknown.
+fn source_row_value(values: &[f64], row: usize, timestamp: i64, step_width: u64, end: i64) -> f64 {
+    let index = i64::try_from(step_width)
+        .ok()
+        .filter(|step| *step > 0)
+        .zip(timestamp.checked_sub(end))
+        .and_then(|(step, back)| i64::try_from(row).ok()?.checked_sub(back.div_euclid(step)));
+    match index {
+        Some(index) if index < 0 => 0.0,
+        Some(index) => usize::try_from(index)
+            .ok()
+            .and_then(|index| values.get(index))
+            .copied()
+            .unwrap_or_else(rrd_nan),
+        None => rrd_nan(),
+    }
+}
+
 fn pop(stack: &mut Vec<f64>) -> Result<f64, StoreError> {
-    stack.pop().ok_or_else(|| rpn_error("stack underflow"))
+    stack.pop().ok_or_else(rpn_stack_underflow)
 }
 fn pop_count(stack: &mut Vec<f64>) -> Result<usize, StoreError> {
     // RRDtool stores these RPN operands in C `int` variables, truncating
@@ -887,6 +964,133 @@ fn cmp(a: f64, b: f64, result: bool) -> f64 {
 }
 fn rpn_error(message: &str) -> StoreError {
     StoreError::RrdUnsupported(format!("invalid CDEF RPN: {message}"))
+}
+fn rrdtool_rpn_error(message: &str) -> StoreError {
+    StoreError::RrdExpression(message.to_owned())
+}
+fn rpn_stack_underflow() -> StoreError {
+    rrdtool_rpn_error("RPN stack underflow")
+}
+
+/// The operator names accepted by RRDtool 1.11.0's `rpn_parse`.
+const RPN_OPERATORS: &[&str] = &[
+    "+",
+    "-",
+    "*",
+    "/",
+    "%",
+    "SIN",
+    "COS",
+    "LOG",
+    "FLOOR",
+    "CEIL",
+    "EXP",
+    "DUP",
+    "EXC",
+    "POP",
+    "LTIME",
+    "NEWDAY",
+    "NEWWEEK",
+    "NEWMONTH",
+    "NEWYEAR",
+    "STEPWIDTH",
+    "LT",
+    "LE",
+    "GT",
+    "GE",
+    "EQ",
+    "IF",
+    "MIN",
+    "MAX",
+    "LIMIT",
+    "UNKN",
+    "UN",
+    "NEGINF",
+    "NE",
+    "COUNT",
+    "PREV",
+    "INF",
+    "ISINF",
+    "NOW",
+    "TIME",
+    "ATAN2",
+    "ATAN",
+    "SQRT",
+    "SORT",
+    "REV",
+    "TREND",
+    "TRENDNAN",
+    "PREDICT",
+    "PREDICTSIGMA",
+    "PREDICTPERC",
+    "RAD2DEG",
+    "DEG2RAD",
+    "AVG",
+    "ABS",
+    "ADDNAN",
+    "MINNAN",
+    "MAXNAN",
+    "MEDIAN",
+    "DEPTH",
+    "COPY",
+    "ROLL",
+    "INDEX",
+    "SMAX",
+    "SMIN",
+    "STDEV",
+    "PERCENT",
+    "POW",
+    "ROUND",
+];
+
+/// `rpn_parse` reads a number with `%40[0-9.e+-]` and only accepts it when a
+/// comma follows, so a trailing number or an uppercase exponent is not one.
+fn parse_rpn_number(token: &str, followed_by_comma: bool) -> Option<f64> {
+    if !followed_by_comma
+        || token.len() > 40
+        || !token
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'.' | b'e' | b'+' | b'-'))
+    {
+        return None;
+    }
+    parse_rrd_number(token)
+}
+
+fn prev_variable(token: &str) -> Option<&str> {
+    token
+        .strip_prefix("PREV(")
+        .and_then(|token| token.strip_suffix(')'))
+}
+
+/// Reject expressions that `rpn_parse` would not parse, before evaluation, so
+/// parse errors win over evaluation errors as they do upstream.
+fn validate_rpn(expression: &str, variable_steps: &HashMap<String, u64>) -> Result<(), StoreError> {
+    if expression.is_empty() {
+        return Err(rrdtool_rpn_error("can not parse an empty rpn expression"));
+    }
+    let tokens: Vec<_> = expression.split(',').collect();
+    for (index, token) in tokens.iter().enumerate() {
+        if parse_rpn_number(token, index + 1 < tokens.len()).is_some()
+            || RPN_OPERATORS.contains(token)
+            || variable_steps.contains_key(*token)
+        {
+            continue;
+        }
+        if let Some(variable) = prev_variable(token) {
+            if variable_steps.contains_key(variable) {
+                continue;
+            }
+            return Err(rrdtool_rpn_error(&format!(
+                "variable '{variable}' not found"
+            )));
+        }
+        return Err(rrdtool_rpn_error(&format!(
+            "don't understand '{}'",
+            tokens[index..].join(",")
+        )));
+    }
+    Ok(())
 }
 
 fn local_tm(timestamp: i64) -> Option<libc::tm> {
@@ -953,15 +1157,14 @@ fn rrd_first_weekday() -> i32 {
 }
 
 fn expression_step(
+    name: &str,
     expression: &str,
     variable_steps: &HashMap<String, u64>,
 ) -> Result<u64, StoreError> {
+    validate_rpn(expression, variable_steps)?;
     let mut step = 0_u64;
     for token in expression.split(',') {
-        let variable = token
-            .strip_prefix("PREV(")
-            .and_then(|token| token.strip_suffix(')'))
-            .unwrap_or(token);
+        let variable = prev_variable(token).unwrap_or(token);
         if let Some(variable_step) = variable_steps.get(variable) {
             step = if step == 0 {
                 *variable_step
@@ -972,8 +1175,9 @@ fn expression_step(
     }
     // The PNG rule-only graph adapter uses a private constant CDEF to give
     // rules a time axis. A constant has no variable step of its own, so use
-    // the available DEF grid for that adapter case.
-    if step == 0 {
+    // the available DEF grid for that adapter case only; RRDtool rejects any
+    // other constant CDEF.
+    if step == 0 && name == "__rondi_rule_anchor" {
         for variable_step in variable_steps.values() {
             step = if step == 0 {
                 *variable_step
@@ -983,11 +1187,120 @@ fn expression_step(
         }
     }
     if step == 0 {
-        return Err(StoreError::RrdUnsupported(
-            "rpn expressions without DEF or CDEF variables are not supported".into(),
+        return Err(rrdtool_rpn_error(
+            "rpn expressions without DEF or CDEF variables are not supported",
         ));
     }
     Ok(step)
+}
+
+/// Port of `rrd_reduce_data`: widen the fetched window to multiples of the
+/// new step, pad partial edge rows with unknowns, and consolidate each group
+/// of source rows with `consolidation`.
+fn reduce_fetched_rows(
+    fetched: &mut RrdFetchResult,
+    consolidation: &str,
+    step: u64,
+) -> Result<(), StoreError> {
+    let overflow = || StoreError::RrdUnsupported("DEF reduce step overflows".into());
+    let current = i64::try_from(fetched.step).map_err(|_| overflow())?;
+    let factor = step.div_ceil(fetched.step);
+    let new_step = fetched.step.checked_mul(factor).ok_or_else(overflow)?;
+    let new_step_i64 = i64::try_from(new_step).map_err(|_| overflow())?;
+    let factor = usize::try_from(factor).map_err(|_| overflow())?;
+    let columns = fetched.data_sources.len();
+    let mut start = fetched.start;
+    let mut end = fetched.end;
+    let mut remaining = usize::try_from((end - start) / current).map_err(|_| overflow())?;
+    let start_offset = start.rem_euclid(new_step_i64);
+    let end_offset = end.rem_euclid(new_step_i64);
+    let mut source = 0_usize;
+    let mut reduced = Vec::new();
+    let sanity = |remaining: usize| {
+        StoreError::RrdUnsupported(format!(
+            "SANITY CHECK: {remaining} rows cannot be reduced by {factor} "
+        ))
+    };
+    if start_offset != 0 {
+        start -= start_offset;
+        source = factor - usize::try_from(start_offset / current).map_err(|_| overflow())?;
+        reduced.push(vec![None; columns]);
+        remaining = remaining
+            .checked_sub(source)
+            .ok_or_else(|| sanity(remaining))?;
+    }
+    if end_offset != 0 {
+        end = end - end_offset + new_step_i64;
+        let skipped = usize::try_from(end_offset / current).map_err(|_| overflow())?;
+        remaining = remaining
+            .checked_sub(skipped)
+            .ok_or_else(|| sanity(remaining))?;
+    }
+    if remaining % factor != 0 {
+        return Err(sanity(remaining));
+    }
+    while remaining >= factor {
+        let mut row = Vec::with_capacity(columns);
+        for column in 0..columns {
+            let mut value = None::<f64>;
+            let mut valid = 0_u32;
+            for offset in 0..factor {
+                let Some(sample) = fetched
+                    .rows
+                    .get(source + offset)
+                    .and_then(|row| row.values.get(column).copied().flatten())
+                    .filter(|sample| !sample.is_nan())
+                else {
+                    continue;
+                };
+                valid += 1;
+                value = Some(match value {
+                    None => sample,
+                    Some(value) => match consolidation {
+                        "MIN" => {
+                            if value < sample {
+                                value
+                            } else {
+                                sample
+                            }
+                        }
+                        "MAX" | "FAILURES" => {
+                            if value > sample {
+                                value
+                            } else {
+                                sample
+                            }
+                        }
+                        "LAST" => sample,
+                        _ => value + sample,
+                    },
+                });
+            }
+            row.push(match (value, consolidation) {
+                (Some(value), "MIN" | "MAX" | "FAILURES" | "LAST") => Some(value),
+                (Some(value), _) => Some(value / f64::from(valid)),
+                (None, _) => None,
+            });
+        }
+        reduced.push(row);
+        source += factor;
+        remaining -= factor;
+    }
+    if end_offset != 0 {
+        reduced.push(vec![None; columns]);
+    }
+    let mut timestamp = start;
+    fetched.rows = reduced
+        .into_iter()
+        .map(|values| {
+            timestamp += new_step_i64;
+            RrdFetchRow { timestamp, values }
+        })
+        .collect();
+    fetched.start = start;
+    fetched.end = end;
+    fetched.step = new_step;
+    Ok(())
 }
 
 fn gcd(mut left: u64, mut right: u64) -> u64 {

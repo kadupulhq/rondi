@@ -1141,6 +1141,63 @@ fn rrdcached_recursive_create_requires_and_honors_dash_r() {
 }
 
 #[test]
+fn rrdcached_accepts_attached_arguments_and_cacti_options() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("data");
+    let socket = dir.path().join("cacti.sock");
+    std::fs::create_dir_all(&root).unwrap();
+    let alias = dir.path().join("rrdcached");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    // SAFETY: geteuid and getegid have no preconditions.
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    let mut child = Command::new(&alias)
+        .arg("-gB")
+        .arg(format!("-b{}", root.display()))
+        .args(["-w1800", "-f", "3600", "-z900", "-V", "LOG_INFO"])
+        .arg(format!("-U{uid}"))
+        .args(["-G", &gid.to_string()])
+        .arg(format!("-lunix:{}", socket.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_socket(&mut child, &socket);
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut reader = BufReader::new(&mut stream);
+    assert_eq!(rrdcached_request(&mut reader, "PING\n"), "0 PONG\n");
+    drop(reader);
+    drop(stream);
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+    assert!(child.wait().unwrap().success());
+
+    // Rondi can neither switch accounts nor serve several sockets, so it
+    // refuses these configurations instead of silently ignoring them.
+    let mut refused = vec![vec![
+        "-l".to_owned(),
+        format!("unix:{}", dir.path().join("first.sock").display()),
+        "-l".to_owned(),
+        format!("unix:{}", dir.path().join("second.sock").display()),
+    ]];
+    if uid != 0 {
+        refused.push(vec!["-U".to_owned(), "0".to_owned()]);
+    }
+    for args in refused {
+        let output = Command::new(&alias)
+            .args(["-g", "-b", root.to_str().unwrap()])
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        assert!(!output.stderr.is_empty(), "{args:?}");
+        assert!(!dir.path().join("first.sock").exists());
+    }
+}
+
+#[test]
 fn rrdcached_socket_mode_matches_upstream() {
     if !Command::new("rrdcached")
         .arg("--version")
@@ -1753,10 +1810,12 @@ fn rrdtool_fetch_daemon_resolution_matches_upstream_protocol_behavior() {
     if !Command::new("rrdtool")
         .arg("--version")
         .output()
-        .is_ok_and(|output| output.status.success())
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
     {
         eprintln!(
-            "skipping daemon FETCH resolution differential: upstream RRDtool is not installed"
+            "skipping daemon FETCH resolution differential: pinned RRDtool 1.11.0 is not installed"
         );
         return;
     }
@@ -1920,10 +1979,12 @@ fn server_handles_interrupt_and_terminate_and_removes_its_socket() {
 #[test]
 fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
     let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("rra");
     let socket = dir.path().join("run/rrdcached.sock");
     let alias = dir.path().join("rrdcached");
-    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(dir.path().join("rra")).unwrap();
+    // Replies echo -b as given, and upstream rejects a symlinked -b, so both
+    // daemons use the canonical base (macOS temporary paths are symlinked).
+    let root = std::fs::canonicalize(dir.path().join("rra")).unwrap();
     std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
     let mut child = Command::new(&alias)
@@ -2121,6 +2182,80 @@ fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
                 .any(|window| window == b"DSName-temp: BinaryData")
         );
         assert_eq!(rondi_multi_fetchbin, upstream_multi_fetchbin);
+        // Only the known `load` column is compared because the printed sign
+        // of an unknown value depends on the C library.
+        let fetch_text = "FETCH multi-fetchbin.rrd AVERAGE 1000000000 1000000019 load\n";
+        let upstream_fetch_text = {
+            let mut upstream_reader = BufReader::new(&mut upstream_stream);
+            rrdcached_full_request(&mut upstream_reader, fetch_text)
+        };
+        assert!(
+            upstream_fetch_text.contains(" 5.00000000000000000e+00\n"),
+            "{upstream_fetch_text}"
+        );
+        assert_eq!(
+            rrdcached_full_request(&mut reader, fetch_text),
+            upstream_fetch_text
+        );
+        // Replies echo the base directory joined with the requested name,
+        // not the resolved path.
+        for (command, full) in [
+            ("INFO ./poller.rrd\n", true),
+            ("FLUSH ./missing.rrd\n", false),
+        ] {
+            let upstream_echo = {
+                let mut upstream_reader = BufReader::new(&mut upstream_stream);
+                if full {
+                    rrdcached_full_request(&mut upstream_reader, command)
+                } else {
+                    rrdcached_request(&mut upstream_reader, command)
+                }
+            };
+            assert!(upstream_echo.contains("/./"), "{upstream_echo}");
+            let rondi_echo = if full {
+                rrdcached_full_request(&mut reader, command)
+            } else {
+                rrdcached_request(&mut reader, command)
+            };
+            assert_eq!(rondi_echo, upstream_echo);
+        }
+        // Upstream closes the connection after some errors, so each
+        // command uses its own connection.
+        let one_shot = |path: &std::path::Path, command: &str| {
+            let mut stream = UnixStream::connect(path).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            rrdcached_request(&mut BufReader::new(&mut stream), command)
+        };
+        for command in [
+            "BOGUS\n",
+            "bogus x\n",
+            "WROTE x\n",
+            "UPDATE\n",
+            "FLUSH\n",
+            "FLUSH ./missing.rrd extra\n",
+            "PENDING\n",
+            "PENDING poller.rrd extra\n",
+            "FORGET\n",
+            "INFO\n",
+            "LAST\n",
+            "SUSPEND\n",
+            "RESUME\n",
+            "FETCH\n",
+            "FETCH poller.rrd\n",
+            "TUNE\n",
+            "TUNE poller.rrd\n",
+            "CREATE\n",
+            "PING x\n",
+            "QUEUE x\n",
+        ] {
+            assert_eq!(
+                one_shot(&socket, command),
+                one_shot(&upstream_socket, command),
+                "{command:?}"
+            );
+        }
         let upstream_forget_multi = {
             let mut upstream_reader = BufReader::new(&mut upstream_stream);
             rrdcached_request(&mut upstream_reader, "FORGET multi-fetchbin.rrd\n")
@@ -2582,7 +2717,7 @@ fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
     batch_result.clear();
     reader.read_line(&mut batch_result).unwrap();
     assert!(
-        batch_result.starts_with("2 Unknown or invalid command: INVALID"),
+        batch_result.starts_with("2 Unknown command: INVALID"),
         "{batch_result:?}"
     );
     assert!(rrdcached_request(&mut reader, "STATS\n").starts_with("9 Statistics follow\n"));
@@ -3037,4 +3172,141 @@ fn rrdcached_recovers_journaled_update_after_crash() {
     drop(stream);
     restarted.kill().unwrap();
     restarted.wait().unwrap();
+}
+
+#[test]
+fn rrdcached_update_waiting_on_an_rrd_lock_does_not_stall_other_clients() {
+    use std::os::fd::AsRawFd;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("rra");
+    let socket = dir.path().join("run/rrdcached.sock");
+    let alias = dir.path().join("rrdcached");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let mut child = Command::new(&alias)
+        .args(["-b", root.to_str().unwrap(), "-l"])
+        .arg(format!("unix:{}", socket.display()))
+        .env("RRD_LOCKING", "block")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for_socket(&mut child, &socket);
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    let mut reader = BufReader::new(&mut stream);
+    for name in ["locked", "other"] {
+        assert_eq!(
+            rrdcached_request(
+                &mut reader,
+                &format!(
+                    "CREATE {name}.rrd -b 1000000000 -s 10 DS:v:GAUGE:20:U:U RRA:AVERAGE:0.5:1:8\n"
+                )
+            ),
+            "0 RRD created OK\n"
+        );
+    }
+    drop(reader);
+    drop(stream);
+
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join("locked.rrd"))
+        .unwrap();
+    // SAFETY: zeroed flock is a valid whole-file request once l_type is set.
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = libc::F_WRLCK as _;
+    lock.l_whence = libc::SEEK_SET as _;
+    // SAFETY: the descriptor is open and `lock` is a valid flock structure.
+    assert_eq!(
+        unsafe { libc::fcntl(holder.as_raw_fd(), libc::F_SETLK, &lock) },
+        0
+    );
+    let blocked = {
+        let socket = socket.clone();
+        thread::spawn(move || {
+            let mut stream = UnixStream::connect(&socket).unwrap();
+            let mut reader = BufReader::new(&mut stream);
+            rrdcached_request(&mut reader, "UPDATE locked.rrd 1000000010:1\n")
+        })
+    };
+    thread::sleep(Duration::from_millis(300));
+    assert!(!blocked.is_finished());
+
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut reader = BufReader::new(&mut stream);
+    assert_eq!(
+        rrdcached_request(&mut reader, "UPDATE other.rrd 1000000010:1\n"),
+        "0 errors, enqueued 1 value(s).\n"
+    );
+    drop(reader);
+    drop(stream);
+
+    drop(holder);
+    assert_eq!(blocked.join().unwrap(), "0 errors, enqueued 1 value(s).\n");
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[test]
+fn rrdcached_idle_client_does_not_block_shutdown_flush() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("rra");
+    let socket = dir.path().join("run/rrdcached.sock");
+    let alias = dir.path().join("rrdcached");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let mut child = Command::new(&alias)
+        .args(["-b", root.to_str().unwrap(), "-w", "3600", "-l"])
+        .arg(format!("unix:{}", socket.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for_socket(&mut child, &socket);
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    let mut reader = BufReader::new(&mut stream);
+    assert_eq!(
+        rrdcached_request(
+            &mut reader,
+            "CREATE idle.rrd -b 1000000000 -s 10 DS:v:GAUGE:20:U:U RRA:AVERAGE:0.5:1:8\n"
+        ),
+        "0 RRD created OK\n"
+    );
+    assert_eq!(
+        rrdcached_request(&mut reader, "UPDATE idle.rrd 1000000010:4\n"),
+        "0 errors, enqueued 1 value(s).\n"
+    );
+    drop(reader);
+    drop(stream);
+    let idle = UnixStream::connect(&socket).unwrap();
+
+    // SAFETY: the child is the daemon process owned by this test.
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) },
+        0
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("an idle rrdcached client blocked shutdown");
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    drop(idle);
+    assert_eq!(
+        rondi::inspect_rrd_file(root.join("idle.rrd"))
+            .unwrap()
+            .last_update,
+        1_000_000_010
+    );
 }

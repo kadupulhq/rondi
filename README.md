@@ -38,7 +38,7 @@ The names are installed for packaging and mode selection; legacy-compatible beha
 
 The installer also installs `rrdtool-proxy.php` for service definitions that invoke the proxy through PHP. It delegates to the neighboring `rrdtool-proxy` alias; set `RONDI_BIN` when the executable is installed elsewhere. This adapter currently covers only the pinned launcher help/version/invalid-option responses, not the proxy daemon or wire protocol.
 
-For systemd deployments, `packaging/systemd/rondi-rrdcached.service` is the packaged security profile. Provision a dedicated unprivileged `rondi` user and group first, install the compatibility symlink as `/usr/bin/rrdcached`, and enable the unit. It keeps the alias's upstream-compatible defaults unchanged while explicitly setting `-m 0660 -s rondi`; the service data and socket directories are group-owned and unavailable to other users. Do not use this profile with a shared `/tmp` base directory.
+For systemd deployments, `packaging/systemd/rondi-rrdcached.service` is the packaged security profile. Provision a dedicated unprivileged `rondi` user and group first, install the compatibility symlink as `/usr/bin/rrdcached`, and enable the unit. It keeps the alias's upstream-compatible defaults unchanged while explicitly setting `-m 0660 -s rondi` and keeping the journal outside the base directory with `-j /var/lib/rondi-journal`; the service data and socket directories are group-owned and unavailable to other users. Do not use this profile with a shared `/tmp` base directory.
 
 The current `rrdtool` alias supports narrow numeric-time `fetch` and `update` paths against existing version 0003-0005 `.rrd` layouts on 64-bit little-endian targets. It also accepts RRDtool's stdin command mode (`rrdtool -`), used by Kadupul's poller, with tested `update --template` handling. For example:
 
@@ -94,6 +94,10 @@ mise exec -- bash scripts/smoke-kadupul-poller.sh
 ```
 
 Set `KADUPUL_ROOT`, `RRDTOOL_BIN`, or `RONDI_BIN` to override the checkout or executable paths. This exercises Kadupul's real `rrd_init()` process/session helper and update-template command stream; it does not run the database-backed poller loop.
+
+## Releases
+
+Version tags (`vMAJOR.MINOR.PATCH`, with optional SemVer prerelease or build metadata) use GitHub-generated release notes, grouped by the pull request labels in [.github/release.yml](.github/release.yml). Label pull requests with `enhancement`, `bug`, or `documentation` so they appear under the matching section; unlabeled changes appear under “Other Changes.”
 
 ## Contributing
 

@@ -41,6 +41,12 @@ pub(crate) fn apply_gauge_update(db: &mut DatabaseFile, update: &Update) -> Resu
         known,
         update.value,
     )?;
+    if elapsed > db.config.heartbeat {
+        // rrd_update.c process_pdp_st discards the whole closing PDP, including
+        // seconds that earlier updates made known, when interval > heartbeat.
+        db.known_seconds = 0;
+        db.weighted_sum = 0.0;
+    }
     finish_average_pdp(db, first_boundary);
 
     // Full buckets in a long update interval have a constant GAUGE value (or

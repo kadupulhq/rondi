@@ -7,6 +7,7 @@ use crate::queries::fetch_retained;
 use crate::rrd_binary::{RrdInfo, fetch_rrd_file, inspect_path, update_rrd_file};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -37,13 +38,22 @@ pub enum StoreError {
     RrdFormat(String),
     #[error("unsupported RRD operation: {0}")]
     RrdUnsupported(String),
+    /// An RPN expression error reported with RRDtool's own wording.
+    #[error("{0}")]
+    RrdExpression(String),
     #[error("storage ownership lock is held by another process")]
     Owned,
+    #[error("could not lock RRD")]
+    RrdLocked,
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("storage format error: {0}")]
     Json(#[from] serde_json::Error),
 }
+
+/// Every update rewrites the whole snapshot and a long gap materializes up to
+/// `rows` points, so the row count bounds per-update work and file size.
+const MAX_ROWS: usize = 100_000;
 
 #[derive(Serialize, Deserialize)]
 struct JournalRecord {
@@ -60,6 +70,9 @@ pub struct Store {
     root: PathBuf,
     _lock: File,
     mutations: Mutex<()>,
+    /// Journal records by request ID, loaded on first use so durable updates
+    /// do not re-read the whole journal. Only touched while `mutations` is held.
+    journal_ids: Mutex<Option<HashMap<String, JournalRecord>>>,
 }
 
 impl Store {
@@ -89,6 +102,7 @@ impl Store {
             root,
             _lock: lock,
             mutations: Mutex::new(()),
+            journal_ids: Mutex::new(None),
         })
     }
 
@@ -99,6 +113,11 @@ impl Store {
             return Err(StoreError::InvalidConfig(
                 "step, heartbeat, and rows must be positive".into(),
             ));
+        }
+        if config.rows > MAX_ROWS {
+            return Err(StoreError::InvalidConfig(format!(
+                "rows must not exceed {MAX_ROWS}"
+            )));
         }
         let step = i64::try_from(config.step).map_err(|_| {
             StoreError::InvalidConfig("step exceeds supported timestamp range".into())
@@ -146,7 +165,9 @@ impl Store {
                 "request id must contain 1-128 bytes".into(),
             ));
         }
-        if let Some(prior) = self.find_journal_record(id)? {
+        let mut journal_ids = self.journal_ids()?;
+        let ids = journal_ids.as_mut().expect("journal index is loaded");
+        if let Some(prior) = ids.get(id) {
             if prior.database != name || prior.update != update {
                 return Err(StoreError::RequestIdConflict);
             }
@@ -168,61 +189,94 @@ impl Store {
             journal_options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
         }
         let mut journal = journal_options.open(self.root.join("rondi.journal"))?;
-        serde_json::to_writer(
-            &mut journal,
-            &JournalRecord {
-                id: id.into(),
-                database: name.into(),
-                update,
-            },
-        )?;
-        journal.write_all(b"\n")?;
-        journal.sync_all()?;
+        let record = JournalRecord {
+            id: id.into(),
+            database: name.into(),
+            update,
+        };
+        let mut line = serde_json::to_vec(&record)?;
+        line.push(b'\n');
+        if let Err(error) = journal.write_all(&line).and_then(|()| journal.sync_all()) {
+            // A failed append can leave a partial line. Reloading the index
+            // truncates it before the next record is appended.
+            *journal_ids = None;
+            return Err(error.into());
+        }
+        ids.insert(record.id.clone(), record);
         self.write_db(&self.path(name), &db)
     }
 
     pub fn recover(&self) -> Result<usize, StoreError> {
         let _mutation = self.mutation_guard()?;
-        let path = self.root.join("rondi.journal");
-        if !path.exists() {
-            return Ok(0);
-        }
-        let mut input = String::new();
-        open_read_nofollow(&path)?.read_to_string(&mut input)?;
-        let complete_length = input.rfind('\n').map_or(0, |index| index + 1);
-        let complete = &input[..complete_length];
+        let mut journal_ids = self.journal_ids_lock()?;
+        let records = self.read_journal()?;
         let mut replayed = 0;
-        for (line_no, line) in complete.lines().enumerate() {
-            let record: JournalRecord = serde_json::from_str(line).map_err(|e| {
-                StoreError::InvalidConfig(format!("journal line {}: {e}", line_no + 1))
-            })?;
+        for record in &records {
             let db = self.read_db(&record.database)?;
             if record.update.timestamp <= db.last_update {
                 continue;
             }
-            self.update_unlocked(&record.database, record.update)?;
+            self.update_unlocked(&record.database, record.update.clone())?;
             replayed += 1;
         }
+        *journal_ids = Some(index_journal(records));
         Ok(replayed)
     }
 
-    fn find_journal_record(&self, id: &str) -> Result<Option<JournalRecord>, StoreError> {
-        let path = self.root.join("rondi.journal");
-        if !path.exists() {
-            return Ok(None);
+    fn journal_ids_lock(
+        &self,
+    ) -> Result<MutexGuard<'_, Option<HashMap<String, JournalRecord>>>, StoreError> {
+        self.journal_ids
+            .lock()
+            .map_err(|_| StoreError::InvalidConfig("journal index lock is poisoned".into()))
+    }
+
+    fn journal_ids(
+        &self,
+    ) -> Result<MutexGuard<'_, Option<HashMap<String, JournalRecord>>>, StoreError> {
+        let mut journal_ids = self.journal_ids_lock()?;
+        if journal_ids.is_none() {
+            *journal_ids = Some(index_journal(self.read_journal()?));
         }
-        let mut input = String::new();
-        open_read_nofollow(&path)?.read_to_string(&mut input)?;
-        let complete_length = input.rfind('\n').map_or(0, |index| index + 1);
-        for (line_no, line) in input[..complete_length].lines().enumerate() {
-            let record: JournalRecord = serde_json::from_str(line).map_err(|error| {
-                StoreError::InvalidConfig(format!("journal line {}: {error}", line_no + 1))
-            })?;
-            if record.id == id {
-                return Ok(Some(record));
-            }
+        Ok(journal_ids)
+    }
+
+    /// Read every complete journal record. A crash mid-append can leave a
+    /// partial last line that was never acknowledged; it is cut off and
+    /// synced so the next append starts on a new line.
+    fn read_journal(&self) -> Result<Vec<JournalRecord>, StoreError> {
+        let mut options = OpenOptions::new();
+        options.read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
         }
-        Ok(None)
+        let mut journal = match options.open(self.root.join("rondi.journal")) {
+            Ok(journal) => journal,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut input = Vec::new();
+        journal.read_to_end(&mut input)?;
+        let complete_length = input
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |index| index + 1);
+        if complete_length < input.len() {
+            journal.set_len(complete_length as u64)?;
+            journal.sync_all()?;
+        }
+        input[..complete_length]
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .enumerate()
+            .map(|(line_no, line)| {
+                serde_json::from_slice(line).map_err(|error| {
+                    StoreError::InvalidConfig(format!("journal line {}: {error}", line_no + 1))
+                })
+            })
+            .collect()
     }
 
     pub fn fetch(&self, name: &str) -> Result<FetchResult, StoreError> {
@@ -282,6 +336,11 @@ impl Store {
         validate_name(name)?;
         let path = self.path(name);
         let db = decode_snapshot(snapshot)?;
+        if db.config.rows > MAX_ROWS {
+            return Err(StoreError::InvalidConfig(format!(
+                "rows must not exceed {MAX_ROWS}"
+            )));
+        }
         self.write_new_db(name, &path, &db)
     }
 
@@ -354,6 +413,14 @@ impl Store {
         file.sync_all()?;
         Ok(tmp)
     }
+}
+
+fn index_journal(records: Vec<JournalRecord>) -> HashMap<String, JournalRecord> {
+    let mut ids = HashMap::with_capacity(records.len());
+    for record in records {
+        ids.entry(record.id.clone()).or_insert(record);
+    }
+    ids
 }
 
 fn validate_name(name: &str) -> Result<(), StoreError> {
@@ -583,6 +650,42 @@ mod tests {
     }
 
     #[test]
+    fn closing_interval_beyond_heartbeat_makes_the_whole_pdp_unknown() {
+        // RRDtool 1.11.0 fetches 1000000010 as nan for these updates.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store
+            .create(
+                "cpu",
+                DatabaseConfig {
+                    step: 10,
+                    heartbeat: 5,
+                    rows: 5,
+                    start: 1_000_000_000,
+                },
+            )
+            .unwrap();
+        for (timestamp, value) in [
+            (1_000_000_003, 4.0),
+            (1_000_000_006, 4.0),
+            (1_000_000_012, 8.0),
+        ] {
+            store
+                .update(
+                    "cpu",
+                    Update {
+                        timestamp,
+                        value: Some(value),
+                    },
+                )
+                .unwrap();
+        }
+        let points = store.fetch("cpu").unwrap().points;
+        assert_eq!(points[0].timestamp, 1_000_000_010);
+        assert_eq!(points[0].value, None);
+    }
+
+    #[test]
     fn reopen_and_out_of_order_validation() {
         let dir = tempfile::tempdir().unwrap();
         {
@@ -680,6 +783,97 @@ mod tests {
         assert_eq!(store.recover().unwrap(), 1);
         assert_eq!(store.fetch("cpu").unwrap().points[0].value, Some(7.0));
         assert_eq!(store.recover().unwrap(), 0);
+    }
+
+    #[test]
+    fn recovery_truncates_a_torn_journal_tail() {
+        use std::io::Write as _;
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(dir.path()).unwrap();
+            store.create("cpu", config()).unwrap();
+            store
+                .update_durable(
+                    "cpu",
+                    Update {
+                        timestamp: 1_700_000_010,
+                        value: Some(1.0),
+                    },
+                    "req-1",
+                )
+                .unwrap();
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(dir.path().join("rondi.journal"))
+                .unwrap()
+                .write_all(b"{\"id\":\"torn")
+                .unwrap();
+        }
+        let store = Store::open(dir.path()).unwrap();
+        store.recover().unwrap();
+        for (timestamp, id) in [(1_700_000_020, "req-2"), (1_700_000_030, "req-3")] {
+            store
+                .update_durable(
+                    "cpu",
+                    Update {
+                        timestamp,
+                        value: Some(2.0),
+                    },
+                    id,
+                )
+                .unwrap();
+        }
+        store.recover().unwrap();
+        let journal = fs::read_to_string(dir.path().join("rondi.journal")).unwrap();
+        assert_eq!(journal.lines().count(), 3);
+        assert!(!journal.contains("torn"));
+    }
+
+    #[test]
+    fn durable_update_after_a_torn_tail_starts_a_new_journal_line() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(dir.path()).unwrap();
+            store.create("cpu", config()).unwrap();
+            std::fs::write(dir.path().join("rondi.journal"), b"{\"id\":\"torn").unwrap();
+        }
+        {
+            let store = Store::open(dir.path()).unwrap();
+            store
+                .update_durable(
+                    "cpu",
+                    Update {
+                        timestamp: 1_700_000_010,
+                        value: Some(1.0),
+                    },
+                    "req-1",
+                )
+                .unwrap();
+        }
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.recover().unwrap(), 0);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("rondi.journal"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn create_rejects_row_counts_above_the_store_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut cfg = config();
+        cfg.rows = usize::MAX;
+        assert!(matches!(
+            store.create("cpu", cfg),
+            Err(StoreError::InvalidConfig(_))
+        ));
+        let mut cfg = config();
+        cfg.rows = MAX_ROWS;
+        store.create("cpu", cfg).unwrap();
     }
 
     #[test]

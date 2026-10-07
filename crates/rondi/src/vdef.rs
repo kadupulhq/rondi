@@ -154,7 +154,8 @@ pub fn evaluate_vdef(
             if finite.is_empty() {
                 no_time(f64::NAN)
             } else {
-                let sum = finite.iter().sum::<f64>();
+                // vdef_calc starts at +0.0; Rust's f64 sum starts at -0.0.
+                let sum = finite.iter().fold(0.0, |sum, value| sum + value);
                 let average = sum / finite.len() as f64;
                 let value = match function {
                     VdefFunction::Average => average,
@@ -260,12 +261,21 @@ fn rrd_qsort_compatible(values: &mut [f64]) {
             return 1;
         }
         if left.is_infinite() {
-            return if left.is_sign_negative() { -1 } else { 1 };
+            return c_isinf(left);
         }
         if right.is_infinite() {
-            return if right.is_sign_negative() { -1 } else { 1 };
+            return c_isinf(right);
         }
         if left < right { -1 } else { 1 }
+    }
+    // The comparator returns isinf() directly. glibc's isinf() is -1 for
+    // negative infinity; the Apple and BSD libcs return 1 for both signs.
+    fn c_isinf(value: f64) -> libc::c_int {
+        if cfg!(target_env = "gnu") && value.is_sign_negative() {
+            -1
+        } else {
+            1
+        }
     }
     unsafe {
         libc::qsort(
@@ -300,6 +310,16 @@ mod tests {
             assert!(VdefFunction::parse(name).is_some(), "{name}");
         }
         assert!(VdefFunction::parse("MAX").is_none());
+    }
+
+    #[test]
+    fn negative_zero_sums_start_from_positive_zero() {
+        for function in [VdefFunction::Average, VdefFunction::Total] {
+            let value = evaluate_vdef(function, None, &[-0.0, -0.0, f64::NAN], 0, 10)
+                .unwrap()
+                .value;
+            assert!(value == 0.0 && value.is_sign_positive(), "{function:?}");
+        }
     }
 
     #[test]
@@ -346,10 +366,14 @@ mod tests {
     }
 
     #[test]
-    fn percentile_comparator_preserves_rrdtool_negative_infinity_sign() {
+    fn percentile_comparator_follows_the_libc_isinf_sign() {
         let mut values = [f64::NEG_INFINITY, 1.0];
         rrd_qsort_compatible(&mut values);
-        assert_eq!(values, [f64::NEG_INFINITY, 1.0]);
+        if cfg!(target_env = "gnu") {
+            assert_eq!(values, [f64::NEG_INFINITY, 1.0]);
+        } else {
+            assert_eq!(values, [1.0, f64::NEG_INFINITY]);
+        }
     }
 
     #[test]
