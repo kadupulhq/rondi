@@ -414,3 +414,38 @@ fn def_options_match_rrdtool_graph_helper() {
         );
     }
 }
+
+// rrd_tool.c prints fetch rows with printf("%0.10e"), so a decimal-comma
+// LC_NUMERIC changes the separator.
+#[test]
+fn fetch_values_follow_lc_numeric() {
+    let Some(fixture) = fixture() else { return };
+    let args = [
+        "fetch",
+        fixture.database.to_str().unwrap(),
+        "AVERAGE",
+        "--start",
+        "1000000000",
+        "--end",
+        "1000000100",
+    ];
+    let fetch = |program: &Path| {
+        Command::new(program)
+            .args(args)
+            .env("LC_ALL", "de_DE.UTF-8")
+            .output()
+            .unwrap()
+    };
+    let expected = fetch(Path::new("rrdtool"));
+    if !String::from_utf8_lossy(&expected.stdout).contains("5000000000e+00")
+        || !String::from_utf8_lossy(&expected.stdout).contains(',')
+    {
+        eprintln!("skipping LC_NUMERIC fetch differential: de_DE.UTF-8 is not installed");
+        return;
+    }
+    let actual = fetch(&fixture.alias);
+    assert_eq!(
+        String::from_utf8_lossy(&actual.stdout),
+        String::from_utf8_lossy(&expected.stdout)
+    );
+}

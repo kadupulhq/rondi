@@ -1336,7 +1336,7 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{:>10}:", row.timestamp);
         for value in row.values {
             match value {
-                Some(value) => print!(" {}", format_rrd_float(value)),
+                Some(value) => print!(" {}", format_fetch_value(value)),
                 None if from_daemon => print!(" {}", rrd_daemon_unknown_text()),
                 None => print!(" {}", rrd_unknown_text()),
             }
@@ -5791,6 +5791,21 @@ fn format_info_value(value: Option<f64>) -> String {
 fn inspect_rrd(path: &str) -> Result<rondi::RrdInfo, Box<dyn std::error::Error>> {
     // Metadata inspection takes RRDtool's shared file lock and bounds reads to its header.
     Ok(rondi::inspect_rrd_file(path)?)
+}
+
+// rrd_tool.c prints fetch rows with printf, so LC_NUMERIC picks the decimal
+// separator.
+fn format_fetch_value(value: f64) -> String {
+    let mut buffer = [0 as libc::c_char; 64];
+    let length =
+        unsafe { libc::snprintf(buffer.as_mut_ptr(), buffer.len(), c"%0.10e".as_ptr(), value) };
+    match usize::try_from(length) {
+        Ok(length) if length < buffer.len() => {
+            let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), length) };
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+        _ => format_rrd_float(value),
+    }
 }
 
 fn format_rrd_float(value: f64) -> String {
