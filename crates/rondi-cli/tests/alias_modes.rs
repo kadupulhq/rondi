@@ -2459,6 +2459,75 @@ fn rrdtool_xport_rpn_sort_orders_unknown_values_first() {
 }
 
 #[test]
+fn rrdtool_xport_rpn_index_truncates_fractional_argument() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping RRDtool RPN INDEX differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("index-truncation.rrd");
+    let create = Command::new("rrdtool")
+        .args([
+            "create",
+            file.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:value:GAUGE:30:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(create.status.success());
+    let update = Command::new("rrdtool")
+        .args(["update", file.to_str().unwrap(), "1000000010:1"])
+        .output()
+        .unwrap();
+    assert!(update.status.success());
+
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let args = [
+        "--json".to_owned(),
+        "--start".to_owned(),
+        "1000000010".to_owned(),
+        "--end".to_owned(),
+        "1000000020".to_owned(),
+        format!("DEF:value={}:value:AVERAGE", file.display()),
+        "CDEF:selected=value,POP,10,20,1.5,INDEX,POP,EXC,POP".to_owned(),
+        "XPORT:selected:selected".to_owned(),
+    ];
+    let upstream = Command::new("rrdtool")
+        .arg("xport")
+        .args(&args)
+        .output()
+        .unwrap();
+    let rondi = Command::new(&alias)
+        .arg("xport")
+        .args(&args)
+        .output()
+        .unwrap();
+    assert!(
+        upstream.status.success(),
+        "{}",
+        String::from_utf8_lossy(&upstream.stderr)
+    );
+    assert!(
+        rondi.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rondi.stderr)
+    );
+    assert_eq!(rondi.status.code(), upstream.status.code());
+    assert_eq!(rondi.stdout, upstream.stdout);
+    assert_eq!(rondi.stderr, upstream.stderr);
+}
+
+#[test]
 fn graph_print_and_gprint_printf_grammar_matches_pinned_rrdtool() {
     if !Command::new("rrdtool")
         .arg("--version")
