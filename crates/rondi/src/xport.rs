@@ -497,7 +497,9 @@ fn evaluate_rpn(
                             // RRDtool pops aggregate operands from the RPN stack, so it
                             // adds the rightmost operand first. Floating point addition
                             // is order-sensitive; preserve that operation order.
-                            known.into_iter().rev().sum::<f64>() / known_count as f64
+                            // The sum starts at +0.0 as in C, not Rust's -0.0.
+                            known.into_iter().rev().fold(0.0, |sum, value| sum + value)
+                                / known_count as f64
                         });
                     }
                     "MEDIAN" => {
@@ -796,13 +798,14 @@ fn evaluate_rpn(
                 let prediction = if observations.is_empty() {
                     rrd_nan()
                 } else if token == "PREDICT" {
-                    observations.iter().sum::<f64>() / observations.len() as f64
+                    observations.iter().fold(0.0, |sum, value| sum + value)
+                        / observations.len() as f64
                 } else if token == "PREDICTSIGMA" {
                     let count = observations.len() as f64;
                     if count < 2.0 {
                         rrd_nan()
                     } else {
-                        let sum = observations.iter().sum::<f64>();
+                        let sum = observations.iter().fold(0.0, |sum, value| sum + value);
                         let sum2 = observations.iter().map(|value| value * value).sum::<f64>();
                         ((count * sum2 - sum * sum) / (count * (count - 1.0))).sqrt()
                     }

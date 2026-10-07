@@ -154,7 +154,8 @@ pub fn evaluate_vdef(
             if finite.is_empty() {
                 no_time(f64::NAN)
             } else {
-                let sum = finite.iter().sum::<f64>();
+                // vdef_calc starts at +0.0; Rust's f64 sum starts at -0.0.
+                let sum = finite.iter().fold(0.0, |sum, value| sum + value);
                 let average = sum / finite.len() as f64;
                 let value = match function {
                     VdefFunction::Average => average,
@@ -300,6 +301,16 @@ mod tests {
             assert!(VdefFunction::parse(name).is_some(), "{name}");
         }
         assert!(VdefFunction::parse("MAX").is_none());
+    }
+
+    #[test]
+    fn negative_zero_sums_start_from_positive_zero() {
+        for function in [VdefFunction::Average, VdefFunction::Total] {
+            let value = evaluate_vdef(function, None, &[-0.0, -0.0, f64::NAN], 0, 10)
+                .unwrap()
+                .value;
+            assert!(value == 0.0 && value.is_sign_positive(), "{function:?}");
+        }
     }
 
     #[test]

@@ -169,3 +169,14 @@ fn rpn_percent_rank_and_count_edges_match_rrdtool() {
         fixture.assert_matches(&fixture.xport_args(cdef));
     }
 }
+
+// RRDtool's AVG and PREDICT sums start at +0.0, so averaging negative zeros
+// yields +0.0; dividing by it shows the sign without printing a zero.
+#[test]
+fn rpn_negative_zero_sums_match_rrdtool() {
+    let Some(fixture) = fixture() else { return };
+    fixture.assert_matches(&fixture.xport_args("x,POP,0,-1,*,1,AVG,1,EXC,/,0,GT"));
+    let mut args = fixture.xport_args("1,0,1,30,n,PREDICT,/,0,GT");
+    args.insert(8, String::from("CDEF:n=x,0,*,-1,*"));
+    fixture.assert_matches(&args);
+}
