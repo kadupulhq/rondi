@@ -2999,9 +2999,11 @@ fn rrdtool_xport_cdef_limit_matches_upstream_bounds_and_unknowns() {
     if !Command::new("rrdtool")
         .arg("--version")
         .output()
-        .is_ok_and(|output| output.status.success())
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
     {
-        eprintln!("skipping RRDtool LIMIT differential: rrdtool is not installed");
+        eprintln!("skipping RRDtool LIMIT differential: pinned RRDtool 1.11.0 is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -5142,6 +5144,21 @@ fn rpn_newweek_matches_locale_first_weekday_from_rrdtool() {
         eprintln!("skipping NEWWEEK locale differential: rrdtool is not installed");
         return;
     }
+    // German weeks start on Monday, unlike the C locale. Without a locale whose
+    // first weekday differs, this comparison cannot detect a fixed weekday.
+    let locale = "de_DE.UTF-8";
+    let installed = Command::new("locale")
+        .arg("-a")
+        .output()
+        .is_ok_and(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|name| name.to_ascii_lowercase().replace('-', "") == "de_de.utf8")
+        });
+    if !installed {
+        eprintln!("skipping NEWWEEK locale differential: locale {locale} is not installed");
+        return;
+    }
     let temp = tempfile::tempdir().unwrap();
     let file = temp.path().join("newweek.rrd");
     let start = 1_704_067_200_i64; // 2024-01-01 00:00:00 UTC
@@ -5199,6 +5216,8 @@ fn rpn_newweek_matches_locale_first_weekday_from_rrdtool() {
     ];
     let expected = Command::new("rrdtool")
         .env("TZ", "UTC")
+        .env_remove("LC_ALL")
+        .env("LC_TIME", locale)
         .args(args)
         .arg(&definition)
         .arg("CDEF:newweek=value,POP,0,NEWWEEK,+")
@@ -5207,6 +5226,8 @@ fn rpn_newweek_matches_locale_first_weekday_from_rrdtool() {
         .unwrap();
     let actual = Command::new(alias)
         .env("TZ", "UTC")
+        .env_remove("LC_ALL")
+        .env("LC_TIME", locale)
         .args(args)
         .arg(&definition)
         .arg("CDEF:newweek=value,POP,0,NEWWEEK,+")

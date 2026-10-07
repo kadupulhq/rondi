@@ -26,3 +26,15 @@ jobs:
       # tests cannot silently pass by skipping when rrdtool is absent.
       - name: Build pinned RRDtool oracle and run workspace checks
         run: docker build --progress=plain -f docker/Dockerfile.test -t rondi-ci .
+
+  ci-arm64:
+    # The default NaN sign bit differs between x86_64 and aarch64, and RRDtool
+    # prints it as glibc formats it, so run the same oracle suite on both.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build pinned RRDtool oracle and run workspace checks
+        run: docker build --progress=plain -f docker/Dockerfile.test -t rondi-ci .
