@@ -1492,6 +1492,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     let mut graph_colors = GraphColors::default();
     let mut grid_dash = Vec::<f64>::new();
     let mut border_width = 2_u32;
+    let mut si_base = 1000_u32;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
@@ -1512,6 +1513,11 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         }
         if let Some(value) = argument.strip_prefix("--imginfo=") {
             imginfo = Some(value.to_owned());
+            index += 1;
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--base=") {
+            si_base = parse_graph_base(value)?;
             index += 1;
             continue;
         }
@@ -1540,6 +1546,10 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                 }
                 xport_args.push(argument.clone());
                 xport_args.push(value.clone());
+                index += 2;
+            }
+            "--base" | "-b" => {
+                si_base = parse_graph_base(args.get(index + 1).ok_or("--base requires a value")?)?;
                 index += 2;
             }
             "--width" | "-w" | "--height" | "-h" => {
@@ -1769,7 +1779,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     }
     xport_args.extend(definitions);
     let rendered =
-        render_xport_with_graph_prints(&xport_args, Some(&graph_gprints), &graph_prints)?;
+        render_xport_with_graph_prints(&xport_args, Some(&graph_gprints), &graph_prints, si_base)?;
     let graph_image = if format == "PNG" {
         Some(render_graph_png(
             &rendered,
@@ -1877,6 +1887,27 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         }
     }
     Ok(())
+}
+
+// rrd_graph.c reads --base with atol, so trailing text after the digits is
+// ignored before the 1000/1024 check.
+fn parse_graph_base(value: &str) -> Result<u32, Box<dyn std::error::Error>> {
+    let trimmed = value.trim_start();
+    let negative = trimmed.starts_with('-');
+    let unsigned = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
+    let base = unsigned
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .fold(0_u64, |total, digit| {
+            total
+                .saturating_mul(10)
+                .saturating_add(u64::from(digit - b'0'))
+        });
+    match (negative, base) {
+        (false, 1000) => Ok(1000),
+        (false, 1024) => Ok(1024),
+        _ => Err("the only sensible value for base apart from 1000 is 1024".into()),
+    }
 }
 
 fn parse_graph_series(
@@ -2429,7 +2460,7 @@ fn render_xport_with_gprints(
     args: &[String],
     graph_gprints: Option<&[(String, String)]>,
 ) -> Result<(String, i64, i64, u64), Box<dyn std::error::Error>> {
-    let rendered = render_xport_with_graph_prints(args, graph_gprints, &[])?;
+    let rendered = render_xport_with_graph_prints(args, graph_gprints, &[], 1000)?;
     Ok((rendered.output, rendered.start, rendered.end, rendered.step))
 }
 
@@ -2447,6 +2478,7 @@ fn render_xport_with_graph_prints(
     args: &[String],
     graph_gprints: Option<&[(String, String)]>,
     graph_prints: &[GraphPrint],
+    si_base: u32,
 ) -> Result<RenderedGraphXport, Box<dyn std::error::Error>> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -2638,6 +2670,7 @@ fn render_xport_with_graph_prints(
     }
     let mut graph_gprints_out = graph_gprints.unwrap_or_default().to_vec();
     let mut print_values = Vec::new();
+    let mut si_scale = GraphSiScale::new(si_base);
     for graph_print in graph_prints {
         let (value, timestamp) = if let Some(value) = vdef_values.get(&graph_print.variable) {
             (value.value, value.timestamp)
@@ -2681,8 +2714,13 @@ fn render_xport_with_graph_prints(
             };
             (value, None)
         };
-        let formatted =
-            format_graph_print(value, timestamp, graph_print.formatter, &graph_print.format)?;
+        let formatted = format_graph_print(
+            value,
+            timestamp,
+            graph_print.formatter,
+            &graph_print.format,
+            &mut si_scale,
+        )?;
         if graph_print.kind == "gprint" {
             graph_gprints_out.push((String::from("gprint"), formatted));
         } else {
@@ -3830,9 +3868,10 @@ fn format_graph_print(
     timestamp: Option<i64>,
     formatter: GraphPrintFormatter,
     format: &str,
+    si_scale: &mut GraphSiScale,
 ) -> Result<String, Box<dyn std::error::Error>> {
     match formatter {
-        GraphPrintFormatter::Numeric => format_graph_numeric(value, format),
+        GraphPrintFormatter::Numeric => format_graph_numeric(value, format, si_scale),
         GraphPrintFormatter::Strftime => match timestamp {
             Some(timestamp) => format_graph_time(timestamp, format),
             None => Ok(clean_graph_time_format(format)),
@@ -3898,16 +3937,51 @@ fn clean_graph_time_format(format: &str) -> String {
     result
 }
 
-fn format_graph_numeric(value: f64, format: &str) -> Result<String, Box<dyn std::error::Error>> {
+/// SI scaling state that RRDtool's print_calc shares across every PRINT and
+/// GPRINT of one graph.
+struct GraphSiScale {
+    base: u32,
+    magnitude: Option<f64>,
+    symbol: &'static str,
+}
+
+impl GraphSiScale {
+    fn new(base: u32) -> Self {
+        Self {
+            base,
+            magnitude: None,
+            symbol: "",
+        }
+    }
+}
+
+fn format_graph_numeric(
+    value: f64,
+    format: &str,
+    si_scale: &mut GraphSiScale,
+) -> Result<String, Box<dyn std::error::Error>> {
     use std::ffi::CString;
 
     let parsed = parse_graph_numeric_format(format)
         .map_err(|_| format!("bad format for PRINT in \"{format}'"))?;
-    let (scaled_value, si_symbol) = if parsed.si_symbol.is_some() {
-        graph_si_scale(value)
-    } else {
-        (value, "")
+    let scaled_value = match parsed.si_symbol {
+        Some(index) => {
+            // %S reuses the magnitude chosen by the first scaled value, unless
+            // that value scaled to zero; %s always picks a new one.
+            let reuse = format.as_bytes()[parsed.substitutions[index].end - 1] == b'S';
+            match si_scale.magnitude {
+                Some(magnitude) if reuse => value / magnitude,
+                _ => {
+                    let (scaled, magnitude, symbol) = graph_si_scale(value, si_scale.base);
+                    si_scale.magnitude = (!reuse || scaled != 0.0).then_some(magnitude);
+                    si_scale.symbol = symbol;
+                    scaled
+                }
+            }
+        }
+        None => value,
     };
+    let si_symbol = si_scale.symbol;
     let mut output = String::with_capacity(format.len() + 32);
     let mut cursor = 0;
     for substitution in parsed.substitutions {
@@ -4062,30 +4136,32 @@ fn append_graph_format_literal(output: &mut String, literal: &str) {
     }
 }
 
-fn graph_si_scale(value: f64) -> (f64, &'static str) {
+fn graph_si_scale(value: f64, base: u32) -> (f64, f64, &'static str) {
     const SYMBOLS: [&str; 13] = [
         "a", "f", "p", "n", "u", "m", " ", "k", "M", "G", "T", "P", "E",
     ];
     if value == 0.0 || value.is_nan() {
-        return (value, SYMBOLS[6]);
+        return (value, 1.0, SYMBOLS[6]);
     }
     if value.is_infinite() {
         // auto_scale converts floor(log(inf)) to int: aarch64 saturates to
         // INT_MAX and divides by pow(base, INT_MAX) = inf, while x86_64 yields
         // INT_MIN and divides by zero. Either index is outside the table.
         #[cfg(target_arch = "x86_64")]
-        return (value, "?");
+        let factor = 0.0;
         #[cfg(not(target_arch = "x86_64"))]
-        return (f64::NAN, "?");
+        let factor = f64::INFINITY;
+        return (value / factor, factor, "?");
     }
-    let exponent = (value.abs().log10() / 3.0).floor() as i32;
-    let factor = 1000.0_f64.powi(exponent);
+    let base = f64::from(base);
+    let exponent = (value.abs().ln() / base.ln()).floor() as i32;
+    let factor = base.powf(f64::from(exponent));
     let symbol = usize::try_from(exponent + 6)
         .ok()
         .and_then(|index| SYMBOLS.get(index))
         .copied()
         .unwrap_or("?");
-    (value / factor, symbol)
+    (value / factor, factor, symbol)
 }
 
 fn format_xport_xml(

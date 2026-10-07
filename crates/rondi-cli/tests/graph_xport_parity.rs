@@ -236,3 +236,79 @@ fn graph_to_file_prints_dimensions_and_print_lines() {
     assert_same_stdout(&fixture, &graph(&xml, &["--imgformat", "XML"]));
     assert_same_stdout(&fixture, &graph(Path::new("-"), &["--imgformat", "XML"]));
 }
+
+// graphv layout keys and image bytes are not compatible yet, so graphv
+// comparisons are limited to the exit status and print[] lines.
+fn assert_same_prints(fixture: &Fixture, args: &[String]) {
+    let prints = |output: &Output| {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.starts_with("print["))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let expected = run(Path::new("rrdtool"), args);
+    let actual = run(&fixture.alias, args);
+    assert_eq!(
+        actual.status.code(),
+        expected.status.code(),
+        "{args:?}\nupstream stderr: {}\nrondi stderr: {}",
+        String::from_utf8_lossy(&expected.stderr),
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(prints(&actual), prints(&expected), "{args:?}");
+}
+
+fn graph_args(
+    fixture: &Fixture,
+    command: &str,
+    options: &[&str],
+    elements: &[&str],
+) -> Vec<String> {
+    let mut args = strings(&[command, "-", "--start", "1000000000", "--end", "1000000600"]);
+    args.extend(strings(options));
+    args.push(format!("DEF:x={}:x:AVERAGE", fixture.database.display()));
+    args.push(String::from("LINE1:x#ff0000"));
+    args.extend(strings(elements));
+    args
+}
+
+// rrd_graph.c print_calc keeps one magnitude across PRINT and GPRINT: the
+// first %S (or any %s) sets it, later %S values reuse it, and a zero %S
+// result leaves it unset. auto_scale divides by powers of --base.
+#[test]
+fn print_si_magnitude_is_shared_and_honors_base() {
+    let Some(fixture) = fixture() else { return };
+    let elements = [
+        "CDEF:k=x,1000,*",
+        "CDEF:m=x,1000000,*",
+        "CDEF:z=x,0,*",
+        "VDEF:kmax=k,MAXIMUM",
+        "VDEF:mmin=m,MINIMUM",
+        "VDEF:zmax=z,MAXIMUM",
+        "VDEF:xmax=x,MAXIMUM",
+        "PRINT:zmax:%6.2lf %S",
+        "PRINT:kmax:%6.2lf %S",
+        "GPRINT:mmin:%6.2lf %S",
+        "PRINT:mmin:%6.2lf %S",
+        "PRINT:xmax:%6.2lf %s",
+        "PRINT:kmax:%6.2lf %S",
+        "PRINT:mmin:%6.2lf",
+        "PRINT:kmax:%6.2lf %S",
+    ];
+    for options in [
+        &[][..],
+        &["--base", "1024"],
+        &["-b", "1000"],
+        &["--base=1024"],
+        &["--base", "1001"],
+    ] {
+        assert_same_prints(
+            &fixture,
+            &graph_args(&fixture, "graphv", options, &elements),
+        );
+        let mut xml = options.to_vec();
+        xml.extend(["--imgformat", "XML"]);
+        assert_same_stdout(&fixture, &graph_args(&fixture, "graph", &xml, &elements));
+    }
+}
