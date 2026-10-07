@@ -42,6 +42,8 @@ pub enum StoreError {
     RrdExpression(String),
     #[error("storage ownership lock is held by another process")]
     Owned,
+    #[error("could not lock RRD")]
+    RrdLocked,
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
     #[error("storage format error: {0}")]

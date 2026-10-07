@@ -404,8 +404,7 @@ pub struct RrdCdpPrepInfo {
 }
 
 pub(crate) fn inspect_path(path: &Path) -> Result<RrdInfo, StoreError> {
-    let mut file = open_rrd_read(path)?;
-    let _lock = RrdFileLock::shared(&file)?;
+    let mut file = RrdFileLock::shared(open_rrd_read(path)?)?;
     read_info(&mut file)
 }
 
@@ -421,8 +420,7 @@ pub(crate) fn fetch_path(
             "RRD fetch requires a positive resolution and end >= start".into(),
         ));
     }
-    let mut file = open_rrd_read(path)?;
-    let _lock = RrdFileLock::shared(&file)?;
+    let mut file = RrdFileLock::shared(open_rrd_read(path)?)?;
     let info = read_info(&mut file)?;
     let archive_index = choose_archive(
         &info,
@@ -580,8 +578,7 @@ fn update_path_values_with_raw(
     if raw_values.is_some_and(|raw| raw.len() != values.len()) {
         return Err(StoreError::InvalidValue);
     }
-    let mut file = open_rrd_write(path)?;
-    let _lock = RrdFileLock::exclusive(&file)?;
+    let mut file = RrdFileLock::exclusive(open_rrd_write(path)?)?;
     let info = read_info(&mut file)?;
     if info.data_sources.len() != values.len()
         || info.data_sources.iter().any(|ds| {
@@ -1367,8 +1364,7 @@ pub fn tune_rrd_data_sources(
     path: impl AsRef<Path>,
     changes: &[RrdDataSourceTune],
 ) -> Result<(), StoreError> {
-    let mut file = open_rrd_write(path.as_ref())?;
-    let _lock = RrdFileLock::exclusive(&file)?;
+    let mut file = RrdFileLock::exclusive(open_rrd_write(path.as_ref())?)?;
     let info = read_info(&mut file)?;
     if info.data_sources.iter().any(|source| {
         !matches!(
@@ -1506,8 +1502,7 @@ pub fn resize_rrd_file(
         ));
     }
 
-    let mut input = open_rrd_write(input_path)?;
-    let _lock = RrdFileLock::exclusive(&input)?;
+    let mut input = RrdFileLock::exclusive(open_rrd_write(input_path)?)?;
     let info = read_info(&mut input)?;
     if !matches!(info.version.as_str(), "0003" | "0004") {
         return Err(StoreError::RrdUnsupported(format!(
@@ -1761,8 +1756,7 @@ pub fn dump_rrd_file_with_header(
     path: impl AsRef<Path>,
     header: RrdDumpHeader,
 ) -> Result<String, StoreError> {
-    let mut file = open_rrd_read(path.as_ref())?;
-    let _lock = RrdFileLock::shared(&file)?;
+    let mut file = RrdFileLock::shared(open_rrd_read(path.as_ref())?)?;
     let info = read_info(&mut file)?;
     if info.data_sources.iter().any(|ds| {
         !matches!(
@@ -2580,24 +2574,92 @@ fn choose_archive(
         })
 }
 
+/// A descriptor holding RRDtool's whole-file `fcntl` lock.
+///
+/// `fcntl` record locks belong to the process, so they never exclude another
+/// thread, and closing any descriptor for the file drops every lock the
+/// process holds on it. Locked access is therefore also serialized per inode
+/// inside the process, and the descriptor is closed before the next thread may
+/// open its own lock on that inode.
 struct RrdFileLock {
-    fd: i32,
+    file: Option<File>,
+    #[cfg(unix)]
+    key: (u64, u64),
+}
+
+#[cfg(unix)]
+static LOCKED_RRD_FILES: std::sync::Mutex<std::collections::BTreeSet<(u64, u64)>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+#[cfg(unix)]
+static LOCKED_RRD_FILE_RELEASED: std::sync::Condvar = std::sync::Condvar::new();
+
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RrdLockMode {
+    Try,
+    Block,
+    None,
+}
+
+/// RRDtool reads `$RRD_LOCKING` on every open and defaults to a single
+/// non-blocking attempt, so a held lock fails with "could not lock RRD".
+#[cfg(unix)]
+fn rrd_lock_mode() -> RrdLockMode {
+    match std::env::var_os("RRD_LOCKING") {
+        None => RrdLockMode::Try,
+        Some(value) => match value.to_str() {
+            Some("" | "try") => RrdLockMode::Try,
+            Some("block") => RrdLockMode::Block,
+            Some("none") => RrdLockMode::None,
+            _ => {
+                eprintln!(
+                    "unsupported locking mode '{}' in $RRD_LOCKING; assuming 'try'",
+                    value.to_string_lossy()
+                );
+                RrdLockMode::Try
+            }
+        },
+    }
 }
 
 impl RrdFileLock {
     #[cfg(unix)]
-    fn shared(file: &File) -> Result<Self, StoreError> {
+    fn shared(file: File) -> Result<Self, StoreError> {
         Self::lock(file, false)
     }
 
     #[cfg(unix)]
-    fn exclusive(file: &File) -> Result<Self, StoreError> {
+    fn exclusive(file: File) -> Result<Self, StoreError> {
         Self::lock(file, true)
     }
 
     #[cfg(unix)]
-    fn lock(file: &File, exclusive: bool) -> Result<Self, StoreError> {
+    fn lock(file: File, exclusive: bool) -> Result<Self, StoreError> {
         use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        let key = (metadata.dev(), metadata.ino());
+        {
+            let mut held = LOCKED_RRD_FILES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while held.contains(&key) {
+                held = LOCKED_RRD_FILE_RELEASED
+                    .wait(held)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            held.insert(key);
+        }
+        // From here on, Drop closes the descriptor and releases the inode.
+        let guard = Self {
+            file: Some(file),
+            key,
+        };
+        let operation = match rrd_lock_mode() {
+            RrdLockMode::None => return Ok(guard),
+            RrdLockMode::Try => libc::F_SETLK,
+            RrdLockMode::Block => libc::F_SETLKW,
+        };
         let mut lock = libc::flock {
             l_type: if exclusive {
                 libc::F_WRLCK
@@ -2609,45 +2671,62 @@ impl RrdFileLock {
             l_len: 0,
             l_pid: 0,
         };
-        // SAFETY: `lock` is a valid flock structure and the descriptor remains
-        // open for the lifetime of this guard.
-        let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLKW, &mut lock) };
+        let fd = guard.file.as_ref().map_or(-1, AsRawFd::as_raw_fd);
+        // SAFETY: `lock` is a valid flock structure and the descriptor stays
+        // open until the guard is dropped.
+        let result = unsafe { libc::fcntl(fd, operation, &mut lock) };
         if result == -1 {
-            return Err(StoreError::Io(std::io::Error::last_os_error()));
+            return Err(StoreError::RrdLocked);
         }
-        Ok(Self {
-            fd: file.as_raw_fd(),
-        })
+        Ok(guard)
     }
 
     #[cfg(not(unix))]
-    fn shared(_file: &File) -> Result<Self, StoreError> {
+    fn shared(_file: File) -> Result<Self, StoreError> {
         Err(StoreError::RrdUnsupported(
             "RRDtool-compatible advisory locking is unavailable on this platform".into(),
         ))
     }
 
     #[cfg(not(unix))]
-    fn exclusive(_file: &File) -> Result<Self, StoreError> {
+    fn exclusive(_file: File) -> Result<Self, StoreError> {
         Err(StoreError::RrdUnsupported(
             "RRDtool-compatible advisory locking is unavailable on this platform".into(),
         ))
     }
 }
 
+impl std::ops::Deref for RrdFileLock {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        self.file
+            .as_ref()
+            .expect("locked RRD file is open until drop")
+    }
+}
+
+impl std::ops::DerefMut for RrdFileLock {
+    fn deref_mut(&mut self) -> &mut File {
+        self.file
+            .as_mut()
+            .expect("locked RRD file is open until drop")
+    }
+}
+
 impl Drop for RrdFileLock {
     fn drop(&mut self) {
+        // Closing the descriptor releases the fcntl lock. It must happen
+        // before another thread can lock the inode, or this close would drop
+        // that thread's lock as well.
+        drop(self.file.take());
         #[cfg(unix)]
         {
-            let mut lock = libc::flock {
-                l_type: libc::F_UNLCK as _,
-                l_whence: libc::SEEK_SET as _,
-                l_start: 0,
-                l_len: 0,
-                l_pid: 0,
-            };
-            // SAFETY: the descriptor is still open and the flock structure is valid.
-            let _ = unsafe { libc::fcntl(self.fd, libc::F_SETLK, &mut lock) };
+            let mut held = LOCKED_RRD_FILES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            held.remove(&self.key);
+            LOCKED_RRD_FILE_RELEASED.notify_all();
         }
     }
 }
@@ -2733,4 +2812,59 @@ fn checked_mul(left: usize, right: usize) -> Result<usize, StoreError> {
 
 fn rrd_error(message: &str) -> StoreError {
     StoreError::RrdFormat(message.into())
+}
+
+#[cfg(all(test, unix))]
+mod lock_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn rrdtool_1110_available() -> bool {
+        Command::new("rrdtool")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+            })
+    }
+
+    #[test]
+    fn another_thread_reading_the_file_does_not_drop_the_process_lock() {
+        if !rrdtool_1110_available() {
+            eprintln!("skipping lock retention check: pinned RRDtool 1.11.0 is not installed");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("held.rrd");
+        create_rrd_file(
+            &path,
+            1_000_000_000,
+            10,
+            &["DS:value:GAUGE:30:U:U".to_owned()],
+            &["RRA:AVERAGE:0.5:1:8".to_owned()],
+            true,
+        )
+        .unwrap();
+        let held = RrdFileLock::exclusive(open_rrd_write(&path).unwrap()).unwrap();
+        let reader = {
+            let path = path.clone();
+            std::thread::spawn(move || inspect_path(&path).map(|info| info.last_update))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // A second descriptor closed by the reader would release this
+        // process's lock and let an external writer in.
+        let external = Command::new("rrdtool")
+            .args(["update", path.to_str().unwrap(), "1000000010:1"])
+            .env_remove("RRD_LOCKING")
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&external.stderr),
+            "ERROR: could not lock RRD\n"
+        );
+        assert!(!reader.is_finished());
+        drop(held);
+        assert_eq!(reader.join().unwrap().unwrap(), 1_000_000_000);
+    }
 }

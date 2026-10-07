@@ -22,6 +22,7 @@ use tokio::task::JoinSet;
 use tokio::time::{Duration, timeout};
 
 pub const DEFAULT_RRDCACHED_QUEUE_BYTES: usize = 64 * 1024 * 1024;
+const RRDCACHED_JOURNAL_NAME: &str = ".rrdcached.journal";
 
 fn open_private_rrdcached_journal(path: &Path) -> Result<File, Box<dyn std::error::Error>> {
     let mut options = OpenOptions::new();
@@ -479,12 +480,18 @@ struct RrdcachedQueue {
     known: CacheTree,
     suspended: std::collections::HashSet<PathBuf>,
     journal: File,
+    journal_path: PathBuf,
+    journal_rotations: u64,
     next_id: u64,
     journal_bytes: u64,
+    journal_needs_truncate: bool,
     pending_bytes: usize,
     max_pending_bytes: usize,
     write_timeout_seconds: u64,
     allocation_chunk: usize,
+    // A flusher owns a path while it applies a snapshot of its entries, so a
+    // concurrent FLUSH, FETCH, or worker waits instead of applying them again.
+    flush_owners: std::collections::HashMap<PathBuf, Arc<Mutex<()>>>,
 }
 
 impl RrdcachedQueue {
@@ -503,7 +510,13 @@ impl RrdcachedQueue {
         write_timeout_seconds: u64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let replay_time = wall_time_seconds();
-        let journal_path = journal_directory.join(".rrdcached.journal");
+        let journal_path = journal_directory.join(RRDCACHED_JOURNAL_NAME);
+        // A rotation interrupted before its rename leaves the old journal
+        // intact; the partial replacement is discarded.
+        match std::fs::remove_file(rrdcached_rotation_path(&journal_path)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+            _ => {}
+        }
         let journal = open_private_rrdcached_journal(&journal_path)?;
         let mut pending = std::collections::BTreeMap::<PathBuf, Vec<PendingRrdUpdate>>::new();
         let mut flushed = std::collections::HashSet::new();
@@ -511,15 +524,47 @@ impl RrdcachedQueue {
         let mut known = CacheTree::default();
         let mut paths_by_id = std::collections::HashMap::<u64, PathBuf>::new();
         let mut next_id = 1;
-        if journal.metadata()?.len() > 0 {
+        let journal_length = journal.metadata()?.len();
+        let mut replayed_bytes = 0_u64;
+        if journal_length > 0 {
             let mut replay = journal.try_clone()?;
             replay.seek(SeekFrom::Start(0))?;
-            for line in StdBufReader::new(replay).lines() {
-                let line = line?;
-                if line.is_empty() {
+            let mut replay = StdBufReader::new(replay);
+            let mut line = Vec::new();
+            loop {
+                line.clear();
+                if replay.read_until(b'\n', &mut line)? == 0 {
+                    break;
+                }
+                if line.last() != Some(&b'\n') {
+                    // A crash or a full disk mid-append leaves a partial final
+                    // record. It was never acknowledged, so drop it.
+                    tracing::warn!(
+                        journal = %journal_path.display(),
+                        offset = replayed_bytes,
+                        "rrdcached_journal_partial_record_dropped"
+                    );
+                    break;
+                }
+                replayed_bytes += line.len() as u64;
+                if line.len() == 1 {
                     continue;
                 }
-                let record: RrdcachedJournalRecord = serde_json::from_str(&line)?;
+                // Upstream journal_replay logs and skips malformed entries
+                // rather than refusing to start.
+                let record: RrdcachedJournalRecord =
+                    match serde_json::from_slice(&line[..line.len() - 1]) {
+                        Ok(record) => record,
+                        Err(error) => {
+                            tracing::warn!(
+                                journal = %journal_path.display(),
+                                offset = replayed_bytes - line.len() as u64,
+                                error = %error,
+                                "rrdcached_journal_record_skipped"
+                            );
+                            continue;
+                        }
+                    };
                 match record {
                     RrdcachedJournalRecord::Update { id, path, samples } => {
                         let path = canonical_journal_path(root, &path, true)?;
@@ -584,19 +629,27 @@ impl RrdcachedQueue {
             )
             .into());
         }
-        let journal_bytes = journal.metadata()?.len();
+        if replayed_bytes < journal_length {
+            journal.set_len(replayed_bytes)?;
+            journal.sync_data()?;
+        }
+        let journal_bytes = replayed_bytes;
         Ok(Self {
             pending,
             pending_order,
             known,
             suspended: std::collections::HashSet::new(),
             journal,
+            journal_path,
+            journal_rotations: 0,
             next_id,
             journal_bytes,
+            journal_needs_truncate: false,
             pending_bytes,
             max_pending_bytes,
             write_timeout_seconds,
             allocation_chunk: 1,
+            flush_owners: std::collections::HashMap::new(),
         })
     }
 
@@ -638,12 +691,79 @@ impl RrdcachedQueue {
     fn append(&mut self, record: &RrdcachedJournalRecord) -> Result<(), String> {
         let mut encoded = serde_json::to_vec(record).map_err(|error| error.to_string())?;
         encoded.push(b'\n');
-        self.journal
+        if self.journal_needs_truncate {
+            self.journal
+                .set_len(self.journal_bytes)
+                .map_err(|error| format!("rrdcached journal is damaged: {error}"))?;
+            self.journal_needs_truncate = false;
+        }
+        if let Err(error) = self
+            .journal
             .write_all(&encoded)
             .and_then(|()| self.journal.sync_data())
-            .map_err(|error| error.to_string())?;
+        {
+            // A partial record would swallow the next one on replay, so cut
+            // the journal back to its last complete record before reuse.
+            self.journal_needs_truncate = self.journal.set_len(self.journal_bytes).is_err();
+            return Err(error.to_string());
+        }
         self.journal_bytes = self.journal_bytes.saturating_add(encoded.len() as u64);
         Ok(())
+    }
+
+    /// Replace the journal with one holding only the pending updates, as
+    /// upstream rotates its journal every flush interval so replay cost tracks
+    /// unflushed work. The old journal stays authoritative until the rename.
+    fn rotate_journal(&mut self) -> Result<(), String> {
+        let temporary = rrdcached_rotation_path(&self.journal_path);
+        let mut entries = self
+            .pending
+            .iter()
+            .flat_map(|(path, entries)| entries.iter().map(move |entry| (path, entry)))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|(_, entry)| entry.id);
+        let mut encoded = Vec::new();
+        for (path, entry) in entries {
+            serde_json::to_writer(
+                &mut encoded,
+                &RrdcachedJournalRecord::Update {
+                    id: entry.id,
+                    path: path.clone(),
+                    samples: entry.samples.clone(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            encoded.push(b'\n');
+        }
+        let rotated = (|| -> Result<File, Box<dyn std::error::Error>> {
+            match std::fs::remove_file(&temporary) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(error.into());
+                }
+                _ => {}
+            }
+            let mut file = open_private_rrdcached_journal(&temporary)?;
+            file.write_all(&encoded)?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, &self.journal_path)?;
+            if let Some(parent) = self.journal_path.parent() {
+                File::open(parent)?.sync_all()?;
+            }
+            Ok(file)
+        })();
+        match rotated {
+            Ok(file) => {
+                self.journal = file;
+                self.journal_bytes = encoded.len() as u64;
+                self.journal_needs_truncate = false;
+                self.journal_rotations = self.journal_rotations.saturating_add(1);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&temporary);
+                Err(error.to_string())
+            }
+        }
     }
 
     fn expire_idle(&mut self, now: i64, age: u64) -> usize {
@@ -668,13 +788,18 @@ impl RrdcachedQueue {
             .count()
     }
 
+    #[cfg(test)]
     fn enqueue(&mut self, path: PathBuf, samples: &[&str]) -> Result<(), String> {
-        let metadata =
-            std::fs::metadata(&path).map_err(|error| format!("No such file: {error}"))?;
-        if !metadata.is_file() {
-            return Err(format!("Not a regular file: {}", path.display()));
-        }
-        let info = rondi::inspect_rrd_file(&path).map_err(|error| error.to_string())?;
+        let info = inspect_rrdcached_target(&path)?;
+        self.enqueue_inspected(path, &info, samples)
+    }
+
+    fn enqueue_inspected(
+        &mut self,
+        path: PathBuf,
+        info: &rondi::RrdInfo,
+        samples: &[&str],
+    ) -> Result<(), String> {
         let mut last_timestamp = self
             .pending
             .get(&path)
@@ -738,6 +863,20 @@ impl RrdcachedQueue {
         self.schedule_path(&path, wall_time_seconds());
         Ok(())
     }
+}
+
+fn rrdcached_rotation_path(journal_path: &Path) -> PathBuf {
+    journal_path.with_file_name(format!("{RRDCACHED_JOURNAL_NAME}.tmp"))
+}
+
+/// Reading the RRD can wait on another process's file lock, so callers do it
+/// before taking the queue lock (as upstream does before cache_lock).
+fn inspect_rrdcached_target(path: &Path) -> Result<rondi::RrdInfo, String> {
+    let metadata = std::fs::metadata(path).map_err(|error| format!("No such file: {error}"))?;
+    if !metadata.is_file() {
+        return Err(format!("Not a regular file: {}", path.display()));
+    }
+    rondi::inspect_rrd_file(path).map_err(|error| error.to_string())
 }
 
 #[derive(Deserialize)]
@@ -962,6 +1101,7 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
     tracing::info!(root = %root.display(), socket = %args.socket.display(), "rrdcached_started");
     let stats = Arc::new(RrdcachedStats::default());
     let mut connections = JoinSet::new();
+    let (shutdown_sender, shutdown) = tokio::sync::watch::channel(false);
     let flush_interval = Duration::from_secs(args.flush_interval_seconds.max(1));
     let mut expiry_tick =
         tokio::time::interval_at(tokio::time::Instant::now() + flush_interval, flush_interval);
@@ -976,8 +1116,9 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
                 let no_overwrite = args.no_overwrite;
                 let allow_recursive_mkdir = args.allow_recursive_mkdir;
                 let socket_commands = args.socket_commands.clone();
+                let shutdown = shutdown.clone();
                 connections.spawn(async move {
-                    if let Err(error) = serve_rrdcached_connection(stream, root, echo_base, stats, queue, no_overwrite, allow_recursive_mkdir, socket_commands).await {
+                    if let Err(error) = serve_rrdcached_connection(stream, root, echo_base, stats, queue, no_overwrite, allow_recursive_mkdir, socket_commands, shutdown).await {
                         tracing::warn!(error = %error, "rrdcached_connection_failed");
                     }
                 });
@@ -988,14 +1129,37 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
                     queue.pending_order.iter().cloned().collect::<Vec<_>>()
                 }).unwrap_or_default();
                 flush_rrdcached_paths(paths, Arc::clone(&queue), Arc::clone(&stats), args.queue_threads).await;
-                let mut queue = queue.lock().map_err(|_| "rrdcached queue lock poisoned")?;
-                queue.expire_idle(wall_time_seconds(), args.flush_interval_seconds);
+                let queue = Arc::clone(&queue);
+                let flush_interval_seconds = args.flush_interval_seconds;
+                tokio::task::spawn_blocking(move || -> Result<(), String> {
+                    let mut queue = queue.lock().map_err(|_| "rrdcached queue lock poisoned")?;
+                    queue.expire_idle(wall_time_seconds(), flush_interval_seconds);
+                    if let Err(error) = queue.rotate_journal() {
+                        tracing::error!(error = %error, "rrdcached_journal_rotation_failed");
+                    }
+                    Ok(())
+                })
+                .await??;
             }
             _ = shutdown_signals.0.recv() => break,
             _ = shutdown_signals.1.recv() => break,
         }
     }
-    while connections.join_next().await.is_some() {}
+    // An idle client must not hold the final flush hostage. Connections stop
+    // reading new requests now; any still busy after the grace period are
+    // aborted so the pending updates still reach disk.
+    let _ = shutdown_sender.send(true);
+    let drained = timeout(Duration::from_secs(5), async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await;
+    if drained.is_err() {
+        tracing::warn!(
+            connections = connections.len(),
+            "rrdcached_shutdown_aborted_connections"
+        );
+        connections.shutdown().await;
+    }
     let paths = queue
         .lock()
         .map(|queue| queue.pending.keys().cloned().collect::<Vec<_>>())
@@ -1093,13 +1257,18 @@ async fn serve_rrdcached_connection(
     no_overwrite: bool,
     allow_recursive_mkdir: bool,
     socket_commands: Option<Vec<String>>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
     loop {
         line.clear();
-        if read_bounded_async_line(&mut reader, &mut line, 1024 * 1024).await? == 0 {
+        let read = tokio::select! {
+            read = read_bounded_async_line(&mut reader, &mut line, 1024 * 1024) => read?,
+            _ = shutdown.wait_for(|stopping| *stopping) => return Ok(()),
+        };
+        if read == 0 {
             return Ok(());
         }
         if line
@@ -1147,7 +1316,11 @@ async fn serve_rrdcached_connection(
             let mut command_number = 0_u64;
             loop {
                 line.clear();
-                if read_bounded_async_line(&mut reader, &mut line, 1024 * 1024).await? == 0 {
+                let read = tokio::select! {
+                    read = read_bounded_async_line(&mut reader, &mut line, 1024 * 1024) => read?,
+                    _ = shutdown.wait_for(|stopping| *stopping) => return Ok(()),
+                };
+                if read == 0 {
                     return Ok(());
                 }
                 if line.trim() == "." {
@@ -1261,11 +1434,13 @@ fn handle_rrdcached_line(
                 }
             } else {
                 match resolve_rrdcached_path(root, &fields[0]).and_then(|path| {
+                    let info = inspect_rrdcached_target(&path)?;
                     queue
                         .lock()
                         .map_err(|_| "rrdcached queue lock poisoned".to_owned())?
-                        .enqueue(
+                        .enqueue_inspected(
                             path,
+                            &info,
                             &fields[1..].iter().map(String::as_str).collect::<Vec<_>>(),
                         )
                 }) {
@@ -1423,7 +1598,7 @@ fn handle_rrdcached_line(
                 Err(_) => return Some("-1 rrdcached queue lock poisoned\n".to_owned()),
             };
             format!(
-                "9 Statistics follow\nQueueLength: {}\nUpdatesReceived: {}\nFlushesReceived: {}\nUpdatesWritten: {}\nDataSetsWritten: {}\nTreeNodesNumber: {}\nTreeDepth: {}\nJournalBytes: {}\nJournalRotate: 0\n",
+                "9 Statistics follow\nQueueLength: {}\nUpdatesReceived: {}\nFlushesReceived: {}\nUpdatesWritten: {}\nDataSetsWritten: {}\nTreeNodesNumber: {}\nTreeDepth: {}\nJournalBytes: {}\nJournalRotate: {}\n",
                 queue
                     .pending
                     .keys()
@@ -1436,6 +1611,7 @@ fn handle_rrdcached_line(
                 queue.known.len(),
                 queue.known.height(),
                 queue.journal_bytes,
+                queue.journal_rotations,
             )
         }
         "CREATE" => match rrdcached_create(
@@ -2243,6 +2419,33 @@ fn flush_rrdcached_path(
     queue: &Mutex<RrdcachedQueue>,
     stats: &RrdcachedStats,
 ) -> Result<bool, String> {
+    let owner = Arc::clone(
+        queue
+            .lock()
+            .map_err(|_| "rrdcached queue lock poisoned".to_owned())?
+            .flush_owners
+            .entry(path.to_path_buf())
+            .or_default(),
+    );
+    let result = match owner.lock() {
+        Ok(_owned) => flush_owned_rrdcached_path(path, queue, stats),
+        Err(_) => Err("rrdcached flush lock poisoned".to_owned()),
+    };
+    if let Ok(mut queue) = queue.lock() {
+        // Owners are cloned only under the queue lock, so a count of two
+        // (the map and this caller) means nobody else is waiting.
+        if Arc::strong_count(&owner) == 2 {
+            queue.flush_owners.remove(path);
+        }
+    }
+    result
+}
+
+fn flush_owned_rrdcached_path(
+    path: &Path,
+    queue: &Mutex<RrdcachedQueue>,
+    stats: &RrdcachedStats,
+) -> Result<bool, String> {
     let entries = {
         let queue = queue
             .lock()
@@ -2388,7 +2591,19 @@ fn rrdcached_create(
             "Access denied: parent resolves outside the configured base directory".to_owned(),
         );
     }
-    let output = canonical_parent.join(output.file_name().ok_or("invalid output filename")?);
+    let filename = output.file_name().ok_or("invalid output filename")?;
+    let output = canonical_parent.join(filename);
+    // Without -j the journal sits beside the RRD files, as do the store lock
+    // and journal. Replacing one would lose acknowledged updates.
+    if filename.to_str().is_some_and(|name| {
+        name == ".rondi.lock"
+            || name == "rondi.journal"
+            || name
+                .strip_prefix(RRDCACHED_JOURNAL_NAME)
+                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('.'))
+    }) {
+        return Err(format!("{}: Permission denied", output.display()));
+    }
     let mut step = 300_u64;
     let mut start = 1_000_000_000_i64;
     let mut no_overwrite = no_overwrite_default;
@@ -2556,7 +2771,8 @@ fn store_error(error: StoreError) -> Response<Full<Bytes>> {
         StoreError::OutOfOrder { .. }
         | StoreError::RrdTimestamp(_)
         | StoreError::RequestIdConflict
-        | StoreError::Owned => (StatusCode::CONFLICT, "conflict"),
+        | StoreError::Owned
+        | StoreError::RrdLocked => (StatusCode::CONFLICT, "conflict"),
         StoreError::InvalidName
         | StoreError::InvalidConfig(_)
         | StoreError::InvalidValue
@@ -2934,5 +3150,191 @@ mod rrdcached_queue_tests {
         assert_eq!(reopened.pending.len(), 1);
         drop(reopened);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn create_test_rrd(path: &Path) {
+        rondi::create_rrd_file(
+            path,
+            1_000_000_000,
+            10,
+            &["DS:value:GAUGE:30:U:U".to_owned()],
+            &[
+                "RRA:AVERAGE:0.5:1:500".to_owned(),
+                "RRA:MAX:0.5:5:100".to_owned(),
+            ],
+            false,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn concurrent_flushes_of_one_file_apply_each_sample_once() {
+        for attempt in 0..5 {
+            let temp = tempfile::tempdir().unwrap();
+            let root = std::fs::canonicalize(temp.path()).unwrap();
+            let file = root.join("metric.rrd");
+            let reference = root.join("reference.rrd");
+            create_test_rrd(&file);
+            std::fs::copy(&file, &reference).unwrap();
+            let mut queue = RrdcachedQueue::open(&root, 64 * 1024 * 1024, 100_000).unwrap();
+            let mut samples = Vec::new();
+            for step in 1..=100_i64 {
+                let sample = format!("{}:{}", 1_000_000_000 + step * 10, step % 37);
+                queue.enqueue(file.clone(), &[sample.as_str()]).unwrap();
+                samples.push(sample);
+            }
+            let queue = Arc::new(Mutex::new(queue));
+            let stats = Arc::new(RrdcachedStats::default());
+            let barrier = Arc::new(std::sync::Barrier::new(4));
+            let workers = (0..4)
+                .map(|_| {
+                    let queue = Arc::clone(&queue);
+                    let stats = Arc::clone(&stats);
+                    let barrier = Arc::clone(&barrier);
+                    let file = file.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        flush_rrdcached_path(&file, &queue, &stats)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let results = workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>();
+            let samples = samples.iter().map(String::as_str).collect::<Vec<_>>();
+            update_rrdcached_file(&reference, &samples).unwrap();
+            assert!(
+                results.iter().all(Result::is_ok),
+                "attempt {attempt}: concurrent FLUSH returned errors: {results:?}"
+            );
+            assert_eq!(
+                rondi::dump_rrd_file(&file).unwrap(),
+                rondi::dump_rrd_file(&reference).unwrap(),
+                "attempt {attempt}: concurrent flush produced a different RRD"
+            );
+            assert_eq!(stats.updates_written.load(Ordering::Relaxed), 100);
+        }
+    }
+
+    #[test]
+    fn torn_final_journal_line_does_not_prevent_startup() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let file = root.join("metric.rrd");
+        create_test_rrd(&file);
+        {
+            let mut queue = RrdcachedQueue::open(&root, 1024 * 1024, 100_000).unwrap();
+            queue.enqueue(file.clone(), &["1000000010:1"]).unwrap();
+        }
+        let journal_path = root.join(".rrdcached.journal");
+        let intact = std::fs::metadata(&journal_path).unwrap().len();
+        let mut journal = OpenOptions::new().append(true).open(&journal_path).unwrap();
+        journal
+            .write_all(br#"{"record":"update","id":2,"pa"#)
+            .unwrap();
+        drop(journal);
+        let mut queue = RrdcachedQueue::open(&root, 1024 * 1024, 100_000)
+            .expect("a torn final journal line must not prevent startup");
+        assert_eq!(queue.pending.get(&file).map(Vec::len), Some(1));
+        assert_eq!(std::fs::metadata(&journal_path).unwrap().len(), intact);
+        // The next record must start on its own line, not extend the torn one.
+        queue.enqueue(file.clone(), &["1000000020:2"]).unwrap();
+        drop(queue);
+        let queue = RrdcachedQueue::open(&root, 1024 * 1024, 100_000).unwrap();
+        assert_eq!(queue.pending.get(&file).map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn malformed_journal_lines_are_skipped_on_replay() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let file = root.join("metric.rrd");
+        create_test_rrd(&file);
+        {
+            let mut queue = RrdcachedQueue::open(&root, 1024 * 1024, 100_000).unwrap();
+            queue.enqueue(file.clone(), &["1000000010:1"]).unwrap();
+            queue.journal.write_all(b"not json\n\xff\xfe\n").unwrap();
+            queue.journal.sync_data().unwrap();
+            queue.enqueue(file.clone(), &["1000000020:2"]).unwrap();
+        }
+        let queue = RrdcachedQueue::open(&root, 1024 * 1024, 100_000).unwrap();
+        assert_eq!(queue.pending.get(&file).map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn create_cannot_replace_daemon_owned_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let file = root.join("metric.rrd");
+        create_test_rrd(&file);
+        {
+            let mut queue = RrdcachedQueue::open(&root, 1024 * 1024, 100_000).unwrap();
+            queue.enqueue(file.clone(), &["1000000010:1"]).unwrap();
+        }
+        for reserved in [
+            ".rrdcached.journal",
+            ".rrdcached.journal.tmp",
+            ".rondi.lock",
+            "rondi.journal",
+        ] {
+            let created = rrdcached_create(
+                &root,
+                &[reserved, "DS:x:GAUGE:30:U:U", "RRA:AVERAGE:0.5:1:10"],
+                false,
+                false,
+            );
+            assert!(created.is_err(), "CREATE replaced {reserved}");
+        }
+        let queue = RrdcachedQueue::open(&root, 1024 * 1024, 100_000).unwrap();
+        assert_eq!(queue.pending.get(&file).map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn rotation_compacts_flushed_records_and_keeps_pending_ones() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let file = root.join("metric.rrd");
+        let pending_file = root.join("pending.rrd");
+        create_test_rrd(&file);
+        create_test_rrd(&pending_file);
+        let queue = Mutex::new(RrdcachedQueue::open(&root, 64 * 1024 * 1024, 100_000).unwrap());
+        let stats = RrdcachedStats::default();
+        for step in 1..=200_i64 {
+            let sample = format!("{}:{}", 1_000_000_000 + step * 10, step);
+            queue
+                .lock()
+                .unwrap()
+                .enqueue(file.clone(), &[sample.as_str()])
+                .unwrap();
+            flush_rrdcached_path(&file, &queue, &stats).unwrap();
+        }
+        queue
+            .lock()
+            .unwrap()
+            .enqueue(pending_file.clone(), &["1000000010:7"])
+            .unwrap();
+        queue.lock().unwrap().rotate_journal().unwrap();
+        let journal_path = root.join(".rrdcached.journal");
+        let bytes = std::fs::metadata(&journal_path).unwrap().len();
+        assert!(bytes < 4096, "journal holds {bytes} bytes after rotation");
+        assert_eq!(queue.lock().unwrap().journal_bytes, bytes);
+        assert_eq!(queue.lock().unwrap().journal_rotations, 1);
+        queue
+            .lock()
+            .unwrap()
+            .enqueue(pending_file.clone(), &["1000000020:8"])
+            .unwrap();
+        drop(queue);
+        let reopened = RrdcachedQueue::open(&root, 64 * 1024 * 1024, 100_000).unwrap();
+        assert!(!reopened.pending.contains_key(&file));
+        assert_eq!(
+            reopened.pending[&pending_file]
+                .iter()
+                .flat_map(|entry| entry.samples.iter().cloned())
+                .collect::<Vec<_>>(),
+            ["1000000010:7", "1000000020:8"]
+        );
+        assert!(reopened.next_id > 202);
     }
 }
