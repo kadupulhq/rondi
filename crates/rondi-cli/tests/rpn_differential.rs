@@ -87,6 +87,21 @@ impl Fixture {
         ]
     }
 
+    fn graphv_args(&self, elements: &[&str]) -> Vec<String> {
+        let mut args = vec![
+            String::from("graphv"),
+            String::from("-"),
+            String::from("--start"),
+            String::from("1000000000"),
+            String::from("--end"),
+            String::from("1000000600"),
+            format!("DEF:x={}:x:AVERAGE", self.file("fine.rrd")),
+            String::from("LINE1:x#ff0000"),
+        ];
+        args.extend(elements.iter().map(|element| element.to_string()));
+        args
+    }
+
     fn run_both(&self, args: &[String]) -> (Output, Output) {
         let run = |program: &Path| Command::new(program).args(args).output().unwrap();
         (run(Path::new("rrdtool")), run(&self.alias))
@@ -104,6 +119,24 @@ impl Fixture {
             String::from_utf8_lossy(&rondi.stderr),
             String::from_utf8_lossy(&upstream.stderr),
             "{args:?}"
+        );
+    }
+
+    fn assert_print_lines_match(&self, elements: &[&str]) {
+        let (upstream, rondi) = self.run_both(&self.graphv_args(elements));
+        let print_lines = |output: &Output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|line| line.starts_with("print["))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rondi.status.code(), upstream.status.code(), "{elements:?}");
+        assert_eq!(print_lines(&rondi), print_lines(&upstream), "{elements:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&rondi.stderr),
+            String::from_utf8_lossy(&upstream.stderr),
+            "{elements:?}"
         );
     }
 }
@@ -179,4 +212,26 @@ fn rpn_negative_zero_sums_match_rrdtool() {
     let mut args = fixture.xport_args("1,0,1,30,n,PREDICT,/,0,GT");
     args.insert(8, String::from("CDEF:n=x,0,*,-1,*"));
     fixture.assert_matches(&args);
+}
+
+// vdef_parse scans "%40[0-9.e+-],%29[A-Z]" and converts with rrd_strtodbl.
+#[test]
+fn vdef_parameter_lexing_matches_vdef_parse() {
+    let Some(fixture) = fixture() else { return };
+    for vdef in [
+        "VDEF:v=x,1E2,PERCENT",
+        "VDEF:v=x,95e,PERCENT",
+        "VDEF:v=x,95,PERCENT,",
+        "VDEF:v=x,MAXIMUM,",
+        "VDEF:v=x,150,PERCENT",
+        "VDEF:v=x,PERCENT",
+        "VDEF:v=x,95,MAXIMUM",
+        "VDEF:v=x,95",
+        "VDEF:v=x,1-2,PERCENT",
+        "VDEF:v=x,1e1100,PERCENT",
+        "VDEF:v=x,FOO",
+        "VDEF:v=x",
+    ] {
+        fixture.assert_print_lines_match(&[vdef, "PRINT:v:%lf"]);
+    }
 }

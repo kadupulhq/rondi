@@ -2264,23 +2264,84 @@ fn parse_graph_vdef(definition: &str) -> Result<GraphVdef, Box<dyn std::error::E
         .strip_prefix("VDEF:")
         .and_then(|value| value.split_once('='))
         .ok_or_else(|| format!("invalid VDEF: {definition}"))?;
-    let fields = expression.split(',').collect::<Vec<_>>();
-    if name.is_empty() || fields.len() < 2 || fields.len() > 3 || fields[0].is_empty() {
+    if name.is_empty() {
         return Err(format!("invalid VDEF: {definition}").into());
     }
-    let (function_name, percentile) = if fields.len() == 3 {
-        (fields[2], Some(fields[1].parse::<f64>()?))
-    } else {
-        (fields[1], None)
-    };
+    let (variable, specification) = expression
+        .split_once(',')
+        .ok_or_else(|| format!("Comma expected in VDEF definition {expression}"))?;
+    if variable.is_empty() {
+        return Err(format!("invalid VDEF: {definition}").into());
+    }
+    let (function_name, percentile) = parse_vdef_specification(name, specification)?;
     let function = rondi::VdefFunction::parse(function_name)
-        .ok_or_else(|| format!("unsupported VDEF function: {function_name}"))?;
+        .ok_or_else(|| format!("Unknown function '{function_name}' in VDEF '{name}'\n"))?;
+    let needs_percentile = matches!(
+        function,
+        rondi::VdefFunction::Percent | rondi::VdefFunction::PercentNan
+    );
+    match percentile {
+        None if needs_percentile => {
+            return Err(
+                format!("Function '{function_name}' needs parameter in VDEF '{name}'\n").into(),
+            );
+        }
+        Some(percentile) if needs_percentile && !(0.0..=100.0).contains(&percentile) => {
+            return Err(
+                format!("Parameter '{percentile:.6}' out of range in VDEF '{name}'\n").into(),
+            );
+        }
+        Some(_) if !needs_percentile => {
+            return Err(format!(
+                "Function '{function_name}' needs no parameter in VDEF '{name}'\n"
+            )
+            .into());
+        }
+        _ => {}
+    }
     Ok(GraphVdef {
         name: name.to_owned(),
-        variable: fields[0].to_owned(),
+        variable: variable.to_owned(),
         function,
         percentile,
     })
+}
+
+/// Mirrors `vdef_parse`: it scans `%40[0-9.e+-],%29[A-Z]` and converts the
+/// number with `rrd_strtodbl`, falling back to a bare function name. Text
+/// after a parsed `number,FUNCTION` pair is not checked upstream.
+fn parse_vdef_specification<'a>(
+    name: &str,
+    specification: &'a str,
+) -> Result<(&'a str, Option<f64>), String> {
+    let function_length = |text: &str| {
+        text.bytes()
+            .take(29)
+            .take_while(u8::is_ascii_uppercase)
+            .count()
+    };
+    let number_length = specification
+        .bytes()
+        .take(40)
+        .take_while(|byte| matches!(byte, b'0'..=b'9' | b'.' | b'e' | b'+' | b'-'))
+        .count();
+    let mut function = "";
+    let mut parameter = None;
+    if number_length > 0 {
+        if let Some(rest) = specification[number_length..].strip_prefix(',') {
+            function = &rest[..function_length(rest)];
+        }
+        parameter = rondi::parse_rrd_number(&specification[..number_length]);
+    }
+    if parameter.is_none() {
+        if function_length(specification) != specification.len() {
+            return Err(format!(
+                "Unknown function string '{specification}' in VDEF '{name}'"
+            ));
+        }
+        function = specification;
+    }
+    Ok((function, parameter))
 }
 
 fn parse_graph_print(definition: &str) -> Result<GraphPrint, Box<dyn std::error::Error>> {
