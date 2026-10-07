@@ -4135,7 +4135,7 @@ fn format_xport_xml(
             };
             match value {
                 Some(value) if value.is_finite() => {
-                    write!(output, "<{tag}>{}</{tag}>", format_rrd_scientific(*value)).unwrap();
+                    write!(output, "<{tag}>{}</{tag}>", format_xport_value(*value)).unwrap();
                 }
                 _ => write!(output, "<{tag}>NaN</{tag}>").unwrap(),
             }
@@ -4224,7 +4224,7 @@ fn format_xport_json(
             }
             match value {
                 Some(value) if value.is_finite() => {
-                    write!(output, "{}", format_rrd_scientific(*value)).unwrap()
+                    write!(output, "{}", format_xport_value(*value)).unwrap()
                 }
                 _ => output.push_str("null"),
             }
@@ -4663,6 +4663,12 @@ fn send_rrdcached_update_on_stream(
         .unwrap_or(response)
         .to_owned()
         .into())
+}
+
+// xport rows go through rrd_snprintf, which only emits '-' for values below
+// zero, so -0 prints unsigned. updatev uses libc printf and keeps the sign.
+fn format_xport_value(value: f64) -> String {
+    format_rrd_scientific(if value == 0.0 { 0.0 } else { value })
 }
 
 fn format_rrd_scientific(value: f64) -> String {
