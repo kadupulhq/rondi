@@ -144,3 +144,12 @@ fn rpn_errors_use_rrdtool_wording() {
         fixture.assert_matches(&fixture.xport_args(cdef));
     }
 }
+
+// rrd_graph.c data_calc rejects a CDEF whose expression names no DEF or CDEF.
+#[test]
+fn constant_cdef_is_rejected_like_rrdtool() {
+    let Some(fixture) = fixture() else { return };
+    for cdef in ["NEWWEEK", "1,2,+", "TIME,UN"] {
+        fixture.assert_matches(&fixture.xport_args(cdef));
+    }
+}

@@ -140,7 +140,7 @@ pub fn fetch_xport_with_cdefs(
         .map(|definition| (definition.name.clone(), definition.fetched.step))
         .collect();
     for cdef in cdefs {
-        let step = expression_step(&cdef.expression, &variable_steps)?;
+        let step = expression_step(&cdef.name, &cdef.expression, &variable_steps)?;
         variable_steps.insert(cdef.name.clone(), step);
     }
     let mut output_step = 0_u64;
@@ -1084,6 +1084,7 @@ fn rrd_first_weekday() -> i32 {
 }
 
 fn expression_step(
+    name: &str,
     expression: &str,
     variable_steps: &HashMap<String, u64>,
 ) -> Result<u64, StoreError> {
@@ -1101,8 +1102,9 @@ fn expression_step(
     }
     // The PNG rule-only graph adapter uses a private constant CDEF to give
     // rules a time axis. A constant has no variable step of its own, so use
-    // the available DEF grid for that adapter case.
-    if step == 0 {
+    // the available DEF grid for that adapter case only; RRDtool rejects any
+    // other constant CDEF.
+    if step == 0 && name == "__rondi_rule_anchor" {
         for variable_step in variable_steps.values() {
             step = if step == 0 {
                 *variable_step
@@ -1112,8 +1114,8 @@ fn expression_step(
         }
     }
     if step == 0 {
-        return Err(StoreError::RrdUnsupported(
-            "rpn expressions without DEF or CDEF variables are not supported".into(),
+        return Err(rrdtool_rpn_error(
+            "rpn expressions without DEF or CDEF variables are not supported",
         ));
     }
     Ok(step)
