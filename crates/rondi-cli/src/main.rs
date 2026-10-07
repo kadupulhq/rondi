@@ -243,75 +243,71 @@ fn current_local_year() -> i32 {
 
 async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut root = PathBuf::from("/tmp");
-    let mut socket = PathBuf::from("/tmp/rrdcached.sock");
+    let mut base_seen = false;
     let mut journal_directory = None;
     let mut pid_file = None;
     let mut log_file = None;
     let mut no_overwrite = false;
+    let mut base_only = false;
     let mut allow_recursive_mkdir = false;
-    let mut socket_mode = None;
     let mut active_socket_mode = None;
     let mut active_socket_commands = None;
-    let mut socket_commands = None;
     let mut active_socket_group = None;
-    let mut socket_group = None;
-    let mut listen_seen = false;
+    // Each listener takes the -m/-P/-s values in effect when it was named.
+    let mut listeners = Vec::<(String, Option<u32>, Option<Vec<String>>, Option<u32>)>::new();
+    let mut daemon_user = None;
+    let mut daemon_group = None;
     let mut write_timeout_seconds = 300;
+    let mut write_jitter_seconds = 0;
     let mut flush_interval_seconds = 3600;
     let mut queue_threads = 4_usize;
     let mut allocation_chunk = 1_usize;
+    // read_options keeps parsing after most errors; the last status wins and a
+    // negative status (an unknown option) still exits successfully.
+    let mut status = 0_i32;
     let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--help" | "-h" => {
+    let mut offset = 0;
+    while let Some(parsed) = next_rrdcached_option(args, &mut index, &mut offset) {
+        let (option, value) = match parsed {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                eprintln!("{message}");
                 print!("{RRDCACHED_HELP}");
-                std::process::exit(1);
+                status = -1;
+                continue;
             }
-            "-l" | "--listen" => {
-                index += 1;
-                let address = args.get(index).ok_or("rrdcached -l requires an address")?;
-                listen_seen = true;
-                socket_mode = active_socket_mode;
-                socket_commands = active_socket_commands.clone();
-                socket_group = active_socket_group;
-                if let Some(path) = address.strip_prefix("unix:") {
-                    socket = PathBuf::from(path);
-                } else if address.starts_with('/') {
-                    socket = PathBuf::from(address);
-                } else {
-                    return Err(
-                        "rrdcached network listeners are not enabled; use a Unix socket".into(),
-                    );
-                }
+        };
+        let value = value.unwrap_or_default();
+        match option {
+            'h' => {
+                print!("{RRDCACHED_HELP}");
+                status = 1;
             }
-            "-b" | "--base-dir" => {
-                index += 1;
-                root = PathBuf::from(args.get(index).ok_or("rrdcached -b requires a directory")?);
-            }
-            "-j" => {
-                index += 1;
-                journal_directory = Some(PathBuf::from(
-                    args.get(index).ok_or("rrdcached -j requires a directory")?,
+            'l' | 'L' => {
+                let address = if option == 'L' { String::new() } else { value };
+                listeners.push((
+                    address,
+                    active_socket_mode,
+                    active_socket_commands.clone(),
+                    active_socket_group,
                 ));
             }
-            "-p" => {
-                index += 1;
-                pid_file = Some(PathBuf::from(
-                    args.get(index).ok_or("rrdcached -p requires a file")?,
-                ));
+            'b' => {
+                base_seen = true;
+                root = PathBuf::from(value);
             }
-            "-o" => {
-                index += 1;
-                log_file = Some(PathBuf::from(
-                    args.get(index).ok_or("rrdcached -o requires a file")?,
-                ));
-            }
-            "-O" => no_overwrite = true,
-            "-R" => allow_recursive_mkdir = true,
-            "-m" => {
-                index += 1;
-                let value = args.get(index).ok_or("rrdcached -m requires a mode")?;
-                let mode = u32::from_str_radix(value, 8)
+            'j' => journal_directory = Some(PathBuf::from(value)),
+            'p' => pid_file = Some(PathBuf::from(value)),
+            'o' => log_file = Some(PathBuf::from(value)),
+            'O' => no_overwrite = true,
+            'R' => allow_recursive_mkdir = true,
+            'B' => base_only = true,
+            // Rondi always stays in the foreground and flushes accepted
+            // entries during graceful shutdown, so these request behavior
+            // already enabled.
+            'F' | 'g' => {}
+            'm' => {
+                let mode = u32::from_str_radix(&value, 8)
                     .ok()
                     .filter(|mode| *mode <= 0o7777);
                 let Some(mode) = mode else {
@@ -319,99 +315,88 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
                     std::process::exit(5);
                 };
                 active_socket_mode = Some(mode);
-                if !listen_seen {
-                    socket_mode = active_socket_mode;
-                }
             }
-            "-P" => {
-                index += 1;
-                let value = args.get(index).ok_or("rrdcached -P requires permissions")?;
+            'P' => {
                 let commands = value
                     .split([',', ' '])
                     .filter(|command| !command.is_empty())
                     .map(str::to_ascii_uppercase)
                     .collect::<Vec<_>>();
-                const COMMANDS: &[&str] = &[
-                    "UPDATE",
-                    "WROTE",
-                    "TUNE",
-                    "DUMP",
-                    "FLUSH",
-                    "FLUSHALL",
-                    "PENDING",
-                    "FORGET",
-                    "QUEUE",
-                    "STATS",
-                    "HELP",
-                    "PING",
-                    "BATCH",
-                    ".",
-                    "FETCH",
-                    "FETCHBIN",
-                    "INFO",
-                    "FIRST",
-                    "LAST",
-                    "CREATE",
-                    "LIST",
-                    "SUSPEND",
-                    "RESUME",
-                    "SUSPENDALL",
-                    "RESUMEALL",
-                    "QUIT",
-                ];
-                if let Some(invalid) = commands
-                    .iter()
-                    .find(|command| !COMMANDS.contains(&command.as_str()))
-                {
-                    eprintln!(
-                        "read_options: Adding permission \"{invalid}\" to socket failed. Most likely, this permission doesn't exist. Check your command line."
-                    );
-                    std::process::exit(4);
+                let mut valid = Vec::new();
+                for command in commands {
+                    if RRDCACHED_COMMANDS.contains(&command.as_str()) {
+                        valid.push(command);
+                    } else {
+                        eprintln!(
+                            "read_options: Adding permission \"{command}\" to socket failed. Most likely, this permission doesn't exist. Check your command line."
+                        );
+                        status = 4;
+                    }
                 }
-                active_socket_commands = if commands.is_empty() {
-                    None
-                } else {
-                    Some(commands)
-                };
-                if !listen_seen {
-                    socket_commands = active_socket_commands.clone();
-                }
+                active_socket_commands = if valid.is_empty() { None } else { Some(valid) };
             }
-            "-s" => {
-                index += 1;
-                let value = args.get(index).ok_or("rrdcached -s requires a group")?;
-                let Some(group) = resolve_rrdcached_group(value) else {
+            's' => {
+                let Some(group) = resolve_rrdcached_group(&value) else {
                     eprintln!("read_options: couldn't map \"{value}\" to a group, Sorry");
                     std::process::exit(5);
                 };
                 active_socket_group = Some(group);
-                if !listen_seen {
-                    socket_group = active_socket_group;
+            }
+            'G' => {
+                let Some(group) = resolve_rrdcached_daemon_group(&value) else {
+                    eprintln!("read_options: couldn't map \"{value}\" to a group, Sorry");
+                    std::process::exit(5);
+                };
+                daemon_group = Some(group);
+            }
+            'U' => {
+                let Some(user) = resolve_rrdcached_daemon_user(&value) else {
+                    eprintln!("read_options: couldn't map \"{value}\" to a user, Sorry");
+                    std::process::exit(5);
+                };
+                daemon_user = Some(user);
+            }
+            'V' => {
+                if !matches!(
+                    value.as_str(),
+                    "LOG_EMERG"
+                        | "LOG_ALERT"
+                        | "LOG_CRIT"
+                        | "LOG_ERR"
+                        | "LOG_WARNING"
+                        | "LOG_NOTICE"
+                        | "LOG_INFO"
+                        | "LOG_DEBUG"
+                ) {
+                    eprintln!("Unrecognized log level '{value}'; falling back to default LOG_ERR.");
                 }
             }
-            // Rondi always stays in the foreground, confines paths to `-b`,
-            // and flushes accepted entries during graceful shutdown. These
-            // upstream switches therefore request behavior already enabled.
-            "-B" | "-F" | "-g" => {}
-            "-w" | "--write-timeout" => {
-                index += 1;
-                write_timeout_seconds = rondi::parse_rrd_scaled_duration(
-                    args.get(index).ok_or("rrdcached -w requires seconds")?,
-                    1,
-                )?;
-            }
-            "-f" | "--flush-interval" => {
-                index += 1;
-                flush_interval_seconds = rondi::parse_rrd_scaled_duration(
-                    args.get(index).ok_or("rrdcached -f requires seconds")?,
-                    1,
-                )?;
-            }
-            "-t" => {
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or("rrdcached -t requires a thread count")?;
+            'w' => match rrdcached_duration(&value) {
+                Ok(seconds) => write_timeout_seconds = seconds,
+                Err(detail) => {
+                    eprintln!("Invalid write interval {value}: {detail}");
+                    status = 2;
+                }
+            },
+            'f' => match rrdcached_duration(&value) {
+                Ok(seconds) => flush_interval_seconds = seconds,
+                Err(detail) => {
+                    eprintln!("Invalid flush interval {value}: {detail}");
+                    status = 3;
+                }
+            },
+            'z' => match rrdcached_duration(&value) {
+                Ok(seconds) => write_jitter_seconds = seconds,
+                Err(detail) => {
+                    eprintln!("Invalid write jitter {value}: {detail}");
+                    status = 2;
+                }
+            },
+            't' => {
+                if value.is_empty() {
+                    eprintln!("Missing argument for -t");
+                    std::process::exit(1);
+                }
                 let parsed = value.parse::<i32>().ok().filter(|threads| *threads > 0);
                 let Some(parsed) = parsed else {
                     eprintln!("Invalid thread count: -t {value}");
@@ -419,12 +404,11 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 };
                 queue_threads = parsed as usize;
             }
-            "-a" => {
-                index += 1;
-                let Some(value) = args.get(index) else {
+            'a' => {
+                if value.is_empty() {
                     eprintln!("Missing argument for -a");
                     std::process::exit(10);
-                };
+                }
                 let parsed = value.parse::<i32>().ok().filter(|size| *size > 0);
                 let Some(parsed) = parsed else {
                     eprintln!("Invalid allocation size: {value}");
@@ -432,17 +416,64 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 };
                 allocation_chunk = parsed as usize;
             }
-            option => {
-                return Err(
-                    format!("rrdcached mode selected; unsupported option: {option}").into(),
-                );
-            }
+            _ => unreachable!("next_rrdcached_option returns only known options"),
         }
-        index += 1;
     }
     if flush_interval_seconds < write_timeout_seconds.saturating_mul(2) {
         eprintln!("WARNING: flush interval (-f) should be at least 2x write interval (-w) !");
     }
+    if write_jitter_seconds > write_timeout_seconds {
+        eprintln!("WARNING: write delay (-z) should NOT be larger than write interval (-w) !");
+    }
+    if base_only && !base_seen {
+        eprintln!(
+            "WARNING: -B does not make sense without -b!\n  Consult the rrdcached documentation"
+        );
+    }
+    if allow_recursive_mkdir && !base_only {
+        eprintln!(
+            "WARNING: -R does not make sense without -B!\n  Consult the rrdcached documentation"
+        );
+    }
+    if status != 0 {
+        std::process::exit(status.max(0));
+    }
+    // Rondi does not change identity after startup. Refusing a different
+    // account keeps the daemon from silently running with more privilege
+    // than the operator asked for.
+    // SAFETY: geteuid and getegid have no preconditions.
+    let (euid, egid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    if daemon_user.is_some_and(|user| user != euid)
+        || daemon_group.is_some_and(|group| group != egid)
+    {
+        return Err(
+            "rrdcached -U/-G cannot switch accounts in Rondi; start the service as that user and group"
+                .into(),
+        );
+    }
+    if listeners.len() > 1 {
+        return Err("rrdcached mode supports one listener; give -l only once".into());
+    }
+    let (socket, socket_mode, socket_commands, socket_group) = match listeners.pop() {
+        Some((address, mode, commands, group)) => {
+            let socket = if let Some(path) = address.strip_prefix("unix:") {
+                PathBuf::from(path)
+            } else if address.starts_with('/') {
+                PathBuf::from(address)
+            } else {
+                return Err(
+                    "rrdcached network listeners are not enabled; use a Unix socket".into(),
+                );
+            };
+            (socket, mode, commands, group)
+        }
+        None => (
+            PathBuf::from("/tmp/rrdcached.sock"),
+            active_socket_mode,
+            active_socket_commands,
+            active_socket_group,
+        ),
+    };
     rondi_server::run_rrdcached(rondi_server::RrdcachedConfig {
         root,
         socket,
@@ -461,6 +492,146 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
         max_pending_bytes: rondi_server::DEFAULT_RRDCACHED_QUEUE_BYTES,
     })
     .await
+}
+
+const RRDCACHED_COMMANDS: &[&str] = &[
+    "UPDATE",
+    "WROTE",
+    "TUNE",
+    "DUMP",
+    "FLUSH",
+    "FLUSHALL",
+    "PENDING",
+    "FORGET",
+    "QUEUE",
+    "STATS",
+    "HELP",
+    "PING",
+    "BATCH",
+    ".",
+    "FETCH",
+    "FETCHBIN",
+    "INFO",
+    "FIRST",
+    "LAST",
+    "CREATE",
+    "LIST",
+    "SUSPEND",
+    "RESUME",
+    "SUSPENDALL",
+    "RESUMEALL",
+    "QUIT",
+];
+
+/// One step of RRDtool's bundled optparse for rrdcached: short options may
+/// be clustered (`-gF`) or carry an attached argument (`-w1800`), `--help` is
+/// the only long option, non-option words are skipped, and `--` ends parsing.
+fn next_rrdcached_option(
+    args: &[String],
+    index: &mut usize,
+    offset: &mut usize,
+) -> Option<Result<(char, Option<String>), String>> {
+    const WITH_ARGUMENT: &str = "abfGjlmoPpstUVwz";
+    const WITHOUT_ARGUMENT: &str = "BFghLOR";
+    loop {
+        let arg = args.get(*index)?;
+        if *offset == 0 {
+            if arg == "--" {
+                return None;
+            }
+            if let Some(name) = arg.strip_prefix("--") {
+                *index += 1;
+                return Some(match name.split_once('=') {
+                    None if name == "help" => Ok(('h', None)),
+                    Some(("help", _)) => Err("option takes no arguments -- 'help'".to_owned()),
+                    _ => Err(format!("invalid option -- '{name}'")),
+                });
+            }
+            if !arg.starts_with('-') || arg.len() == 1 {
+                *index += 1;
+                continue;
+            }
+            *offset = 1;
+        }
+        let option = arg[*offset..].chars().next()?;
+        let rest = &arg[*offset + option.len_utf8()..];
+        if WITH_ARGUMENT.contains(option) {
+            *offset = 0;
+            *index += 1;
+            if !rest.is_empty() {
+                return Some(Ok((option, Some(rest.to_owned()))));
+            }
+            let Some(value) = args.get(*index) else {
+                return Some(Err(format!("option requires an argument -- '{option}'")));
+            };
+            *index += 1;
+            return Some(Ok((option, Some(value.clone()))));
+        }
+        if !WITHOUT_ARGUMENT.contains(option) {
+            // optparse abandons the rest of a cluster after an unknown option.
+            *offset = 0;
+            *index += 1;
+            return Some(Err(format!("invalid option -- '{option}'")));
+        }
+        if rest.is_empty() {
+            *offset = 0;
+            *index += 1;
+        } else {
+            *offset += option.len_utf8();
+        }
+        return Some(Ok((option, None)));
+    }
+}
+
+/// `rrd_scaled_duration` with a divisor of one, reporting RRDtool's text.
+fn rrdcached_duration(value: &str) -> Result<u64, &'static str> {
+    if !value.starts_with(|first: char| first.is_ascii_digit()) {
+        return Err("value must be (suffixed) positive number");
+    }
+    if is_rrd_zero_duration(value) {
+        return Err("value must be positive");
+    }
+    parse_rrd_scaled_duration(value, 1).map_err(|_| "value has trailing garbage")
+}
+
+fn resolve_rrdcached_daemon_user(value: &str) -> Option<libc::uid_t> {
+    use std::ffi::CString;
+    // RRDtool treats any all-digit argument (including an empty one) as a
+    // numeric id and everything else as a name.
+    let user = if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        let uid = value.parse::<libc::uid_t>().unwrap_or(0);
+        // SAFETY: getpwuid returns a pointer to libc-owned static data.
+        unsafe { libc::getpwuid(uid) }
+    } else {
+        let name = CString::new(value).ok()?;
+        // SAFETY: name is NUL terminated and remains alive for the call.
+        unsafe { libc::getpwnam(name.as_ptr()) }
+    };
+    if user.is_null() {
+        None
+    } else {
+        // SAFETY: non-null user points to libc-owned passwd data.
+        Some(unsafe { (*user).pw_uid })
+    }
+}
+
+fn resolve_rrdcached_daemon_group(value: &str) -> Option<libc::gid_t> {
+    use std::ffi::CString;
+    let group = if value.bytes().all(|byte| byte.is_ascii_digit()) {
+        let gid = value.parse::<libc::gid_t>().unwrap_or(0);
+        // SAFETY: getgrgid returns a pointer to libc-owned static data.
+        unsafe { libc::getgrgid(gid) }
+    } else {
+        let name = CString::new(value).ok()?;
+        // SAFETY: name is NUL terminated and remains alive for the call.
+        unsafe { libc::getgrnam(name.as_ptr()) }
+    };
+    if group.is_null() {
+        None
+    } else {
+        // SAFETY: non-null group points to libc-owned group data.
+        Some(unsafe { (*group).gr_gid })
+    }
 }
 
 fn resolve_rrdcached_group(value: &str) -> Option<u32> {

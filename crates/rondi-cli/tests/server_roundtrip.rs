@@ -1141,6 +1141,63 @@ fn rrdcached_recursive_create_requires_and_honors_dash_r() {
 }
 
 #[test]
+fn rrdcached_accepts_attached_arguments_and_cacti_options() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("data");
+    let socket = dir.path().join("cacti.sock");
+    std::fs::create_dir_all(&root).unwrap();
+    let alias = dir.path().join("rrdcached");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    // SAFETY: geteuid and getegid have no preconditions.
+    let (uid, gid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    let mut child = Command::new(&alias)
+        .arg("-gB")
+        .arg(format!("-b{}", root.display()))
+        .args(["-w1800", "-f", "3600", "-z900", "-V", "LOG_INFO"])
+        .arg(format!("-U{uid}"))
+        .args(["-G", &gid.to_string()])
+        .arg(format!("-lunix:{}", socket.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for_socket(&mut child, &socket);
+    let mut stream = UnixStream::connect(&socket).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut reader = BufReader::new(&mut stream);
+    assert_eq!(rrdcached_request(&mut reader, "PING\n"), "0 PONG\n");
+    drop(reader);
+    drop(stream);
+    unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+    assert!(child.wait().unwrap().success());
+
+    // Rondi can neither switch accounts nor serve several sockets, so it
+    // refuses these configurations instead of silently ignoring them.
+    let mut refused = vec![vec![
+        "-l".to_owned(),
+        format!("unix:{}", dir.path().join("first.sock").display()),
+        "-l".to_owned(),
+        format!("unix:{}", dir.path().join("second.sock").display()),
+    ]];
+    if uid != 0 {
+        refused.push(vec!["-U".to_owned(), "0".to_owned()]);
+    }
+    for args in refused {
+        let output = Command::new(&alias)
+            .args(["-g", "-b", root.to_str().unwrap()])
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        assert!(!output.stderr.is_empty(), "{args:?}");
+        assert!(!dir.path().join("first.sock").exists());
+    }
+}
+
+#[test]
 fn rrdcached_socket_mode_matches_upstream() {
     if !Command::new("rrdcached")
         .arg("--version")

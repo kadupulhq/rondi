@@ -17,23 +17,6 @@ fn normalize_rrdtool_compiled_stamp(output: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn compatibility_names_select_their_named_mode() {
-    let temp = tempfile::tempdir().unwrap();
-    let executable = env!("CARGO_BIN_EXE_rondi");
-    for (name, message) in [("rrdcached", "rrdcached mode selected")] {
-        let alias = temp.path().join(name);
-        symlink(executable, &alias).unwrap();
-        let output = Command::new(alias).arg("--version").output().unwrap();
-        assert!(!output.status.success());
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains(message),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-}
-
-#[test]
 fn rpn_roll_small_stack_matches_rrdtool_1110_for_shift_range() {
     if !Command::new("rrdtool")
         .arg("--version")
@@ -138,6 +121,60 @@ fn rrdcached_help_matches_pinned_stdout_and_exit_status() {
         assert_eq!(rondi.status.code(), upstream.status.code());
         assert_eq!(rondi.stdout, upstream.stdout);
         assert_eq!(rondi.stderr, upstream.stderr);
+    }
+}
+
+#[test]
+fn rrdcached_option_parsing_matches_pinned_daemon() {
+    if !Command::new("rrdcached")
+        .arg("--help")
+        .output()
+        .is_ok_and(|output| output.status.code() == Some(1))
+    {
+        eprintln!("skipping rrdcached option differential: pinned rrdcached is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let alias = temp.path().join("rrdcached");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    // Every case stops during option parsing, so neither daemon starts.
+    for args in [
+        &["--version"][..],
+        &["--help=x"],
+        &["--listen", "/x"],
+        &["-q"],
+        &["-xh"],
+        &["-hq"],
+        &["-gF", "-h"],
+        &["foo", "-h"],
+        &["-V"],
+        &["-V", "LOG_FOO", "-h"],
+        &["-w", "abc"],
+        &["-w", "0"],
+        &["-w", "5x"],
+        &["-f", "abc"],
+        &["-z", "abc"],
+        &["-w1800", "-z100", "-f3600", "-h"],
+        &["-z", "5000", "-h"],
+        &["-h", "-f", "10", "-w", "20"],
+        &["-U", "rondi-no-such-user"],
+        &["-G", "rondi-no-such-group"],
+        &["-t", ""],
+        &["-a", ""],
+        &["-B", "-h"],
+        &["-R", "-h"],
+        &["-P", "FOO,PING", "-h"],
+        &["-P", "FOO"],
+    ] {
+        let upstream = Command::new("rrdcached").args(args).output().unwrap();
+        let rondi = Command::new(&alias).args(args).output().unwrap();
+        assert_eq!(rondi.status.code(), upstream.status.code(), "{args:?}");
+        assert_eq!(rondi.stdout, upstream.stdout, "{args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&rondi.stderr),
+            String::from_utf8_lossy(&upstream.stderr),
+            "{args:?}"
+        );
     }
 }
 
