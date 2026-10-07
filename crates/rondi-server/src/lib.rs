@@ -480,6 +480,8 @@ struct RrdcachedQueue {
     known: CacheTree,
     suspended: std::collections::HashSet<PathBuf>,
     journal: File,
+    journal_path: PathBuf,
+    journal_rotations: u64,
     next_id: u64,
     journal_bytes: u64,
     journal_needs_truncate: bool,
@@ -509,6 +511,12 @@ impl RrdcachedQueue {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let replay_time = wall_time_seconds();
         let journal_path = journal_directory.join(RRDCACHED_JOURNAL_NAME);
+        // A rotation interrupted before its rename leaves the old journal
+        // intact; the partial replacement is discarded.
+        match std::fs::remove_file(rrdcached_rotation_path(&journal_path)) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return Err(error.into()),
+            _ => {}
+        }
         let journal = open_private_rrdcached_journal(&journal_path)?;
         let mut pending = std::collections::BTreeMap::<PathBuf, Vec<PendingRrdUpdate>>::new();
         let mut flushed = std::collections::HashSet::new();
@@ -632,6 +640,8 @@ impl RrdcachedQueue {
             known,
             suspended: std::collections::HashSet::new(),
             journal,
+            journal_path,
+            journal_rotations: 0,
             next_id,
             journal_bytes,
             journal_needs_truncate: false,
@@ -699,6 +709,61 @@ impl RrdcachedQueue {
         }
         self.journal_bytes = self.journal_bytes.saturating_add(encoded.len() as u64);
         Ok(())
+    }
+
+    /// Replace the journal with one holding only the pending updates, as
+    /// upstream rotates its journal every flush interval so replay cost tracks
+    /// unflushed work. The old journal stays authoritative until the rename.
+    fn rotate_journal(&mut self) -> Result<(), String> {
+        let temporary = rrdcached_rotation_path(&self.journal_path);
+        let mut entries = self
+            .pending
+            .iter()
+            .flat_map(|(path, entries)| entries.iter().map(move |entry| (path, entry)))
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|(_, entry)| entry.id);
+        let mut encoded = Vec::new();
+        for (path, entry) in entries {
+            serde_json::to_writer(
+                &mut encoded,
+                &RrdcachedJournalRecord::Update {
+                    id: entry.id,
+                    path: path.clone(),
+                    samples: entry.samples.clone(),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            encoded.push(b'\n');
+        }
+        let rotated = (|| -> Result<File, Box<dyn std::error::Error>> {
+            match std::fs::remove_file(&temporary) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(error.into());
+                }
+                _ => {}
+            }
+            let mut file = open_private_rrdcached_journal(&temporary)?;
+            file.write_all(&encoded)?;
+            file.sync_all()?;
+            std::fs::rename(&temporary, &self.journal_path)?;
+            if let Some(parent) = self.journal_path.parent() {
+                File::open(parent)?.sync_all()?;
+            }
+            Ok(file)
+        })();
+        match rotated {
+            Ok(file) => {
+                self.journal = file;
+                self.journal_bytes = encoded.len() as u64;
+                self.journal_needs_truncate = false;
+                self.journal_rotations = self.journal_rotations.saturating_add(1);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = std::fs::remove_file(&temporary);
+                Err(error.to_string())
+            }
+        }
     }
 
     fn expire_idle(&mut self, now: i64, age: u64) -> usize {
@@ -798,6 +863,10 @@ impl RrdcachedQueue {
         self.schedule_path(&path, wall_time_seconds());
         Ok(())
     }
+}
+
+fn rrdcached_rotation_path(journal_path: &Path) -> PathBuf {
+    journal_path.with_file_name(format!("{RRDCACHED_JOURNAL_NAME}.tmp"))
 }
 
 /// Reading the RRD can wait on another process's file lock, so callers do it
@@ -1058,8 +1127,17 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
                     queue.pending_order.iter().cloned().collect::<Vec<_>>()
                 }).unwrap_or_default();
                 flush_rrdcached_paths(paths, Arc::clone(&queue), Arc::clone(&stats), args.queue_threads).await;
-                let mut queue = queue.lock().map_err(|_| "rrdcached queue lock poisoned")?;
-                queue.expire_idle(wall_time_seconds(), args.flush_interval_seconds);
+                let queue = Arc::clone(&queue);
+                let flush_interval_seconds = args.flush_interval_seconds;
+                tokio::task::spawn_blocking(move || -> Result<(), String> {
+                    let mut queue = queue.lock().map_err(|_| "rrdcached queue lock poisoned")?;
+                    queue.expire_idle(wall_time_seconds(), flush_interval_seconds);
+                    if let Err(error) = queue.rotate_journal() {
+                        tracing::error!(error = %error, "rrdcached_journal_rotation_failed");
+                    }
+                    Ok(())
+                })
+                .await??;
             }
             _ = shutdown_signals.0.recv() => break,
             _ = shutdown_signals.1.recv() => break,
@@ -1495,7 +1573,7 @@ fn handle_rrdcached_line(
                 Err(_) => return Some("-1 rrdcached queue lock poisoned\n".to_owned()),
             };
             format!(
-                "9 Statistics follow\nQueueLength: {}\nUpdatesReceived: {}\nFlushesReceived: {}\nUpdatesWritten: {}\nDataSetsWritten: {}\nTreeNodesNumber: {}\nTreeDepth: {}\nJournalBytes: {}\nJournalRotate: 0\n",
+                "9 Statistics follow\nQueueLength: {}\nUpdatesReceived: {}\nFlushesReceived: {}\nUpdatesWritten: {}\nDataSetsWritten: {}\nTreeNodesNumber: {}\nTreeDepth: {}\nJournalBytes: {}\nJournalRotate: {}\n",
                 queue
                     .pending
                     .keys()
@@ -1508,6 +1586,7 @@ fn handle_rrdcached_line(
                 queue.known.len(),
                 queue.known.height(),
                 queue.journal_bytes,
+                queue.journal_rotations,
             )
         }
         "CREATE" => match rrdcached_create(
@@ -3184,5 +3263,53 @@ mod rrdcached_queue_tests {
         }
         let queue = RrdcachedQueue::open(&root, 1024 * 1024, 100_000).unwrap();
         assert_eq!(queue.pending.get(&file).map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn rotation_compacts_flushed_records_and_keeps_pending_ones() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let file = root.join("metric.rrd");
+        let pending_file = root.join("pending.rrd");
+        create_test_rrd(&file);
+        create_test_rrd(&pending_file);
+        let queue = Mutex::new(RrdcachedQueue::open(&root, 64 * 1024 * 1024, 100_000).unwrap());
+        let stats = RrdcachedStats::default();
+        for step in 1..=200_i64 {
+            let sample = format!("{}:{}", 1_000_000_000 + step * 10, step);
+            queue
+                .lock()
+                .unwrap()
+                .enqueue(file.clone(), &[sample.as_str()])
+                .unwrap();
+            flush_rrdcached_path(&file, &queue, &stats).unwrap();
+        }
+        queue
+            .lock()
+            .unwrap()
+            .enqueue(pending_file.clone(), &["1000000010:7"])
+            .unwrap();
+        queue.lock().unwrap().rotate_journal().unwrap();
+        let journal_path = root.join(".rrdcached.journal");
+        let bytes = std::fs::metadata(&journal_path).unwrap().len();
+        assert!(bytes < 4096, "journal holds {bytes} bytes after rotation");
+        assert_eq!(queue.lock().unwrap().journal_bytes, bytes);
+        assert_eq!(queue.lock().unwrap().journal_rotations, 1);
+        queue
+            .lock()
+            .unwrap()
+            .enqueue(pending_file.clone(), &["1000000020:8"])
+            .unwrap();
+        drop(queue);
+        let reopened = RrdcachedQueue::open(&root, 64 * 1024 * 1024, 100_000).unwrap();
+        assert!(!reopened.pending.contains_key(&file));
+        assert_eq!(
+            reopened.pending[&pending_file]
+                .iter()
+                .flat_map(|entry| entry.samples.iter().cloned())
+                .collect::<Vec<_>>(),
+            ["1000000010:7", "1000000020:8"]
+        );
+        assert!(reopened.next_id > 202);
     }
 }
