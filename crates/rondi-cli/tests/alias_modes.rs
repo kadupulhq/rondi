@@ -779,6 +779,58 @@ fn update_daemon_equals_down_socket_matches_upstream_failure() {
 }
 
 #[test]
+fn read_commands_with_down_daemon_report_upstream_connect_error() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping unavailable-daemon read differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("read.rrd");
+    let create = Command::new("rrdtool")
+        .args([
+            "create",
+            file.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:value:GAUGE:60:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(create.status.success());
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let unavailable = format!("unix:{}", temp.path().join("missing.sock").display());
+    let file = file.to_str().unwrap();
+    for args in [
+        &["fetch", file, "AVERAGE", "--daemon", &unavailable][..],
+        &["last", file, "--daemon", &unavailable],
+        &["first", file, "--daemon", &unavailable],
+        &["info", file, "--daemon", &unavailable],
+        &["dump", file, "--daemon", &unavailable],
+        &["flushcached", file, "--daemon", &unavailable],
+    ] {
+        let ours = Command::new(&alias).args(args).output().unwrap();
+        let upstream = Command::new("rrdtool").args(args).output().unwrap();
+        // RRDtool also prints a local read on stdout after the connect
+        // failure for fetch, last, first, info, and dump; Rondi does not fall
+        // back, so only the diagnostic and status are compared.
+        assert_eq!(ours.status.code(), upstream.status.code(), "{args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&ours.stderr),
+            String::from_utf8_lossy(&upstream.stderr),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
 fn local_updates_to_different_files_in_one_directory_can_run_concurrently() {
     let temp = tempfile::tempdir().unwrap();
     let alias = temp.path().join("rrdtool");

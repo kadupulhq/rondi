@@ -4266,23 +4266,11 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
     if let Some(address) = daemon_address {
         if !daemon_samples.is_empty() {
             #[cfg(unix)]
-            match connect_rrdcached(&address) {
-                Ok(stream) => {
-                    send_rrdcached_update_on_stream(
-                        stream,
-                        PathBuf::from(&args[1]).as_path(),
-                        &daemon_samples,
-                    )?;
-                }
-                Err(error) => {
-                    let error_text = error.to_string();
-                    let detail = error_text
-                        .split(" (os error ")
-                        .next()
-                        .unwrap_or("Internal error");
-                    return Err(format!("Unable to connect to rrdcached: {detail}").into());
-                }
-            }
+            send_rrdcached_update_on_stream(
+                connect_rrdcached(&address)?,
+                PathBuf::from(&args[1]).as_path(),
+                &daemon_samples,
+            )?;
             #[cfg(not(unix))]
             return Err("rrdcached updates are unavailable on this platform".into());
         }
@@ -4339,6 +4327,9 @@ fn rrdtool_flushcached(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     };
     for filename in &files {
         if let Err(error) = send_rrdcached_flush(&daemon, filename) {
+            if error.is::<RrdcachedConnectError>() {
+                return Err(error);
+            }
             // RRDtool 1.11.0 reports the number of filenames after the
             // command name, independent of the point at which flushing failed.
             let remaining = files.len().saturating_sub(1);
@@ -5194,6 +5185,33 @@ impl<T: Read + Write> RrdcachedStream for T {}
 
 #[cfg(unix)]
 fn connect_rrdcached(
+    address: &str,
+) -> Result<Box<dyn RrdcachedStream>, Box<dyn std::error::Error>> {
+    open_rrdcached_stream(address).map_err(|error| {
+        let error_text = error.to_string();
+        let detail = error_text
+            .split(" (os error ")
+            .next()
+            .unwrap_or("Internal error");
+        RrdcachedConnectError(format!("Unable to connect to rrdcached: {detail}")).into()
+    })
+}
+
+/// A failed connection, kept distinct so `flushcached` can report it without
+/// the per-file wrapper, as RRDtool connects once before flushing any file.
+#[derive(Debug)]
+struct RrdcachedConnectError(String);
+
+impl std::fmt::Display for RrdcachedConnectError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RrdcachedConnectError {}
+
+#[cfg(unix)]
+fn open_rrdcached_stream(
     address: &str,
 ) -> Result<Box<dyn RrdcachedStream>, Box<dyn std::error::Error>> {
     use std::os::unix::net::UnixStream;
