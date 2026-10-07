@@ -235,3 +235,17 @@ fn vdef_parameter_lexing_matches_vdef_parse() {
         fixture.assert_print_lines_match(&[vdef, "PRINT:v:%lf"]);
     }
 }
+
+// auto_scale has no symbol for an infinite magnitude and prints '?'.
+#[test]
+fn print_si_scale_of_infinity_matches_rrdtool() {
+    let Some(fixture) = fixture() else { return };
+    fixture.assert_print_lines_match(&[
+        "CDEF:c=x,INF,+",
+        "VDEF:v=c,MAXIMUM",
+        "PRINT:v:%6.2lf %s",
+        "CDEF:d=x,NEGINF,+",
+        "VDEF:w=d,MINIMUM",
+        "PRINT:w:%6.2lf %s",
+    ]);
+}

@@ -4052,6 +4052,15 @@ fn graph_si_scale(value: f64) -> (f64, &'static str) {
     if value == 0.0 || value.is_nan() {
         return (value, SYMBOLS[6]);
     }
+    if value.is_infinite() {
+        // auto_scale converts floor(log(inf)) to int: aarch64 saturates to
+        // INT_MAX and divides by pow(base, INT_MAX) = inf, while x86_64 yields
+        // INT_MIN and divides by zero. Either index is outside the table.
+        #[cfg(target_arch = "x86_64")]
+        return (value, "?");
+        #[cfg(not(target_arch = "x86_64"))]
+        return (f64::NAN, "?");
+    }
     let exponent = (value.abs().log10() / 3.0).floor() as i32;
     let factor = 1000.0_f64.powi(exponent);
     let symbol = usize::try_from(exponent + 6)
