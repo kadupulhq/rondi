@@ -4316,7 +4316,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
             .split(':')
             .enumerate()
             .map(|(value_index, value)| {
-                parse_value(value).map_err(|_| {
+                parse_rrd_update_value(value).ok_or_else(|| {
                     let data_sources = inspect_rrd(&args[1])
                         .map(|info| info.data_sources)
                         .unwrap_or_default();
@@ -5527,6 +5527,13 @@ fn format_rrd_float(value: f64) -> String {
     };
     let exponent = exponent.parse::<i32>().unwrap_or_default();
     format!("{mantissa}e{exponent:+03}")
+}
+
+fn parse_rrd_update_value(value: &str) -> Option<Option<f64>> {
+    if value.eq_ignore_ascii_case("U") || value.eq_ignore_ascii_case("UNKNOWN") {
+        return Some(None);
+    }
+    rondi::parse_rrd_number(value).map(Some)
 }
 
 fn parse_value(value: &str) -> Result<Option<f64>, Box<dyn std::error::Error>> {

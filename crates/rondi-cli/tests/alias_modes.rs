@@ -1370,6 +1370,84 @@ fn rrdtool_update_uses_rrd_strtod_rounding_for_epoch_fractions() {
 }
 
 #[test]
+fn rrdtool_update_special_values_and_exponent_range_follow_rrd_strtod() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        eprintln!(
+            "skipping rrd_strtod special-value differential: pinned RRDtool 1.11.0 is not installed"
+        );
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let template = temp.path().join("template.rrd");
+    let created = Command::new("rrdtool")
+        .args([
+            "create",
+            template.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:x:GAUGE:30:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let upstream_dir = temp.path().join("upstream");
+    let rondi_dir = temp.path().join("rondi");
+    std::fs::create_dir(&upstream_dir).unwrap();
+    std::fs::create_dir(&rondi_dir).unwrap();
+
+    for value in [
+        "nan", "-nan", "NaN", "inf", "-inf", "Infinity", "1e-1100", "1e400", "+inf",
+    ] {
+        // The template keeps RRDtool's randomized archive pointer identical in
+        // both copies; relative paths keep diagnostics comparable.
+        std::fs::copy(&template, upstream_dir.join("t.rrd")).unwrap();
+        std::fs::copy(&template, rondi_dir.join("t.rrd")).unwrap();
+        let update = |program: &std::path::Path, dir: &std::path::Path| {
+            Command::new(program)
+                .current_dir(dir)
+                .args([
+                    "update",
+                    "t.rrd",
+                    &format!("1000000010:{value}"),
+                    "1000000020:1",
+                ])
+                .output()
+                .unwrap()
+        };
+        let upstream = update(std::path::Path::new("rrdtool"), &upstream_dir);
+        let rondi = update(&alias, &rondi_dir);
+        assert_eq!(rondi.status.code(), upstream.status.code(), "{value}");
+        assert_eq!(rondi.stdout, upstream.stdout, "{value}");
+        assert_eq!(
+            String::from_utf8_lossy(&rondi.stderr),
+            String::from_utf8_lossy(&upstream.stderr),
+            "{value}"
+        );
+        assert_eq!(
+            std::fs::read(rondi_dir.join("t.rrd")).unwrap(),
+            std::fs::read(upstream_dir.join("t.rrd")).unwrap(),
+            "{value}"
+        );
+    }
+}
+
+#[test]
 fn rrdtool_update_at_style_calendar_timestamp_matches_upstream() {
     if !Command::new("rrdtool")
         .arg("--version")
