@@ -1,0 +1,84 @@
+name: SonarQube Cloud
+
+# Automatic Analysis does not support Rust, so analysis runs here. No branch
+# filter on pull_request: stacked PRs target other PR branches.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sonarcloud-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: SonarQube Cloud analysis
+    # Dependabot and fork PRs get no secrets, so the scan could not authenticate.
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name != 'pull_request' ||
+        github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ${{ vars.DO_RUNNERS_ENABLED == 'true' && (contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","kadupul-do"]') || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Blame and new-code detection need the full history.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+
+      - name: Detect Cargo workspace
+        id: cargo
+        run: |
+          if [ -f Cargo.toml ]; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::No Cargo.toml; scanning without Clippy or coverage reports.'
+          fi
+
+      - name: Install Rust components
+        if: steps.cargo.outputs.present == 'true'
+        run: mise exec -- rustup component add clippy llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        if: steps.cargo.outputs.present == 'true'
+        env:
+          VERSION: v0.9.1
+          SHA256: b3f68e625481fed9b16444174f3fa5ebcdbde4a1878803a35eabe2dcefcdc41a
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/cargo-llvm-cov.tar.gz"
+          curl --fail --location --silent --show-error --retry 3 \
+            "https://github.com/taiki-e/cargo-llvm-cov/releases/download/${VERSION}/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz" \
+            --output "$archive"
+          echo "${SHA256}  ${archive}" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/bin"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      # Findings belong in Sonar, not in this job's status; rust.yml enforces
+      # -D warnings.
+      - name: Clippy report
+        if: steps.cargo.outputs.present == 'true'
+        run: |
+          if ! mise exec -- cargo clippy --workspace --all-targets --locked --message-format=json > clippy.json; then
+            echo '::warning::cargo clippy exited non-zero; the report may be incomplete.'
+          fi
+
+      - name: Coverage
+        if: steps.cargo.outputs.present == 'true'
+        run: mise exec -- cargo llvm-cov --workspace --locked --lcov --output-path lcov.info
+
+      - name: Scan
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
