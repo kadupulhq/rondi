@@ -1156,3 +1156,25 @@ fn verbose_update_reports_rrdtool_row_times() {
         ]
     );
 }
+
+#[test]
+fn verbose_update_parses_numbers_like_plain_update() {
+    let temp = tempfile::tempdir().unwrap();
+    let plain = temp.path().join("plain.rrd");
+    let verbose = temp.path().join("verbose.rrd");
+    create_single_source(
+        &plain,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:20:U:U",
+        "RRA:LAST:0:1:5",
+    );
+    std::fs::copy(&plain, &verbose).unwrap();
+    // rrd_strtodbl and str::parse round this decimal to different doubles.
+    rondi::update_rrd_raw_values(&plain, 1_000_000_010, &[Some("1234567.891")]).unwrap();
+    rondi::update_rrd_raw_values_verbose(&verbose, 1_000_000_010, &[Some("1234567.891")]).unwrap();
+    assert_eq!(
+        std::fs::read(&plain).unwrap(),
+        std::fs::read(&verbose).unwrap()
+    );
+}

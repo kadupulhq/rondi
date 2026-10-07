@@ -1221,22 +1221,26 @@ pub fn update_rrd_raw_values_precise(
     timestamp_usec: u64,
     values: &[Option<&str>],
 ) -> Result<(), StoreError> {
-    let numeric = values
+    update_path_values_with_raw(
+        path.as_ref(),
+        timestamp,
+        timestamp_usec,
+        &parse_raw_values(values)?,
+        Some(values),
+    )
+    .map(|_| ())
+}
+
+/// RRDtool's update and updatev both convert samples with rrd_strtodbl.
+fn parse_raw_values(values: &[Option<&str>]) -> Result<Vec<Option<f64>>, StoreError> {
+    values
         .iter()
         .map(|value| {
             value
                 .map(|value| crate::parse_rrd_number(value).ok_or(StoreError::InvalidValue))
                 .transpose()
         })
-        .collect::<Result<Vec<_>, _>>()?;
-    update_path_values_with_raw(
-        path.as_ref(),
-        timestamp,
-        timestamp_usec,
-        &numeric,
-        Some(values),
-    )
-    .map(|_| ())
+        .collect()
 }
 
 /// Update an RRD and return the archive rows written, in RRA and row order.
@@ -1264,19 +1268,11 @@ pub fn update_rrd_raw_values_precise_verbose(
     timestamp_usec: u64,
     values: &[Option<&str>],
 ) -> Result<Vec<RrdUpdateSummary>, StoreError> {
-    let numeric = values
-        .iter()
-        .map(|value| {
-            value
-                .map(|value| value.parse::<f64>().map_err(|_| StoreError::InvalidValue))
-                .transpose()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     update_path_values_with_raw(
         path.as_ref(),
         timestamp,
         timestamp_usec,
-        &numeric,
+        &parse_raw_values(values)?,
         Some(values),
     )
 }
