@@ -4233,7 +4233,8 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 update_time.seconds,
                 update_time.microseconds,
                 &raw_values,
-            )?;
+            )
+            .map_err(|error| rrd_update_error(&filename, error))?;
             for summary in summaries {
                 for (source_name, value) in verbose_source_names
                     .as_ref()
@@ -4258,7 +4259,8 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 update_time.seconds,
                 update_time.microseconds,
                 &raw_values,
-            )?;
+            )
+            .map_err(|error| rrd_update_error(&filename, error))?;
         }
     }
     if let Some(address) = daemon_address {
@@ -4286,6 +4288,16 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
         }
     }
     Ok(())
+}
+
+/// RRDtool prefixes per-sample update failures with the file name.
+fn rrd_update_error(filename: &Path, error: rondi::StoreError) -> Box<dyn std::error::Error> {
+    match error {
+        rondi::StoreError::RrdTimestamp(message) => {
+            format!("{}: {message}", filename.display()).into()
+        }
+        error => error.into(),
+    }
 }
 
 fn rrdtool_flushcached(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {

@@ -1001,6 +1001,75 @@ fn rrdtool_update_skip_past_updates_matches_pinned_tool() {
 }
 
 #[test]
+fn rrdtool_update_out_of_order_diagnostic_matches_upstream() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        eprintln!(
+            "skipping out-of-order update differential: pinned RRDtool 1.11.0 is not installed"
+        );
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let ours = temp.path().join("ours.rrd");
+    let oracle = temp.path().join("oracle.rrd");
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let created = Command::new("rrdtool")
+        .args([
+            "create",
+            ours.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:v:GAUGE:20:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    // RRDtool create randomizes the archive start row, so both runs share one file image.
+    std::fs::copy(&ours, &oracle).unwrap();
+    for samples in [
+        &["1000000010:1"][..],
+        &["1000000010:2"],
+        &["1000000005.5:2"],
+        &["1000000020:3", "1000000030:4", "1000000025:5"],
+    ] {
+        let upstream = Command::new("rrdtool")
+            .arg("update")
+            .arg(&oracle)
+            .args(samples)
+            .output()
+            .unwrap();
+        let rondi = Command::new(&alias)
+            .arg("update")
+            .arg(&ours)
+            .args(samples)
+            .output()
+            .unwrap();
+        let expected_stderr = String::from_utf8_lossy(&upstream.stderr)
+            .replace(oracle.to_str().unwrap(), ours.to_str().unwrap());
+        assert_eq!(rondi.status.code(), upstream.status.code(), "{samples:?}");
+        assert_eq!(rondi.stdout, upstream.stdout, "{samples:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&rondi.stderr),
+            expected_stderr,
+            "{samples:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(&ours).unwrap(),
+        std::fs::read(&oracle).unwrap()
+    );
+}
+
+#[test]
 fn rrdtool_update_n_and_negative_timestamps_match_upstream() {
     if !Command::new("rrdtool")
         .arg("--version")

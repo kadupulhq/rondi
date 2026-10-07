@@ -620,7 +620,7 @@ fn update_path_values_with_raw(
     let last_update_usec = info.last_update_usec;
     if (timestamp, timestamp_usec) <= (last_update, last_update_usec) {
         return Err(StoreError::RrdTimestamp(format!(
-            "update time {timestamp}.{timestamp_usec:06} is not later than last update {last_update}.{last_update_usec:06}"
+            "illegal attempt to update using time {timestamp} when last update time is {last_update} (minimum one second step)"
         )));
     }
     let step = i64::try_from(info.step).map_err(|_| rrd_error("RRD PDP step overflows"))?;
