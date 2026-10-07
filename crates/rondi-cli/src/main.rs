@@ -7132,4 +7132,74 @@ mod rrdcached_response_tests {
             read_bounded_line(&mut reader, &mut line, MAX_RRDCACHED_LINE_BYTES).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     }
+
+    // The helper tests above pass even if a call site reads with an unbounded
+    // read_line, so drive each client path against a daemon that never sends a
+    // newline. The daemon stops writing once the client hangs up.
+    #[cfg(unix)]
+    fn serve_oversized_response(prefix: &'static str) -> (tempfile::TempDir, String) {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("rrdcached.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            let _ = stream.write_all(prefix.as_bytes());
+            let chunk = [b'x'; 64 * 1024];
+            for _ in 0..(2 * MAX_RRDCACHED_LINE_BYTES / chunk.len()) {
+                if stream.write_all(&chunk).is_err() {
+                    break;
+                }
+            }
+        });
+        (dir, format!("unix:{}", socket.display()))
+    }
+
+    #[cfg(unix)]
+    fn assert_oversized_line_error(error: &dyn std::error::Error) {
+        let message = error.to_string();
+        // An unbounded read surfaces the payload itself as the error text.
+        assert!(
+            message == "rrdcached response line exceeds 1 MiB",
+            "{message:.80}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn single_line_commands_reject_an_oversized_daemon_response() {
+        let (_dir, address) = serve_oversized_response("");
+        let error = super::send_rrdcached_command(&address, "FLUSH x.rrd").unwrap_err();
+        assert_oversized_line_error(&*error);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn updates_reject_an_oversized_daemon_response() {
+        let (_dir, address) = serve_oversized_response("");
+        let stream = super::connect_rrdcached(&address).unwrap();
+        let error = super::send_rrdcached_update_on_stream(
+            stream,
+            std::path::Path::new("x.rrd"),
+            &["1000000010:1".to_owned()],
+        )
+        .unwrap_err();
+        assert_oversized_line_error(&*error);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multiline_commands_reject_an_oversized_header_or_body_line() {
+        for prefix in ["", "1 entries follow\n"] {
+            let (_dir, address) = serve_oversized_response(prefix);
+            let error = super::send_rrdcached_multiline_command(&address, "LIST /").unwrap_err();
+            assert_oversized_line_error(&*error);
+        }
+    }
 }
