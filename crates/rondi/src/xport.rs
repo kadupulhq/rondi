@@ -106,7 +106,6 @@ pub fn fetch_xport_with_cdefs(
     let fetch_resolution = requested_step.max(automatic_step).max(1);
 
     let mut fetched_definitions = Vec::with_capacity(definitions.len());
-    let mut output_step = 0_u64;
     for definition in definitions {
         let fetched = fetch_rrd_file(
             &definition.file,
@@ -126,16 +125,40 @@ pub fn fetch_xport_with_cdefs(
                     definition.file.display()
                 ))
             })?;
-        output_step = if output_step == 0 {
-            fetched.step
-        } else {
-            gcd(output_step, fetched.step)
-        };
         fetched_definitions.push(FetchedDefinition {
             name: definition.name.clone(),
             fetched,
             source_index,
         });
+    }
+
+    // RRDtool derives each CDEF's step from the DEF/CDEF variables used by
+    // its expression, then derives xport's step from the exported variables.
+    // Unused DEFs must not make the exported grid finer.
+    let mut variable_steps: HashMap<String, u64> = fetched_definitions
+        .iter()
+        .map(|definition| (definition.name.clone(), definition.fetched.step))
+        .collect();
+    for cdef in cdefs {
+        let step = expression_step(&cdef.expression, &variable_steps)?;
+        variable_steps.insert(cdef.name.clone(), step);
+    }
+    let mut output_step = 0_u64;
+    for column in columns {
+        let step = variable_steps
+            .get(&column.variable)
+            .copied()
+            .ok_or_else(|| {
+                StoreError::RrdUnsupported(format!(
+                    "unknown DEF or CDEF name '{}'",
+                    column.variable
+                ))
+            })?;
+        output_step = if output_step == 0 {
+            step
+        } else {
+            gcd(output_step, step)
+        };
     }
 
     let step_i64 = i64::try_from(output_step)
@@ -164,7 +187,6 @@ pub fn fetch_xport_with_cdefs(
     }
 
     let mut variables: HashMap<String, Vec<f64>> = HashMap::new();
-    let mut variable_steps: HashMap<String, u64> = HashMap::new();
     for definition in &fetched_definitions {
         let source_step = i64::try_from(definition.fetched.step)
             .map_err(|_| StoreError::RrdUnsupported("DEF step overflows".into()))?;
@@ -191,7 +213,6 @@ pub fn fetch_xport_with_cdefs(
                     .unwrap_or(rrd_nan())
             });
         }
-        variable_steps.insert(definition.name.clone(), definition.fetched.step);
         variables.insert(definition.name.clone(), values);
     }
     for cdef in cdefs {
@@ -220,7 +241,6 @@ pub fn fetch_xport_with_cdefs(
                 previous,
             )?);
         }
-        variable_steps.insert(cdef.name.clone(), output_step);
         variables.insert(cdef.name.clone(), values);
     }
     let mut rows = vec![Vec::with_capacity(columns.len()); row_count];
@@ -633,16 +653,13 @@ fn evaluate_rpn(
                 };
                 let source_step_i64 = i64::try_from(source_step)
                     .map_err(|_| rpn_error("trend source step overflows"))?;
-                let window = if duration_seconds <= 0 {
-                    1
-                } else {
-                    usize::try_from(
-                        duration_seconds.saturating_add(source_step_i64 - 1) / source_step_i64,
-                    )
-                    .map_err(|_| rpn_error("trend window is too large"))?
-                };
-                let required = window;
-                let value = if row + 1 < required {
+                // rrd_rpncalc.c first checks readiness using single-precision
+                // division, then separately consumes samples while the integer
+                // duration remains positive. The float rounding is visible for
+                // large durations just above a source-step boundary.
+                let required_rows = (duration_seconds as f32 / source_step_i64 as f32).ceil();
+                let ready = (row + 1) as f32 >= required_rows;
+                let value = if !ready {
                     rrd_nan()
                 } else {
                     let stride = usize::try_from(source_step / step_width)
@@ -651,12 +668,16 @@ fn evaluate_rpn(
                     let mut sum = 0.0;
                     let mut count = 0_usize;
                     let mut unknown = false;
-                    for offset in 0..window {
-                        let Some(index) = row.checked_sub(offset.saturating_mul(stride)) else {
-                            unknown = true;
-                            break;
-                        };
-                        let sample = values.get(index).copied().unwrap_or(f64::NAN);
+                    let mut remaining_duration = duration_seconds;
+                    let mut offset = 0_usize;
+                    loop {
+                        let index = row.checked_sub(offset.saturating_mul(stride));
+                        // RRDtool's RPN history buffer is zero-initialized
+                        // before the first available row.
+                        let sample = index
+                            .and_then(|index| values.get(index))
+                            .copied()
+                            .unwrap_or(0.0);
                         if sample.is_nan() {
                             if token == "TREND" {
                                 unknown = true;
@@ -666,6 +687,11 @@ fn evaluate_rpn(
                             sum += sample;
                             count += 1;
                         }
+                        remaining_duration = remaining_duration.saturating_sub(source_step_i64);
+                        if remaining_duration <= 0 {
+                            break;
+                        }
+                        offset += 1;
                     }
                     if unknown || count == 0 {
                         rrd_nan()
@@ -924,6 +950,44 @@ fn rrd_first_weekday() -> i32 {
 #[cfg(not(all(unix, target_env = "gnu")))]
 fn rrd_first_weekday() -> i32 {
     0
+}
+
+fn expression_step(
+    expression: &str,
+    variable_steps: &HashMap<String, u64>,
+) -> Result<u64, StoreError> {
+    let mut step = 0_u64;
+    for token in expression.split(',') {
+        let variable = token
+            .strip_prefix("PREV(")
+            .and_then(|token| token.strip_suffix(')'))
+            .unwrap_or(token);
+        if let Some(variable_step) = variable_steps.get(variable) {
+            step = if step == 0 {
+                *variable_step
+            } else {
+                gcd(step, *variable_step)
+            };
+        }
+    }
+    // The PNG rule-only graph adapter uses a private constant CDEF to give
+    // rules a time axis. A constant has no variable step of its own, so use
+    // the available DEF grid for that adapter case.
+    if step == 0 {
+        for variable_step in variable_steps.values() {
+            step = if step == 0 {
+                *variable_step
+            } else {
+                gcd(step, *variable_step)
+            };
+        }
+    }
+    if step == 0 {
+        return Err(StoreError::RrdUnsupported(
+            "rpn expressions without DEF or CDEF variables are not supported".into(),
+        ));
+    }
+    Ok(step)
 }
 
 fn gcd(mut left: u64, mut right: u64) -> u64 {
