@@ -288,3 +288,221 @@ fn duplicate_and_out_of_order_timestamps_are_rejected_by_both() {
         );
     }
 }
+
+/// splitmix64: a fixed, dependency-free generator so every run and platform
+/// draws the same cases.
+struct CaseRng(u64);
+
+impl CaseRng {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^ (z >> 31)
+    }
+
+    fn below(&mut self, bound: u64) -> u64 {
+        self.next() % bound
+    }
+
+    fn range(&mut self, low: i64, high: i64) -> i64 {
+        low + self.below((high - low + 1) as u64) as i64
+    }
+
+    fn pick<'a>(&mut self, items: &[&'a str]) -> &'a str {
+        items[self.below(items.len() as u64) as usize]
+    }
+}
+
+struct UpdateCase {
+    create: Vec<String>,
+    updates: Vec<(i64, u64, Vec<Option<String>>)>,
+}
+
+fn random_update_case(rng: &mut CaseRng) -> UpdateCase {
+    let step = [1_i64, 5, 10, 60, 300][rng.below(5) as usize];
+    let start = 1_000_000_000 + rng.range(0, 600);
+    let kinds = [
+        "GAUGE", "COUNTER", "DERIVE", "ABSOLUTE", "DCOUNTER", "DDERIVE",
+    ];
+    let mut create = vec![
+        "--start".to_owned(),
+        start.to_string(),
+        "--step".to_owned(),
+        step.to_string(),
+    ];
+    let mut sources = Vec::new();
+    for index in 0..rng.range(1, 3) {
+        let kind = rng.pick(&kinds);
+        let heartbeat = step * [1, 2, 3, 10][rng.below(4) as usize];
+        let minimum = rng.pick(&["U", "U", "0", "-100"]);
+        let maximum = rng.pick(&["U", "U", "1000", "100000"]);
+        create.push(format!(
+            "DS:d{index}:{kind}:{heartbeat}:{minimum}:{maximum}"
+        ));
+        sources.push((kind, rng.range(0, 1000)));
+    }
+    for _ in 0..rng.range(1, 4) {
+        create.push(format!(
+            "RRA:{}:{}:{}:{}",
+            rng.pick(&["AVERAGE", "MIN", "MAX", "LAST"]),
+            rng.pick(&["0", "0.5", "0.9", "0.25"]),
+            rng.range(1, 6),
+            rng.range(1, 8)
+        ));
+    }
+    let mut timestamp = start;
+    let mut updates = Vec::new();
+    for _ in 0..rng.range(1, 25) {
+        let gap = match rng.below(7) {
+            0 => 1,
+            1 => (step / 2).max(1),
+            2 => step,
+            3 => step + 1,
+            4 => 2 * step,
+            5 => 3 * step + rng.range(0, step),
+            _ => rng.range(1, 20 * step),
+        };
+        timestamp += gap;
+        let usec = if rng.below(10) < 3 {
+            rng.range(1, 999_999) as u64
+        } else {
+            0
+        };
+        let values = sources
+            .iter_mut()
+            .map(|(kind, last)| {
+                if rng.below(100) < 15 {
+                    return None;
+                }
+                Some(match *kind {
+                    "COUNTER" | "DCOUNTER" => {
+                        *last = if rng.below(100) < 95 {
+                            *last + rng.range(0, 5000)
+                        } else {
+                            (*last - rng.range(1, 100)).max(0)
+                        };
+                        last.to_string()
+                    }
+                    "DERIVE" => {
+                        *last += rng.range(-500, 5000);
+                        last.to_string()
+                    }
+                    _ => match rng.below(3) {
+                        0 => rng.range(0, 2000).to_string(),
+                        1 => rng.range(-50, 50).to_string(),
+                        _ => {
+                            let thousandths = rng.range(0, 500_000);
+                            format!("{}.{:03}", thousandths / 1000, thousandths % 1000)
+                        }
+                    },
+                })
+            })
+            .collect();
+        updates.push((timestamp, usec, values));
+    }
+    UpdateCase { create, updates }
+}
+
+fn update_argument(timestamp: i64, usec: u64, values: &[Option<String>]) -> String {
+    let mut argument = if usec == 0 {
+        timestamp.to_string()
+    } else {
+        format!("{timestamp}.{usec:06}")
+    };
+    for value in values {
+        argument.push(':');
+        argument.push_str(value.as_deref().unwrap_or("U"));
+    }
+    argument
+}
+
+/// Randomized byte-level differential for in-place updates. Each case is
+/// created by RRDtool, then the same updates are applied by both
+/// implementations and the files are compared after every chunk.
+#[test]
+fn seeded_random_updates_match_rrdtool_byte_for_byte() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        eprintln!(
+            "skipping randomized update differential: pinned RRDtool 1.11.0 is not installed"
+        );
+        return;
+    }
+    const SEED: u64 = 0x5eed_2026_1007;
+    const CASES: usize = 100;
+    let temp = tempfile::tempdir().unwrap();
+    let mut rng = CaseRng(SEED);
+    for case_index in 0..CASES {
+        let case = random_update_case(&mut rng);
+        let oracle = temp.path().join(format!("case-{case_index}-oracle.rrd"));
+        let ours = temp.path().join(format!("case-{case_index}-rondi.rrd"));
+        let created = Command::new("rrdtool")
+            .arg("create")
+            .arg(&oracle)
+            .args(&case.create)
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "seed {SEED:#x} case {case_index}: create {:?}: {}",
+            case.create,
+            String::from_utf8_lossy(&created.stderr)
+        );
+        std::fs::copy(&oracle, &ours).unwrap();
+        let mut applied = Vec::new();
+        for chunk in case.updates.chunks(5) {
+            let arguments = chunk
+                .iter()
+                .map(|(timestamp, usec, values)| update_argument(*timestamp, *usec, values))
+                .collect::<Vec<_>>();
+            applied.extend(arguments.iter().cloned());
+            let context = format!(
+                "seed {SEED:#x} case {case_index}: rrdtool create {} then update {}",
+                case.create.join(" "),
+                applied.join(" ")
+            );
+            let updated = Command::new("rrdtool")
+                .arg("update")
+                .arg(&oracle)
+                .args(&arguments)
+                .output()
+                .unwrap();
+            assert!(
+                updated.status.success(),
+                "{context}: {}",
+                String::from_utf8_lossy(&updated.stderr)
+            );
+            for (argument, (_, _, values)) in arguments.iter().zip(chunk) {
+                // get_time_from_reading converts the text to a double and
+                // derives microseconds from it, which can differ by one.
+                let (time_text, _) = argument.split_once(':').unwrap();
+                let time = rondi::parse_rrd_number(time_text).unwrap();
+                let seconds = time.floor();
+                let usec = ((time - seconds) * 1_000_000.0) as u64;
+                let values = values.iter().map(Option::as_deref).collect::<Vec<_>>();
+                if let Err(error) =
+                    rondi::update_rrd_raw_values_precise(&ours, seconds as i64, usec, &values)
+                {
+                    panic!("{context}: Rondi rejected an update RRDtool accepted: {error}");
+                }
+            }
+            let expected = std::fs::read(&oracle).unwrap();
+            let actual = std::fs::read(&ours).unwrap();
+            let first_difference = expected
+                .iter()
+                .zip(&actual)
+                .position(|(left, right)| left != right);
+            assert!(
+                expected.len() == actual.len() && first_difference.is_none(),
+                "{context}: files differ first at byte {first_difference:?}"
+            );
+        }
+    }
+}
