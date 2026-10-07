@@ -2655,10 +2655,6 @@ fn render_xport_with_graph_prints(
             .get(&vdef.variable)
             .cloned()
             .ok_or_else(|| format!("VDEF source variable {} is unavailable", vdef.variable))?;
-        // RRDtool's graph buffer includes an unknown right-edge boundary slot
-        // that is not part of the rows returned by xport.
-        let mut values = values;
-        values.push(rrd_nan());
         let value = rondi::evaluate_vdef(
             vdef.function,
             vdef.percentile,
@@ -2686,14 +2682,12 @@ fn render_xport_with_graph_prints(
                     graph_print.variable
                 )
             })?;
-            let column = exports
-                .iter()
-                .position(|export| export.variable == graph_print.variable)
-                .ok_or_else(|| format!("unknown graph print variable {}", graph_print.variable))?;
             let values = result
-                .rows
+                .raw_variables
+                .get(&graph_print.variable)
+                .ok_or_else(|| format!("unknown graph print variable {}", graph_print.variable))?
                 .iter()
-                .filter_map(|row| row.get(column).copied().flatten())
+                .copied()
                 .filter(|value| value.is_finite())
                 .collect::<Vec<_>>();
             let value = match consolidation {

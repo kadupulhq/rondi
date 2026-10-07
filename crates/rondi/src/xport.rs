@@ -42,8 +42,9 @@ pub struct RrdXportResult {
     pub legends: Vec<String>,
     pub rows: Vec<Vec<Option<f64>>>,
     /// Row-wise values for every DEF and CDEF, including ones that are not
-    /// exported. `rows` keeps infinities because XML prints them while JSON
-    /// writes null; only NaN becomes `None`.
+    /// exported, over RRDtool's graph buffer. That buffer has one more slot
+    /// than `rows` when `end` is step-aligned. `rows` keeps infinities because
+    /// XML prints them while JSON writes null; only NaN becomes `None`.
     pub raw_variables: HashMap<String, Vec<f64>>,
 }
 
@@ -185,13 +186,21 @@ pub fn fetch_xport_with_cdefs(
             "xport output exceeds the 10 million row safety limit".into(),
         ));
     }
+    // RRDtool's fetched buffer, and so every CDEF and graph VDEF, ends one
+    // step after the last full row at or before `end`. With an aligned end
+    // that is one slot beyond the exported rows.
+    let buffer_rows = if end == floor_end {
+        row_count + 1
+    } else {
+        row_count
+    };
 
     let mut variables: HashMap<String, Vec<f64>> = HashMap::new();
     for definition in &fetched_definitions {
         let source_step = i64::try_from(definition.fetched.step)
             .map_err(|_| StoreError::RrdUnsupported("DEF step overflows".into()))?;
-        let mut values = Vec::with_capacity(row_count);
-        for row_index in 0..row_count {
+        let mut values = Vec::with_capacity(buffer_rows);
+        for row_index in 0..buffer_rows {
             let row_offset = i64::try_from(row_index)
                 .ok()
                 .and_then(|row| row.checked_mul(step_i64))
@@ -222,8 +231,8 @@ pub fn fetch_xport_with_cdefs(
                 cdef.name
             )));
         }
-        let mut values = Vec::with_capacity(row_count);
-        for row_index in 0..row_count {
+        let mut values = Vec::with_capacity(buffer_rows);
+        for row_index in 0..buffer_rows {
             let timestamp = i64::try_from(row_index)
                 .ok()
                 .and_then(|row| row.checked_add(1))

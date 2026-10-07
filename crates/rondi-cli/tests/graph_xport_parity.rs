@@ -312,3 +312,35 @@ fn print_si_magnitude_is_shared_and_honors_base() {
         assert_same_stdout(&fixture, &graph_args(&fixture, "graph", &xml, &elements));
     }
 }
+
+// RRDtool's graph buffer runs one step past the last full row before --end.
+// CDEFs are evaluated over that slot too, so `x,UN,0,x,IF` turns its
+// unknown into zero, and with data past --end the slot holds a real sample.
+#[test]
+fn graph_cdefs_and_vdefs_cover_the_right_edge_slot() {
+    let Some(fixture) = fixture() else { return };
+    let mut elements = vec!["CDEF:c=x,UN,0,x,IF"];
+    let vdefs = ["AVERAGE", "STDEV", "LAST", "TOTAL", "LSLSLOPE", "MAXIMUM"];
+    let definitions = vdefs
+        .iter()
+        .map(|function| format!("VDEF:v{function}=c,{function}"))
+        .collect::<Vec<_>>();
+    let prints = vdefs
+        .iter()
+        .map(|function| format!("PRINT:v{function}:%.12le"))
+        .collect::<Vec<_>>();
+    elements.extend(definitions.iter().map(String::as_str));
+    elements.extend(prints.iter().map(String::as_str));
+    elements.extend([
+        "PRINT:c:AVERAGE:%.12le",
+        "PRINT:c:LAST:%.12le",
+        "PRINT:x:LAST:%.12le",
+    ]);
+    for end in ["1000000600", "1000000300", "1000000305"] {
+        let mut args = strings(&["graphv", "-", "--start", "1000000000", "--end", end]);
+        args.push(format!("DEF:x={}:x:AVERAGE", fixture.database.display()));
+        args.push(String::from("LINE1:x#ff0000"));
+        args.extend(strings(&elements));
+        assert_same_prints(&fixture, &args);
+    }
+}
