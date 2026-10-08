@@ -101,7 +101,7 @@ Closed since the earlier draft (all EXECUTED unless noted):
 
 ### What Rondi does
 
-- `argv[0]` dispatch for `rrdtool`, `rrdcached`, `rrdtool-proxy`, `rrdproxy`. `scripts/install-compat-links.sh` installs those four names only. No `rrdupdate` and no `rrdcgi`. EXECUTED (read script).
+- `argv[0]` dispatch for `rrdtool`, `rrdcached`, `rrdupdate`, `rrdcreate`, `rrdinfo`, `rrdtool-proxy`, `rrdproxy`. `scripts/install-compat-links.sh` installs those names. No `rrdcgi`. EXECUTED (read script).
 - Usage, version, and unknown-name handling match (see "Closed since the earlier draft"). EXECUTED with `cmp` on stdout and stderr and a check of the exit status.
 - Pipe mode still lacks commands. EXECUTED: `pwd`, `ls`, `cd /tmp`, `xport`, `graph`, `graphv`, and `flushcached` each print `ERROR: unknown function '<name>'`; upstream runs them. The chroot argument is not implemented (READ-ONLY).
 - The pipe tokenizer is still `shell_words::split` (`crates/rondi-cli/src/main.rs`). EXECUTED: input `info no\:such.rrd` prints `opening 'no:such.rrd'` from Rondi and `opening 'no\:such.rrd'` from upstream. This breaks `COMMENT` text with `\:` once graph commands reach pipe mode.
@@ -262,7 +262,7 @@ TCP listeners and several `-l` options; real `-U` and `-G` privilege drop; daemo
 
 RRDtool ships `rrdtool`, `rrdupdate`, optional `rrdcgi` and `rrdcached`; `librrd.so.8`, `librrd.pc`, and three headers; 38 POD man pages (EXECUTED: `ls doc/*.pod | wc -l`).
 
-Rondi ships one `rondi` executable with symlinks `rrdtool`, `rrdcached`, `rrdtool-proxy`, `rrdproxy`, the `rrdtool-proxy.php` launcher (`scripts/install-compat-links.sh`), and a systemd unit (`packaging/systemd/rondi-rrdcached.service`). It ships no man pages, no `.pc`, no headers, no library, and no distro packages. EXECUTED (file listing). The release workflow builds from merged pull requests (#28).
+Rondi ships one `rondi` executable with symlinks `rrdtool`, `rrdcached`, `rrdupdate`, `rrdcreate`, `rrdinfo`, `rrdtool-proxy`, `rrdproxy`, the `rrdtool-proxy.php` launcher (`scripts/install-compat-links.sh`), and a systemd unit (`packaging/systemd/rondi-rrdcached.service`). It ships no man pages, no `.pc`, no headers, no library, and no distro packages. EXECUTED (file listing). The release workflow builds from merged pull requests (#28).
 
 Plan:
 

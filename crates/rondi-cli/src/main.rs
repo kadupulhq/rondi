@@ -107,6 +107,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = std::io::stdout().flush();
         std::process::exit(status);
     }
+    if matches!(invoked_as.as_str(), "rrdupdate" | "rrdcreate" | "rrdinfo") {
+        let args = std::env::args_os()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let status = rrdupdate_main(&invoked_as, &args);
+        let _ = std::io::stdout().flush();
+        std::process::exit(status);
+    }
     if invoked_as == "rrdtool-proxy"
         || invoked_as == "rrdtool-proxy.php"
         || invoked_as == "rrdproxy"
@@ -771,6 +779,41 @@ fn rrdtool_main(argv: &[String]) -> i32 {
         }
         _ => handle_input_line(argv, false),
     }
+}
+
+/// `rrdupdate.c`: the one executable installed as rrdupdate, rrdcreate and
+/// rrdinfo. `argv[0]` stands where `rrdtool` puts the command name, and
+/// errors go to stdout after the program's usage text.
+fn rrdupdate_main(name: &str, argv: &[String]) -> i32 {
+    // The library parsers fail on a lone argv[0]; Rondi's command functions
+    // print their help there instead.
+    let result = match (name, argv.len()) {
+        ("rrdcreate", 1) => Err("need name of an rrd file to create".into()),
+        ("rrdcreate", _) => rrdtool_create(argv),
+        ("rrdinfo", 1) => Err(format!(
+            "Usage: rrdtool {} [--daemon |-d <addr> [--noflush|-F]] <file>",
+            argv[0]
+        )
+        .into()),
+        ("rrdinfo", _) => rrdtool_info(argv),
+        (_, 1) => Err("Not enough arguments".into()),
+        _ => rrdtool_update(argv),
+    };
+    let Err(error) = result else {
+        return 0;
+    };
+    print!("RRDtool 1.11.0  Copyright by Tobi Oetiker\n\n");
+    match name {
+        "rrdcreate" => print!(
+            "Usage: rrdcreate <filename>\n\t\t\t[--start|-b start time]\n\t\t\t[--step|-s step]\n\t\t\t[--no-overwrite]\n\t\t\t[DS:ds-name:DST:dst arguments]\n\t\t\t[RRA:CF:cf arguments]\n\n"
+        ),
+        "rrdinfo" => println!("Usage: rrdinfo <filename>"),
+        _ => print!(
+            "Usage: rrdupdate <filename>\n\t\t\t[--locking|-L <try|block|none>]\n\t\t\t[--template|-t ds-name[:ds-name]...]\n\t\t\t[--skip-past-updates]\n\t\t\ttime|N:value[:value...]\n\n\t\t\tat-time@value[:value...]\n\n\t\t\t[ time:value[:value...] ..]\n\n"
+        ),
+    }
+    println!("ERROR: {error}");
+    1
 }
 
 /// The command switch in `HandleInputLine` (rrd_tool.c:713), shared by
@@ -3126,6 +3169,13 @@ fn format_imginfo(
     width: u32,
     height: u32,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    // bad_format_imginfo (rrd_graph.c:5880).
+    let bad_format = || -> Box<dyn std::error::Error> {
+        format!(
+            "invalid format string '{format}' (should match '^(?:[^%]+|%%)*%s(?:[^%]+|%%)*%lu(?:[^%]+|%%)*%lu(?:[^%]+|%%)*$')"
+        )
+        .into()
+    };
     let mut output = String::new();
     let mut chars = format.chars().peekable();
     let mut argument = 0;
@@ -3134,7 +3184,7 @@ fn format_imginfo(
             output.push(character);
             continue;
         }
-        let conversion = chars.next().ok_or("invalid --imginfo format")?;
+        let conversion = chars.next().ok_or_else(bad_format)?;
         if conversion == '%' {
             output.push('%');
             continue;
@@ -3143,13 +3193,13 @@ fn format_imginfo(
             (0, 's') => filename.to_owned(),
             (1, 'l') if chars.next() == Some('u') => width.to_string(),
             (2, 'l') if chars.next() == Some('u') => height.to_string(),
-            _ => return Err("--imginfo format must use %s, %lu, and %lu in that order".into()),
+            _ => return Err(bad_format()),
         };
         output.push_str(&value);
         argument += 1;
     }
     if argument != 3 {
-        return Err("--imginfo format must use %s, %lu, and %lu in that order".into());
+        return Err(bad_format());
     }
     Ok(output)
 }
@@ -5216,7 +5266,12 @@ fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .into());
     };
     let directory = PathBuf::from(directory);
-    if let Some(address) = daemon.or_else(|| std::env::var("RRDCACHED_ADDRESS").ok()) {
+    // rrdc_connect treats an empty address as none (rrd_client.c:956).
+    if let Some(address) = daemon
+        .clone()
+        .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
+        .filter(|address| !address.is_empty())
+    {
         let path = directory.to_string_lossy();
         let protocol_path = if path.starts_with('/') {
             path.to_string()
@@ -5235,8 +5290,18 @@ fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{response}");
         return Ok(());
     }
-    let text = list_rrd_entries(&directory, recursive)?;
-    print!("{text}");
+    if daemon.is_some() {
+        // rrd_list.c:340: an explicit address that did not connect.
+        eprintln!("Error connecting to rrdcached");
+        return Ok(());
+    }
+    // rrd_list.c:350: a failed listing prints strerror(errno) without a
+    // newline and the command still succeeds.
+    match rrd_list_r(recursive, &directory.to_string_lossy()) {
+        Ok(Some(text)) => print!("{text}"),
+        Ok(None) => eprint!("{}", rrd_strerror(0)),
+        Err(errno) => eprint!("{}", rrd_strerror(errno)),
+    }
     Ok(())
 }
 
@@ -5391,91 +5456,145 @@ fn send_rrdcached_multiline_command(
     Err("rrdcached Unix socket commands are unavailable on this platform".into())
 }
 
-fn list_rrd_entries(
-    directory: &std::path::Path,
-    recursive: bool,
-) -> Result<String, Box<dyn std::error::Error>> {
-    use std::fmt::Write as _;
-    let input = directory.to_string_lossy();
-    if input.contains("..") {
-        return Err("path traversal is not allowed".into());
+/// `rrd_list_r` (rrd_list.c:150). `Ok(None)` is an empty listing, which
+/// upstream reports through errno 0; `Err` carries errno.
+#[cfg(unix)]
+fn rrd_list_r(recursive: bool, dirname: &str) -> Result<Option<String>, libc::c_int> {
+    // Prevent moving up the directory tree.
+    if dirname.contains("..") {
+        return Err(libc::EACCES);
     }
-    if input.contains('*') || input.contains('?') {
+    let c_dirname = std::ffi::CString::new(dirname).map_err(|_| libc::ENOENT)?;
+    if dirname.contains(['*', '?']) {
         if recursive {
-            print_list_error(libc::EINVAL);
-            return Ok(String::new());
+            return Err(libc::EINVAL);
         }
-        let matches = match glob::glob(input.as_ref()) {
-            Ok(paths) => match paths.collect::<Result<Vec<_>, _>>() {
-                Ok(matches) => matches,
-                Err(_) => {
-                    print_list_error(libc::ENOENT);
-                    return Ok(String::new());
+        let mut out = String::new();
+        // SAFETY: glob fills `buffer`, its paths are read while it is alive,
+        // and globfree releases it on every path.
+        unsafe {
+            let mut buffer = std::mem::zeroed::<libc::glob_t>();
+            if libc::glob(c_dirname.as_ptr(), 0, None, &mut buffer) != 0 {
+                libc::globfree(&mut buffer);
+                return Err(libc::ENOENT);
+            }
+            for index in 0..buffer.gl_pathc as usize {
+                let path = std::ffi::CStr::from_ptr(*buffer.gl_pathv.add(index)).to_bytes();
+                if let Some(slash) = path.iter().rposition(|byte| *byte == b'/') {
+                    out.push_str(&String::from_utf8_lossy(&path[slash + 1..]));
+                    out.push('\n');
                 }
-            },
-            Err(_) => {
-                print_list_error(libc::ENOENT);
-                return Ok(String::new());
             }
+            libc::globfree(&mut buffer);
+        }
+        return if out.is_empty() {
+            Err(libc::ENOENT)
+        } else {
+            Ok(Some(out))
         };
-        if matches.is_empty() {
-            print_list_error(libc::ENOENT);
-            return Ok(String::new());
-        }
-        let mut output = String::new();
-        for matched in matches {
-            if let Some(name) = matched.file_name() {
-                writeln!(output, "{}", name.to_string_lossy()).unwrap();
-            }
-        }
-        return Ok(output);
     }
-    if input.ends_with(".rrd") {
-        let metadata = std::fs::metadata(directory)?;
-        if !metadata.is_file() {
-            return Err("RRD path is not a regular file".into());
+    // A name whose first ".rrd" ends it (strstr) is one file.
+    if dirname
+        .find(".rrd")
+        .is_some_and(|index| index + 4 == dirname.len())
+    {
+        let metadata = c_stat(&c_dirname)?;
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(libc::ENXIO);
         }
-        let name = directory.file_name().ok_or("RRD path has no filename")?;
-        return Ok(format!("{}\n", name.to_string_lossy()));
+        return match dirname.rfind('/') {
+            Some(slash) => Ok(Some(format!("{}\n", &dirname[slash + 1..]))),
+            None => Err(libc::EINVAL),
+        };
     }
-    if !std::fs::metadata(directory)?.is_dir() {
-        return Err("list path is not a directory".into());
+    let metadata = c_stat(&c_dirname)?;
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err(libc::ENOTDIR);
     }
-    fn walk(
-        root: &std::path::Path,
-        path: &std::path::Path,
-        recursive: bool,
-        out: &mut String,
-    ) -> std::io::Result<()> {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            if name == "." || name == ".." {
-                continue;
-            }
-            let current = entry.path();
-            let metadata = std::fs::metadata(&current)?;
-            if metadata.is_dir() && recursive {
-                walk(root, &current, recursive, out)?;
-                continue;
-            }
-            if metadata.is_file() && !name.to_string_lossy().ends_with(".rrd") {
-                continue;
-            }
-            let relative = current.strip_prefix(root).unwrap_or(&current);
-            writeln!(out, "{}", relative.to_string_lossy().replace('\\', "/")).unwrap();
-        }
-        Ok(())
-    }
-    let mut out = String::new();
-    walk(directory, directory, recursive, &mut out)?;
-    Ok(out)
+    rrd_list_rec(recursive, dirname.as_bytes(), dirname.as_bytes())
 }
 
-fn print_list_error(errno: libc::c_int) {
-    // RRDtool writes strerror(errno) without a trailing newline for list errors.
-    let message = unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)).to_string_lossy() };
-    eprint!("{message}");
+#[cfg(unix)]
+fn c_stat(path: &std::ffi::CStr) -> Result<libc::stat, libc::c_int> {
+    // SAFETY: stat writes one struct into the zeroed buffer.
+    unsafe {
+        let mut status = std::mem::zeroed::<libc::stat>();
+        if libc::stat(path.as_ptr(), &mut status) != 0 {
+            return Err(last_errno());
+        }
+        Ok(status)
+    }
+}
+
+/// `rrd_list_rec` (rrd_list.c:39): readdir order, directories listed unless
+/// recursing, regular files only with an `.rrd` suffix.
+#[cfg(unix)]
+fn rrd_list_rec(
+    recursive: bool,
+    root: &[u8],
+    dirname: &[u8],
+) -> Result<Option<String>, libc::c_int> {
+    let c_dirname = std::ffi::CString::new(dirname).map_err(|_| libc::ENOENT)?;
+    let mut out = None::<String>;
+    // SAFETY: the directory handle is owned here and closed before return;
+    // each entry name is NUL-terminated.
+    unsafe {
+        let dir = libc::opendir(c_dirname.as_ptr());
+        if dir.is_null() {
+            return Err(last_errno());
+        }
+        loop {
+            let entry = libc::readdir(dir);
+            if entry.is_null() {
+                break;
+            }
+            let name = std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()).to_bytes();
+            if name == b"." || name == b".." {
+                continue;
+            }
+            if dirname.len() + name.len() + 1 >= libc::PATH_MAX as usize {
+                continue;
+            }
+            let current = [dirname, b"/", name].concat();
+            let Ok(c_current) = std::ffi::CString::new(current.clone()) else {
+                continue;
+            };
+            let Ok(status) = c_stat(&c_current) else {
+                continue;
+            };
+            let kind = status.st_mode & libc::S_IFMT;
+            if kind == libc::S_IFDIR && recursive {
+                if let Ok(Some(nested)) = rrd_list_rec(recursive, root, &current) {
+                    out.get_or_insert_with(String::new).push_str(&nested);
+                }
+                continue;
+            }
+            if kind == libc::S_IFREG {
+                let suffix = name.windows(4).position(|window| window == b".rrd");
+                if suffix.is_none_or(|index| index + 4 != name.len()) {
+                    continue;
+                }
+            }
+            // move_past_prefix: skip the characters shared with the root.
+            let mut short = &current[..];
+            if root.len() <= current.len() {
+                let shared = root
+                    .iter()
+                    .zip(&current)
+                    .take_while(|(left, right)| left == right)
+                    .count();
+                short = &current[shared..];
+            }
+            if short.first() == Some(&b'/') {
+                short = &short[1..];
+            }
+            let out = out.get_or_insert_with(String::new);
+            out.push_str(&String::from_utf8_lossy(short));
+            out.push('\n');
+        }
+        libc::closedir(dir);
+    }
+    Ok(out)
 }
 
 fn format_info_float(value: f64) -> String {
