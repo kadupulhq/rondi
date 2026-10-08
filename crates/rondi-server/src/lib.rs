@@ -357,13 +357,40 @@ pub struct PidFile {
     _file: File,
 }
 
+/// A pid-file failure whose upstream text is already on stderr.
+#[derive(Debug)]
+pub struct PidFileFailed;
+
+/// Upstream's `rrd_strerror` text for an I/O error.
+fn errno_text(error: &std::io::Error) -> String {
+    let text = error.to_string();
+    text.split(" (os error ")
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
 impl PidFile {
-    pub fn create(path: &Path) -> Result<Option<Self>, Box<dyn std::error::Error>> {
+    /// open_pidfile and check_pidfile (rrd_daemon.c:536-640), printing their
+    /// messages. A stale file is replaced by rename rather than truncated in
+    /// place, and a pid that cannot be signalled for lack of permission
+    /// counts as running, where upstream would replace it.
+    pub fn create(path: &Path) -> Result<Option<Self>, PidFileFailed> {
         let Some(path) = (!path.as_os_str().is_empty()).then(|| path.to_path_buf()) else {
             return Ok(None);
         };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        let display = path.display();
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            eprintln!(
+                "Failed to create pidfile directory '{}': {}",
+                parent.display(),
+                errno_text(&error)
+            );
+            return Err(PidFileFailed);
         }
         let pid = std::process::id();
         let mut options = OpenOptions::new();
@@ -375,44 +402,85 @@ impl PidFile {
         }
         let file = match options.open(&path) {
             Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let existing = read_pid_file(&path)?;
-                let existing_pid = existing
-                    .trim()
-                    .parse::<libc::pid_t>()
-                    .map_err(|_| format!("invalid rrdcached pid file: {}", path.display()))?;
-                if existing_pid <= 0 {
-                    return Err(format!("invalid rrdcached pid file: {}", path.display()).into());
+            Err(error) => {
+                eprintln!(
+                    "rrdcached: can't create pid file '{display}' ({})",
+                    errno_text(&error)
+                );
+                let existing = match read_pid_file(&path) {
+                    Ok(existing) => existing,
+                    Err(error) => {
+                        eprintln!(
+                            "rrdcached: can't open pid file '{display}' ({})",
+                            errno_text(&error)
+                        );
+                        eprintln!("FATAL: Fail to create/open PID file ");
+                        return Err(PidFileFailed);
+                    }
+                };
+                if existing.is_empty() {
+                    eprintln!("FATAL: Empty PID file exist");
+                    return Err(PidFileFailed);
                 }
+                let existing_pid = existing
+                    .trim_start_matches([' ', '\t', '\n', '\r', '\x0b', '\x0c'])
+                    .trim_end_matches([' ', '\n', '\r', '\t'])
+                    .parse::<libc::pid_t>()
+                    .ok()
+                    .filter(|pid| *pid > 0);
+                let Some(existing_pid) = existing_pid else {
+                    eprintln!("FATAL: PID file is corrupted");
+                    return Err(PidFileFailed);
+                };
                 // SAFETY: signal 0 only checks whether this PID is present.
                 let alive = unsafe { libc::kill(existing_pid, 0) } == 0
                     || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
                 if alive {
-                    return Err(format!(
-                        "rrdcached pid file is owned by live process {existing_pid}"
-                    )
-                    .into());
+                    eprintln!("FATAL: Another rrdcached daemon is running?? (pid {existing_pid})");
+                    return Err(PidFileFailed);
                 }
                 // The pid file is created as root. Writing a new file and
                 // renaming it over the stale one leaves no window in which
                 // another user could recreate the name and block startup.
-                let (staged, mut file) = create_staged_pid_file(&path, &options)?;
-                let renamed = writeln!(&mut file, "{pid}")
-                    .and_then(|()| file.sync_all())
-                    .and_then(|()| std::fs::rename(&staged, &path));
-                if let Err(error) = renamed {
-                    let _ = std::fs::remove_file(&staged);
-                    return Err(error.into());
+                let replaced =
+                    create_staged_pid_file(&path, &options).and_then(|(staged, mut file)| {
+                        let renamed = writeln!(&mut file, "{pid}")
+                            .and_then(|()| file.sync_all())
+                            .and_then(|()| std::fs::rename(&staged, &path));
+                        if renamed.is_err() {
+                            let _ = std::fs::remove_file(&staged);
+                        }
+                        renamed.map(|()| file)
+                    });
+                match replaced {
+                    Ok(file) => {
+                        eprintln!(
+                            "rrdcached: removed stale PID file (no rrdcached on pid {existing_pid})\nrrdcached: starting normally."
+                        );
+                        file
+                    }
+                    Err(_) => {
+                        eprintln!("FATAL: Failed to truncate stale PID file. (pid {existing_pid})");
+                        return Err(PidFileFailed);
+                    }
                 }
-                file
             }
-            Err(error) => return Err(error.into()),
         };
         let mut file = file;
-        check_pid_file_handle(&file, &path)?;
-        if file.metadata()?.len() == 0 {
-            writeln!(&mut file, "{pid}")?;
-            file.sync_all()?;
+        let written = check_pid_file_handle(&file).and_then(|()| {
+            if file.metadata()?.len() == 0 {
+                writeln!(&mut file, "{pid}")?;
+                file.sync_all()?;
+            }
+            Ok(())
+        });
+        if let Err(error) = written {
+            eprintln!(
+                "rrdcached: can't create pid file '{display}' ({})",
+                errno_text(&error)
+            );
+            eprintln!("FATAL: Fail to create/open PID file ");
+            return Err(PidFileFailed);
         }
         Ok(Some(Self {
             path,
@@ -425,24 +493,24 @@ impl PidFile {
 /// Trust a pid file only through its open handle: a regular file with one
 /// link, and, while running as root, owned by root. A hard link to another
 /// file, or a file another user planted, is refused.
-fn check_pid_file_handle(file: &File, path: &Path) -> std::io::Result<()> {
+fn check_pid_file_handle(file: &File) -> std::io::Result<()> {
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata()?;
     // SAFETY: geteuid has no preconditions.
     let privileged = unsafe { libc::geteuid() } == 0;
     let problem = if !metadata.file_type().is_file() {
-        Some("is not a regular file".to_owned())
+        Some("not a regular file".to_owned())
     } else if metadata.nlink() != 1 {
-        Some(format!("has {} links", metadata.nlink()))
+        Some(format!("{} links", metadata.nlink()))
     } else if privileged && metadata.uid() != 0 {
-        Some(format!("is owned by uid {}", metadata.uid()))
+        Some(format!("owned by uid {}", metadata.uid()))
     } else {
         None
     };
     match problem {
         Some(problem) => Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("rrdcached pid file {problem}: {}", path.display()),
+            problem,
         )),
         None => Ok(()),
     }
@@ -457,7 +525,7 @@ fn read_pid_file(path: &Path) -> std::io::Result<String> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(path)?;
-    check_pid_file_handle(&file, path)?;
+    check_pid_file_handle(&file)?;
     let mut contents = String::new();
     file.take(64).read_to_string(&mut contents)?;
     Ok(contents)

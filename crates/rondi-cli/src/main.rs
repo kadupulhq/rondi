@@ -535,11 +535,14 @@ fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(status.max(0));
     }
     rondi_server::block_shutdown_signals();
-    let pid_file = pid_file
-        .as_deref()
-        .map(rondi_server::PidFile::create)
-        .transpose()?
-        .flatten();
+    let pid_file = match pid_file.as_deref().map(rondi_server::PidFile::create) {
+        None => None,
+        Some(Ok(pid_file)) => pid_file,
+        Some(Err(rondi_server::PidFileFailed)) => {
+            eprintln!("rrdcached: daemonize failed, exiting.");
+            std::process::exit(1);
+        }
+    };
     if addresses.is_empty() {
         addresses.push(rondi_server::RrdcachedListenAddress {
             address: "unix:/tmp/rrdcached.sock".to_owned(),

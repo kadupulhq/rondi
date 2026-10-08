@@ -608,7 +608,10 @@ fn rrdcached_refuses_linked_pid_and_log_files() {
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("rrdcached pid file has 2 links"),
+        String::from_utf8_lossy(&output.stderr).contains(&format!(
+            "rrdcached: can't open pid file '{}' (2 links)\nFATAL: Fail to create/open PID file \n",
+            pid_file.display()
+        )),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -643,4 +646,55 @@ fn rrdcached_refuses_linked_pid_and_log_files() {
         )
     );
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "2147483647\n");
+}
+
+#[test]
+fn rrdcached_pid_file_diagnostics_match_upstream() {
+    if !upstream_available("rrdcached pid file differential") {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    let live = std::process::id().to_string();
+    // (case, existing pid file contents, daemon starts)
+    for (case, contents, starts) in [
+        ("live", format!("{live}\n"), false),
+        ("empty", String::new(), false),
+        ("corrupt", "12x\n".to_owned(), false),
+        ("zero", "0\n".to_owned(), false),
+        ("stale", "2147483647\n".to_owned(), true),
+    ] {
+        let mut outputs = Vec::new();
+        for name in ["upstream", "rondi"] {
+            let run = base.join(case).join(name);
+            std::fs::create_dir_all(&run).unwrap();
+            let pid_file = run.join("rrdcached.pid");
+            std::fs::write(&pid_file, &contents).unwrap();
+            let socket = run.join("rrdcached.sock");
+            let mut child = Command::new(daemon(name, &run))
+                .args(["-g", "-b", run.to_str().unwrap(), "-l"])
+                .arg(&socket)
+                .arg("-p")
+                .arg(&pid_file)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let output = if starts {
+                wait_until_serving(&mut child, &Endpoint::Unix(socket));
+                stop(child)
+            } else {
+                child.wait_with_output().unwrap()
+            };
+            outputs.push((
+                output.status.code(),
+                String::from_utf8_lossy(&output.stderr).replace(&*run.to_string_lossy(), "RUN"),
+            ));
+        }
+        if !starts {
+            assert_eq!(outputs[0].0, Some(1), "{case}");
+        }
+        assert_eq!(outputs[1], outputs[0], "{case}");
+    }
 }
