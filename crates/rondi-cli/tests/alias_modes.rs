@@ -4407,7 +4407,9 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
             alias.as_path(),
             path,
             &[&format!("--legend-direction={direction}")],
-            &["LINE1:x#ff0000:first", "LINE1:x#0000ff:second"],
+            // leg_place puts both on one row without \\l, and reversing
+            // the direction only swaps rows.
+            &["LINE1:x#ff0000:first\\l", "LINE1:x#0000ff:second\\l"],
         );
         assert!(
             result.status.success(),

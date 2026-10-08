@@ -4,6 +4,7 @@ mod consolidation;
 mod data_source;
 mod format;
 pub mod graph;
+pub mod graph_layout;
 pub mod import_export;
 mod queries;
 mod rpn;

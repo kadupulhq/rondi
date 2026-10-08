@@ -471,6 +471,170 @@ fn print_only_graph_is_not_rendered() {
     ]);
 }
 
+// graph_paint_timestring (rrd_graph.c:4004-4049) pushes graph_left..
+// graph_end after graph_size_location (3561), value_min/value_max after
+// data_proc (1365), si_unit (578) and expand_range (613), and the legend
+// loop (3430) pushes legend[n]/coords[n] from leg_place (2115).
+#[test]
+fn graphv_layout_keys_match_graph_paint_timestring() {
+    let Some(f) = fixture() else { return };
+    let line = "LINE1:x#ff0000:foo";
+    check_all(
+        [
+            vec![line, "GPRINT:x:AVERAGE:%6.2lf", "PRINT:x:AVERAGE:%6.2lf"],
+            vec!["LINE1:x#ff0000"],
+            vec![line, "-f", "<%s %lu %lu>"],
+            vec!["-t", "Title", line],
+            vec!["-t", "one\\ntwo<br>three\nfour", line],
+            vec!["-v", "units", line],
+            vec!["-w", "100", "-h", "50", line],
+            vec!["-g", line],
+            vec!["-j", line],
+            vec!["-D", "-w", "500", "-h", "200", "-t", "T", line],
+            vec!["-D", "-g", "-w", "300", "-h", "120", line],
+            vec!["HRULE:100#00ff00:outside", line],
+            vec!["-F", "HRULE:100#00ff00:outside", line],
+            vec!["VRULE:900000000#00ff00:early", line],
+            vec![
+                "VDEF:v=x,MAXIMUM",
+                "HRULE:v#ff0000:max",
+                "VRULE:v#00ff00:when",
+            ],
+            vec!["AREA:x#ff0000:x", "AREA:z#00ff00:z:STACK"],
+            vec!["CDEF:big=x,1000000,*", "LINE1:big#ff0000:big"],
+            vec!["-b", "1024", "CDEF:big=x,3000,*", "LINE1:big#ff0000"],
+            vec!["TICK:x#ff0000:0.5:tick", "LINE1:z#00ff00"],
+            vec!["LINE1:x#ff0000::skipscale", "LINE1:z#00ff00"],
+        ]
+        .iter()
+        .map(|case| f.assert_same(&f.graphv(case))),
+    );
+}
+
+// Value range options feed data_proc and expand_range (rrd_graph.c:1365,
+// 613; ALTAUTOSCALE*, rigid, allow_shrink).
+#[test]
+fn graphv_value_range_matches_data_proc_and_expand_range() {
+    let Some(f) = fixture() else { return };
+    let line = "LINE1:x#ff0000";
+    check_all(
+        [
+            vec!["-l", "-100", "-u", "100", line],
+            vec!["-l", "-100", "-u", "100", "-r", line],
+            vec!["-l", "0", "-u", "5", "-r", line],
+            vec!["-l", "-100", "-u", "100", "-r", "--allow-shrink", line],
+            vec!["-l", "9", "-u", "4", "-r", line],
+            vec!["-l", "4", "-u", "4", "-r", line],
+            vec!["-A", line],
+            vec!["-J", line],
+            vec!["-M", line],
+            vec!["-A", "CDEF:c=x,0,*,7,+", "LINE1:c#ff0000"],
+            vec!["CDEF:c=x,0,*", "LINE1:c#ff0000"],
+            vec!["CDEF:c=x,UN,UNKN,UNKN,IF", "LINE1:c#ff0000"],
+        ]
+        .iter()
+        .map(|case| f.assert_same(&f.graphv(case))),
+    );
+}
+
+// leg_place (rrd_graph.c:2115): control codes, \\t, \\g trimming, line
+// breaking at the image width, TEXTALIGN and the legend directions.
+#[test]
+fn graphv_legend_placement_matches_leg_place() {
+    let Some(f) = fixture() else { return };
+    let long = "L".repeat(30);
+    let many: Vec<String> = (0..12)
+        .map(|i| format!("LINE1:x#ff0000:item {i} {long}"))
+        .collect();
+    let mut cases: Vec<Vec<&str>> = [
+        vec!["LINE1:x#ff0000:left\\l", "LINE1:z#00ff00:right\\r"],
+        vec!["LINE1:x#ff0000:center\\c", "COMMENT:just\\j", "COMMENT:end"],
+        vec![
+            "LINE1:x#ff0000:a\\g",
+            "GPRINT:x:AVERAGE:%6.2lf  \\g",
+            "COMMENT:b\\n",
+        ],
+        vec![
+            "COMMENT:x\\s",
+            "COMMENT:y\\u",
+            "COMMENT:z\\.",
+            "COMMENT:w\\l",
+        ],
+        vec!["LINE1:x#ff0000:tab\\there", "COMMENT:a\tb\tc"],
+        vec!["LINE1:x#ff0000:bad\\q"],
+        vec![
+            "TEXTALIGN:right",
+            "LINE1:x#ff0000:one",
+            "LINE1:z#00ff00:two",
+        ],
+        vec![
+            "TEXTALIGN:center",
+            "LINE1:x#ff0000:one",
+            "LINE1:z#00ff00:two",
+        ],
+        vec!["TEXTALIGN:left", "LINE1:x#ff0000:one", "LINE1:z#00ff00:two"],
+        vec![
+            "COMMENT:head\\l",
+            "LINE1:x#ff0000:one\\l",
+            "LINE1:z#00ff00:two\\l",
+            "COMMENT:tail",
+        ],
+        vec![
+            "--legend-direction=bottomup",
+            "COMMENT:head\\l",
+            "LINE1:x#ff0000:one\\l",
+            "LINE1:z#00ff00:two\\l",
+            "COMMENT:tail",
+        ],
+        vec![
+            "--legend-direction=bottomup2",
+            "COMMENT:head\\l",
+            "LINE1:x#ff0000:one\\l",
+            "LINE1:z#00ff00:two\\l",
+            "COMMENT:tail",
+        ],
+        vec![
+            "-w",
+            "120",
+            "LINE1:x#ff0000:alpha",
+            "LINE1:z#00ff00:beta",
+            "COMMENT:gamma delta",
+        ],
+    ]
+    .into_iter()
+    .collect();
+    let mut wrapped = vec!["LINE1:z#00ff00"];
+    wrapped.extend(many.iter().map(String::as_str));
+    cases.push(wrapped);
+    check_all(cases.iter().map(|case| f.assert_same(&f.graphv(case))));
+}
+
+// The `graph` WxH line comes from the same layout (rrd_tool.c prints
+// ximg x yimg).
+#[test]
+fn graph_image_size_matches_graph_size_location() {
+    let Some(f) = fixture() else { return };
+    let graph = |elements: &[&str]| {
+        let mut args = f.graphv(elements);
+        args[0] = String::from("graph");
+        args
+    };
+    check_all(
+        [
+            vec!["LINE1:x#ff0000", "PRINT:x:AVERAGE:%6.2lf"],
+            vec!["LINE1:x#ff0000:foo"],
+            vec!["-t", "Title", "LINE1:x#ff0000"],
+            vec!["-v", "label", "-w", "30", "LINE1:x#ff0000"],
+            vec!["VDEF:v=x,MAXIMUM", "HRULE:v#ff0000:max"],
+            vec!["VDEF:v=x,MAXIMUM", "LINE1:v#ff0000"],
+            vec!["cmd=LINE:vname=x:color=#ff0000"],
+            vec!["LINE1:x#f00"],
+        ]
+        .iter()
+        .map(|case| f.assert_same(&graph(case))),
+    );
+}
+
 // Infinities produced by a CDEF reach xport and graph exports unchanged
 // (rrd_xport.c writes them with %0.10e, JSON as null).
 #[test]
