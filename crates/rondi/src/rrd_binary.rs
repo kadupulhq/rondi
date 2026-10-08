@@ -17,7 +17,6 @@ const CDP_PREP_LEN: usize = 80;
 const RRA_PTR_LEN: usize = 8;
 const VALUE_LEN: usize = 8;
 const FLOAT_COOKIE: f64 = 8.642135E130;
-const MAX_HEADER_LEN: usize = 64 * 1024 * 1024;
 
 /// Match the NaN produced by RRDtool's `rrd_set_to_DNAN`: the pinned x86_64
 /// build uses a negative quiet NaN, while aarch64 and the other supported
@@ -435,7 +434,7 @@ pub struct RrdCdpPrepInfo {
 
 pub(crate) fn inspect_path(path: &Path) -> Result<RrdInfo, StoreError> {
     let mut file = RrdFileLock::shared(open_rrd_read(path)?)?;
-    read_info(&mut file)
+    read_info(&mut file, path)
 }
 
 pub(crate) fn fetch_path(
@@ -451,7 +450,7 @@ pub(crate) fn fetch_path(
         ));
     }
     let mut file = RrdFileLock::shared(open_rrd_read(path)?)?;
-    let info = read_info(&mut file)?;
+    let info = read_info(&mut file, path)?;
     let archive_index = choose_archive(
         &info,
         consolidation,
@@ -628,7 +627,7 @@ fn update_path_values_with_raw(
 ) -> Result<Vec<RrdUpdateSummary>, StoreError> {
     check_update_arguments(timestamp_usec, values, raw_values)?;
     let mut file = RrdFileLock::exclusive(open_rrd_write(path)?)?;
-    let mut info = read_info(&mut file)?;
+    let mut info = read_info(&mut file, path)?;
     apply_update(
         &mut file,
         &mut info,
@@ -984,7 +983,7 @@ fn update_text_arguments(
         return Err(StoreError::Rrd("Not enough arguments".into()));
     }
     let mut file = RrdFileLock::exclusive(open_rrd_write(path)?)?;
-    let mut info = read_info(&mut file)?;
+    let mut info = read_info(&mut file, path)?;
     let ds_count = info.data_sources.len();
     // parse_template (rrd_update.c:1073-1116): slot 0 is the time; each
     // further slot names the data source it fills.
@@ -1140,7 +1139,7 @@ pub fn update_rrd_raw_batch(
     skip_past_updates: bool,
 ) -> Result<Vec<RrdUpdateSummary>, StoreError> {
     let mut file = RrdFileLock::exclusive(open_rrd_write(path.as_ref())?)?;
-    let mut info = read_info(&mut file)?;
+    let mut info = read_info(&mut file, path.as_ref())?;
     let mut state_cache = None;
     let mut summaries = Vec::new();
     for update in updates {
@@ -1642,7 +1641,7 @@ pub fn tune_rrd_data_sources(
     changes: &[RrdDataSourceTune],
 ) -> Result<(), StoreError> {
     let mut file = RrdFileLock::exclusive(open_rrd_write(path.as_ref())?)?;
-    let info = read_info(&mut file)?;
+    let info = read_info(&mut file, path.as_ref())?;
     if info.data_sources.iter().any(|source| {
         !matches!(
             source.kind.as_str(),
@@ -1757,16 +1756,11 @@ pub fn resize_rrd_file(
 ) -> Result<(), StoreError> {
     let input_path = input_path.as_ref();
     let output_path = output_path.as_ref();
-    if input_path
-        .file_name()
-        .is_some_and(|name| name == "resize.rrd")
-    {
-        return Err(StoreError::RrdUnsupported(
-            "resize.rrd is a reserved name".into(),
-        ));
+    if input_path == Path::new("resize.rrd") {
+        return Err(StoreError::Rrd("resize.rrd is a reserved name".into()));
     }
     if row_count == 0 {
-        return Err(StoreError::RrdUnsupported(
+        return Err(StoreError::Rrd(
             "Please grow or shrink with at least 1 row".into(),
         ));
     }
@@ -1777,29 +1771,28 @@ pub fn resize_rrd_file(
     }
 
     let mut input = RrdFileLock::exclusive(open_rrd_write(input_path)?)?;
-    let info = read_info(&mut input)?;
-    if !matches!(info.version.as_str(), "0003" | "0004") {
-        return Err(StoreError::RrdUnsupported(format!(
-            "Do not know how to handle RRD version {}",
-            info.version
-        )));
-    }
+    let info = read_info(&mut input, input_path)?;
     let archive = info
         .archives
         .get(rra_index)
-        .ok_or_else(|| StoreError::RrdUnsupported("no such RRA in this RRD".into()))?;
+        .ok_or_else(|| StoreError::Rrd("no such RRA in this RRD".into()))?;
     let new_row_count = match action {
         RrdResizeAction::Grow => archive
             .rows
             .checked_add(row_count)
             .ok_or_else(|| StoreError::RrdUnsupported("RRA row count overflows".into()))?,
         RrdResizeAction::Shrink if archive.rows <= row_count => {
-            return Err(StoreError::RrdUnsupported(
-                "This RRA is not that big".into(),
-            ));
+            return Err(StoreError::Rrd("This RRA is not that big".into()));
         }
         RrdResizeAction::Shrink => archive.rows - row_count,
     };
+    // rrd_resize.c:137-150 checks the version only after both RRA checks.
+    if !matches!(info.version.as_str(), "0003" | "0004") {
+        return Err(StoreError::Rrd(format!(
+            "Do not know how to handle RRD version {}",
+            info.version
+        )));
+    }
     let data_sources = info.data_sources.len();
     let row_bytes = data_sources
         .checked_mul(VALUE_LEN)
@@ -1970,9 +1963,10 @@ pub fn inspect_rrd_file(path: impl AsRef<Path>) -> Result<RrdInfo, StoreError> {
 /// Return RRDtool's first-row timestamp for an archive index.
 pub fn first_rrd_time(path: impl AsRef<Path>, archive_index: usize) -> Result<i64, StoreError> {
     let info = inspect_path(path.as_ref())?;
-    let archive = info.archives.get(archive_index).ok_or_else(|| {
-        StoreError::RrdUnsupported(format!("invalid rraindex number: {archive_index}"))
-    })?;
+    let archive = info
+        .archives
+        .get(archive_index)
+        .ok_or_else(|| StoreError::Rrd("invalid rraindex number".into()))?;
     let resolution = info
         .step
         .checked_mul(archive.pdp_per_row)
@@ -2008,7 +2002,7 @@ pub fn dump_rrd_file_with_header(
     header: RrdDumpHeader,
 ) -> Result<String, StoreError> {
     let mut file = RrdFileLock::shared(open_rrd_read(path.as_ref())?)?;
-    let info = read_info(&mut file)?;
+    let info = read_info(&mut file, path.as_ref())?;
     if info.data_sources.iter().any(|ds| {
         !matches!(
             ds.kind.as_str(),
@@ -2548,23 +2542,154 @@ fn rrd_local_timestamp(timestamp: i64) -> Result<String, StoreError> {
     String::from_utf8(bytes.to_vec()).map_err(|_| rrd_error("local timestamp is not UTF-8"))
 }
 
-fn read_info(file: &mut File) -> Result<RrdInfo, StoreError> {
-    let file_len = usize::try_from(file.metadata()?.len())
-        .map_err(|_| rrd_error("RRD file length exceeds host size"))?;
-    let mut prefix = vec![0; STAT_HEAD_LEN];
-    file.read_exact(&mut prefix)
-        .map_err(|_| rrd_error("truncated RRD file"))?;
-    let header_len = header_length(&prefix)?;
-    if header_len > MAX_HEADER_LEN {
-        return Err(StoreError::RrdUnsupported(
-            "RRD metadata header exceeds the 64 MiB inspection limit".into(),
+/// rrd_open.c:336-560: RRDtool maps the file and reads the header piece by
+/// piece, failing with these texts in this order before anything else looks
+/// at the contents.
+fn read_info(file: &mut File, path: &Path) -> Result<RrdInfo, StoreError> {
+    let name = path.display();
+    let metadata = file.metadata().map_err(|error| {
+        StoreError::RrdFile(format!("fstat '{name}': {}", rrd_strerror(&error)))
+    })?;
+    let file_len = metadata.len();
+    if file_len == 0 || !metadata.is_file() {
+        probe_mmap(file, file_len).map_err(|error| {
+            StoreError::RrdFile(format!("mmaping file '{name}': {}", rrd_strerror(&error)))
+        })?;
+    }
+    let mut offset = 0_u64;
+    let load = |offset: &mut u64, what: &str, size: usize, count: u64| match (size as u64)
+        .checked_mul(count)
+        .and_then(|wanted| offset.checked_add(wanted))
+    {
+        Some(end) if end <= file_len => {
+            *offset = end;
+            Ok(())
+        }
+        _ => Err(StoreError::RrdFile(format!(
+            "reached EOF while loading header {what}"
+        ))),
+    };
+    load(&mut offset, "rrd->stat_head", STAT_HEAD_LEN, 1)?;
+    let mut stat_head = [0_u8; STAT_HEAD_LEN];
+    file.read_exact(&mut stat_head)?;
+    if stat_head[0..4] != *b"RRD\0" {
+        return Err(StoreError::RrdFile(format!("'{name}' is not an RRD file")));
+    }
+    if f64_at(&stat_head, 16)? != FLOAT_COOKIE {
+        return Err(StoreError::RrdFile(
+            "This RRD was created on another architecture".into(),
         ));
     }
-    file.seek(SeekFrom::Start(0))?;
+    let version_field = &stat_head[4..];
+    let version_field = &version_field[..version_field
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(version_field.len())];
+    let version = c_atoi(version_field);
+    if version > 5 {
+        return Err(StoreError::RrdFile(format!(
+            "can't handle RRD file version {}",
+            String::from_utf8_lossy(version_field)
+        )));
+    }
+    let ds_count = u64_at(&stat_head, 24)?;
+    let rra_count = u64_at(&stat_head, 32)?;
+    load(&mut offset, "rrd->ds_def", DS_DEF_LEN, ds_count)?;
+    let rra_def_start = offset;
+    load(&mut offset, "rrd->rra_def", RRA_DEF_LEN, rra_count)?;
+    if version < 3 {
+        load(&mut offset, "rrd->legacy_last_up", 8, 1)?;
+    } else {
+        load(&mut offset, "rrd->live_head", LIVE_HEAD_LEN, 1)?;
+    }
+    load(&mut offset, "rrd->pdp_prep", PDP_PREP_LEN, ds_count)?;
+    load(
+        &mut offset,
+        "rrd->cdp_prep",
+        CDP_PREP_LEN,
+        rra_count.saturating_mul(ds_count),
+    )?;
+    load(&mut offset, "rrd->rra_ptr", RRA_PTR_LEN, rra_count)?;
+    let header_len =
+        usize::try_from(offset).map_err(|_| rrd_error("RRD metadata header exceeds host size"))?;
     let mut header = vec![0; header_len];
-    file.read_exact(&mut header)
-        .map_err(|_| rrd_error("truncated RRD metadata header"))?;
-    inspect_parts(&header, file_len)
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut header)?;
+    let row_count = (0..rra_count as usize).fold(0_u64, |total, index| {
+        let row_cnt = rra_def_start as usize + index * RRA_DEF_LEN + 24;
+        total.wrapping_add(u64::from_le_bytes(
+            header[row_cnt..row_cnt + 8].try_into().unwrap(),
+        ))
+    });
+    let correct_len = offset.wrapping_add(
+        (VALUE_LEN as u64)
+            .wrapping_mul(row_count)
+            .wrapping_mul(ds_count),
+    );
+    if correct_len > file_len {
+        return Err(StoreError::RrdFile(format!(
+            "'{name}' is too small (should be {} bytes)",
+            correct_len as i64
+        )));
+    }
+    inspect_parts(
+        &header,
+        usize::try_from(file_len).map_err(|_| rrd_error("RRD file length exceeds host size"))?,
+    )
+}
+
+/// RRDtool maps every file it opens; an empty file or a directory fails
+/// there with the kernel's errno.
+#[cfg(unix)]
+fn probe_mmap(file: &File, length: u64) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let length =
+        usize::try_from(length).map_err(|_| std::io::Error::from_raw_os_error(libc::ENOMEM))?;
+    // SAFETY: a fresh read-only private mapping of an open descriptor; it is
+    // unmapped before returning and never dereferenced.
+    let mapped = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            length,
+            libc::PROT_READ,
+            libc::MAP_PRIVATE,
+            file.as_raw_fd(),
+            0,
+        )
+    };
+    if mapped == libc::MAP_FAILED {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `mapped` is the mapping created above with this length.
+    unsafe { libc::munmap(mapped, length) };
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn probe_mmap(_file: &File, length: u64) -> std::io::Result<()> {
+    if length == 0 {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    Ok(())
+}
+
+/// C `atoi` over a NUL-trimmed byte field.
+fn c_atoi(field: &[u8]) -> i64 {
+    let text = String::from_utf8_lossy(field);
+    i64::from(crate::rrd_number::c_strtol(&text, 10).0 as i32)
+}
+
+/// `rrd_strerror(errno)` for an I/O error.
+pub(crate) fn rrd_strerror(error: &std::io::Error) -> String {
+    match error.raw_os_error() {
+        // SAFETY: strerror returns a valid NUL-terminated string.
+        Some(code) => unsafe {
+            std::ffi::CStr::from_ptr(libc::strerror(code))
+                .to_string_lossy()
+                .into_owned()
+        },
+        None => error.to_string(),
+    }
 }
 
 fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
@@ -2734,35 +2859,6 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
         data_sources,
         archives,
     })
-}
-
-fn header_length(stat_head: &[u8]) -> Result<usize, StoreError> {
-    require(stat_head, 0, STAT_HEAD_LEN)?;
-    if &stat_head[0..4] != b"RRD\0" {
-        return Err(StoreError::RrdFormat("invalid RRD cookie".into()));
-    }
-    let version = fixed_string(stat_head, 4, 5)?;
-    if !matches!(version.as_str(), "0003" | "0004" | "0005") {
-        return Err(StoreError::RrdUnsupported(format!(
-            "RRD format version {version} is not supported by the inspector"
-        )));
-    }
-    let ds_count = usize_at(stat_head, 24)?;
-    let rra_count = usize_at(stat_head, 32)?;
-    if ds_count == 0 || rra_count == 0 {
-        return Err(StoreError::RrdFormat(
-            "RRD requires data sources and archives".into(),
-        ));
-    }
-    let mut len = checked_add(STAT_HEAD_LEN, checked_mul(ds_count, DS_DEF_LEN)?)?;
-    len = checked_add(len, checked_mul(rra_count, RRA_DEF_LEN)?)?;
-    len = checked_add(len, LIVE_HEAD_LEN)?;
-    len = checked_add(len, checked_mul(ds_count, PDP_PREP_LEN)?)?;
-    len = checked_add(
-        len,
-        checked_mul(checked_mul(ds_count, rra_count)?, CDP_PREP_LEN)?,
-    )?;
-    checked_add(len, checked_mul(rra_count, RRA_PTR_LEN)?)
 }
 
 fn choose_archive(
@@ -3007,13 +3103,22 @@ fn xml_escape_text(value: &str) -> String {
 // Keep that compatibility behavior separate from the stricter native-store
 // helpers, which intentionally refuse symlinked database files.
 fn open_rrd_read(path: &Path) -> Result<File, StoreError> {
-    Ok(File::open(path)?)
+    File::open(path).map_err(|error| open_error(path, &error))
 }
 
 fn open_rrd_write(path: &Path) -> Result<File, StoreError> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true);
-    Ok(options.open(path)?)
+    options.open(path).map_err(|error| open_error(path, &error))
+}
+
+/// rrd_open.c:336.
+fn open_error(path: &Path, error: &std::io::Error) -> StoreError {
+    StoreError::RrdFile(format!(
+        "opening '{}': {}",
+        path.display(),
+        rrd_strerror(error)
+    ))
 }
 
 fn usize_at(bytes: &[u8], offset: usize) -> Result<usize, StoreError> {

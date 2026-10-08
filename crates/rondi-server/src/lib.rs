@@ -2782,6 +2782,7 @@ fn store_error(error: StoreError) -> Response<Full<Bytes>> {
         StoreError::Io(_) => (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable"),
         StoreError::FormatVersion(_)
         | StoreError::RrdFormat(_)
+        | StoreError::RrdFile(_)
         | StoreError::RrdUnsupported(_)
         | StoreError::Json(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage_corrupt"),
     };

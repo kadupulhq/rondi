@@ -47,6 +47,68 @@ fn parse_special(input: &str) -> Option<f64> {
     }
 }
 
+/// C `strtol(text, &end, base)` for a 64-bit `long`: leading white space, an
+/// optional sign, and for base 0 a `0x` or `0` prefix choosing hex or octal.
+/// Overflow saturates as glibc and Apple libc do. Returns the value and the
+/// byte offset of `end`, which is 0 when nothing converts.
+pub fn c_strtol(text: &str, base: u32) -> (i64, usize) {
+    let bytes = text.as_bytes();
+    let mut position = 0;
+    while position < bytes.len()
+        && matches!(bytes[position], b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+    {
+        position += 1;
+    }
+    let negative = bytes.get(position) == Some(&b'-');
+    if matches!(bytes.get(position), Some(b'-' | b'+')) {
+        position += 1;
+    }
+    let hex_prefix = bytes.get(position) == Some(&b'0')
+        && matches!(bytes.get(position + 1), Some(b'x' | b'X'))
+        && bytes.get(position + 2).is_some_and(u8::is_ascii_hexdigit);
+    let base = match base {
+        0 if hex_prefix => 16,
+        0 if bytes.get(position) == Some(&b'0') => 8,
+        0 => 10,
+        other => other,
+    };
+    if base == 16 && hex_prefix {
+        position += 2;
+    }
+    let digits_start = position;
+    let mut magnitude: u64 = 0;
+    let mut overflow = false;
+    while let Some(digit) = bytes
+        .get(position)
+        .and_then(|byte| char::from(*byte).to_digit(36))
+        .filter(|digit| *digit < base)
+    {
+        match magnitude
+            .checked_mul(u64::from(base))
+            .and_then(|value| value.checked_add(u64::from(digit)))
+        {
+            Some(value) => magnitude = value,
+            None => overflow = true,
+        }
+        position += 1;
+    }
+    if position == digits_start {
+        return (0, 0);
+    }
+    let value = if negative {
+        if overflow || magnitude > i64::MIN.unsigned_abs() {
+            i64::MIN
+        } else {
+            0_i64.wrapping_sub_unsigned(magnitude)
+        }
+    } else if overflow || magnitude > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        magnitude as i64
+    };
+    (value, position)
+}
+
 /// `rrd_diff()` from rrd_diff.c: the decimal difference `a - b` of two
 /// integer strings, computed digit by digit and converted with rrd_strtod.
 /// Any `-` before the first digit makes a number negative; mixed signs,
@@ -234,7 +296,22 @@ fn parse_rrd_decimal(input: &str) -> Option<(f64, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_rrd_number;
+    use super::{c_strtol, parse_rrd_number};
+
+    #[test]
+    fn strtol_follows_c_prefixes_and_saturation() {
+        assert_eq!(c_strtol("0x1", 0), (1, 3));
+        assert_eq!(c_strtol("010", 0), (8, 3));
+        assert_eq!(c_strtol("1abc", 0), (1, 1));
+        assert_eq!(c_strtol(" -12", 0), (-12, 4));
+        assert_eq!(c_strtol("0x", 0), (0, 1));
+        assert_eq!(c_strtol("09", 0), (0, 1));
+        assert_eq!(c_strtol("abc", 0), (0, 0));
+        assert_eq!(c_strtol("-", 10), (0, 0));
+        assert_eq!(c_strtol("99999999999999999999", 10).0, i64::MAX);
+        assert_eq!(c_strtol("-99999999999999999999", 10).0, i64::MIN);
+        assert_eq!(c_strtol("-9223372036854775808", 10).0, i64::MIN);
+    }
 
     #[test]
     fn epoch_fraction_rounding_matches_rrdtool_strtod() {

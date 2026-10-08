@@ -26,6 +26,6 @@ pub use rrd_binary::{
     update_rrd_raw_values_precise, update_rrd_raw_values_precise_verbose,
     update_rrd_raw_values_verbose, update_rrd_text, update_rrd_values, update_rrd_values_verbose,
 };
-pub use rrd_number::parse_rrd_number;
+pub use rrd_number::{c_strtol, parse_rrd_number};
 pub use storage::{DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, Store, StoreError, StoreOptions};
 pub use vdef::{VdefError, VdefFunction, VdefResult, evaluate_vdef};
