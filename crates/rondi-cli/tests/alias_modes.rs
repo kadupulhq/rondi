@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[macro_use]
+mod common;
+
 use std::io::Write;
 use std::os::unix::fs::symlink;
 use std::path::Path;
@@ -26,7 +29,7 @@ fn rpn_roll_small_stack_matches_rrdtool_1110_for_shift_range() {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
         })
     {
-        eprintln!("skipping ROLL differential: pinned RRDtool 1.11.0 is not installed");
+        oracle_skip!("skipping ROLL differential: pinned RRDtool 1.11.0 is not installed");
         return;
     }
 
@@ -109,7 +112,7 @@ fn rrdcached_help_matches_pinned_stdout_and_exit_status() {
         .output()
         .is_ok_and(|output| output.status.code() == Some(1))
     {
-        eprintln!("skipping rrdcached help differential: pinned rrdcached is not installed");
+        oracle_skip!("skipping rrdcached help differential: pinned rrdcached is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -132,7 +135,7 @@ fn rrdcached_option_parsing_matches_pinned_daemon() {
         .output()
         .is_ok_and(|output| output.status.code() == Some(1))
     {
-        eprintln!("skipping rrdcached option differential: pinned rrdcached is not installed");
+        oracle_skip!("skipping rrdcached option differential: pinned rrdcached is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -210,7 +213,7 @@ fn rrdproxy_alias_preserves_pinned_version_and_help_invocations() {
 fn php_rrdproxy_launcher_forwards_arguments_and_output() {
     let php = Command::new("php").arg("-v").output();
     if !php.is_ok_and(|output| output.status.success()) {
-        eprintln!("skipping PHP launcher test: PHP CLI is not installed");
+        oracle_skip!("skipping PHP launcher test: PHP CLI is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -255,7 +258,7 @@ fn rrdtool_usage_and_version_invocations_match_pinned_tool() {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
         })
     {
-        eprintln!("skipping usage differential: pinned RRDtool 1.11.0 is not installed");
+        oracle_skip!("skipping usage differential: pinned RRDtool 1.11.0 is not installed");
         return;
     }
     for args in [
@@ -289,7 +292,7 @@ fn rrdtool_usage_and_version_invocations_match_pinned_tool() {
 fn rrdtool_fetch_alias_matches_pinned_tool_output() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool CLI differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool CLI differential: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -367,7 +370,7 @@ fn rrdtool_fetch_start_and_end_references_match_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool range-reference differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool range-reference differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -471,7 +474,7 @@ fn rrdtool_fetch_negative_times_are_relative_to_now_like_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool relative-fetch differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool relative-fetch differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -551,7 +554,7 @@ fn rrdtool_batch_mode_runs_poller_commands_and_update_templates() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool batch differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool batch differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -649,7 +652,7 @@ fn rrdtool_batch_mode_usage_and_errors_match_pinned_tool() {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
         })
     {
-        eprintln!(
+        oracle_skip!(
             "skipping RRDtool batch usage differential: pinned RRDtool 1.11.0 is not installed"
         );
         return;
@@ -701,7 +704,7 @@ fn aligned_multi_step_update_matches_upstream_bytes_for_multi_pdp_archive() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping aligned multi-PDP differential: rrdtool is not installed");
+        oracle_skip!("skipping aligned multi-PDP differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -757,7 +760,7 @@ fn update_daemon_equals_down_socket_matches_upstream_failure() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping unavailable-daemon differential: rrdtool is not installed");
+        oracle_skip!("skipping unavailable-daemon differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -823,7 +826,7 @@ fn read_commands_with_down_daemon_report_upstream_connect_error() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping unavailable-daemon read differential: rrdtool is not installed");
+        oracle_skip!("skipping unavailable-daemon read differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -932,7 +935,7 @@ fn held_rrd_lock_fails_fast_and_honors_rrd_locking_like_rrdtool() {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
         })
     {
-        eprintln!("skipping lock differential: pinned RRDtool 1.11.0 is not installed");
+        oracle_skip!("skipping lock differential: pinned RRDtool 1.11.0 is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -1034,7 +1037,7 @@ fn update_through_rrd_symlink_follows_the_target_like_rrdtool() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool symlink differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool symlink differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -1082,7 +1085,7 @@ fn negative_tuned_heartbeat_matches_pinned_rrdtool_file_and_diagnostic() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping negative heartbeat differential: rrdtool is not installed");
+        oracle_skip!("skipping negative heartbeat differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -1126,7 +1129,7 @@ fn rrdtool_update_skip_past_updates_matches_pinned_tool() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool update differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool update differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -1204,7 +1207,7 @@ fn rrdtool_update_out_of_order_diagnostic_matches_upstream() {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
         })
     {
-        eprintln!(
+        oracle_skip!(
             "skipping out-of-order update differential: pinned RRDtool 1.11.0 is not installed"
         );
         return;
@@ -1271,7 +1274,7 @@ fn rrdtool_update_n_and_negative_timestamps_match_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool update-time differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool update-time differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -1350,7 +1353,7 @@ fn rrdtool_update_fractional_timestamps_match_upstream_byte_for_byte() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping fractional update timestamp differential: rrdtool is not installed");
+        oracle_skip!("skipping fractional update timestamp differential: rrdtool is not installed");
         return;
     }
 
@@ -1416,7 +1419,7 @@ fn rrdtool_update_uses_rrd_strtod_rounding_for_epoch_fractions() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping rrd_strtod timestamp differential: rrdtool is not installed");
+        oracle_skip!("skipping rrd_strtod timestamp differential: rrdtool is not installed");
         return;
     }
 
@@ -1484,7 +1487,7 @@ fn rrdtool_update_special_values_and_exponent_range_follow_rrd_strtod() {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
         })
     {
-        eprintln!(
+        oracle_skip!(
             "skipping rrd_strtod special-value differential: pinned RRDtool 1.11.0 is not installed"
         );
         return;
@@ -1560,7 +1563,7 @@ fn rrdtool_update_at_style_calendar_timestamp_matches_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool at-style update differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool at-style update differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -1629,7 +1632,7 @@ fn rrdtool_fetch_unknown_consolidation_function_matches_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool fetch CF diagnostic differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool fetch CF diagnostic differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -1677,7 +1680,7 @@ fn rrdtool_fetch_zero_resolution_diagnostic_matches_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool fetch resolution differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool fetch resolution differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -1743,7 +1746,7 @@ fn rrdtool_create_alias_makes_files_upstream_can_update_and_fetch() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool create differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool create differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -1866,7 +1869,7 @@ fn rrdtool_create_accepts_pinned_now_relative_start_forms() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool create-time differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool create-time differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -1936,7 +1939,7 @@ fn rrdtool_create_common_absolute_date_forms_match_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool absolute-date differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool absolute-date differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -2000,7 +2003,7 @@ fn rrdtool_create_date_only_and_special_time_forms_match_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool date-only differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool date-only differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -2071,7 +2074,7 @@ fn rrdtool_create_rejects_standalone_day_tokens_like_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping standalone date rejection differential: rrdtool is not installed");
+        oracle_skip!("skipping standalone date rejection differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -2118,7 +2121,7 @@ fn rrdtool_calendar_offsets_and_dst_match_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool calendar-offset differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool calendar-offset differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -2182,7 +2185,7 @@ fn rrdtool_create_duration_suffixes_match_upstream_settings() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool create-duration differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool create-duration differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -2255,7 +2258,7 @@ fn rrdtool_create_rejects_xff_one_like_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool xff differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool xff differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -2329,7 +2332,7 @@ fn rrdtool_create_uses_format_v5_for_double_counter_sources() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool v5 create differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool v5 create differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -2384,7 +2387,7 @@ fn rrdtool_fetch_alias_matches_multiple_sources_and_archives() {
         .output()
         .is_ok_and(|o| o.status.success())
     {
-        eprintln!("skipping RRDtool CLI differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool CLI differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -2456,7 +2459,7 @@ fn rrdtool_fetch_alias_matches_multiple_sources_and_archives() {
 fn rrdtool_update_alias_mutates_the_original_rrd_in_place() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool CLI differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool CLI differential: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -2528,7 +2531,7 @@ fn rrdtool_xport_raw_def_and_export_match_rrdtool_xml_and_json() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool xport differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool xport differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -2826,7 +2829,7 @@ fn rrdtool_xport_prediction_matches_mixed_resolution_history() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping mixed-resolution prediction differential: rrdtool is not installed");
+        oracle_skip!("skipping mixed-resolution prediction differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -2925,7 +2928,9 @@ fn rrdtool_xport_rpn_numeric_literals_follow_rrd_strtod() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool RPN numeric conversion differential: rrdtool is not installed");
+        oracle_skip!(
+            "skipping RRDtool RPN numeric conversion differential: rrdtool is not installed"
+        );
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -3014,7 +3019,7 @@ fn rrdtool_xport_trend_duration_rounding_matches_rrd_strtod() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool TREND duration differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool TREND duration differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -3109,7 +3114,7 @@ fn rrdtool_xport_cdef_limit_matches_upstream_bounds_and_unknowns() {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
         })
     {
-        eprintln!("skipping RRDtool LIMIT differential: pinned RRDtool 1.11.0 is not installed");
+        oracle_skip!("skipping RRDtool LIMIT differential: pinned RRDtool 1.11.0 is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -3204,7 +3209,7 @@ fn rrdtool_xport_rpn_aggregates_follow_upstream_stack_order() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool RPN aggregate differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool RPN aggregate differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -3284,7 +3289,7 @@ fn rrdtool_xport_rpn_percent_sorts_unknown_values_first() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool RPN PERCENT differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool RPN PERCENT differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -3353,7 +3358,7 @@ fn rrdtool_xport_now_uses_whole_seconds() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool NOW differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool NOW differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -3434,7 +3439,7 @@ fn rrdtool_xport_rpn_sort_orders_unknown_values_first() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool RPN SORT differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool RPN SORT differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -3503,7 +3508,7 @@ fn rrdtool_xport_rpn_index_truncates_fractional_argument() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool RPN INDEX differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool RPN INDEX differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -3572,7 +3577,7 @@ fn rrdtool_xport_rpn_count_operators_truncate_fractional_values() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool RPN count differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool RPN count differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -3645,7 +3650,7 @@ fn rrdtool_xport_rpn_zero_copy_and_roll_counts_are_noops() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool zero-count RPN differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool zero-count RPN differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -3716,7 +3721,7 @@ fn graph_print_and_gprint_printf_grammar_matches_pinned_rrdtool() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping graph printf differential: rrdtool is not installed");
+        oracle_skip!("skipping graph printf differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -3990,7 +3995,7 @@ fn graph_valstrftime_rejection_matches_pinned_rrdtool_1110() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping graph valstrftime differential: rrdtool is not installed");
+        oracle_skip!("skipping graph valstrftime differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -4040,7 +4045,7 @@ fn deterministic_irregular_gauge_sequences_match_pinned_rrdtool() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping randomized sequence differential: rrdtool is not installed");
+        oracle_skip!("skipping randomized sequence differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -4145,7 +4150,7 @@ fn deterministic_mixed_data_source_sequences_match_pinned_rrdtool() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping mixed data-source differential: rrdtool is not installed");
+        oracle_skip!("skipping mixed data-source differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -4261,7 +4266,7 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool graph differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool graph differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -5141,7 +5146,7 @@ fn rrdtool_xport_local_calendar_rpn_operators_match_at_new_year_boundary() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool xport differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool xport differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -5247,7 +5252,7 @@ fn rpn_newweek_matches_locale_first_weekday_from_rrdtool() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping NEWWEEK locale differential: rrdtool is not installed");
+        oracle_skip!("skipping NEWWEEK locale differential: rrdtool is not installed");
         return;
     }
     // German weeks start on Monday, unlike the C locale. Without a locale whose
@@ -5262,7 +5267,7 @@ fn rpn_newweek_matches_locale_first_weekday_from_rrdtool() {
                 .any(|name| name.to_ascii_lowercase().replace('-', "") == "de_de.utf8")
         });
     if !installed {
-        eprintln!("skipping NEWWEEK locale differential: locale {locale} is not installed");
+        oracle_skip!("skipping NEWWEEK locale differential: locale {locale} is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -5360,7 +5365,7 @@ fn rrdtool_xport_ltime_matches_across_daylight_saving_transition() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool xport differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool xport differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -5451,7 +5456,7 @@ fn rrdtool_last_lastupdate_and_first_aliases_match_pinned_output() {
         .output()
         .is_ok_and(|o| o.status.success())
     {
-        eprintln!("skipping RRDtool CLI differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool CLI differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -5560,7 +5565,7 @@ fn rrdtool_missing_file_diagnostics_match_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool missing-file differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool missing-file differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -5669,7 +5674,7 @@ fn rrdtool_update_malformed_row_diagnostics_match_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool update diagnostic differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool update diagnostic differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -5718,7 +5723,7 @@ fn rrdtool_update_missing_data_source_diagnostic_matches_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool update diagnostic differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool update diagnostic differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -5760,7 +5765,7 @@ fn rrdtool_update_template_arity_diagnostics_match_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool update-template differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool update-template differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -5820,7 +5825,7 @@ fn rrdtool_update_duplicate_template_names_match_upstream_file_bytes() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool update-template differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool update-template differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -5881,7 +5886,7 @@ fn rrdtool_create_template_copies_supported_structure_and_start_time() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool create-template differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool create-template differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -6017,7 +6022,7 @@ fn rrdtool_create_template_failure_diagnostics_match_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!(
+        oracle_skip!(
             "skipping RRDtool create-template diagnostic differential: rrdtool is not installed"
         );
         return;
@@ -6085,7 +6090,7 @@ fn rrdtool_create_source_prefills_matching_schema_and_remains_interoperable() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool create-source differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool create-source differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -6281,7 +6286,7 @@ fn rrdtool_create_source_failure_diagnostics_match_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool create-source diagnostics: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool create-source diagnostics: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -6342,7 +6347,7 @@ fn rrdtool_create_missing_archive_and_data_source_errors_match_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool create diagnostics differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool create diagnostics differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -6381,7 +6386,7 @@ fn rrdtool_supported_command_no_argument_help_matches_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool help differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool help differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -6424,7 +6429,7 @@ fn rrdtool_list_alias_matches_directory_and_recursive_output() {
         .output()
         .is_ok_and(|o| o.status.success())
     {
-        eprintln!("skipping RRDtool CLI differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool CLI differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -6521,7 +6526,7 @@ fn rrdtool_list_alias_matches_directory_and_recursive_output() {
 fn rrdtool_dump_header_options_and_output_file_match_upstream() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool dump differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool dump differential: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -6592,7 +6597,7 @@ fn rrdtool_restore_dump_round_trip_preserves_rows_and_update_state() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool restore differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool restore differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -6874,7 +6879,7 @@ fn rrdtool_restore_preserves_version_five_double_counter_state() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool v5 restore differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool v5 restore differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -7014,7 +7019,7 @@ fn rrdtool_tune_heartbeat_and_bounds_match_upstream_byte_for_byte() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool tune differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool tune differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -7145,7 +7150,7 @@ fn rrdtool_tune_data_source_type_resets_last_value_like_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool tune type differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool tune type differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -7239,7 +7244,7 @@ fn rrdtool_tune_data_source_rename_matches_upstream_byte_for_byte() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool tune rename differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool tune rename differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -7350,7 +7355,7 @@ fn rrdtool_resize_grow_and_shrink_match_upstream_byte_for_byte() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool resize differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool resize differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -7475,7 +7480,7 @@ fn rrdtool_updatev_matches_upstream_output_and_file_changes() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool updatev differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool updatev differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();

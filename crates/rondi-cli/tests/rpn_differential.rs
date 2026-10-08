@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[macro_use]
+mod common;
+
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -28,7 +31,7 @@ fn fixture() -> Option<Fixture> {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
         })
     {
-        eprintln!("skipping RPN differential: pinned RRDtool 1.11.0 is not installed");
+        oracle_skip!("skipping RPN differential: pinned RRDtool 1.11.0 is not installed");
         return None;
     }
     let temp = tempfile::tempdir().unwrap();

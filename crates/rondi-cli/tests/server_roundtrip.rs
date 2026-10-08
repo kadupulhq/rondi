@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[macro_use]
+mod common;
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
@@ -23,7 +26,8 @@ fn start_server(root: &std::path::Path, socket: &std::path::Path) -> Child {
 }
 
 fn wait_for_socket(child: &mut Child, socket: &std::path::Path) {
-    for _ in 0..100 {
+    let deadline = Instant::now() + common::io_timeout();
+    while Instant::now() < deadline {
         if socket.exists() && UnixStream::connect(socket).is_ok() {
             return;
         }
@@ -48,7 +52,7 @@ fn wait_for_socket_metadata(
     use std::os::unix::fs::MetadataExt;
 
     wait_for_socket(child, socket);
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::io_timeout();
     loop {
         if let Ok(metadata) = std::fs::metadata(socket)
             && metadata.gid() == expected_gid
@@ -80,7 +84,7 @@ fn flushcached_client_connects_to_upstream_tcp_daemon() {
             .output()
             .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping TCP rrdcached differential: upstream tools are not installed");
+        oracle_skip!("skipping TCP rrdcached differential: upstream tools are not installed");
         return;
     }
 
@@ -132,7 +136,8 @@ fn flushcached_client_connects_to_upstream_tcp_daemon() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let ready = (0..100).any(|_| {
+    let deadline = Instant::now() + common::io_timeout();
+    let ready = std::iter::from_fn(|| (Instant::now() < deadline).then_some(())).any(|()| {
         if upstream.try_wait().unwrap().is_some() {
             return false;
         }
@@ -337,7 +342,7 @@ fn rrdcached_warns_when_flush_interval_is_less_than_twice_write_interval() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping rrdcached warning differential: rrdcached is not installed");
+        oracle_skip!("skipping rrdcached warning differential: rrdcached is not installed");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -398,7 +403,7 @@ fn rrdcached_thread_count_validation_matches_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping rrdcached thread-count differential: rrdcached is not installed");
+        oracle_skip!("skipping rrdcached thread-count differential: rrdcached is not installed");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -423,7 +428,7 @@ fn rrdcached_allocation_size_validation_matches_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping rrdcached allocation-size differential: rrdcached is not installed");
+        oracle_skip!("skipping rrdcached allocation-size differential: rrdcached is not installed");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -452,7 +457,7 @@ fn rrdtool_flushcached_matches_upstream_for_multiple_rrds() {
             .output()
             .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping flushcached differential: upstream RRDtool is not installed");
+        oracle_skip!("skipping flushcached differential: upstream RRDtool is not installed");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -527,9 +532,7 @@ fn rrdtool_flushcached_matches_upstream_for_multiple_rrds() {
             .unwrap();
         wait_for_socket(&mut daemon, &socket);
         let mut stream = UnixStream::connect(&socket).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+        stream.set_read_timeout(Some(common::io_timeout())).unwrap();
         let mut reader = BufReader::new(&mut stream);
         for (file, value) in files.iter().zip(["1", "2", "3"]) {
             let update = format!(
@@ -566,9 +569,7 @@ fn rrdtool_flushcached_matches_upstream_for_multiple_rrds() {
             .unwrap();
         results.push((flushed.status.code(), flushed.stdout, flushed.stderr));
         let mut stream = UnixStream::connect(&socket).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+        stream.set_read_timeout(Some(common::io_timeout())).unwrap();
         let mut reader = BufReader::new(&mut stream);
         assert_eq!(
             rrdcached_request(&mut reader, "UPDATE one.rrd 1000000020:3\n"),
@@ -623,7 +624,7 @@ fn rrdtool_flushcached_usage_and_missing_daemon_errors_match_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping flushcached CLI differential: upstream RRDtool is not installed");
+        oracle_skip!("skipping flushcached CLI differential: upstream RRDtool is not installed");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -677,7 +678,7 @@ fn rrdtool_xport_daemon_flushes_pending_values_like_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping xport daemon differential: upstream RRDtool is not installed");
+        oracle_skip!("skipping xport daemon differential: upstream RRDtool is not installed");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -718,9 +719,7 @@ fn rrdtool_xport_daemon_flushes_pending_values_like_upstream() {
         .unwrap();
     wait_for_socket(&mut daemon, &socket);
     let mut stream = UnixStream::connect(&socket).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
+    stream.set_read_timeout(Some(common::io_timeout())).unwrap();
     let mut reader = BufReader::new(&mut stream);
     assert_eq!(
         rrdcached_request(&mut reader, "UPDATE metric.rrd 1000000010:7\n"),
@@ -957,9 +956,7 @@ fn rrdtool_xport_daemon_flushes_pending_values_like_upstream() {
     assert_eq!(daemon_last.stdout, upstream_last.stdout);
 
     let mut stream = UnixStream::connect(&socket).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
+    stream.set_read_timeout(Some(common::io_timeout())).unwrap();
     let mut reader = BufReader::new(&mut stream);
     assert_eq!(
         rrdcached_request(&mut reader, "UPDATE metric.rrd 1000000020:9\n"),
@@ -1005,9 +1002,7 @@ fn rrdtool_xport_daemon_flushes_pending_values_like_upstream() {
     assert_eq!(fetch.stderr, upstream_fetch.stderr);
 
     let mut stream = UnixStream::connect(&socket).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
+    stream.set_read_timeout(Some(common::io_timeout())).unwrap();
     let mut reader = BufReader::new(&mut stream);
     assert_eq!(
         rrdcached_request(&mut reader, "UPDATE metric.rrd 1000000030:11\n"),
@@ -1118,9 +1113,7 @@ fn rrdcached_recursive_create_requires_and_honors_dash_r() {
             .unwrap();
         wait_for_socket(&mut child, &socket);
         let mut stream = UnixStream::connect(&socket).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+        stream.set_read_timeout(Some(common::io_timeout())).unwrap();
         let mut reader = BufReader::new(&mut stream);
         let response = rrdcached_request(
             &mut reader,
@@ -1164,9 +1157,7 @@ fn rrdcached_accepts_attached_arguments_and_cacti_options() {
         .unwrap();
     wait_for_socket(&mut child, &socket);
     let mut stream = UnixStream::connect(&socket).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
+    stream.set_read_timeout(Some(common::io_timeout())).unwrap();
     let mut reader = BufReader::new(&mut stream);
     assert_eq!(rrdcached_request(&mut reader, "PING\n"), "0 PONG\n");
     drop(reader);
@@ -1204,7 +1195,7 @@ fn rrdcached_socket_mode_matches_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping rrdcached socket-mode differential: rrdcached is not installed");
+        oracle_skip!("skipping rrdcached socket-mode differential: rrdcached is not installed");
         return;
     }
     use std::os::unix::fs::PermissionsExt;
@@ -1280,7 +1271,7 @@ fn rrdcached_default_socket_mode_matches_upstream_umask() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!(
+        oracle_skip!(
             "skipping rrdcached default socket-mode differential: rrdcached is not installed"
         );
         return;
@@ -1331,7 +1322,7 @@ fn rrdcached_dash_p_restricts_command_permissions() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping rrdcached permission differential: rrdcached is not installed");
+        oracle_skip!("skipping rrdcached permission differential: rrdcached is not installed");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -1362,9 +1353,7 @@ fn rrdcached_dash_p_restricts_command_permissions() {
             .unwrap();
         wait_for_socket(&mut child, &socket);
         let mut stream = UnixStream::connect(&socket).unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
+        stream.set_read_timeout(Some(common::io_timeout())).unwrap();
         let mut reader = BufReader::new(&mut stream);
         let ping = rrdcached_request(&mut reader, "PING\n");
         let denied = rrdcached_request(&mut reader, "UPDATE missing.rrd 123:1\n");
@@ -1387,7 +1376,7 @@ fn rrdcached_socket_group_matches_upstream() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping rrdcached socket-group differential: rrdcached is not installed");
+        oracle_skip!("skipping rrdcached socket-group differential: rrdcached is not installed");
         return;
     }
     use std::os::unix::fs::MetadataExt;
@@ -1395,7 +1384,7 @@ fn rrdcached_socket_group_matches_upstream() {
     // SAFETY: getgrgid returns libc-owned data for a valid process group.
     let group = unsafe { libc::getgrgid(gid) };
     if group.is_null() {
-        eprintln!("skipping socket-group test: primary group has no database entry");
+        oracle_skip!("skipping socket-group test: primary group has no database entry");
         return;
     }
     // SAFETY: non-null group points to libc-owned data with a NUL-terminated name.
@@ -1510,7 +1499,7 @@ fn rrdcached_pid_file_tracks_owner_and_prevents_a_second_instance() {
         unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) },
         0
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::io_timeout();
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
             let _ = child.kill();
@@ -1519,7 +1508,7 @@ fn rrdcached_pid_file_tracks_owner_and_prevents_a_second_instance() {
         }
         thread::sleep(Duration::from_millis(10));
     }
-    let cleanup_deadline = Instant::now() + Duration::from_secs(5);
+    let cleanup_deadline = Instant::now() + common::io_timeout();
     while pid_file.exists() && Instant::now() < cleanup_deadline {
         thread::sleep(Duration::from_millis(10));
     }
@@ -1544,7 +1533,7 @@ fn rrdcached_pid_file_tracks_owner_and_prevents_a_second_instance() {
         unsafe { libc::kill(restarted.id() as libc::pid_t, libc::SIGTERM) },
         0
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::io_timeout();
     while restarted.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
             let _ = restarted.kill();
@@ -1553,7 +1542,7 @@ fn rrdcached_pid_file_tracks_owner_and_prevents_a_second_instance() {
         }
         thread::sleep(Duration::from_millis(10));
     }
-    let cleanup_deadline = Instant::now() + Duration::from_secs(5);
+    let cleanup_deadline = Instant::now() + common::io_timeout();
     while pid_file.exists() && Instant::now() < cleanup_deadline {
         thread::sleep(Duration::from_millis(10));
     }
@@ -1595,7 +1584,7 @@ fn rrdcached_log_option_appends_structured_lifecycle_events() {
         unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) },
         0
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::io_timeout();
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
             let _ = child.kill();
@@ -1814,7 +1803,7 @@ fn rrdtool_fetch_daemon_resolution_matches_upstream_protocol_behavior() {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
         })
     {
-        eprintln!(
+        oracle_skip!(
             "skipping daemon FETCH resolution differential: pinned RRDtool 1.11.0 is not installed"
         );
         return;
@@ -1956,7 +1945,7 @@ fn server_handles_interrupt_and_terminate_and_removes_its_socket() {
         // SAFETY: `child.id()` is a live child process owned by this test.
         let signal_result = unsafe { libc::kill(child.id() as libc::pid_t, signal) };
         assert_eq!(signal_result, 0, "failed to send {label} signal");
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + common::io_timeout();
         let status = loop {
             if let Some(status) = child.try_wait().unwrap() {
                 break status;
@@ -1964,7 +1953,7 @@ fn server_handles_interrupt_and_terminate_and_removes_its_socket() {
             if Instant::now() >= deadline {
                 let _ = child.kill();
                 let _ = child.wait();
-                panic!("server did not shut down after {label} within five seconds");
+                panic!("server did not shut down after {label} within the test timeout");
             }
             thread::sleep(Duration::from_millis(10));
         };
@@ -2013,9 +2002,7 @@ fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
     wait_for_socket(&mut child, &socket);
 
     let mut stream = UnixStream::connect(&socket).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
+    stream.set_read_timeout(Some(common::io_timeout())).unwrap();
     let mut reader = BufReader::new(&mut stream);
     assert_eq!(rrdcached_request(&mut reader, "PING\n"), "0 PONG\n");
     let rrd = root.join("poller.rrd");
@@ -2096,7 +2083,7 @@ fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
         wait_for_socket(&mut upstream, &upstream_socket);
         let mut upstream_stream = UnixStream::connect(&upstream_socket).unwrap();
         upstream_stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(common::io_timeout()))
             .unwrap();
         let mut upstream_reader = BufReader::new(&mut upstream_stream);
         let upstream_first_without_index =
@@ -2223,9 +2210,7 @@ fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
         // command uses its own connection.
         let one_shot = |path: &std::path::Path, command: &str| {
             let mut stream = UnixStream::connect(path).unwrap();
-            stream
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
+            stream.set_read_timeout(Some(common::io_timeout())).unwrap();
             rrdcached_request(&mut BufReader::new(&mut stream), command)
         };
         for command in [
@@ -2737,7 +2722,7 @@ fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
         unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) },
         0
     );
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + common::io_timeout();
     while child.try_wait().unwrap().is_none() {
         if Instant::now() >= deadline {
             let _ = child.kill();
@@ -2760,7 +2745,7 @@ fn rrdcached_fractional_update_timestamps_flush_byte_for_byte_like_rrdtool() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping fractional rrdcached update differential: rrdtool is not installed");
+        oracle_skip!("skipping fractional rrdcached update differential: rrdtool is not installed");
         return;
     }
 
@@ -2812,9 +2797,7 @@ fn rrdcached_fractional_update_timestamps_flush_byte_for_byte_like_rrdtool() {
         .unwrap();
     wait_for_socket(&mut child, &socket);
     let mut stream = UnixStream::connect(&socket).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    stream.set_read_timeout(Some(common::io_timeout())).unwrap();
     let mut reader = BufReader::new(&mut stream);
     assert_eq!(
         rrdcached_request(
@@ -2875,7 +2858,7 @@ fn rrdtool_update_daemon_and_environment_route_writes_through_rrdcached() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping rrdtool --daemon integration: RRDtool is not installed");
+        oracle_skip!("skipping rrdtool --daemon integration: RRDtool is not installed");
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -3236,9 +3219,7 @@ fn rrdcached_update_waiting_on_an_rrd_lock_does_not_stall_other_clients() {
     assert!(!blocked.is_finished());
 
     let mut stream = UnixStream::connect(&socket).unwrap();
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+    stream.set_read_timeout(Some(common::io_timeout())).unwrap();
     let mut reader = BufReader::new(&mut stream);
     assert_eq!(
         rrdcached_request(&mut reader, "UPDATE other.rrd 1000000010:1\n"),

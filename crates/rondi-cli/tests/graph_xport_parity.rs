@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+#[macro_use]
+mod common;
+
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -23,7 +26,7 @@ fn pinned_rrdtool() -> bool {
 // replace unknowns and VDEFs over the graph buffer see a mix of both.
 fn fixture() -> Option<Fixture> {
     if !pinned_rrdtool() {
-        eprintln!("skipping graph/xport differential: pinned RRDtool 1.11.0 is not installed");
+        oracle_skip!("skipping graph/xport differential: pinned RRDtool 1.11.0 is not installed");
         return None;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -440,7 +443,7 @@ fn fetch_values_follow_lc_numeric() {
     if !String::from_utf8_lossy(&expected.stdout).contains("5000000000e+00")
         || !String::from_utf8_lossy(&expected.stdout).contains(',')
     {
-        eprintln!("skipping LC_NUMERIC fetch differential: de_DE.UTF-8 is not installed");
+        oracle_skip!("skipping LC_NUMERIC fetch differential: de_DE.UTF-8 is not installed");
         return;
     }
     let actual = fetch(&fixture.alias);

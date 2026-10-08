@@ -1,3 +1,6 @@
+#[macro_use]
+mod common;
+
 use rondi::{VdefFunction, evaluate_vdef};
 use std::process::Command;
 
@@ -7,7 +10,7 @@ fn vdef_aggregates_match_pinned_rrdtool_graphv() {
     if !version.is_ok_and(|output| {
         output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
     }) {
-        eprintln!("skipping VDEF differential: pinned RRDtool 1.11.0 is not installed");
+        oracle_skip!("skipping VDEF differential: pinned RRDtool 1.11.0 is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -209,7 +212,7 @@ fn vdef_percentiles_with_infinities_match_pinned_rrdtool_qsort() {
     if !version.is_ok_and(|output| {
         output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
     }) {
-        eprintln!("skipping VDEF infinity differential: pinned RRDtool 1.11.0 is not installed");
+        oracle_skip!("skipping VDEF infinity differential: pinned RRDtool 1.11.0 is not installed");
         return;
     }
 
