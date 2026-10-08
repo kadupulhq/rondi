@@ -658,3 +658,99 @@ fn dcounter_dderive_special_samples_match_rrdtool_byte_for_byte() {
         }
     }
 }
+
+/// A batch stops at the first rejected sample and keeps the samples before
+/// it, as one `rrdtool update file s1 s2 ...` call does; with
+/// `--skip-past-updates` stale samples are skipped instead.
+#[test]
+fn batch_update_matches_one_rrdtool_update_call() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        oracle_skip!("skipping batch update differential: pinned RRDtool 1.11.0 is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let samples = [
+        (1_000_000_010_i64, 0_u64, "1"),
+        (1_000_000_021, 250_000, "5"),
+        (1_000_000_015, 0, "3"),
+        (1_000_000_047, 0, "U"),
+        (1_000_000_090, 0, "8"),
+    ];
+    for skip_past_updates in [false, true] {
+        let oracle = temp
+            .path()
+            .join(format!("batch-{skip_past_updates}-oracle.rrd"));
+        let ours = temp
+            .path()
+            .join(format!("batch-{skip_past_updates}-rondi.rrd"));
+        let created = Command::new("rrdtool")
+            .arg("create")
+            .arg(&oracle)
+            .args([
+                "--start",
+                "1000000000",
+                "--step",
+                "10",
+                "DS:g:GAUGE:30:U:U",
+                "DS:d:DERIVE:30:U:U",
+                "RRA:AVERAGE:0.5:1:10",
+                "RRA:MAX:0.5:3:10",
+            ])
+            .output()
+            .unwrap();
+        assert!(created.status.success());
+        std::fs::copy(&oracle, &ours).unwrap();
+        let arguments = samples
+            .iter()
+            .enumerate()
+            .map(|(index, (timestamp, usec, value))| {
+                update_argument(
+                    *timestamp,
+                    *usec,
+                    &[
+                        (*value != "U").then(|| (*value).to_owned()),
+                        Some((index * 100).to_string()),
+                    ],
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut command = Command::new("rrdtool");
+        command.arg("update").arg(&oracle);
+        if skip_past_updates {
+            command.arg("--skip-past-updates");
+        }
+        let upstream = command.args(&arguments).output().unwrap();
+        let derive = samples
+            .iter()
+            .enumerate()
+            .map(|(index, _)| (index * 100).to_string())
+            .collect::<Vec<_>>();
+        let updates = samples
+            .iter()
+            .zip(&derive)
+            .map(|((timestamp, usec, value), derive)| rondi::RrdRawUpdate {
+                timestamp: *timestamp,
+                timestamp_usec: *usec,
+                values: vec![(*value != "U").then_some(*value), Some(derive.as_str())],
+            })
+            .collect::<Vec<_>>();
+        let local = rondi::update_rrd_raw_batch(&ours, &updates, skip_past_updates);
+        assert_eq!(
+            upstream.status.success(),
+            local.is_ok(),
+            "skip={skip_past_updates}: RRDtool {:?}, Rondi {local:?}",
+            String::from_utf8_lossy(&upstream.stderr)
+        );
+        assert_eq!(
+            std::fs::read(&oracle).unwrap(),
+            std::fs::read(&ours).unwrap(),
+            "skip={skip_past_updates}: files differ"
+        );
+    }
+}
