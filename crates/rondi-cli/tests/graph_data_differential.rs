@@ -453,6 +453,42 @@ fn print_formatters_match_print_calc() {
     );
 }
 
+// timestamp_to_tm (rrd_graph.c:1810) truncates any in-range value to
+// seconds; GPRINT formats into the legend buffer with snprintf(FMT_LEG_LEN
+// - 2) for numbers and snprintf(FMT_LEG_LEN) for the `%.0f` fallback
+// (rrd_graph.c:2017-2033), while PRINT allocates.
+#[test]
+fn print_and_gprint_text_lengths_match_print_calc() {
+    let Some(f) = fixture() else { return };
+    check_all(
+        [
+            vec![
+                "VDEF:v=x,MAXIMUM",
+                "PRINT:v:%s:valstrftime",
+                "GPRINT:v:%s:valstrftime",
+            ],
+            vec![
+                "CDEF:t=x,-0.5,*",
+                "VDEF:v=t,MAXIMUM",
+                "PRINT:v:%s:valstrftime",
+            ],
+            vec!["GPRINT:x:AVERAGE:%300.2lf", "PRINT:x:AVERAGE:%300.2lf"],
+            vec![
+                "CDEF:t=x,1e300,*",
+                "VDEF:v=t,MAXIMUM",
+                "GPRINT:v:%s:valstrftime",
+                "PRINT:v:%s:valstrftime",
+            ],
+        ]
+        .iter()
+        .map(|extra| {
+            let mut elements = vec!["LINE1:x#ff0000"];
+            elements.extend(extra.iter().copied());
+            f.assert_same(&f.graphv(&elements))
+        }),
+    );
+}
+
 // graph_paint (rrd_graph.c:3975) stops after print_calc when nothing is
 // drawn: no image, 0x0 and only print lines.
 #[test]
