@@ -5,9 +5,9 @@ use rondi::time::{
 };
 use rondi::{
     DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, DatabaseConfig, RrdDataSourceTune, RrdDumpHeader,
-    RrdResizeAction, RrdTuneBound, Store, StoreOptions, Update, create_rrd_file,
+    RrdRawUpdate, RrdResizeAction, RrdTuneBound, Store, StoreOptions, Update, create_rrd_file,
     dump_rrd_file_with_header, fetch_rrd_file, first_rrd_time, parse_rrd_scaled_duration,
-    resize_rrd_file, restore_rrd_file, tune_rrd_data_sources, update_rrd_raw_values_precise,
+    resize_rrd_file, restore_rrd_file, tune_rrd_data_sources, update_rrd_raw_batch,
     update_rrd_raw_values_precise_verbose,
 };
 use std::fmt::Write as FmtWrite;
@@ -1336,22 +1336,25 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         fetch_rrd_file(&filename, cf, start, end, resolution)?
     };
-    print!("           ");
+    // stdout is line buffered; one write per row dominates large fetches.
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    write!(out, "           ")?;
     for data_source in &result.data_sources {
-        print!("{data_source:>20}");
+        write!(out, "{data_source:>20}")?;
     }
-    println!("\n");
+    writeln!(out, "\n")?;
     for row in result.rows {
-        print!("{:>10}:", row.timestamp);
+        write!(out, "{:>10}:", row.timestamp)?;
         for value in row.values {
             match value {
-                Some(value) => print!(" {}", format_fetch_value(value)),
-                None if from_daemon => print!(" {}", rrd_daemon_unknown_text()),
-                None => print!(" {}", rrd_unknown_text()),
+                Some(value) => write!(out, " {}", format_fetch_value(value))?,
+                None if from_daemon => write!(out, " {}", rrd_daemon_unknown_text())?,
+                None => write!(out, " {}", rrd_unknown_text())?,
             }
         }
-        println!();
+        writeln!(out)?;
     }
+    out.flush()?;
     Ok(())
 }
 
@@ -4504,6 +4507,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
     // Local RRD writes use RRDtool's per-file fcntl lock in the library, which
     // tries once unless $RRD_LOCKING says otherwise. A directory-wide Rondi
     // lock would serialize unrelated files and stop parallel poller updates.
+    let mut source_count = None;
     let source_names = if let Some(template) = &template {
         let info = inspect_rrd(&args[1])?;
         let mut indices = Vec::with_capacity(template.len());
@@ -4515,6 +4519,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                     .ok_or_else(|| format!("unknown DS name '{name}'"))?,
             );
         }
+        source_count = Some(info.data_sources.len());
         Some(indices)
     } else {
         None
@@ -4534,7 +4539,11 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
         println!("return_value = 0");
     }
     let mut daemon_samples = Vec::new();
-    for sample in &samples {
+    // Local samples are applied together under one open and lock, as
+    // rrd_update_r does; a later sample's parse error is reported after the
+    // samples before it are written.
+    let mut pending: Vec<(i64, u64, Vec<Option<String>>)> = Vec::new();
+    let parsed = samples.iter().try_for_each(|sample| -> Result<(), Box<dyn std::error::Error>> {
         let (timestamp, values, at_style) =
             if let Some((timestamp, values)) = sample.split_once('@') {
                 (timestamp, values, true)
@@ -4558,7 +4567,10 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
             })
             .collect::<Vec<_>>();
         if template.is_none() && daemon_address.is_none() {
-            let source_count = inspect_rrd(&args[1])?.data_sources.len();
+            let source_count = match source_count {
+                Some(count) => count,
+                None => *source_count.insert(inspect_rrd(&args[1])?.data_sources.len()),
+            };
             if raw_values.len() > source_count {
                 return Err(format!(
                     "{}: found extra data on update argument: {}",
@@ -4625,7 +4637,11 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 )
                 .into());
             }
-            let mut expanded = vec![None; inspect_rrd(&args[1])?.data_sources.len()];
+            let source_count = match source_count {
+                Some(count) => count,
+                None => *source_count.insert(inspect_rrd(&args[1])?.data_sources.len()),
+            };
+            let mut expanded = vec![None; source_count];
             for (source_index, raw_value) in indices.iter().zip(raw_values) {
                 expanded[*source_index] = raw_value;
             }
@@ -4658,12 +4674,12 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 )
             })?
         };
-        if skip_past_updates && daemon_address.is_none() {
+        if skip_past_updates && verbose {
             let info = inspect_rrd(&args[1])?;
             if (update_time.seconds, update_time.microseconds)
                 <= (info.last_update, info.last_update_usec)
             {
-                continue;
+                return Ok(());
             }
         }
         if daemon_address.is_some() {
@@ -4673,7 +4689,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 .collect::<Vec<_>>()
                 .join(":");
             daemon_samples.push(format!("{}:{encoded_values}", update_time.format_rrd()));
-            continue;
+            return Ok(());
         }
         if verbose {
             let raw_values = raw_values.iter().map(Option::as_deref).collect::<Vec<_>>();
@@ -4702,16 +4718,23 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 }
             }
         } else {
-            let raw_values = raw_values.iter().map(Option::as_deref).collect::<Vec<_>>();
-            update_rrd_raw_values_precise(
-                &filename,
-                update_time.seconds,
-                update_time.microseconds,
-                &raw_values,
-            )
-            .map_err(|error| rrd_update_error(&filename, error))?;
+            pending.push((update_time.seconds, update_time.microseconds, raw_values));
         }
+        Ok(())
+    });
+    if !pending.is_empty() {
+        let updates = pending
+            .iter()
+            .map(|(seconds, microseconds, values)| RrdRawUpdate {
+                timestamp: *seconds,
+                timestamp_usec: *microseconds,
+                values: values.iter().map(Option::as_deref).collect(),
+            })
+            .collect::<Vec<_>>();
+        update_rrd_raw_batch(&filename, &updates, skip_past_updates)
+            .map_err(|error| rrd_update_error(&filename, error))?;
     }
+    parsed?;
     if let Some(address) = daemon_address {
         if !daemon_samples.is_empty() {
             #[cfg(unix)]

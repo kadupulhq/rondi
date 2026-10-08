@@ -511,6 +511,39 @@ pub(crate) fn fetch_path(
         .rem_euclid(row_count);
     }
 
+    // The rows inside the archive form one circular run starting at
+    // `pointer`; read it in at most two pieces instead of one read per row.
+    let row_bytes = info.data_sources.len() * VALUE_LEN;
+    let stored_rows = if in_archive_range {
+        let first = start_offset.max(0);
+        let last = (row_count - end_offset).min(row_count);
+        usize::try_from((last - first).max(0)).map_err(|_| rrd_error("RRD row count overflows"))?
+    } else {
+        0
+    };
+    let mut stored = vec![0_u8; stored_rows * row_bytes];
+    let mut filled = 0;
+    let mut segment_start = pointer;
+    while filled < stored.len() {
+        let segment_rows =
+            (row_count - segment_start).min(((stored.len() - filled) / row_bytes) as i128);
+        let offset = archive
+            .data_offset
+            .checked_add(
+                u64::try_from(segment_start)
+                    .map_err(|_| rrd_error("RRD row offset overflows"))?
+                    .checked_mul(row_bytes as u64)
+                    .ok_or_else(|| rrd_error("RRD row offset overflows"))?,
+            )
+            .ok_or_else(|| rrd_error("RRD row offset overflows"))?;
+        let length = segment_rows as usize * row_bytes;
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut stored[filled..filled + length])?;
+        filled += length;
+        segment_start = 0;
+    }
+    let mut stored_rows = stored.chunks_exact(row_bytes.max(1));
+
     let mut rows = Vec::new();
     let mut timestamp = start
         .checked_add(step_i64)
@@ -525,19 +558,13 @@ pub(crate) fn fetch_path(
         let values = if index < 0 || index >= row_count || !in_archive_range {
             vec![None; info.data_sources.len()]
         } else {
-            let offset = archive
-                .data_offset
-                .checked_add(
-                    u64::try_from(pointer)
-                        .map_err(|_| rrd_error("RRD row offset overflows"))?
-                        .checked_mul(info.data_sources.len() as u64 * VALUE_LEN as u64)
-                        .ok_or_else(|| rrd_error("RRD row offset overflows"))?,
-                )
-                .ok_or_else(|| rrd_error("RRD row offset overflows"))?;
-            file.seek(SeekFrom::Start(offset))?;
-            let mut bytes = vec![0; info.data_sources.len() * VALUE_LEN];
-            file.read_exact(&mut bytes)?;
-            pointer += 1;
+            let bytes = if row_bytes == 0 {
+                &[][..]
+            } else {
+                stored_rows
+                    .next()
+                    .ok_or_else(|| rrd_error("RRD fetch read fewer rows than it addressed"))?
+            };
             bytes
                 .chunks_exact(VALUE_LEN)
                 .map(|chunk| {
@@ -551,9 +578,6 @@ pub(crate) fn fetch_path(
             .checked_add(step_i64)
             .ok_or_else(|| rrd_error("RRD fetch timestamp overflows"))?;
         index += 1;
-        if pointer >= row_count {
-            pointer -= row_count;
-        }
     }
     // RRDtool reports the aligned request bounds, not the first/last emitted
     // row timestamps.
@@ -600,6 +624,25 @@ fn update_path_values_with_raw(
     values: &[Option<f64>],
     raw_values: Option<&[Option<&str>]>,
 ) -> Result<Vec<RrdUpdateSummary>, StoreError> {
+    check_update_arguments(timestamp_usec, values, raw_values)?;
+    let mut file = RrdFileLock::exclusive(open_rrd_write(path)?)?;
+    let mut info = read_info(&mut file)?;
+    apply_update(
+        &mut file,
+        &mut info,
+        &mut None,
+        timestamp,
+        timestamp_usec,
+        values,
+        raw_values,
+    )
+}
+
+fn check_update_arguments(
+    timestamp_usec: u64,
+    values: &[Option<f64>],
+    raw_values: Option<&[Option<&str>]>,
+) -> Result<(), StoreError> {
     if timestamp_usec >= 1_000_000 {
         return Err(StoreError::InvalidValue);
     }
@@ -611,8 +654,21 @@ fn update_path_values_with_raw(
     if raw_values.is_some_and(|raw| raw.len() != values.len()) {
         return Err(StoreError::InvalidValue);
     }
-    let mut file = RrdFileLock::exclusive(open_rrd_write(path)?)?;
-    let info = read_info(&mut file)?;
+    Ok(())
+}
+
+/// Apply one sample to an open, locked file whose header is `info`, then
+/// bring `info` and the cached prep area `state_cache` up to date so the
+/// next sample in a batch needs no further header read.
+fn apply_update(
+    file: &mut File,
+    info: &mut RrdInfo,
+    state_cache: &mut Option<Vec<u8>>,
+    timestamp: i64,
+    timestamp_usec: u64,
+    values: &[Option<f64>],
+    raw_values: Option<&[Option<&str>]>,
+) -> Result<Vec<RrdUpdateSummary>, StoreError> {
     if info.data_sources.len() != values.len()
         || info.data_sources.iter().any(|ds| {
             !matches!(
@@ -765,7 +821,7 @@ fn update_path_values_with_raw(
                     })
                     .collect::<Vec<_>>();
                 let pdp_temp = process_pdp_steps(
-                    &info,
+                    info,
                     &mut pdp_prep,
                     open_seconds as f64,
                     open_seconds as f64,
@@ -774,12 +830,12 @@ fn update_path_values_with_raw(
                     &open_new,
                 );
                 let row_counts =
-                    update_cdp_preps(&info, &mut cdp_prep, 1, proc_pdp_count, &pdp_temp);
+                    update_cdp_preps(info, &mut cdp_prep, 1, proc_pdp_count, &pdp_temp);
                 let open_close_time = last_update
                     .checked_add(open_seconds as i64)
                     .ok_or_else(|| rrd_error("RRD timestamp alignment overflows"))?;
                 write_rra_rows(
-                    &info,
+                    info,
                     &cdp_prep,
                     &mut current_rows,
                     &row_counts,
@@ -794,7 +850,7 @@ fn update_path_values_with_raw(
             }
         }
         let pdp_temp = process_pdp_steps(
-            &info,
+            info,
             &mut pdp_prep,
             interval,
             pre_interval,
@@ -802,9 +858,9 @@ fn update_path_values_with_raw(
             elapsed,
             &pdp_new,
         );
-        let row_counts = update_cdp_preps(&info, &mut cdp_prep, elapsed, proc_pdp_count, &pdp_temp);
+        let row_counts = update_cdp_preps(info, &mut cdp_prep, elapsed, proc_pdp_count, &pdp_temp);
         write_rra_rows(
-            &info,
+            info,
             &cdp_prep,
             &mut current_rows,
             &row_counts,
@@ -823,9 +879,16 @@ fn update_path_values_with_raw(
         }
         file.write_all(&bytes)?;
     }
-    let mut state = vec![0_u8; pointer_start + info.archives.len() * RRA_PTR_LEN - pdp_start];
-    file.seek(SeekFrom::Start(pdp_start as u64))?;
-    file.read_exact(&mut state)?;
+    let mut state = match state_cache.take() {
+        Some(state) => state,
+        None => {
+            let mut state =
+                vec![0_u8; pointer_start + info.archives.len() * RRA_PTR_LEN - pdp_start];
+            file.seek(SeekFrom::Start(pdp_start as u64))?;
+            file.read_exact(&mut state)?;
+            state
+        }
+    };
     for (index, ((unknown, value), last_ds)) in pdp_prep.iter().zip(&last_ds_bytes).enumerate() {
         let offset = index * PDP_PREP_LEN;
         state[offset..offset + 30].copy_from_slice(last_ds);
@@ -853,6 +916,75 @@ fn update_path_values_with_raw(
     file.write_all(&(timestamp_usec as i64).to_le_bytes())?;
     // No fsync: RRDtool leaves writeback to the kernel on every .rrd write
     // path (rrd_flush is a no-op, rrd_close only unmaps and closes).
+    *state_cache = Some(state);
+    for (index, (source, (unknown, value))) in
+        info.data_sources.iter_mut().zip(pdp_prep).enumerate()
+    {
+        let last_ds = &last_ds_bytes[index];
+        let length = last_ds
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(last_ds.len());
+        source.last_value = String::from_utf8_lossy(&last_ds[..length]).into_owned();
+        source.unknown_seconds = unknown;
+        source.pdp_value = value;
+    }
+    for ((archive, scratch), current_row) in info
+        .archives
+        .iter_mut()
+        .zip(cdp_prep.chunks(ds_count))
+        .zip(current_rows)
+    {
+        archive.cdp_prep = scratch.to_vec();
+        archive.current_row = current_row;
+    }
+    info.last_update = timestamp;
+    info.last_update_usec = timestamp_usec;
+    Ok(summaries)
+}
+
+/// One sample for [`update_rrd_raw_batch`], with the caller's exact text for
+/// each data source (`None` is unknown).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RrdRawUpdate<'a> {
+    pub timestamp: i64,
+    pub timestamp_usec: u64,
+    pub values: Vec<Option<&'a str>>,
+}
+
+/// Apply several samples in order under one open and one lock, reading the
+/// header once, as `rrdtool update file s1 s2 ...` does. Processing stops at
+/// the first failing sample; the samples before it stay written. With
+/// `skip_past_updates`, samples not newer than the last update are ignored
+/// (`--skip-past-updates`). Returns the archive rows written by all samples.
+pub fn update_rrd_raw_batch(
+    path: impl AsRef<Path>,
+    updates: &[RrdRawUpdate<'_>],
+    skip_past_updates: bool,
+) -> Result<Vec<RrdUpdateSummary>, StoreError> {
+    let mut file = RrdFileLock::exclusive(open_rrd_write(path.as_ref())?)?;
+    let mut info = read_info(&mut file)?;
+    let mut state_cache = None;
+    let mut summaries = Vec::new();
+    for update in updates {
+        if skip_past_updates
+            && (update.timestamp, update.timestamp_usec)
+                <= (info.last_update, info.last_update_usec)
+        {
+            continue;
+        }
+        let values = parse_raw_values(&update.values)?;
+        check_update_arguments(update.timestamp_usec, &values, Some(&update.values))?;
+        summaries.extend(apply_update(
+            &mut file,
+            &mut info,
+            &mut state_cache,
+            update.timestamp,
+            update.timestamp_usec,
+            &values,
+            Some(&update.values),
+        )?);
+    }
     Ok(summaries)
 }
 
