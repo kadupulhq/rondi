@@ -3,7 +3,7 @@ ignore = []
 
 [licenses]
 allow = [
-  "GPL-2.0-only",
+  "GPL-2.0-or-later WITH RRDtool-FLOSS-exception-2.0",
   "0BSD",
   "MIT",
   "Unicode-3.0",

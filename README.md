@@ -105,4 +105,4 @@ Changes are reviewed through pull requests using the repository's [pull request 
 
 ## License
 
-GPL-2.0-only. See [LICENSE](LICENSE).
+GPL-2.0-or-later with the RRDtool FLOSS License Exception (SPDX `GPL-2.0-or-later WITH RRDtool-FLOSS-exception-2.0`), the same terms as RRDtool 1.11.0. See [COPYRIGHT](COPYRIGHT) for the notice and exception text, copied from RRDtool's `COPYRIGHT`, and [LICENSE](LICENSE) for the GPL version 2 text.

@@ -27,3 +27,8 @@ trim_trailing_whitespace = false
 
 [Makefile]
 indent_style = tab
+
+[COPYRIGHT]
+# Keeps the RRDtool FLOSS exception text byte-identical to upstream.
+trim_trailing_whitespace = false
+indent_style = unset
