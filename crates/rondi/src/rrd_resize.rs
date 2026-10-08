@@ -55,6 +55,55 @@ impl Mapped {
     }
 }
 
+/// `rrd_read` one value into the shared buffer and `rrd_write` it out.
+fn copy_value(
+    input: &mut Mapped,
+    out: &mut Mapped,
+    buffer: &mut [u8; VALUE_LEN],
+    error: &mut Option<String>,
+) {
+    input.read(buffer);
+    out.write(&buffer[..], error);
+}
+
+struct Copy<'a> {
+    input: &'a mut Mapped,
+    out: &'a mut Mapped,
+    buffer: &'a mut [u8; VALUE_LEN],
+    error: &'a mut Option<String>,
+}
+
+impl Copy<'_> {
+    /// rrd_resize.c:212-248: drop rows after the cursor, wrapping to the
+    /// start of the archive when they run past its end.
+    fn shrink(&mut self, ds: u64, cur_row: &mut u64, row_cnt: &mut u64, modify: &mut i64) {
+        let row_bytes = (VALUE_LEN as u64).wrapping_mul(ds);
+        // (cur_row - modify) % row_cnt in unsigned long, stored in a long.
+        let mut remove_end = (cur_row.wrapping_sub(*modify as u64) % *row_cnt) as i64;
+        if remove_end <= *cur_row as i64 {
+            while remove_end >= 0 {
+                self.input.pos = self.input.pos.wrapping_add(row_bytes);
+                *cur_row = cur_row.wrapping_sub(1);
+                *row_cnt = row_cnt.wrapping_sub(1);
+                remove_end -= 1;
+                *modify += 1;
+            }
+        }
+        let mut row = 0_u64;
+        while row <= *cur_row {
+            for _ in 0..ds {
+                copy_value(self.input, self.out, self.buffer, self.error);
+            }
+            row += 1;
+        }
+        while *modify < 0 {
+            self.input.pos = self.input.pos.wrapping_add(row_bytes);
+            *row_cnt = row_cnt.wrapping_sub(1);
+            *modify += 1;
+        }
+    }
+}
+
 fn u64_at(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
@@ -175,53 +224,29 @@ pub fn resize_rrd_file(
     let ds = ds_cnt as u64;
     // rrd_resize.c keeps one `buffer` for every copy.
     let mut buffer = [0_u8; VALUE_LEN];
-    let copy = |input: &mut Mapped,
-                out: &mut Mapped,
-                buffer: &mut [u8; VALUE_LEN],
-                error: &mut Option<String>| {
-        input.read(buffer);
-        out.write(&buffer[..], error);
-    };
     let before = (0..rra_index).fold(0_u64, |total, rra| {
         total.wrapping_add(ds.wrapping_mul(u64_at(&rra_defs, row_cnt_offset(rra))))
     });
     for _ in 0..before {
-        copy(&mut input, &mut out, &mut buffer, &mut error);
+        copy_value(&mut input, &mut out, &mut buffer, &mut error);
     }
     if modify > 0 {
         for _ in 0..ds.wrapping_mul(rra_ptrs[rra_index].wrapping_add(1)) {
-            copy(&mut input, &mut out, &mut buffer, &mut error);
+            copy_value(&mut input, &mut out, &mut buffer, &mut error);
         }
         buffer = rrd_nan().to_le_bytes();
         for _ in 0..ds.wrapping_mul(modify as u64) {
             out.write(&buffer, &mut error);
         }
     } else {
-        let row_bytes = (VALUE_LEN as u64).wrapping_mul(ds);
         let mut row_cnt = u64_at(&rra_defs, row_cnt_offset(rra_index));
-        // (cur_row - modify) % row_cnt in unsigned long, stored in a long.
-        let mut remove_end = (rra_ptrs[rra_index].wrapping_sub(modify as u64) % row_cnt) as i64;
-        if remove_end <= rra_ptrs[rra_index] as i64 {
-            while remove_end >= 0 {
-                input.pos = input.pos.wrapping_add(row_bytes);
-                rra_ptrs[rra_index] = rra_ptrs[rra_index].wrapping_sub(1);
-                row_cnt = row_cnt.wrapping_sub(1);
-                remove_end -= 1;
-                modify += 1;
-            }
-        }
-        let mut row = 0_u64;
-        while row <= rra_ptrs[rra_index] {
-            for _ in 0..ds {
-                copy(&mut input, &mut out, &mut buffer, &mut error);
-            }
-            row += 1;
-        }
-        while modify < 0 {
-            input.pos = input.pos.wrapping_add(row_bytes);
-            row_cnt = row_cnt.wrapping_sub(1);
-            modify += 1;
-        }
+        let mut copy = Copy {
+            input: &mut input,
+            out: &mut out,
+            buffer: &mut buffer,
+            error: &mut error,
+        };
+        copy.shrink(ds, &mut rra_ptrs[rra_index], &mut row_cnt, &mut modify);
         rra_defs[row_cnt_offset(rra_index)..row_cnt_offset(rra_index) + 8]
             .copy_from_slice(&row_cnt.to_le_bytes());
     }

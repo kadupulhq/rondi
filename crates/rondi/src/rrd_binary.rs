@@ -2475,9 +2475,8 @@ pub fn open_output_file(path: &Path, exclusive: bool) -> std::io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-        options
-            .mode(0o666)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        // The default creation mode is already 0666 less the umask.
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         let file = options.open(path).map_err(|error| {
             if error.raw_os_error() == Some(libc::ELOOP) {
                 std::io::Error::other("refusing to follow a symbolic link")

@@ -83,147 +83,166 @@ impl<'a> XmlReader<'a> {
     fn read(&mut self) -> Result<bool, String> {
         loop {
             if self.position >= self.data.len() {
-                self.parsed = self.data.len();
-                if let Some(open) = self.open.last() {
-                    return Err(format!("Premature end of data in tag {open}"));
-                }
-                if !self.root_closed {
-                    return Err("Start tag expected, '<' not found".into());
-                }
-                return Ok(false);
+                return self.read_end();
             }
             let rest = &self.data[self.position..];
             if rest.starts_with(b"<?") {
-                let end = self
-                    .find(b"?>")
-                    .ok_or("unterminated processing instruction")?;
-                self.consume_to(end + 2);
-                self.node = NodeType::Other;
-                return Ok(true);
+                return self.skip_to(b"?>", "unterminated processing instruction");
             }
             if rest.starts_with(b"<!--") {
-                let end = self.find(b"-->").ok_or("Comment not terminated")?;
-                self.consume_to(end + 3);
-                self.node = NodeType::Other;
-                return Ok(true);
+                return self.skip_to(b"-->", "Comment not terminated");
             }
             if rest.starts_with(b"<![CDATA[") {
-                let end = self.find(b"]]>").ok_or("CData section not finished")?;
-                self.consume_to(end + 3);
-                self.node = NodeType::Other;
-                return Ok(true);
+                return self.skip_to(b"]]>", "CData section not finished");
             }
             if rest.starts_with(b"<!") {
-                // DOCTYPE, with an optional internal subset.
-                let mut index = self.position + 2;
-                let mut depth = 0;
-                while index < self.data.len() {
-                    match self.data[index] {
-                        b'[' => depth += 1,
-                        b']' => depth -= 1,
-                        b'>' if depth <= 0 => break,
-                        _ => {}
-                    }
-                    index += 1;
-                }
-                if index >= self.data.len() {
-                    return Err("DOCTYPE improperly terminated".into());
-                }
-                self.consume_to(index + 1);
-                self.node = NodeType::Other;
-                return Ok(true);
+                return self.read_doctype();
             }
             if rest.starts_with(b"</") {
-                let end = self.find(b">").ok_or("expected '>'")?;
-                let name = String::from_utf8_lossy(&self.data[self.position + 2..end])
-                    .trim_end()
-                    .to_owned();
-                self.consume_to(end + 1);
-                match self.open.pop() {
-                    Some(open) if open == name => {}
-                    Some(open) => {
-                        return Err(format!(
-                            "Opening and ending tag mismatch: {open} and {name}"
-                        ));
-                    }
-                    None => return Err("Extra content at the end of the document".into()),
-                }
-                if self.open.is_empty() {
-                    self.root_closed = true;
-                }
-                self.node = NodeType::EndElement;
-                self.name = name;
-                return Ok(true);
+                return self.read_end_tag();
             }
             if rest.starts_with(b"<") {
-                if self.root_closed {
-                    return Err("Extra content at the end of the document".into());
+                return self.read_start_tag();
+            }
+            if let Some(read) = self.read_text()? {
+                return Ok(read);
+            }
+        }
+    }
+
+    fn read_end(&mut self) -> Result<bool, String> {
+        self.parsed = self.data.len();
+        if let Some(open) = self.open.last() {
+            return Err(format!("Premature end of data in tag {open}"));
+        }
+        if !self.root_closed {
+            return Err("Start tag expected, '<' not found".into());
+        }
+        Ok(false)
+    }
+
+    /// Comments, processing instructions and CDATA are nodes neither
+    /// get_xml_element nor get_xml_text looks at.
+    fn skip_to(&mut self, terminator: &[u8], unterminated: &str) -> Result<bool, String> {
+        let end = self.find(terminator).ok_or(unterminated)?;
+        self.consume_to(end + terminator.len());
+        self.node = NodeType::Other;
+        Ok(true)
+    }
+
+    /// DOCTYPE, with an optional internal subset.
+    fn read_doctype(&mut self) -> Result<bool, String> {
+        let mut depth = 0;
+        let end = self.data[self.position + 2..]
+            .iter()
+            .position(|byte| {
+                match byte {
+                    b'[' => depth += 1,
+                    b']' => depth -= 1,
+                    b'>' if depth <= 0 => return true,
+                    _ => {}
                 }
-                let mut index = self.position + 1;
-                let name_start = index;
-                while index < self.data.len()
-                    && !matches!(self.data[index], b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'>')
-                {
-                    index += 1;
-                }
-                let name = String::from_utf8_lossy(&self.data[name_start..index]).into_owned();
-                if name.is_empty() {
-                    return Err("StartTag: invalid element name".into());
-                }
-                let mut quote = None;
-                while index < self.data.len() {
-                    let byte = self.data[index];
-                    match quote {
-                        Some(open) if byte == open => quote = None,
-                        Some(_) => {}
-                        None if byte == b'"' || byte == b'\'' => quote = Some(byte),
-                        None if byte == b'>' => break,
-                        None => {}
+                false
+            })
+            .ok_or("DOCTYPE improperly terminated")?;
+        self.consume_to(self.position + 2 + end + 1);
+        self.node = NodeType::Other;
+        Ok(true)
+    }
+
+    fn read_end_tag(&mut self) -> Result<bool, String> {
+        let end = self.find(b">").ok_or("expected '>'")?;
+        let name = String::from_utf8_lossy(&self.data[self.position + 2..end])
+            .trim_end()
+            .to_owned();
+        self.consume_to(end + 1);
+        match self.open.pop() {
+            Some(open) if open == name => {}
+            Some(open) => {
+                return Err(format!(
+                    "Opening and ending tag mismatch: {open} and {name}"
+                ));
+            }
+            None => return Err("Extra content at the end of the document".into()),
+        }
+        self.root_closed = self.open.is_empty();
+        self.node = NodeType::EndElement;
+        self.name = name;
+        Ok(true)
+    }
+
+    fn read_start_tag(&mut self) -> Result<bool, String> {
+        if self.root_closed {
+            return Err("Extra content at the end of the document".into());
+        }
+        let name_start = self.position + 1;
+        let name_len = self.data[name_start..]
+            .iter()
+            .take_while(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'>'))
+            .count();
+        let name =
+            String::from_utf8_lossy(&self.data[name_start..name_start + name_len]).into_owned();
+        if name.is_empty() {
+            return Err("StartTag: invalid element name".into());
+        }
+        let mut quote = None;
+        let end = self.data[name_start + name_len..]
+            .iter()
+            .position(|byte| match quote {
+                Some(open) => {
+                    if *byte == open {
+                        quote = None;
                     }
-                    index += 1;
+                    false
                 }
-                if index >= self.data.len() {
-                    return Err(format!("Couldn't find end of Start Tag {name}"));
+                None if matches!(byte, b'"' | b'\'') => {
+                    quote = Some(*byte);
+                    false
                 }
-                let empty = self.data[index - 1] == b'/';
-                self.consume_to(index + 1);
-                if empty {
-                    if self.open.is_empty() {
-                        self.root_closed = true;
-                    }
-                } else {
-                    self.open.push(name.clone());
-                }
-                self.node = NodeType::Element;
-                self.name = name;
-                return Ok(true);
+                None => *byte == b'>',
+            })
+            .map(|offset| name_start + name_len + offset)
+            .ok_or_else(|| format!("Couldn't find end of Start Tag {name}"))?;
+        let empty = self.data[end - 1] == b'/';
+        self.consume_to(end + 1);
+        if empty {
+            self.root_closed = self.open.is_empty();
+        } else {
+            self.open.push(name.clone());
+        }
+        self.node = NodeType::Element;
+        self.name = name;
+        Ok(true)
+    }
+
+    /// Character data up to the next '<'. Blank text inside an element is a
+    /// whitespace node; blank text outside the root is skipped (None).
+    fn read_text(&mut self) -> Result<Option<bool>, String> {
+        let end = self.find(b"<").unwrap_or(self.data.len());
+        let raw = String::from_utf8_lossy(&self.data[self.position..end]).into_owned();
+        // Character data is complete once the parser has seen the '<'.
+        self.position = end;
+        self.parsed = self.parsed.max((end + 1).min(self.data.len()));
+        let blank = raw
+            .bytes()
+            .all(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'));
+        if self.open.is_empty() {
+            if blank {
+                return Ok(None);
             }
-            let end = self.find(b"<").unwrap_or(self.data.len());
-            let raw = String::from_utf8_lossy(&self.data[self.position..end]).into_owned();
-            // Character data is complete once the parser has seen the '<'.
-            self.position = end;
-            self.parsed = self.parsed.max((end + 1).min(self.data.len()));
-            if raw
-                .bytes()
-                .all(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'))
-            {
-                if self.open.is_empty() {
-                    continue;
-                }
-                self.node = NodeType::Other;
-                return Ok(true);
-            }
-            if self.open.is_empty() {
-                return Err(if self.root_closed {
-                    "Extra content at the end of the document".into()
-                } else {
-                    "Start tag expected, '<' not found".into()
-                });
-            }
+            return Err(if self.root_closed {
+                "Extra content at the end of the document".into()
+            } else {
+                "Start tag expected, '<' not found".into()
+            });
+        }
+        if blank {
+            self.node = NodeType::Other;
+        } else {
             self.value = decode_entities(&raw)?;
             self.node = NodeType::Text;
-            return Ok(true);
         }
+        Ok(Some(true))
     }
 }
 
@@ -602,53 +621,13 @@ impl Restore<'_> {
         let mut status = Err(());
         while let Some(element) = self.get_xml_element() {
             let lower = element.to_ascii_lowercase();
-            let double_slot = match lower.as_str() {
-                "hw_alpha" | "seasonal_gamma" | "delta_pos" => Some(1),
-                "hw_beta" | "smoothing_window" | "delta_neg" => Some(2),
-                "xff" => Some(0),
-                _ => None,
-            };
-            let count_slot = match lower.as_str() {
-                "dependent_rra_idx" => Some(3),
-                "seasonal_smooth_idx" | "window_len" => Some(4),
-                "failure_threshold" => Some(5),
-                _ => None,
-            };
             // Upstream assigns each result to `status` and then replaces it
             // with the end-element check, so a bad value only leaves its
             // error text behind.
-            if let Some(slot) = double_slot {
-                if let Ok(value) = self.get_xml_double() {
-                    put(rra_def, 40 + slot * 8, value.to_bits());
-                }
-            } else if let Some(slot) = count_slot {
-                if let Ok(value) = self.get_xml_ulong() {
-                    put(rra_def, 40 + slot * 8, value);
-                }
+            if let Some((slot, is_count)) = rra_param_slot(&lower) {
+                let _ = self.read_rra_param(rra_def, slot, is_count);
             } else if lower == "value" {
-                // Compatibility code for 1.0.49 (rrd_restore.c:755-779);
-                // `i-1 < ARRAY_LENGTH` is false for i == 0.
-                for index in 0..MAX_PAR {
-                    let mut status = if matches!(index, 3..=5) {
-                        self.get_xml_ulong()
-                            .map(|value| put(rra_def, 40 + index * 8, value))
-                    } else {
-                        self.get_xml_double()
-                            .map(|value| put(rra_def, 40 + index * 8, value.to_bits()))
-                    };
-                    if status.is_err() {
-                        break;
-                    }
-                    if (index as u32).wrapping_sub(1) < MAX_PAR as u32 {
-                        status = self.expect_element("/value");
-                        if status.is_ok() {
-                            status = self.expect_element("value");
-                        }
-                    }
-                    if status.is_err() {
-                        break;
-                    }
-                }
+                self.read_rra_param_values(rra_def);
             } else if lower == "/params" {
                 return status;
             } else {
@@ -664,6 +643,40 @@ impl Restore<'_> {
             }
         }
         status
+    }
+
+    /// One `<params>` value into `par[slot]`, as a double or an unsigned long.
+    fn read_rra_param(
+        &mut self,
+        rra_def: &mut [u8; RRA_DEF_LEN],
+        slot: usize,
+        is_count: bool,
+    ) -> Status {
+        let bits = if is_count {
+            self.get_xml_ulong()?
+        } else {
+            self.get_xml_double()?.to_bits()
+        };
+        put(rra_def, 40 + slot * 8, bits);
+        Ok(())
+    }
+
+    /// Compatibility code for 1.0.49 (rrd_restore.c:755-779): every par[]
+    /// in `<value>` elements. `i-1 < ARRAY_LENGTH` is false for i == 0.
+    fn read_rra_param_values(&mut self, rra_def: &mut [u8; RRA_DEF_LEN]) {
+        for index in 0..MAX_PAR {
+            if self
+                .read_rra_param(rra_def, index, matches!(index, 3..=5))
+                .is_err()
+            {
+                break;
+            }
+            if (index as u32).wrapping_sub(1) < MAX_PAR as u32
+                && (self.expect_element("/value").is_err() || self.expect_element("value").is_err())
+            {
+                break;
+            }
+        }
     }
 
     fn parse_tag_rra(&mut self, rrd: &mut Rrd) -> Status {
@@ -861,6 +874,19 @@ impl Restore<'_> {
             }
         }
         status
+    }
+}
+
+/// The par[] slot a `<params>` child names, and whether it is a count.
+fn rra_param_slot(tag: &str) -> Option<(usize, bool)> {
+    match tag {
+        "xff" => Some((0, false)),
+        "hw_alpha" | "seasonal_gamma" | "delta_pos" => Some((1, false)),
+        "hw_beta" | "smoothing_window" | "delta_neg" => Some((2, false)),
+        "dependent_rra_idx" => Some((3, true)),
+        "seasonal_smooth_idx" | "window_len" => Some((4, true)),
+        "failure_threshold" => Some((5, true)),
+        _ => None,
     }
 }
 
