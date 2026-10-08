@@ -84,25 +84,11 @@ pub mod cli {
     pub fn fuzz_xport(args: &[String]) -> Result<String, String> {
         let mut argv = vec![String::from("xport")];
         argv.extend_from_slice(args);
-        let mut prints = Vec::new();
-        let mut rest = Vec::new();
-        for arg in argv {
-            if arg.starts_with("PRINT:") || arg.starts_with("GPRINT:") {
-                prints.push(parse_graph_print(&arg).map_err(|e| e.to_string())?);
-            } else {
-                rest.push(arg);
-            }
+        match render_xport(&argv) {
+            Ok((output, None)) => Ok(output),
+            Ok((_, Some(error))) => Err(error),
+            Err(error) => Err(error.to_string()),
         }
-        render_xport_with_graph_prints(&rest, None, &prints, 1000)
-            .map(|rendered| {
-                let mut text = rendered.output;
-                for line in rendered.prints {
-                    text.push_str(&line);
-                    text.push('\n');
-                }
-                text
-            })
-            .map_err(|e| e.to_string())
     }
 
     /// `rrdtool graph <out> ...`; output goes to a scratch file.

@@ -2016,6 +2016,17 @@ fn rrdtool_xport(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/xport.txt"));
         return Ok(());
     }
+    let (output, error) = render_xport(args)?;
+    print!("{output}");
+    match error {
+        Some(error) => Err(error.into()),
+        None => Ok(()),
+    }
+}
+
+/// The xport document and, when formatting a PRINT failed part way, the
+/// error RRDtool reports after writing the head of the document.
+fn render_xport(args: &[String]) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
     let mut start = None::<String>;
     let mut end = None::<String>;
     let mut max_rows = 400_i64;
@@ -2098,12 +2109,7 @@ fn rrdtool_xport(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     flush_and_prepare_data(&mut im)?;
     let data = im.xport(false)?;
     let flags = u8::from(json) | (u8::from(show_time) << 1) | (u8::from(enum_ds) << 2);
-    let (output, error) = format_xport_xmljson(flags, &mut im, &data, 1000, false);
-    print!("{output}");
-    match error {
-        Some(error) => Err(error.into()),
-        None => Ok(()),
-    }
+    Ok(format_xport_xmljson(flags, &mut im, &data, 1000, false))
 }
 
 /// Turns graph elements into the native renderer's series, with one column
