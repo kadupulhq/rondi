@@ -1497,7 +1497,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     let mut only_graph = false;
     let mut full_size_mode = false;
     let mut force_rules_legend = false;
-    let mut legend_bottomup = false;
+    let mut legend_direction = rondi::graph_layout::LegendDirection::TopDown;
     let mut graph_colors = GraphColors::default();
     let mut grid_dash = Vec::<f64>::new();
     let mut border_width = 2_u32;
@@ -1660,8 +1660,15 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             }
             value if value.starts_with("--legend-direction=") => {
                 match &value["--legend-direction=".len()..] {
-                    "topdown" => legend_bottomup = false,
-                    "bottomup" | "bottomup2" => legend_bottomup = true,
+                    "topdown" => {
+                        legend_direction = rondi::graph_layout::LegendDirection::TopDown;
+                    }
+                    "bottomup" => {
+                        legend_direction = rondi::graph_layout::LegendDirection::BottomUp;
+                    }
+                    "bottomup2" => {
+                        legend_direction = rondi::graph_layout::LegendDirection::BottomUp2;
+                    }
                     direction => {
                         return Err(format!("invalid legend direction: {direction}").into());
                     }
@@ -1764,36 +1771,113 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         };
         // graph_paint stops after print_calc when nothing is drawn.
         if graph_elements {
+            use rondi::graph_layout::{
+                ALTAUTOSCALE, ALTAUTOSCALE_MAX, ALTAUTOSCALE_MIN, FORCE_RULES_LEGEND,
+                FULL_SIZE_MODE, NOLEGEND, ONLY_GRAPH, TEXT_PROP_LEGEND, text_height,
+            };
+            if image_width < 10 {
+                return Err("width below 10 pixels".into());
+            }
+            if image_height < 10 {
+                return Err("height below 10 pixels".into());
+            }
+            im.xsize = i64::from(image_width);
+            im.ysize = i64::from(image_height);
+            im.title.clone_from(&graph_title);
+            im.ylegend.clone_from(&vertical_label);
+            im.minval = lower_limit.unwrap_or_else(rrd_nan);
+            im.maxval = upper_limit.unwrap_or_else(rrd_nan);
+            im.rigid = rigid_scale;
+            im.allow_shrink = allow_shrink;
+            im.base = i64::from(si_base);
+            im.legenddirection = legend_direction;
+            for (set, flag) in [
+                (alt_autoscale, ALTAUTOSCALE),
+                (alt_autoscale_min, ALTAUTOSCALE_MIN),
+                (alt_autoscale_max, ALTAUTOSCALE_MAX),
+                (no_legend, NOLEGEND),
+                (only_graph, ONLY_GRAPH),
+                (force_rules_legend, FORCE_RULES_LEGEND),
+                (full_size_mode, FULL_SIZE_MODE),
+            ] {
+                if set {
+                    im.extra_flags |= flag;
+                }
+            }
+            // graph_paint_timestring.
+            im.graph_size_location(true)?;
+            for (key, value) in [
+                ("graph_left", im.xorigin),
+                ("graph_top", im.yorigin - im.ysize),
+                ("graph_width", im.xsize),
+                ("graph_height", im.ysize),
+                ("image_width", im.ximg),
+                ("image_height", im.yimg),
+                ("graph_start", im.start),
+                ("graph_end", im.end),
+            ] {
+                info.push(key, InfoValue::Count(value));
+            }
+            im.data_proc()?;
+            if !im.logarithmic {
+                im.si_unit();
+            }
+            if (!im.rigid || im.allow_shrink) && !im.logarithmic {
+                im.expand_range();
+            }
+            info.push("value_min", InfoValue::Val(im.minval));
+            info.push("value_max", InfoValue::Val(im.maxval));
+            let legend_size = im.text_prop[TEXT_PROP_LEGEND];
+            let mut legends = Vec::new();
+            for (index, x0, y0) in im.legend_origins() {
+                let legend = im.gdes[index].legend.clone();
+                let width = im.legend_text_width(&legend);
+                let height = text_height(legend_size);
+                let count = legends.len();
+                info.push(format!("legend[{count}]"), InfoValue::Str(legend.clone()));
+                info.push(
+                    format!("coords[{count}]"),
+                    InfoValue::Str(format!(
+                        "{},{},{},{}",
+                        c_printf_double("%.0f", x0),
+                        c_printf_double("%.0f", y0 - height),
+                        c_printf_double("%.0f", x0 + width),
+                        c_printf_double("%.0f", y0)
+                    )),
+                );
+                legends.push(GraphLegend {
+                    x: x0,
+                    y: y0,
+                    text: legend,
+                    gdes_index: index,
+                });
+            }
             let (rendered, series) = graph_render_input(&im);
             let png = render_graph_png(
                 &rendered,
                 &series,
                 GraphPngOptions {
-                    width: image_width,
-                    height: image_height,
+                    canvas: GraphCanvas {
+                        width: u32::try_from(im.ximg)?,
+                        height: u32::try_from(im.yimg)?,
+                        left: u32::try_from(im.xorigin)?,
+                        top: u32::try_from(im.yorigin - im.ysize)?,
+                        plot_width: u32::try_from(im.xsize)?,
+                        plot_height: u32::try_from(im.ysize)?,
+                        minimum: im.minval,
+                        maximum: im.maxval,
+                    },
+                    legends: &legends,
                     title: graph_title.as_deref(),
                     vertical_label: vertical_label.as_deref(),
                     vertical_label_angle,
-                    lower_limit,
-                    upper_limit,
-                    show_legend: !no_legend,
-                    rigid_scale,
-                    allow_shrink,
-                    alt_autoscale,
-                    alt_autoscale_min,
-                    alt_autoscale_max,
                     only_graph,
-                    full_size_mode,
-                    force_rules_legend,
-                    legend_bottomup,
                     colors: graph_colors,
                     grid_dash,
                     border_width,
                 },
             )?;
             let (width, height) = png_dimensions(&png)?;
-            info.push("image_width", InfoValue::Count(i64::from(width)));
-            info.push("image_height", InfoValue::Count(i64::from(height)));
             if !to_memory {
                 std::fs::write(filename, &png)?;
             }
@@ -1859,6 +1943,7 @@ enum XportFormat {
 
 #[derive(Debug)]
 enum InfoValue {
+    Val(f64),
     Count(i64),
     Str(String),
     Blob(Vec<u8>),
@@ -1880,6 +1965,8 @@ impl GraphInfo {
         for (key, value) in &self.entries {
             write!(out, "{key} = ")?;
             match value {
+                InfoValue::Val(value) if value.is_nan() => writeln!(out, "NaN")?,
+                InfoValue::Val(value) => writeln!(out, "{}", c_printf_double("%0.10e", *value))?,
                 InfoValue::Count(value) => writeln!(out, "{value}")?,
                 InfoValue::Str(value) => writeln!(out, "\"{value}\"")?,
                 InfoValue::Blob(value) => {
@@ -2126,11 +2213,6 @@ fn graph_render_input(im: &rondi::graph::GraphImage) -> (RenderedGraphXport, Vec
             Gf::Vrule => "vrule",
             _ => continue,
         };
-        let legend = element
-            .legend
-            .strip_prefix("  ")
-            .unwrap_or(&element.legend)
-            .to_owned();
         let (rule_value, rule_time) = match element.gf {
             Gf::Hrule => (Some(element.yrule), None),
             Gf::Vrule => (None, Some(element.xrule)),
@@ -2149,7 +2231,6 @@ fn graph_render_input(im: &rondi::graph::GraphImage) -> (RenderedGraphXport, Vec
                 _ => 1.0,
             },
             stack: element.stack,
-            skip_scale: element.skipscale || matches!(element.gf, Gf::Tick | Gf::Vrule),
             color: element.color,
             color2: element.color2,
             grad_height: if element.gf == Gf::Area {
@@ -2164,7 +2245,6 @@ fn graph_render_input(im: &rondi::graph::GraphImage) -> (RenderedGraphXport, Vec
             },
             rule_value,
             rule_time,
-            legend,
             dash_pattern: element.dashes.clone(),
             dash_offset: element.dash_offset,
         });
@@ -2601,36 +2681,44 @@ struct GraphSeries {
     style: &'static str,
     line_width: f64,
     stack: bool,
-    skip_scale: bool,
     color: Option<[u8; 4]>,
     color2: Option<[u8; 4]>,
     grad_height: f64,
     tick_fraction: f64,
     rule_value: Option<f64>,
     rule_time: Option<i64>,
-    legend: String,
     dash_pattern: Vec<f64>,
     dash_offset: f64,
 }
 
-struct GraphPngOptions<'a> {
+/// The canvas, graph area and value range `graph_size_location`,
+/// `data_proc` and `expand_range` computed.
+struct GraphCanvas {
     width: u32,
     height: u32,
+    left: u32,
+    top: u32,
+    plot_width: u32,
+    plot_height: u32,
+    minimum: f64,
+    maximum: f64,
+}
+
+/// A legend placed by `leg_place`: the bottom-left pen position of its text.
+struct GraphLegend {
+    x: f64,
+    y: f64,
+    text: String,
+    gdes_index: usize,
+}
+
+struct GraphPngOptions<'a> {
+    canvas: GraphCanvas,
+    legends: &'a [GraphLegend],
     title: Option<&'a str>,
     vertical_label: Option<&'a str>,
     vertical_label_angle: f64,
-    lower_limit: Option<f64>,
-    upper_limit: Option<f64>,
-    show_legend: bool,
-    rigid_scale: bool,
-    allow_shrink: bool,
-    alt_autoscale: bool,
-    alt_autoscale_min: bool,
-    alt_autoscale_max: bool,
     only_graph: bool,
-    full_size_mode: bool,
-    force_rules_legend: bool,
-    legend_bottomup: bool,
     colors: GraphColors,
     grid_dash: Vec<f64>,
     border_width: u32,
@@ -2697,101 +2785,29 @@ fn render_graph_png(
     options: GraphPngOptions<'_>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let GraphPngOptions {
-        width,
-        height,
+        canvas,
+        legends,
         title,
         vertical_label,
         vertical_label_angle,
-        lower_limit,
-        upper_limit,
-        show_legend,
-        rigid_scale,
-        allow_shrink,
-        alt_autoscale,
-        alt_autoscale_min,
-        alt_autoscale_max,
         only_graph,
-        full_size_mode,
-        force_rules_legend,
-        legend_bottomup,
         colors,
         grid_dash,
         border_width,
     } = options;
-    if width < 10 {
-        return Err("width below 10 pixels".into());
-    }
-    if height < 10 {
-        return Err("height below 10 pixels".into());
-    }
-    if width > 4096 || height > 4096 {
+    let GraphCanvas {
+        width: canvas_width,
+        height: canvas_height,
+        left: plot_left,
+        top: plot_top,
+        plot_width: width,
+        plot_height: height,
+        minimum,
+        maximum,
+    } = canvas;
+    if canvas_width > 4096 || canvas_height > 4096 {
         return Err("PNG graph dimensions exceed the 4096 pixel safety limit".into());
     }
-    let (minimum, maximum) = graph_scale_bounds(
-        graph_value_bounds(graph, series),
-        GraphScaleOptions {
-            lower_limit,
-            upper_limit,
-            rigid: rigid_scale,
-            allow_shrink,
-            alternate: alt_autoscale,
-            alternate_min: alt_autoscale_min,
-            alternate_max: alt_autoscale_max,
-        },
-    )?;
-    // RRDtool treats these as plot dimensions unless full-size mode is set.
-    // only-graph suppresses every margin and label around the plot.
-    let has_legend = !only_graph
-        && show_legend
-        && series.iter().any(|item| {
-            if item.color.is_none() || item.legend.is_empty() {
-                return false;
-            }
-            if force_rules_legend || !matches!(item.style, "hrule" | "vrule") {
-                return true;
-            }
-            item.rule_value
-                .is_some_and(|value| (minimum..=maximum).contains(&value))
-                || item
-                    .rule_time
-                    .is_some_and(|time| (graph.start..=graph.end).contains(&time))
-        });
-    let horizontal_margin = if only_graph {
-        0
-    } else {
-        81 + if vertical_label.is_some() { 16 } else { 0 }
-    };
-    let vertical_margin = if only_graph {
-        0
-    } else {
-        (if has_legend { 55 } else { 39 }) + if title.is_some() { 13 } else { 0 }
-    };
-    let (width, height) = if full_size_mode {
-        let plot_width = width
-            .checked_sub(horizontal_margin)
-            .ok_or("full-size width leaves no graph area")?;
-        let plot_height = height
-            .checked_sub(vertical_margin)
-            .ok_or("full-size height leaves no graph area")?;
-        if plot_width < 10 || plot_height < 10 {
-            return Err("full-size dimensions leave less than 10 pixels for the graph".into());
-        }
-        (plot_width, plot_height)
-    } else {
-        (width, height)
-    };
-    let plot_left = if only_graph {
-        0
-    } else {
-        51 + if vertical_label.is_some() { 16 } else { 0 }
-    };
-    let plot_top = if only_graph {
-        0
-    } else {
-        15 + if title.is_some() { 13 } else { 0 }
-    };
-    let canvas_width = width + horizontal_margin;
-    let canvas_height = height + vertical_margin;
     let pixel_count = usize::try_from(canvas_width)
         .ok()
         .and_then(|width| {
@@ -3119,88 +3135,40 @@ fn render_graph_png(
             }
         }
     }
-    if has_legend {
-        let mut x = left;
-        let y = bottom + 26;
-        let mut legend_series = series.iter().collect::<Vec<_>>();
-        if legend_bottomup {
-            legend_series.reverse();
-        }
-        for item in legend_series {
-            let (Some(color), false) = (item.color, item.legend.is_empty()) else {
-                continue;
-            };
-            if !force_rules_legend
-                && matches!(item.style, "hrule" | "vrule")
-                && !item
-                    .rule_value
-                    .is_some_and(|value| (minimum..=maximum).contains(&value))
-                && !item
-                    .rule_time
-                    .is_some_and(|time| (graph.start..=graph.end).contains(&time))
-            {
-                continue;
+    for legend in legends {
+        let x = legend.x.max(0.0) as u32;
+        let y = legend.y.max(0.0) as u32;
+        let item = series
+            .iter()
+            .find(|item| item.variable == format!("#{}", legend.gdes_index));
+        let text_x = match item.and_then(|item| item.color.map(|color| (item, color))) {
+            Some((item, color)) => {
+                draw_styled_line(
+                    &mut pixels,
+                    canvas_width,
+                    canvas_height,
+                    (x, y.saturating_sub(4)),
+                    (x + 10, y.saturating_sub(4)),
+                    DashStroke {
+                        color,
+                        pattern: &item.dash_pattern,
+                        offset: item.dash_offset,
+                        width: item.line_width.max(1.0),
+                    },
+                );
+                x + 13
             }
-            let sample_x = x;
-            draw_styled_line(
-                &mut pixels,
-                canvas_width,
-                canvas_height,
-                (x, y - 3),
-                (x + 10, y - 3),
-                DashStroke {
-                    color,
-                    pattern: &item.dash_pattern,
-                    offset: item.dash_offset,
-                    width: item.line_width,
-                },
-            );
-            if item.style == "tick" && colors.frame[3] > 0 {
-                draw_line(
-                    &mut pixels,
-                    canvas_width,
-                    canvas_height,
-                    (sample_x.saturating_sub(1), y - 5),
-                    (sample_x + 11, y - 5),
-                    colors.frame,
-                );
-                draw_line(
-                    &mut pixels,
-                    canvas_width,
-                    canvas_height,
-                    (sample_x.saturating_sub(1), y + 1),
-                    (sample_x + 11, y + 1),
-                    colors.frame,
-                );
-                draw_line(
-                    &mut pixels,
-                    canvas_width,
-                    canvas_height,
-                    (sample_x.saturating_sub(1), y - 5),
-                    (sample_x.saturating_sub(1), y + 1),
-                    colors.frame,
-                );
-                draw_line(
-                    &mut pixels,
-                    canvas_width,
-                    canvas_height,
-                    (sample_x + 11, y - 5),
-                    (sample_x + 11, y + 1),
-                    colors.frame,
-                );
-            }
-            x += 13;
-            draw_text(
-                &mut pixels,
-                canvas_width,
-                canvas_height,
-                x,
-                y - 7,
-                &ascii_text(&item.legend),
-                colors.font,
-            );
-            x = x.saturating_add((item.legend.len() as u32).saturating_mul(8) + 14);
-        }
+            None => x,
+        };
+        draw_text(
+            &mut pixels,
+            canvas_width,
+            canvas_height,
+            text_x,
+            y.saturating_sub(9),
+            &ascii_text(legend.text.trim_start_matches(' ')),
+            colors.font,
+        );
     }
     if border_width > 0 && !only_graph {
         for border in 0..border_width.min(canvas_width.min(canvas_height) / 2) {
@@ -3346,99 +3314,6 @@ fn tick_mark_range(top: u32, bottom: u32, height: u32, fraction: f64) -> (u32, u
     } else {
         (bottom - height, bottom)
     }
-}
-
-fn graph_value_bounds(graph: &RenderedGraphXport, series: &[GraphSeries]) -> (f64, f64) {
-    let prepared = prepare_graph_series(graph, series);
-    let (mut minimum, mut maximum) = (f64::INFINITY, f64::NEG_INFINITY);
-    for (item, prepared_series) in series.iter().zip(&prepared) {
-        if item.skip_scale || item.style == "tick" {
-            continue;
-        }
-        if item.rule_value.is_some() || item.rule_time.is_some() {
-            continue;
-        }
-        for value in prepared_series.values.iter().flatten().copied() {
-            minimum = minimum.min(value);
-            maximum = maximum.max(value);
-        }
-    }
-    if minimum.is_finite() && maximum.is_finite() {
-        (minimum, maximum)
-    } else {
-        (0.0, 1.0)
-    }
-}
-
-struct GraphScaleOptions {
-    lower_limit: Option<f64>,
-    upper_limit: Option<f64>,
-    rigid: bool,
-    allow_shrink: bool,
-    alternate: bool,
-    alternate_min: bool,
-    alternate_max: bool,
-}
-
-fn graph_scale_bounds(
-    (data_minimum, data_maximum): (f64, f64),
-    options: GraphScaleOptions,
-) -> Result<(f64, f64), &'static str> {
-    let GraphScaleOptions {
-        lower_limit,
-        upper_limit,
-        rigid,
-        allow_shrink,
-        alternate,
-        alternate_min,
-        alternate_max,
-    } = options;
-    let mut minimum = lower_limit.map_or(data_minimum, |lower| {
-        if !rigid && lower > data_minimum {
-            data_minimum
-        } else {
-            lower
-        }
-    });
-    let mut maximum = upper_limit.map_or(data_maximum, |upper| {
-        if !rigid && upper < data_maximum {
-            data_maximum
-        } else {
-            upper
-        }
-    });
-    if rigid && allow_shrink {
-        if lower_limit.is_some_and(|lower| lower < data_minimum) {
-            minimum = data_minimum;
-        }
-        if upper_limit.is_some_and(|upper| upper > data_maximum) {
-            maximum = data_maximum;
-        }
-    }
-    if minimum > maximum || (lower_limit.is_some() && upper_limit.is_some() && minimum == maximum) {
-        return Err("graph lower limit must be less than upper limit");
-    }
-    if minimum == maximum {
-        let padding = minimum.abs().max(1.0) * 0.05;
-        if lower_limit.is_some() {
-            maximum += padding;
-        } else if upper_limit.is_some() {
-            minimum -= padding;
-        } else {
-            minimum -= padding;
-            maximum += padding;
-        }
-    }
-    let span = maximum - minimum;
-    if alternate {
-        minimum -= span * 0.1;
-        maximum += span * 0.1;
-    } else if alternate_min {
-        minimum -= span * 0.1;
-    } else if alternate_max {
-        maximum += span * 0.1;
-    }
-    Ok((minimum, maximum))
 }
 
 struct PreparedGraphSeries {
@@ -5899,16 +5774,31 @@ mod xml_output_tests {
 #[cfg(test)]
 mod graph_stroke_tests {
     use super::{
-        GraphPngOptions, GraphScaleOptions, GraphSeries, RenderedGraphXport, draw_line_with_width,
-        draw_styled_line, draw_vertical_text, graph_render_input, graph_scale_bounds,
-        graph_value_bounds, interpolate_graph_color, prepare_graph_series, render_graph_png,
-        set_pixel, tick_mark_range,
+        GraphCanvas, GraphPngOptions, GraphSeries, RenderedGraphXport, draw_line_with_width,
+        draw_styled_line, draw_vertical_text, graph_render_input, interpolate_graph_color,
+        prepare_graph_series, render_graph_png, set_pixel, tick_mark_range,
     };
 
     /// Parses one drawing element through rrd_graph_script after DEFs for
     /// every source name used here, and returns its renderer series with
     /// the source name as its column.
-    fn element(definition: &str) -> Result<GraphSeries, rondi::graph::ScriptError> {
+    /// A renderer series plus the legend and scale exclusion of its element.
+    #[derive(Clone)]
+    struct TestElement {
+        series: GraphSeries,
+        legend: String,
+        skip_scale: bool,
+    }
+
+    impl std::ops::Deref for TestElement {
+        type Target = GraphSeries;
+
+        fn deref(&self) -> &GraphSeries {
+            &self.series
+        }
+    }
+
+    fn element(definition: &str) -> Result<TestElement, rondi::graph::ScriptError> {
         let names = [
             "rate", "base", "x", "upper", "normal", "spike", "load", "events", "extra",
         ];
@@ -5919,16 +5809,28 @@ mod graph_stroke_tests {
         script.push(definition.to_owned());
         let mut im = rondi::graph::GraphImage::new(1_000_000_000, 1_000_000_100, 10);
         im.graph_script(&script, &|_, _, start, end| Ok((start, end)))?;
-        let source = im.gdes.last().map(|element| element.vname.clone());
+        let last = im.gdes.last().expect("a drawing element");
+        let source = last.vname.clone();
+        // data_proc leaves TICKs and skipscale elements out of the range.
+        let skip_scale = last.skipscale || last.gf == rondi::graph::Gf::Tick;
+        let legend = last
+            .legend
+            .strip_prefix("  ")
+            .unwrap_or(&last.legend)
+            .to_owned();
         let (_, series) = graph_render_input(&im);
         let mut series = series.into_iter().last().expect("a drawing element");
-        series.variable = source.unwrap_or_default();
-        Ok(series)
+        series.variable = source;
+        Ok(TestElement {
+            series,
+            legend,
+            skip_scale,
+        })
     }
 
     fn parse_graph_series(
         definition: &str,
-    ) -> Result<(GraphSeries, ()), rondi::graph::ScriptError> {
+    ) -> Result<(TestElement, ()), rondi::graph::ScriptError> {
         element(definition).map(|series| (series, ()))
     }
 
@@ -6116,9 +6018,8 @@ mod graph_stroke_tests {
             variables: vec!["base".into(), "upper".into()],
             rows: vec![vec![Some(3.0), Some(2.0)]],
         };
-        let prepared = prepare_graph_series(&graph, &[hidden.clone(), visible]);
+        let prepared = prepare_graph_series(&graph, &[hidden.series, visible.series]);
         assert_eq!(prepared[1].values, [Some(5.0)]);
-        assert_eq!(graph_value_bounds(&graph, &[hidden]), (3.0, 3.0));
     }
 
     #[test]
@@ -6134,112 +6035,12 @@ mod graph_stroke_tests {
     }
 
     #[test]
-    fn skipscale_series_is_drawn_but_does_not_expand_automatic_bounds() {
-        let in_scale = parse_graph_series("LINE:normal#ffffff:normal").unwrap().0;
+    fn skipscale_series_is_parsed_as_excluded_from_automatic_bounds() {
         let excluded = parse_graph_series("LINE:spike#ffffff:spike:skipscale")
             .unwrap()
             .0;
         assert_eq!(excluded.legend, "spike");
         assert!(excluded.skip_scale);
-
-        let graph = RenderedGraphXport {
-            start: 0,
-            end: 10,
-            variables: vec![String::from("normal"), String::from("spike")],
-            rows: vec![
-                vec![Some(2.0), Some(1000.0)],
-                vec![Some(4.0), Some(-1000.0)],
-            ],
-        };
-        assert_eq!(
-            graph_value_bounds(&graph, &[in_scale, excluded]),
-            (2.0, 4.0)
-        );
-    }
-
-    #[test]
-    fn rigid_limits_hold_until_allow_shrink_is_selected() {
-        let limits = || GraphScaleOptions {
-            lower_limit: Some(0.0),
-            upper_limit: Some(10.0),
-            rigid: true,
-            allow_shrink: false,
-            alternate: false,
-            alternate_min: false,
-            alternate_max: false,
-        };
-        assert_eq!(
-            graph_scale_bounds((2.0, 8.0), limits()).unwrap(),
-            (0.0, 10.0)
-        );
-        let shrunk = GraphScaleOptions {
-            allow_shrink: true,
-            ..limits()
-        };
-        assert_eq!(graph_scale_bounds((2.0, 8.0), shrunk).unwrap(), (2.0, 8.0));
-    }
-
-    #[test]
-    fn flexible_limits_expand_to_include_outlying_data() {
-        let options = GraphScaleOptions {
-            lower_limit: Some(3.0),
-            upper_limit: Some(7.0),
-            rigid: false,
-            allow_shrink: false,
-            alternate: false,
-            alternate_min: false,
-            alternate_max: false,
-        };
-        assert_eq!(graph_scale_bounds((2.0, 8.0), options).unwrap(), (2.0, 8.0));
-    }
-
-    #[test]
-    fn alternate_autoscale_modes_expand_the_requested_side() {
-        let opts = |alternate, alternate_min, alternate_max| GraphScaleOptions {
-            lower_limit: None,
-            upper_limit: None,
-            rigid: false,
-            allow_shrink: false,
-            alternate,
-            alternate_min,
-            alternate_max,
-        };
-        assert_eq!(
-            graph_scale_bounds((2.0, 8.0), opts(true, false, false)).unwrap(),
-            (1.4, 8.6)
-        );
-        assert_eq!(
-            graph_scale_bounds((2.0, 8.0), opts(false, true, false)).unwrap(),
-            (1.4, 8.0)
-        );
-        assert_eq!(
-            graph_scale_bounds((2.0, 8.0), opts(false, false, true)).unwrap(),
-            (2.0, 8.6)
-        );
-    }
-
-    #[test]
-    fn invalid_and_collapsed_scale_limits_are_rejected() {
-        let invalid = GraphScaleOptions {
-            lower_limit: Some(9.0),
-            upper_limit: Some(4.0),
-            rigid: true,
-            allow_shrink: false,
-            alternate: false,
-            alternate_min: false,
-            alternate_max: false,
-        };
-        assert!(graph_scale_bounds((2.0, 8.0), invalid).is_err());
-        let collapsed = GraphScaleOptions {
-            lower_limit: Some(4.0),
-            upper_limit: Some(4.0),
-            rigid: true,
-            allow_shrink: false,
-            alternate: false,
-            alternate_min: false,
-            alternate_max: false,
-        };
-        assert!(graph_scale_bounds((2.0, 8.0), collapsed).is_err());
     }
 
     #[test]
@@ -6284,28 +6085,26 @@ mod graph_stroke_tests {
         };
         let zero = element("TICK:events#ff0000:0").unwrap();
         let visible = element("TICK:events#ff0000:0.5").unwrap();
-        let render = |tick: super::GraphSeries| {
+        let render = |tick: TestElement| {
             let png = render_graph_png(
                 &graph,
-                &[tick],
+                &[tick.series],
                 GraphPngOptions {
-                    width: 40,
-                    height: 30,
+                    canvas: GraphCanvas {
+                        width: 121,
+                        height: 71,
+                        left: 51,
+                        top: 15,
+                        plot_width: 40,
+                        plot_height: 30,
+                        minimum: 0.0,
+                        maximum: 1.0,
+                    },
+                    legends: &[],
                     title: None,
                     vertical_label: None,
                     vertical_label_angle: 90.0,
-                    lower_limit: None,
-                    upper_limit: None,
-                    show_legend: false,
-                    rigid_scale: false,
-                    allow_shrink: false,
-                    alt_autoscale: false,
-                    alt_autoscale_min: false,
-                    alt_autoscale_max: false,
                     only_graph: false,
-                    full_size_mode: false,
-                    force_rules_legend: false,
-                    legend_bottomup: false,
                     colors: super::GraphColors::default(),
                     grid_dash: Vec::new(),
                     border_width: 0,
@@ -6345,15 +6144,6 @@ mod graph_stroke_tests {
         assert_eq!(rule.legend, "Threshold");
         assert_eq!(rule.color, Some([255, 0, 0, 128]));
         assert!(element("HRULE:abc#ff0000").is_err());
-
-        let graph = RenderedGraphXport {
-            start: 0,
-            end: 10,
-            variables: vec![String::from("load")],
-            rows: vec![vec![Some(2.0)], vec![Some(4.0)]],
-        };
-        let load = parse_graph_series("LINE:load#ffffff:Load").unwrap().0;
-        assert_eq!(graph_value_bounds(&graph, &[load, rule]), (2.0, 4.0));
     }
 
     #[test]
@@ -6383,22 +6173,10 @@ mod graph_stroke_tests {
                 vec![None, Some(1.0)],
             ],
         };
-        let prepared = prepare_graph_series(&graph, &[first, second]);
+        let prepared = prepare_graph_series(&graph, &[first.series, second.series]);
         assert_eq!(prepared[0].values, vec![Some(2.0), Some(4.0), None]);
         assert_eq!(prepared[1].baseline, vec![Some(2.0), Some(4.0), Some(0.0)]);
         assert_eq!(prepared[1].values, vec![Some(5.0), Some(4.0), Some(1.0)]);
-        assert_eq!(
-            graph_value_bounds(
-                &graph,
-                &[
-                    parse_graph_series("AREA:base#ff0000:Base").unwrap().0,
-                    parse_graph_series("AREA:extra#0000ff:Extra:STACK")
-                        .unwrap()
-                        .0,
-                ]
-            ),
-            (1.0, 5.0)
-        );
     }
 }
 
