@@ -2950,10 +2950,65 @@ enum RrdLockMode {
     None,
 }
 
+#[cfg(unix)]
+thread_local! {
+    static LOCK_MODE_OPTION: std::cell::Cell<Option<RrdLockMode>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// `_rrd_lock_parse` (rrd_open.c:1216); an empty string is the default.
+#[cfg(unix)]
+fn parse_rrd_lock_mode(mode: &str) -> Option<RrdLockMode> {
+    match mode {
+        "" | "try" => Some(RrdLockMode::Try),
+        "block" => Some(RrdLockMode::Block),
+        "none" => Some(RrdLockMode::None),
+        _ => None,
+    }
+}
+
+/// Whether `rrdtool update --locking` accepts `mode`.
+pub fn is_rrd_locking_mode(mode: &str) -> bool {
+    #[cfg(unix)]
+    {
+        parse_rrd_lock_mode(mode).is_some()
+    }
+    #[cfg(not(unix))]
+    {
+        matches!(mode, "" | "try" | "block" | "none")
+    }
+}
+
+/// Runs `f` with the mode `update --locking` selected
+/// (`_rrd_lock_from_opt`, rrd_open.c:1264) in place of `$RRD_LOCKING`. An
+/// empty mode leaves `$RRD_LOCKING` in charge.
+pub fn with_rrd_locking<T>(mode: &str, f: impl FnOnce() -> T) -> T {
+    #[cfg(unix)]
+    {
+        let selected = if mode.is_empty() {
+            None
+        } else {
+            parse_rrd_lock_mode(mode)
+        };
+        let previous = LOCK_MODE_OPTION.with(|cell| cell.replace(selected));
+        let result = f();
+        LOCK_MODE_OPTION.with(|cell| cell.set(previous));
+        result
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        f()
+    }
+}
+
 /// RRDtool reads `$RRD_LOCKING` on every open and defaults to a single
 /// non-blocking attempt, so a held lock fails with "could not lock RRD".
 #[cfg(unix)]
 fn rrd_lock_mode() -> RrdLockMode {
+    if let Some(mode) = LOCK_MODE_OPTION.with(std::cell::Cell::get) {
+        return mode;
+    }
     match std::env::var_os("RRD_LOCKING") {
         None => RrdLockMode::Try,
         Some(value) => match value.to_str() {
