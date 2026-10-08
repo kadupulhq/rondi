@@ -425,10 +425,7 @@ fn write_rrd(filename: &str, bytes: &[u8], no_overwrite: bool) -> Result<(), Sto
         file.write_all(bytes)?;
         file.flush()?;
         drop(file);
-        let mode = std::fs::metadata(filename)
-            .map(|metadata| metadata.permissions())
-            .unwrap_or_else(|_| default_permissions());
-        std::fs::set_permissions(&temp_path, mode)
+        chmod_like_write_rrd(&temp_path, filename)
             .map_err(|_| StoreError::Rrd("Cannot chmod temporary file!".into()))?;
         // A hard link keeps --no-overwrite from replacing a file created
         // after the stat above; RRDtool's rename would replace it.
@@ -443,18 +440,31 @@ fn write_rrd(filename: &str, bytes: &[u8], no_overwrite: bool) -> Result<(), Sto
     result
 }
 
+/// rrd_create.c:1462-1476: chmod the temporary file to the target's mode,
+/// or to S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH when there is no target. chmod is
+/// not masked by the umask, so a new file is always 0644.
 #[cfg(unix)]
-fn default_permissions() -> std::fs::Permissions {
+fn chmod_like_write_rrd(temp_path: &Path, filename: &str) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
-    std::fs::Permissions::from_mode(0o644)
+    let mode = match std::fs::metadata(filename) {
+        Ok(metadata) => metadata.permissions().mode() as libc::mode_t,
+        Err(_) => libc::S_IRUSR | libc::S_IWUSR | libc::S_IRGRP | libc::S_IROTH,
+    };
+    let path = std::ffi::CString::new(temp_path.as_os_str().as_bytes())?;
+    // SAFETY: `path` is a valid NUL-terminated string for the call.
+    if unsafe { libc::chmod(path.as_ptr(), mode) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]
-fn default_permissions() -> std::fs::Permissions {
-    std::fs::File::open(".")
-        .and_then(|file| file.metadata())
-        .map(|metadata| metadata.permissions())
-        .unwrap_or_else(|_| unreachable!("current directory metadata"))
+fn chmod_like_write_rrd(temp_path: &Path, filename: &str) -> std::io::Result<()> {
+    match std::fs::metadata(filename) {
+        Ok(metadata) => std::fs::set_permissions(temp_path, metadata.permissions()),
+        Err(_) => Ok(()),
+    }
 }
 
 /// `mkstemp("<filename>XXXXXX")`: mode 0600, created exclusively.
