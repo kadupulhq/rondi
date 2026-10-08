@@ -423,3 +423,39 @@ fn rrdcached_root_refuses_a_socket_directory_another_user_can_write() {
         }
     }
 }
+
+#[test]
+fn rrdcached_user_without_group_uses_the_accounts_primary_group() {
+    let Some(account) = test_account("rrdcached -U without -G") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let run = std::fs::canonicalize(dir.path()).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let data = run.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::os::unix::fs::chown(&data, Some(account.uid), Some(account.gid)).unwrap();
+    let socket = run.join("rrdcached.sock");
+    let mut child = Command::new(daemon("rondi", &run))
+        .args(["-g", "-b", data.to_str().unwrap(), "-U", "rondi-test", "-l"])
+        .arg(&socket)
+        .arg("-p")
+        .arg(run.join("rrdcached.pid"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_until_serving(&mut child, &socket);
+    let pid = child.id();
+    // Upstream would keep gid 0 here and initgroups would add 0 back.
+    assert_eq!(proc_ids(pid, "Uid:"), [account.uid; 4]);
+    assert_eq!(proc_ids(pid, "Gid:"), [account.gid; 4]);
+    assert_eq!(proc_ids(pid, "Groups:"), account.groups);
+    // SAFETY: the child is a daemon started by this test.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    child.wait().unwrap();
+}

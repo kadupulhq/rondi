@@ -281,6 +281,7 @@ fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Each listener takes the -m/-P/-s values in effect when it was named.
     let mut addresses = Vec::<rondi_server::RrdcachedListenAddress>::new();
     let mut daemon_user = None;
+    let mut group_given = false;
     // SAFETY: getegid has no preconditions.
     let mut daemon_group = unsafe { libc::getegid() };
     let mut write_timeout_seconds = 300;
@@ -444,6 +445,7 @@ fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(5);
                 };
                 daemon_group = group;
+                group_given = true;
             }
             'U' => {
                 let Some(user) = resolve_rrdcached_daemon_user(&value) else {
@@ -564,7 +566,16 @@ fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         // configured listener missing. Its error is already printed.
         Some(String::new())
     } else {
-        rondi_server::drop_rrdcached_privileges(daemon_user.as_ref(), daemon_group).err()
+        // Upstream keeps the starting egid when only -U is given, so a root
+        // start would run as gid 0; a root Rondi uses the account's primary
+        // group. Unprivileged starts keep upstream's behaviour and text.
+        // SAFETY: geteuid has no preconditions.
+        let privileged = unsafe { libc::geteuid() } == 0;
+        let group = match &daemon_user {
+            Some(user) if privileged && !group_given => user.gid,
+            _ => daemon_group,
+        };
+        rondi_server::drop_rrdcached_privileges(daemon_user.as_ref(), group).err()
     };
     if let Some(message) = failure {
         // Fail closed: nothing has been accepted yet. Exit closes every
@@ -718,9 +729,16 @@ fn resolve_rrdcached_daemon_user(value: &str) -> Option<rondi_server::RrdcachedU
     } else {
         // SAFETY: non-null user points to libc-owned passwd data whose name is
         // NUL terminated; both are copied before the next lookup.
-        let (uid, name) = unsafe { ((*user).pw_uid, std::ffi::CStr::from_ptr((*user).pw_name)) };
+        let (uid, gid, name) = unsafe {
+            (
+                (*user).pw_uid,
+                (*user).pw_gid,
+                std::ffi::CStr::from_ptr((*user).pw_name),
+            )
+        };
         Some(rondi_server::RrdcachedUser {
             uid,
+            gid,
             name: name.to_owned(),
         })
     }

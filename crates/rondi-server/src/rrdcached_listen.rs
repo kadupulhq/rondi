@@ -612,6 +612,8 @@ fn open_network(sock: &RrdcachedListenAddress, listeners: &mut Vec<RrdcachedList
 #[derive(Debug, Clone)]
 pub struct RrdcachedUser {
     pub uid: libc::uid_t,
+    /// The account's primary group, used when `-G` is absent.
+    pub gid: libc::gid_t,
     pub name: CString,
 }
 
