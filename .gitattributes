@@ -8,3 +8,6 @@
 /.editorconfig  export-ignore
 /.gitattributes export-ignore
 /.github        export-ignore
+
+# Fuzz seeds are byte-exact inputs (HTTP requests keep CRLF).
+/fuzz/seeds/** -text

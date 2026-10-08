@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE rrd SYSTEM "https://oss.oetiker.ch/rrdtool/rrdtool.dtd">
+<!-- Round Robin Database Dump -->
+<rrd>
+	<version>0003</version>
+	<step>10</step> <!-- Seconds -->
+	<lastupdate>1000000070</lastupdate> <!-- 2001-09-08 18:47:50 -0700 -->
+
+	<ds>
+		<name> g </name>
+		<type> GAUGE </type>
+		<minimal_heartbeat>30</minimal_heartbeat>
+		<min>0.0000000000e+00</min>
+		<max>1.0000000000e+02</max>
+
+		<!-- PDP Status -->
+		<last_ds>42</last_ds>
+		<value>0.0000000000e+00</value>
+		<unknown_sec> 0 </unknown_sec>
+	</ds>
+
+	<!-- Round Robin Archives -->
+	<rra>
+		<cf>AVERAGE</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>4.2000000000e+01</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<value>NaN</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-08 18:47:10 -0700 / 1000000030 --> <row><v>4.2000000000e+01</v></row>
+			<!-- 2001-09-08 18:47:20 -0700 / 1000000040 --> <row><v>4.2000000000e+01</v></row>
+			<!-- 2001-09-08 18:47:30 -0700 / 1000000050 --> <row><v>4.2000000000e+01</v></row>
+			<!-- 2001-09-08 18:47:40 -0700 / 1000000060 --> <row><v>4.2000000000e+01</v></row>
+			<!-- 2001-09-08 18:47:50 -0700 / 1000000070 --> <row><v>4.2000000000e+01</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>MIN</cf>
+		<pdp_per_row>2</pdp_per_row> <!-- 20 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>4.2000000000e+01</primary_value>
+			<secondary_value>4.2000000000e+01</secondary_value>
+			<value>4.2000000000e+01</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-08 18:47:00 -0700 / 1000000020 --> <row><v>4.2000000000e+01</v></row>
+			<!-- 2001-09-08 18:47:20 -0700 / 1000000040 --> <row><v>4.2000000000e+01</v></row>
+			<!-- 2001-09-08 18:47:40 -0700 / 1000000060 --> <row><v>4.2000000000e+01</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>MAX</cf>
+		<pdp_per_row>2</pdp_per_row> <!-- 20 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>4.2000000000e+01</primary_value>
+			<secondary_value>4.2000000000e+01</secondary_value>
+			<value>4.2000000000e+01</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-08 18:47:00 -0700 / 1000000020 --> <row><v>4.2000000000e+01</v></row>
+			<!-- 2001-09-08 18:47:20 -0700 / 1000000040 --> <row><v>4.2000000000e+01</v></row>
+			<!-- 2001-09-08 18:47:40 -0700 / 1000000060 --> <row><v>4.2000000000e+01</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>LAST</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>4.2000000000e+01</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<value>NaN</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-08 18:47:20 -0700 / 1000000040 --> <row><v>4.2000000000e+01</v></row>
+			<!-- 2001-09-08 18:47:30 -0700 / 1000000050 --> <row><v>4.2000000000e+01</v></row>
+			<!-- 2001-09-08 18:47:40 -0700 / 1000000060 --> <row><v>4.2000000000e+01</v></row>
+			<!-- 2001-09-08 18:47:50 -0700 / 1000000070 --> <row><v>4.2000000000e+01</v></row>
+		</database>
+	</rra>
+</rrd>

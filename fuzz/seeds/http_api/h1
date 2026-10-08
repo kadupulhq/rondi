@@ -1,0 +1,12 @@
+POST /v1/databases HTTP/1.1
+Host: x
+Content-Length: 76
+
+{"name":"s","config":{"step":10,"heartbeat":20,"rows":5,"start":1000000000}}POST /v1/databases/s/updates HTTP/1.1
+Host: x
+Content-Length: 45
+
+{"id":"a","timestamp":1000000010,"value":1.5}GET /v1/databases/s/points HTTP/1.1
+Host: x
+Content-Length: 0
+

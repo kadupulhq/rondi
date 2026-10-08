@@ -1,0 +1,5 @@
+{"record":"update","id":3,"path":"ROOT/d.rrd","samples":["1000000080:1.5:2"]}
+{"record":"forgotten","ids":[3],"path":"ROOT/d.rrd"}
+{"record":"expired","path":"ROOT/g.rrd"}
+{"record":"update","id":4,"path":"ROOT/g.rrd","samples":["1000000080:5"]}
+{"rec
