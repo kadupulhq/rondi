@@ -27,6 +27,9 @@ pub(crate) fn append_full_average_pdps(
     if count >= rows {
         db.points.clear();
     }
+    // Trim once up front; push_bounded's remove(0) per point is O(rows^2).
+    let excess = (db.points.len() + retained as usize).saturating_sub(db.config.rows);
+    db.points.drain(..excess.min(db.points.len()));
     let step = i64::try_from(db.config.step).map_err(|_| StoreError::InvalidValue)?;
     let first_index = count - retained;
     for index in first_index..count {
