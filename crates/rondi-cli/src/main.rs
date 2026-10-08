@@ -2029,10 +2029,10 @@ fn flush_and_prepare_data(
 #[cfg(unix)]
 fn write_output_file(path: &str, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    // OpenOptions creates with 0666 less the umask, as fopen does.
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
-        .mode(0o666)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
         .map_err(|error| -> Box<dyn std::error::Error> {
