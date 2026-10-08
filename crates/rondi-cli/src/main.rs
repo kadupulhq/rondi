@@ -2279,7 +2279,12 @@ fn print_calc(
                 } else {
                     match element.vformatter {
                         ValueFormatter::Numeric => {
-                            match format_graph_numeric(printval, &element.format, &mut si_scale) {
+                            match format_graph_numeric(
+                                printval,
+                                &element.format,
+                                &mut si_scale,
+                                GraphPrintf::Libc,
+                            ) {
                                 Ok(text) => Some(text),
                                 Err(_) => {
                                     return Err(format!(
@@ -3792,10 +3797,19 @@ impl GraphSiScale {
     }
 }
 
+/// Which printf formats a PRINT value: print_calc uses the C library
+/// (`sprintf_alloc`, locale aware) and rrd_xport.c:1235 uses `rrd_snprintf`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GraphPrintf {
+    Libc,
+    Rrd,
+}
+
 fn format_graph_numeric(
     value: f64,
     format: &str,
     si_scale: &mut GraphSiScale,
+    printf: GraphPrintf,
 ) -> Result<String, Box<dyn std::error::Error>> {
     use std::ffi::CString;
 
@@ -3819,6 +3833,21 @@ fn format_graph_numeric(
         None => value,
     };
     let si_symbol = si_scale.symbol;
+    if printf == GraphPrintf::Rrd {
+        // RRDtool rewrites %S to %s before formatting.
+        let mut format = format.to_owned();
+        if let Some(index) = parsed.si_symbol {
+            let end = parsed.substitutions[index].end;
+            format.replace_range(end - 1..end, "s");
+        }
+        return Ok(rondi::rrd_snprintf::rrd_snprintf(
+            &format,
+            &[
+                rondi::rrd_snprintf::Arg::Double(scaled_value),
+                rondi::rrd_snprintf::Arg::Str(si_symbol),
+            ],
+        ));
+    }
     let mut output = String::with_capacity(format.len() + 32);
     let mut cursor = 0;
     for substitution in parsed.substitutions {
@@ -4064,7 +4093,12 @@ fn format_xport_addprints(
                         dbuf = c_strftime(&element.format, &tmvdef, 1024).unwrap_or_default();
                     }
                 } else {
-                    match format_graph_numeric(printval, &element.format, &mut si_scale) {
+                    match format_graph_numeric(
+                        printval,
+                        &element.format,
+                        &mut si_scale,
+                        GraphPrintf::Rrd,
+                    ) {
                         Ok(text) => dbuf = text,
                         Err(_) => {
                             return Err(format!("bad format for PRINT in \"{}'", element.format));
