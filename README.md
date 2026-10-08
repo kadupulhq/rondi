@@ -25,7 +25,7 @@ cargo run -p rondi-cli -- --socket ./run/rondi.sock update temperature 170000003
 cargo run -p rondi-cli -- --socket ./run/rondi.sock fetch temperature
 ```
 
-See [architecture](docs/architecture.md), [API and durability](docs/api.md), and [compatibility](docs/compatibility.md). Rondi is not currently a drop-in replacement. Its known compatibility defects are tracked in [docs/COMPATIBILITY_DEFECTS.md](docs/COMPATIBILITY_DEFECTS.md).
+See [architecture](docs/architecture.md), [API and durability](docs/api.md), and [compatibility](docs/compatibility.md). Rondi is not currently a drop-in replacement. Its known compatibility defects are tracked in [docs/COMPATIBILITY_DEFECTS.md](docs/COMPATIBILITY_DEFECTS.md). The plan for closing them is in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 Build the single executable and create the requested compatibility symlink names with:
 
