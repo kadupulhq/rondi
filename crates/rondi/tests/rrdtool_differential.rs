@@ -754,3 +754,64 @@ fn batch_update_matches_one_rrdtool_update_call() {
         );
     }
 }
+
+/// update_pdp_prep stores DCOUNTER text unconverted after an unknown sample
+/// and strncpy cuts it at 29 bytes, even inside a multibyte character.
+#[test]
+fn multibyte_last_ds_is_cut_at_29_bytes_like_rrdtool() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        oracle_skip!(
+            "skipping last_ds truncation differential: pinned RRDtool 1.11.0 is not installed"
+        );
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let oracle = temp.path().join("last-ds-oracle.rrd");
+    let ours = temp.path().join("last-ds-rondi.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&oracle)
+        .args([
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:d:DCOUNTER:100:U:U",
+            "RRA:LAST:0:1:5",
+        ])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    std::fs::copy(&oracle, &ours).unwrap();
+    let text = format!("{}\u{e9}", "a".repeat(28));
+    let upstream = Command::new("rrdtool")
+        .arg("update")
+        .arg(&oracle)
+        .arg(format!("1000000005:{text}"))
+        .output()
+        .unwrap();
+    assert!(upstream.status.success());
+    rondi::update_rrd_raw_values_precise(&ours, 1_000_000_005, 0, &[Some(text.as_str())]).unwrap();
+    assert_eq!(
+        std::fs::read(&oracle).unwrap(),
+        std::fs::read(&ours).unwrap()
+    );
+    let upstream = Command::new("rrdtool")
+        .arg("update")
+        .arg(&oracle)
+        .arg("1000000015:3")
+        .output()
+        .unwrap();
+    let local = rondi::update_rrd_raw_values_precise(&ours, 1_000_000_015, 0, &[Some("3")]);
+    assert_eq!(upstream.status.success(), local.is_ok(), "{local:?}");
+    assert_eq!(
+        std::fs::read(&oracle).unwrap(),
+        std::fs::read(&ours).unwrap()
+    );
+}

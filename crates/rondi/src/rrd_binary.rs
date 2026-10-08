@@ -755,7 +755,7 @@ fn apply_update(
             raw_values.and_then(|raw| raw[index]),
             interval,
         )?);
-        let mut last_ds = value.map_or_else(
+        let last_ds = value.map_or_else(
             || "U".to_owned(),
             |v| {
                 raw_values
@@ -763,9 +763,11 @@ fn apply_update(
                     .map_or_else(|| v.to_string(), str::to_owned)
             },
         );
-        last_ds.truncate(29);
+        // strncpy(last_ds, ..., LAST_DS_LEN - 1) cuts at a byte count, which
+        // can split a multibyte character.
+        let last_ds = &last_ds.as_bytes()[..last_ds.len().min(29)];
         let mut encoded = [0_u8; 30];
-        encoded[..last_ds.len()].copy_from_slice(last_ds.as_bytes());
+        encoded[..last_ds.len()].copy_from_slice(last_ds);
         last_ds_bytes.push(encoded);
     }
     let mut pdp_prep = info
@@ -2466,11 +2468,14 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
             heartbeat,
             minimum,
             maximum,
-            last_value: fixed_string(
-                bytes,
-                checked_add(pdp_start, checked_mul(index, PDP_PREP_LEN)?)?,
-                30,
-            )?,
+            // last_ds holds raw sample text that RRDtool cut at 29 bytes.
+            last_value: {
+                let offset = checked_add(pdp_start, checked_mul(index, PDP_PREP_LEN)?)?;
+                require(bytes, offset, 30)?;
+                let field = &bytes[offset..offset + 30];
+                let end = field.iter().position(|byte| *byte == 0).unwrap_or(30);
+                String::from_utf8_lossy(&field[..end]).into_owned()
+            },
             pdp_value: f64_at(
                 bytes,
                 checked_add(
