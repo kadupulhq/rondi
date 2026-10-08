@@ -7,7 +7,7 @@ RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         autoconf automake build-essential ca-certificates curl groff-base \
         libfreetype6-dev libglib2.0-dev libpango1.0-dev libpng-dev libtool \
-        libxml2-dev locales pkg-config \
+        libxml2-dev locales php-cli pkg-config \
     && sed -i 's/^# de_DE.UTF-8 UTF-8/de_DE.UTF-8 UTF-8/' /etc/locale.gen \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*
@@ -26,6 +26,9 @@ RUN curl --fail --location --silent --show-error \
 
 WORKDIR /workspace
 COPY . .
+
+# Differential tests fail instead of skipping when an oracle is missing.
+ENV RONDI_REQUIRE_ORACLE=1
 
 RUN rustc --version \
     && cargo --version \

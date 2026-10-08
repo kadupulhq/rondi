@@ -1,3 +1,6 @@
+#[macro_use]
+mod common;
+
 use rondi::{Store, StoreError, update_rrd_values};
 use std::process::Command;
 
@@ -5,7 +8,7 @@ use std::process::Command;
 fn inspects_disposable_rrdtool_v3_file_without_modifying_it() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool binary probe: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool binary probe: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -60,7 +63,7 @@ fn inspects_disposable_rrdtool_v3_file_without_modifying_it() {
 fn truncated_rrd_is_reported_as_a_format_error() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool binary probe: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool binary probe: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -94,7 +97,7 @@ fn truncated_rrd_is_reported_as_a_format_error() {
 fn metadata_inspection_does_not_read_a_large_archive_payload() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool binary probe: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool binary probe: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -140,7 +143,7 @@ fn metadata_inspection_does_not_read_a_large_archive_payload() {
 fn fetch_matches_rrdtool_for_ring_order_and_padded_range() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool differential fetch: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential fetch: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -214,7 +217,7 @@ fn fetch_matches_rrdtool_for_ring_order_and_padded_range() {
 fn fetch_uses_rrdtool_resolution_choice_across_archives() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool differential fetch: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential fetch: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -300,7 +303,7 @@ fn fetch_uses_rrdtool_resolution_choice_across_archives() {
 fn in_place_gauge_update_is_byte_compatible_and_upstream_can_continue() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool differential update: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential update: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -382,7 +385,7 @@ fn multipdp_average_update_matches_rrdtool_in_place() {
         .output()
         .is_ok_and(|o| o.status.success())
     {
-        eprintln!("skipping RRDtool differential update: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential update: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -451,7 +454,7 @@ fn multipdp_min_max_last_updates_match_rrdtool_in_place() {
         .output()
         .is_ok_and(|o| o.status.success())
     {
-        eprintln!("skipping RRDtool differential update: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential update: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -514,7 +517,7 @@ fn multiple_gauge_sources_update_matches_rrdtool_in_place() {
         .output()
         .is_ok_and(|o| o.status.success())
     {
-        eprintln!("skipping RRDtool differential update: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential update: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -575,7 +578,7 @@ fn counter_derive_and_absolute_updates_match_rrdtool_in_place() {
         .output()
         .is_ok_and(|o| o.status.success())
     {
-        eprintln!("skipping RRDtool differential update: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential update: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -651,7 +654,7 @@ fn large_counter_and_derive_inputs_keep_decimal_precision_like_rrdtool() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping large integer differential: rrdtool is not installed");
+        oracle_skip!("skipping large integer differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -708,7 +711,7 @@ fn dcounter_and_dderive_reset_semantics_match_rrdtool_byte_for_byte() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool DCOUNTER differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool DCOUNTER differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -772,7 +775,7 @@ fn bulk_updates_cross_multiple_pdp_boundaries_and_roll_archives_like_rrdtool() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool bulk update differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool bulk update differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -865,7 +868,7 @@ fn bulk_updates_cross_multiple_pdp_boundaries_and_roll_archives_like_rrdtool() {
 fn in_place_update_matches_irregular_unknown_and_heartbeat_semantics() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool differential update: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential update: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -957,7 +960,7 @@ fn in_place_update_matches_irregular_unknown_and_heartbeat_semantics() {
 fn unsupported_in_place_update_is_rejected_without_mutating_the_rrd() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool update probe: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool update probe: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -990,7 +993,7 @@ fn unsupported_in_place_update_is_rejected_without_mutating_the_rrd() {
 fn in_place_update_advances_each_basic_base_step_archive() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool differential update: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential update: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -1212,7 +1215,7 @@ fn create_parses_ds_bounds_like_rrdtool() {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
         })
     {
-        eprintln!("skipping DS bound differential: pinned RRDtool 1.11.0 is not installed");
+        oracle_skip!("skipping DS bound differential: pinned RRDtool 1.11.0 is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -1322,7 +1325,7 @@ fn dderive_previous_sample_is_parsed_like_rrdtool() {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
         })
     {
-        eprintln!("skipping DDERIVE differential: pinned RRDtool 1.11.0 is not installed");
+        oracle_skip!("skipping DDERIVE differential: pinned RRDtool 1.11.0 is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();

@@ -1,10 +1,13 @@
+#[macro_use]
+mod common;
+
 use rondi::{DatabaseConfig, Store, Update};
 use std::process::Command;
 
 #[test]
 fn gauge_irregular_sample_average_matches_rrdtool() {
     if Command::new("rrdtool").arg("--version").output().is_err() {
-        eprintln!("skipping RRDtool differential test: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential test: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -103,7 +106,7 @@ fn gauge_irregular_sample_average_matches_rrdtool() {
 #[test]
 fn heartbeat_and_unknown_intervals_match_rrdtool() {
     if Command::new("rrdtool").arg("--version").output().is_err() {
-        eprintln!("skipping RRDtool differential test: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential test: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -218,7 +221,7 @@ fn heartbeat_and_unknown_intervals_match_rrdtool() {
 #[test]
 fn duplicate_and_out_of_order_timestamps_are_rejected_by_both() {
     if Command::new("rrdtool").arg("--version").output().is_err() {
-        eprintln!("skipping RRDtool differential test: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential test: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -430,7 +433,7 @@ fn seeded_random_updates_match_rrdtool_byte_for_byte() {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
         })
     {
-        eprintln!(
+        oracle_skip!(
             "skipping randomized update differential: pinned RRDtool 1.11.0 is not installed"
         );
         return;
