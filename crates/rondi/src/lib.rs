@@ -8,6 +8,7 @@ mod queries;
 mod rrd_binary;
 mod rrd_number;
 pub(crate) mod storage;
+pub mod time;
 pub mod vdef;
 pub mod xport;
 
