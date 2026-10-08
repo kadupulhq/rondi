@@ -67,12 +67,19 @@ fn fixture() -> Option<Fixture> {
 
 impl Fixture {
     fn compare(&self, args: &[String], locale: &str) -> Result<(), String> {
+        self.compare_with(args, "LC_ALL", locale)
+    }
+
+    fn compare_with(&self, args: &[String], variable: &str, locale: &str) -> Result<(), String> {
         let run = |program: &Path| -> Output {
             Command::new(program)
                 .args(args)
                 .current_dir(self.temp.path())
                 .env("TZ", "UTC")
-                .env("LC_ALL", locale)
+                .env_remove("LC_ALL")
+                .env_remove("LC_NUMERIC")
+                .env_remove("LANG")
+                .env(variable, locale)
                 .output()
                 .unwrap()
         };
@@ -88,7 +95,7 @@ impl Fixture {
             Ok(())
         } else {
             Err(format!(
-                "{locale} {args:?}\n  rondi:    {rondi:?}\n  upstream: {upstream:?}"
+                "{variable}={locale} {args:?}\n  rondi:    {rondi:?}\n  upstream: {upstream:?}"
             ))
         }
     }
@@ -195,11 +202,27 @@ fn locale_decimal_point_follows_the_printf_used() {
     graph_csv.extend(["--imgformat", "CSV", "LINE1:x#ff0000:x"].map(String::from));
     let mut graph_print = base("graph", Some("/dev/null"));
     graph_print.extend(["--imgformat", "XML", "LINE1:x#ff0000:x"].map(String::from));
-    let cases = [xport_json, xport_xml, graph_json, graph_csv, graph_print];
+    // PNG graphv: print[n], value_min/value_max (rrd_info_print's printf)
+    // and the GPRINT legend.
+    let mut graphv_png = base("graphv", Some("/dev/null"));
+    graphv_png.extend(["-l", "-0.5", "LINE1:x#ff0000:x"].map(String::from));
+    let cases = [
+        xport_json,
+        xport_xml,
+        graph_json,
+        graph_csv,
+        graph_print,
+        graphv_png,
+    ];
     check_all(
-        ["C", "de_DE.UTF-8"]
-            .iter()
-            .flat_map(|locale| cases.iter().map(move |args| (locale, args)))
-            .map(|(locale, args)| f.compare(args, locale)),
+        [
+            ("LC_ALL", "C"),
+            ("LC_ALL", "de_DE.UTF-8"),
+            ("LC_NUMERIC", "de_DE.UTF-8"),
+            ("LANG", "de_DE.UTF-8"),
+        ]
+        .iter()
+        .flat_map(|setting| cases.iter().map(move |args| (setting, args)))
+        .map(|((variable, locale), args)| f.compare_with(args, variable, locale)),
     );
 }
