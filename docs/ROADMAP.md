@@ -183,7 +183,7 @@ What Rondi does:
 - RPN is reachable from xport and graph, not from COMPUTE data sources.
 - Percentile with infinities depends on libc `qsort` order. The test passes on Linux CI and on macOS arm64 here.
 
-Gaps: COMPUTE wiring; the remaining mixed-resolution `PREDICT`, `TREND`, and `PREV` alignment cases; the full `rrd_parsetime` grammar; error text for malformed RPN; `qsort` order emulation if parity beyond glibc is wanted.
+Gaps: COMPUTE wiring; the remaining mixed-resolution `PREDICT`, `TREND`, and `PREV` alignment cases; error text for malformed RPN; `qsort` order emulation if parity beyond glibc is wanted.
 
 Effort: 3 to 5 engineer-weeks.
 
