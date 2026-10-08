@@ -368,19 +368,24 @@ fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 use std::os::unix::fs::OpenOptionsExt;
                 // O_NOFOLLOW: the file is opened as root, so a symlink planted
                 // at the final component must not redirect appends elsewhere.
+                // O_NONBLOCK keeps a FIFO at the path from hanging startup;
+                // it has no effect on the regular file that is required.
                 let opened = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .custom_flags(libc::O_NOFOLLOW)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
                     .open(&value);
                 // A hard link at the path could aim root's appends at
-                // another file, so only a singly linked file is used.
+                // another file, so only a singly linked regular file is used.
                 let opened = opened.and_then(|file| {
                     use std::os::unix::fs::MetadataExt;
-                    if file.metadata()?.nlink() == 1 {
-                        Ok(file)
-                    } else {
+                    let metadata = file.metadata()?;
+                    if !metadata.file_type().is_file() {
+                        Err(std::io::Error::other("not a regular file"))
+                    } else if metadata.nlink() != 1 {
                         Err(std::io::Error::from_raw_os_error(libc::EMLINK))
+                    } else {
+                        Ok(file)
                     }
                 });
                 match opened {

@@ -646,6 +646,24 @@ fn rrdcached_refuses_linked_pid_and_log_files() {
         )
     );
     assert_eq!(std::fs::read_to_string(&victim).unwrap(), "2147483647\n");
+
+    // A FIFO log path is refused instead of blocking startup.
+    let fifo = run.join("fifo.log");
+    let c_fifo = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+    // SAFETY: the path is NUL terminated and outlives the call.
+    assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+    let output = Command::new(daemon("rondi", &run))
+        .args(["-g", "-o"])
+        .arg(&fifo)
+        .output()
+        .unwrap();
+    // With no reader the open fails with ENXIO, whose text varies by
+    // platform; with one it would open and be refused as not regular.
+    assert_eq!(output.status.code(), Some(6));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .starts_with(&format!("Failed to open log file '{}': ", fifo.display()))
+    );
 }
 
 #[test]
