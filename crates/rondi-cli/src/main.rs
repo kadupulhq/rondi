@@ -7008,7 +7008,7 @@ mod graph_stroke_tests {
             let mut reader = png::Decoder::new(std::io::Cursor::new(png))
                 .read_info()
                 .unwrap();
-            let mut bytes = vec![0; reader.output_buffer_size()];
+            let mut bytes = vec![0; reader.output_buffer_size().unwrap()];
             let info = reader.next_frame(&mut bytes).unwrap();
             bytes.truncate(info.buffer_size());
             bytes

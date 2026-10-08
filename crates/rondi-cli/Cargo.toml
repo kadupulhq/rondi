@@ -28,7 +28,7 @@ hyper.workspace = true
 hyper-util.workspace = true
 shell-words = "1.1"
 libc.workspace = true
-png = "0.17"
+png = "0.18"
 font8x8 = "0.3"
 
 [dev-dependencies]

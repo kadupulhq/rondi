@@ -4316,7 +4316,7 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
         let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
             .read_info()
             .unwrap();
-        let mut pixels = vec![0; reader.output_buffer_size()];
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
         let frame = reader.next_frame(&mut pixels).unwrap();
         assert_eq!(frame.color_type, png::ColorType::Rgb);
         let offset = ((y * frame.width + x) * 3) as usize;
@@ -4626,7 +4626,7 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
             let mut reader = png::Decoder::new(std::io::Cursor::new(image))
                 .read_info()
                 .unwrap();
-            let mut pixels = vec![0; reader.output_buffer_size()];
+            let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
             let frame = reader.next_frame(&mut pixels).unwrap();
             pixels.truncate(frame.buffer_size());
             let draws_red = pixels.chunks_exact(3).any(|pixel| pixel == [255, 0, 0]);
@@ -4814,11 +4814,11 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
     let expected_image = std::fs::read(expected_png_path).unwrap();
     let decoder = png::Decoder::new(std::io::Cursor::new(&image));
     let mut reader = decoder.read_info().unwrap();
-    let mut pixels = vec![0; reader.output_buffer_size()];
+    let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
     let info = reader.next_frame(&mut pixels).unwrap();
     let expected_decoder = png::Decoder::new(std::io::Cursor::new(&expected_image));
     let mut expected_reader = expected_decoder.read_info().unwrap();
-    let mut expected_pixels = vec![0; expected_reader.output_buffer_size()];
+    let mut expected_pixels = vec![0; expected_reader.output_buffer_size().unwrap()];
     let expected_info = expected_reader.next_frame(&mut expected_pixels).unwrap();
     assert_eq!(
         (info.width, info.height),
@@ -4867,7 +4867,7 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
         let data = std::fs::read(path).unwrap();
         let decoder = png::Decoder::new(std::io::Cursor::new(data));
         let mut reader = decoder.read_info().unwrap();
-        let mut pixels = vec![0; reader.output_buffer_size()];
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(&mut pixels).unwrap();
         let plot_colors = pixels[..info.buffer_size()]
             .chunks_exact(3)
@@ -4920,7 +4920,7 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
         let data = std::fs::read(path).unwrap();
         let decoder = png::Decoder::new(std::io::Cursor::new(data));
         let mut reader = decoder.read_info().unwrap();
-        let mut pixels = vec![0; reader.output_buffer_size()];
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(&mut pixels).unwrap();
         let red_ticks_in_plot = pixels[..info.buffer_size()]
             .chunks_exact(3)
@@ -4975,7 +4975,7 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
         let data = std::fs::read(path).unwrap();
         let decoder = png::Decoder::new(std::io::Cursor::new(data));
         let mut reader = decoder.read_info().unwrap();
-        let mut pixels = vec![0; reader.output_buffer_size()];
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(&mut pixels).unwrap();
         assert!(
             pixels[..info.buffer_size()]
@@ -5027,7 +5027,7 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
         let data = std::fs::read(path).unwrap();
         let decoder = png::Decoder::new(std::io::Cursor::new(data));
         let mut reader = decoder.read_info().unwrap();
-        let mut pixels = vec![0; reader.output_buffer_size()];
+        let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(&mut pixels).unwrap();
         assert!(
             pixels[..info.buffer_size()]
