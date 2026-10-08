@@ -24,7 +24,7 @@ pub use rrd_binary::{
     parse_rrd_scaled_duration, resize_rrd_file, restore_rrd_file, tune_rrd_data_sources,
     update_rrd_file, update_rrd_file_precise, update_rrd_raw_batch, update_rrd_raw_values,
     update_rrd_raw_values_precise, update_rrd_raw_values_precise_verbose,
-    update_rrd_raw_values_verbose, update_rrd_values, update_rrd_values_verbose,
+    update_rrd_raw_values_verbose, update_rrd_text, update_rrd_values, update_rrd_values_verbose,
 };
 pub use rrd_number::parse_rrd_number;
 pub use storage::{DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, Store, StoreError, StoreOptions};

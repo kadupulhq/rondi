@@ -6,7 +6,24 @@
 pub fn parse_rrd_number(input: &str) -> Option<f64> {
     // rrd_strtodbl only consults the special spellings when rrd_strtod made
     // no conversion, which also covers an out-of-range exponent.
-    parse_rrd_decimal(input).or_else(|| parse_special(input))
+    match parse_rrd_decimal(input) {
+        Some((number, end)) => (end == input.len()).then_some(number),
+        None => parse_special(input),
+    }
+}
+
+/// `rrd_strtodbl()` with an error context, returning RRDtool's message for
+/// text that does not convert or converts only in part.
+pub(crate) fn rrd_strtodbl(input: &str, context: &str) -> Result<f64, String> {
+    match parse_rrd_decimal(input) {
+        Some((number, end)) if end == input.len() => Ok(number),
+        Some((number, end)) => Err(format!(
+            "{context} - Converted '{input}' to {number:.6}, but cannot convert '{}'",
+            String::from_utf8_lossy(&input.as_bytes()[end..])
+        )),
+        None => parse_special(input)
+            .ok_or_else(|| format!("{context} - Cannot convert '{input}' to float")),
+    }
 }
 
 fn parse_special(input: &str) -> Option<f64> {
@@ -30,10 +47,99 @@ fn parse_special(input: &str) -> Option<f64> {
     }
 }
 
-fn parse_rrd_decimal(input: &str) -> Option<f64> {
+/// `rrd_diff()` from rrd_diff.c: the decimal difference `a - b` of two
+/// integer strings, computed digit by digit and converted with rrd_strtod.
+/// Any `-` before the first digit makes a number negative; mixed signs,
+/// missing digits, and more than LAST_DS_LEN digits give NaN.
+pub(crate) fn rrd_diff(a: &str, b: &str) -> f64 {
+    const LAST_DS_LEN: usize = 30;
+    fn digits(text: &[u8]) -> (bool, &[u8]) {
+        let mut position = 0;
+        let mut negative = false;
+        while position < text.len() && !text[position].is_ascii_digit() {
+            negative |= text[position] == b'-';
+            position += 1;
+        }
+        let start = position;
+        while position < text.len() && text[position].is_ascii_digit() {
+            position += 1;
+        }
+        (negative, &text[start..position])
+    }
+    let (a_negative, a) = digits(a.as_bytes());
+    let (b_negative, b) = digits(b.as_bytes());
+    if a.is_empty() || b.is_empty() || a_negative != b_negative {
+        return crate::rrd_binary::rrd_nan();
+    }
+    let m = a.len().max(b.len());
+    if m > LAST_DS_LEN {
+        return crate::rrd_binary::rrd_nan();
+    }
+    let zero = i32::from(b'0');
+    let mut result_text = vec![b' '; m + 2];
+    let mut carry = 0;
+    for x in 0..m {
+        let a_digit = a.len().checked_sub(x + 1).map(|index| i32::from(a[index]));
+        let b_digit = b.len().checked_sub(x + 1).map(|index| i32::from(b[index]));
+        let mut digit = match (a_digit, b_digit) {
+            (Some(a_digit), Some(b_digit)) => a_digit - carry - b_digit + zero,
+            (Some(a_digit), None) => a_digit - carry,
+            (None, Some(b_digit)) => zero - b_digit - carry + zero,
+            (None, None) => unreachable!("x < max(len(a), len(b))"),
+        };
+        if digit < zero {
+            digit += 10;
+            carry = 1;
+        } else if digit > zero + 9 {
+            digit -= 10;
+            carry = 1;
+        } else {
+            carry = 0;
+        }
+        result_text[m + 1 - x] = digit as u8;
+    }
+    let negate = carry == 1;
+    if negate {
+        // Ten's complement of the digits written so far.
+        let mut position = m + 1;
+        for _ in 0..m {
+            if !result_text[position].is_ascii_digit() {
+                break;
+            }
+            let mut digit = i32::from(b'9') - i32::from(result_text[position]) + carry + zero;
+            if digit > zero + 9 {
+                digit -= 10;
+                carry = 1;
+            } else {
+                carry = 0;
+            }
+            result_text[position] = digit as u8;
+            position -= 1;
+        }
+    }
+    let text = String::from_utf8_lossy(&result_text);
+    let mut result = match rrd_strtodbl(&text, "expected a number") {
+        Ok(value) if negate => -value,
+        Ok(value) => value,
+        Err(_) => crate::rrd_binary::rrd_nan(),
+    };
+    if a_negative && b_negative {
+        result = -result;
+    }
+    result
+}
+
+/// `rrd_strtod()`: the value and the end of the converted text, or `None`
+/// when it leaves `endptr` at the start (no digits, or an exponent outside
+/// the double range).
+fn parse_rrd_decimal(input: &str) -> Option<(f64, usize)> {
     let bytes = input.as_bytes();
     let mut position = 0;
-    while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
+    // C isspace(), which unlike is_ascii_whitespace includes \v.
+    while bytes
+        .get(position)
+        .is_some_and(|byte| matches!(byte, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'))
+    {
         position += 1;
     }
 
@@ -49,10 +155,12 @@ fn parse_rrd_decimal(input: &str) -> Option<f64> {
         _ => false,
     };
 
+    // `number * 10. + digit` is contracted like the pinned builds do, which
+    // matters once the digits pass 2^53.
     let mut number = 0.0_f64;
     let mut digits = 0_usize;
     while let Some(byte @ b'0'..=b'9') = bytes.get(position).copied() {
-        number = number * 10.0 + f64::from(byte - b'0');
+        number = crate::rrd_binary::rrd_mul_add(number, 10.0, f64::from(byte - b'0'));
         position += 1;
         digits += 1;
     }
@@ -62,7 +170,7 @@ fn parse_rrd_decimal(input: &str) -> Option<f64> {
         position += 1;
         let mut decimals = 0_i32;
         while let Some(byte @ b'0'..=b'9') = bytes.get(position).copied() {
-            number = number * 10.0 + f64::from(byte - b'0');
+            number = crate::rrd_binary::rrd_mul_add(number, 10.0, f64::from(byte - b'0'));
             position += 1;
             digits += 1;
             decimals = decimals.checked_add(1)?;
@@ -88,22 +196,20 @@ fn parse_rrd_decimal(input: &str) -> Option<f64> {
         };
         let mut explicit_exponent = 0_i32;
         while let Some(byte @ b'0'..=b'9') = bytes.get(position).copied() {
+            // rrd_strtod accumulates into a C int, which wraps.
             explicit_exponent = explicit_exponent
-                .checked_mul(10)?
-                .checked_add(i32::from(byte - b'0'))?;
+                .wrapping_mul(10)
+                .wrapping_add(i32::from(byte - b'0'));
             position += 1;
         }
         exponent = if exponent_negative {
-            exponent.checked_sub(explicit_exponent)?
+            exponent.wrapping_sub(explicit_exponent)
         } else {
-            exponent.checked_add(explicit_exponent)?
+            exponent.wrapping_add(explicit_exponent)
         };
     }
     // DBL_MIN_EXP and DBL_MAX_EXP bound the decimal exponent in rrd_strtod.
     if !(f64::MIN_EXP..=f64::MAX_EXP).contains(&exponent) {
-        return None;
-    }
-    if position != bytes.len() {
         return None;
     }
 
@@ -123,7 +229,7 @@ fn parse_rrd_decimal(input: &str) -> Option<f64> {
         remaining_power >>= 1;
         power_of_ten *= power_of_ten;
     }
-    Some(number)
+    Some((number, position))
 }
 
 #[cfg(test)]

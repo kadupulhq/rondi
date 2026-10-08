@@ -4,10 +4,9 @@ use rondi::time::{
 };
 use rondi::{
     DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, DatabaseConfig, RrdDataSourceTune, RrdDumpHeader,
-    RrdRawUpdate, RrdResizeAction, RrdTuneBound, Store, StoreOptions, Update, create_rrd_file,
+    RrdResizeAction, RrdTuneBound, Store, StoreOptions, Update, create_rrd_file,
     dump_rrd_file_with_header, fetch_rrd_file, first_rrd_time, parse_rrd_scaled_duration,
-    resize_rrd_file, restore_rrd_file, tune_rrd_data_sources, update_rrd_raw_batch,
-    update_rrd_raw_values_precise_verbose,
+    resize_rrd_file, restore_rrd_file, tune_rrd_data_sources, update_rrd_text,
 };
 use std::fmt::Write as FmtWrite;
 use std::io::{BufRead, Read, Seek, Write};
@@ -4367,6 +4366,13 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                         .collect::<Vec<_>>(),
                 );
             }
+            "--daemon" | "-d" if verbose => {
+                return Err(format!(
+                    "invalid option -- '{}'",
+                    args[index].trim_start_matches('-')
+                )
+                .into());
+            }
             "--daemon" | "-d" => {
                 index += 1;
                 let address = args
@@ -4390,15 +4396,48 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
             .ok()
             .filter(|address| !address.is_empty())
     });
-    if verbose && daemon_address.is_some() {
-        return Err("rrdtool updatev cannot be used with rrdcached".into());
+    if verbose {
+        // rrd_update_v refuses only an empty RRDCACHED_ADDRESS and otherwise
+        // updates the file directly.
+        if std::env::var_os("RRDCACHED_ADDRESS").is_some_and(|address| address.is_empty()) {
+            return Err("The \"RRDCACHED_ADDRESS\" environment variable is defined, but \"updatev\" cannot work with rrdcached. Either unset the environment variable or use \"update\" instead.".into());
+        }
     }
-    if daemon_address.is_none() {
-        ensure_rrd_file_exists(&filename)?;
-    }
+    let daemon_address = if verbose { None } else { daemon_address };
     // Local RRD writes use RRDtool's per-file fcntl lock in the library, which
     // tries once unless $RRD_LOCKING says otherwise. A directory-wide Rondi
     // lock would serialize unrelated files and stop parallel poller updates.
+    if daemon_address.is_none() {
+        ensure_rrd_file_exists(&filename)?;
+        let template = template.as_ref().map(|names| names.join(":"));
+        let arguments = samples.iter().map(String::as_str).collect::<Vec<_>>();
+        let (summaries, result) = update_rrd_text(
+            &filename,
+            template.as_deref(),
+            &arguments,
+            skip_past_updates,
+        );
+        if verbose {
+            // rrd_update_v reports the rows written before a failure too.
+            println!("return_value = {}", if result.is_ok() { 0 } else { -1 });
+            let names = inspect_rrd(&args[1])
+                .map(|info| info.data_sources)
+                .unwrap_or_default();
+            for summary in summaries {
+                for (source, value) in names.iter().zip(summary.values) {
+                    println!(
+                        "[{}]RRA[{}][{}]DS[{}] = {}",
+                        summary.timestamp,
+                        summary.consolidation,
+                        summary.pdp_per_row,
+                        source.name,
+                        format_rrd_scientific(value)
+                    );
+                }
+            }
+        }
+        return result.map_err(|error| rrd_update_error(&filename, error));
+    }
     let mut source_count = None;
     let source_names = if let Some(template) = &template {
         let info = inspect_rrd(&args[1])?;
@@ -4416,26 +4455,8 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
     } else {
         None
     };
-    let verbose_source_names = if verbose {
-        Some(
-            inspect_rrd(filename.to_str().ok_or("RRD filename is not valid UTF-8")?)?
-                .data_sources
-                .into_iter()
-                .map(|source| source.name)
-                .collect::<Vec<_>>(),
-        )
-    } else {
-        None
-    };
-    if verbose {
-        println!("return_value = 0");
-    }
     let mut daemon_samples = Vec::new();
-    // Local samples are applied together under one open and lock, as
-    // rrd_update_r does; a later sample's parse error is reported after the
-    // samples before it are written.
-    let mut pending: Vec<(i64, u64, Vec<Option<String>>)> = Vec::new();
-    let parsed = samples.iter().try_for_each(|sample| -> Result<(), Box<dyn std::error::Error>> {
+    for sample in &samples {
         let (timestamp, values, at_style) =
             if let Some((timestamp, values)) = sample.split_once('@') {
                 (timestamp, values, true)
@@ -4458,28 +4479,6 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 }
             })
             .collect::<Vec<_>>();
-        if template.is_none() && daemon_address.is_none() {
-            let source_count = match source_count {
-                Some(count) => count,
-                None => *source_count.insert(inspect_rrd(&args[1])?.data_sources.len()),
-            };
-            if raw_values.len() > source_count {
-                return Err(format!(
-                    "{}: found extra data on update argument: {}",
-                    filename.display(),
-                    source_count + 1
-                )
-                .into());
-            }
-            if raw_values.len() < source_count {
-                return Err(format!(
-                    "{}: expected {source_count} data source readings (got {}) from {timestamp}",
-                    filename.display(),
-                    raw_values.len()
-                )
-                .into());
-            }
-        }
         let numeric_values = values
             .split(':')
             .enumerate()
@@ -4566,67 +4565,13 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 )
             })?
         };
-        if skip_past_updates && verbose {
-            let info = inspect_rrd(&args[1])?;
-            if (update_time.seconds, update_time.microseconds)
-                <= (info.last_update, info.last_update_usec)
-            {
-                return Ok(());
-            }
-        }
-        if daemon_address.is_some() {
-            let encoded_values = raw_values
-                .iter()
-                .map(|value| value.as_deref().unwrap_or("U"))
-                .collect::<Vec<_>>()
-                .join(":");
-            daemon_samples.push(format!("{}:{encoded_values}", update_time.format_rrd()));
-            return Ok(());
-        }
-        if verbose {
-            let raw_values = raw_values.iter().map(Option::as_deref).collect::<Vec<_>>();
-            let summaries = update_rrd_raw_values_precise_verbose(
-                &filename,
-                update_time.seconds,
-                update_time.microseconds,
-                &raw_values,
-            )
-            .map_err(|error| rrd_update_error(&filename, error))?;
-            for summary in summaries {
-                for (source_name, value) in verbose_source_names
-                    .as_ref()
-                    .expect("verbose source names are initialized")
-                    .iter()
-                    .zip(summary.values)
-                {
-                    println!(
-                        "[{}]RRA[{}][{}]DS[{}] = {}",
-                        summary.timestamp,
-                        summary.consolidation,
-                        summary.pdp_per_row,
-                        source_name,
-                        format_rrd_scientific(value)
-                    );
-                }
-            }
-        } else {
-            pending.push((update_time.seconds, update_time.microseconds, raw_values));
-        }
-        Ok(())
-    });
-    if !pending.is_empty() {
-        let updates = pending
+        let encoded_values = raw_values
             .iter()
-            .map(|(seconds, microseconds, values)| RrdRawUpdate {
-                timestamp: *seconds,
-                timestamp_usec: *microseconds,
-                values: values.iter().map(Option::as_deref).collect(),
-            })
-            .collect::<Vec<_>>();
-        update_rrd_raw_batch(&filename, &updates, skip_past_updates)
-            .map_err(|error| rrd_update_error(&filename, error))?;
+            .map(|value| value.as_deref().unwrap_or("U"))
+            .collect::<Vec<_>>()
+            .join(":");
+        daemon_samples.push(format!("{}:{encoded_values}", update_time.format_rrd()));
     }
-    parsed?;
     if let Some(address) = daemon_address {
         if !daemon_samples.is_empty() {
             #[cfg(unix)]

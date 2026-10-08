@@ -38,7 +38,7 @@ pub(crate) fn rrd_nan() -> f64 {
 /// contract this pattern into a fused multiply-add on aarch64, which always
 /// has the instruction, while baseline x86_64 builds round the product first.
 #[inline]
-fn rrd_mul_add(a: f64, b: f64, c: f64) -> f64 {
+pub(crate) fn rrd_mul_add(a: f64, b: f64, c: f64) -> f64 {
     #[cfg(target_arch = "aarch64")]
     {
         a.mul_add(b, c)
@@ -690,26 +690,16 @@ fn apply_update(
             "in-place update requires one value per supported data source and basic archives (AVERAGE, MIN, MAX, LAST)".into(),
         ));
     }
-    for (index, (source, value)) in info.data_sources.iter().zip(values).enumerate() {
-        if let Some(value) = value {
-            // update_pdp_prep converts DCOUNTER/DDERIVE text only when the
-            // previous sample is known, so those are checked in update_pdp_new.
-            if !matches!(source.kind.as_str(), "DCOUNTER" | "DDERIVE")
-                && raw_values
-                    .and_then(|raw| raw[index])
-                    .is_some_and(|raw| crate::parse_rrd_number(raw).is_none())
-            {
-                return Err(StoreError::InvalidValue);
-            }
-            if matches!(source.kind.as_str(), "COUNTER" | "DERIVE") {
-                let valid = if let Some(raw) = raw_values.and_then(|raw| raw[index]) {
-                    valid_integer_sample(raw, source.kind == "COUNTER")
-                } else {
-                    value.fract() == 0.0
+    // Text samples are converted lazily in update_pdp_new, as
+    // update_pdp_prep does; numeric callers keep an up-front check.
+    if raw_values.is_none() {
+        for (source, value) in info.data_sources.iter().zip(values) {
+            if let Some(value) = value {
+                if matches!(source.kind.as_str(), "COUNTER" | "DERIVE")
+                    && !(value.fract() == 0.0
                         && (source.kind != "COUNTER" || *value >= 0.0)
-                        && value.abs() <= 9_007_199_254_740_992.0
-                };
-                if !valid {
+                        && value.abs() <= 9_007_199_254_740_992.0)
+                {
                     return Err(StoreError::InvalidValue);
                 }
             }
@@ -747,14 +737,27 @@ fn apply_update(
     // The steps below follow rrd_update.c process_arg so that every archive
     // value is produced by the same sequence of floating-point operations.
     let mut pdp_new = Vec::with_capacity(ds_count);
-    let mut last_ds_bytes = Vec::with_capacity(ds_count);
+    let mut last_ds_bytes: Vec<[u8; 30]> = Vec::with_capacity(ds_count);
     for (index, (source, value)) in info.data_sources.iter().zip(values).enumerate() {
-        pdp_new.push(update_pdp_new(
+        let amount = match update_pdp_new(
             source,
             *value,
             raw_values.and_then(|raw| raw[index]),
             interval,
-        )?);
+        ) {
+            Ok(amount) => amount,
+            Err(error) => {
+                // RRDtool edits last_ds in the mapped header as it goes, so
+                // the sources before the failing one keep their new text.
+                for (earlier, last_ds) in last_ds_bytes.iter().enumerate() {
+                    file.seek(SeekFrom::Start((pdp_start + earlier * PDP_PREP_LEN) as u64))?;
+                    file.write_all(last_ds)?;
+                }
+                *state_cache = None;
+                return Err(error);
+            }
+        };
+        pdp_new.push(amount);
         let last_ds = value.map_or_else(
             || "U".to_owned(),
             |v| {
@@ -947,6 +950,176 @@ fn apply_update(
     Ok(summaries)
 }
 
+/// `rrd_update_r()` over RRDtool's update argument text (`time:v1:v2...` or
+/// `time@v1:...`), with an optional `--template` list. The file is opened
+/// and locked once. Like `_rrd_update`, processing stops at the first failing
+/// argument and keeps the ones before it; the second element is that error,
+/// worded as rrd_set_error words it (sample errors carry the file name).
+pub fn update_rrd_text(
+    path: impl AsRef<Path>,
+    template: Option<&str>,
+    arguments: &[&str],
+    skip_past_updates: bool,
+) -> (Vec<RrdUpdateSummary>, Result<(), StoreError>) {
+    let mut summaries = Vec::new();
+    let result = update_text_arguments(
+        path.as_ref(),
+        template,
+        arguments,
+        skip_past_updates,
+        &mut summaries,
+    );
+    (summaries, result)
+}
+
+fn update_text_arguments(
+    path: &Path,
+    template: Option<&str>,
+    arguments: &[&str],
+    skip_past_updates: bool,
+    summaries: &mut Vec<RrdUpdateSummary>,
+) -> Result<(), StoreError> {
+    // rrd_update.c:864-867
+    if arguments.is_empty() {
+        return Err(StoreError::Rrd("Not enough arguments".into()));
+    }
+    let mut file = RrdFileLock::exclusive(open_rrd_write(path)?)?;
+    let mut info = read_info(&mut file)?;
+    let ds_count = info.data_sources.len();
+    // parse_template (rrd_update.c:1073-1116): slot 0 is the time; each
+    // further slot names the data source it fills.
+    let slots = match template {
+        None => (0..ds_count).collect::<Vec<_>>(),
+        Some(template) => {
+            let mut slots = Vec::new();
+            for name in template.split(':') {
+                if slots.len() >= ds_count {
+                    return Err(StoreError::Rrd(
+                        "tmplt contains more DS definitions than RRD".into(),
+                    ));
+                }
+                let index = info
+                    .data_sources
+                    .iter()
+                    .position(|source| source.name == name)
+                    .ok_or_else(|| StoreError::Rrd(format!("unknown DS name '{name}'")))?;
+                slots.push(index);
+            }
+            slots
+        }
+    };
+    let version = info.version.parse::<u32>().unwrap_or(0);
+    let mut state_cache = None;
+    for argument in arguments {
+        let prefixed = |message: String| StoreError::Rrd(format!("{}: {message}", path.display()));
+        // parse_ds (rrd_update.c:1302-1358)
+        let (time_text, values_text, at_style) = if let Some(at) = argument.find('@') {
+            (&argument[..at], &argument[at + 1..], true)
+        } else if let Some(colon) = argument.find(':') {
+            (&argument[..colon], &argument[colon + 1..], false)
+        } else {
+            return Err(prefixed(format!(
+                "expected timestamp not found in data source from {argument}"
+            )));
+        };
+        let mut texts = vec!["U"; ds_count];
+        let mut filled = 0;
+        let mut rest = values_text;
+        loop {
+            let (value, remainder) = match rest.find(':') {
+                Some(colon) => (&rest[..colon], Some(&rest[colon + 1..])),
+                None => (rest, None),
+            };
+            if filled > 0 && filled >= slots.len() {
+                return Err(prefixed(format!(
+                    "found extra data on update argument: {value}{}",
+                    remainder.map_or(String::new(), |remainder| format!(":{remainder}"))
+                )));
+            }
+            if let Some(&slot) = slots.get(filled) {
+                texts[slot] = value;
+            }
+            filled += 1;
+            match remainder {
+                Some(remainder) => rest = remainder,
+                None => break,
+            }
+        }
+        if filled != slots.len() {
+            // parse_ds has already cut the argument at the time separator.
+            return Err(prefixed(format!(
+                "expected {} data source readings (got {filled}) from {time_text}",
+                slots.len()
+            )));
+        }
+        // get_time_from_reading (rrd_update.c:1368-1425)
+        let (seconds, mut microseconds) = if at_style {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs() as i64);
+            let value = crate::time::rrd_parsetime(time_text, now)
+                .map_err(|error| prefixed(format!("ds time: {time_text}: {error}")))?;
+            let seconds = value.absolute().ok_or_else(|| {
+                prefixed(format!(
+                    "specifying time relative to the 'start' or 'end' makes no sense here: {time_text}"
+                ))
+            })?;
+            (seconds, 0)
+        } else {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            if time_text == "N" {
+                (now.as_secs() as i64, u64::from(now.subsec_micros()))
+            } else {
+                let mut time = crate::rrd_number::rrd_strtodbl(
+                    time_text,
+                    "error while parsing time in get_time_from_reading",
+                )
+                .map_err(prefixed)?;
+                if time < 0.0 {
+                    // tv_usec * 1e-6f: the constant is a float.
+                    time +=
+                        now.as_secs() as f64 + f64::from(now.subsec_micros()) * f64::from(1e-6_f32);
+                }
+                let seconds = time.floor();
+                (seconds as i64, ((time - seconds) * 1e6) as u64)
+            }
+        };
+        if version < 3 {
+            microseconds = 0;
+        }
+        if seconds < info.last_update
+            || (seconds == info.last_update && microseconds <= info.last_update_usec)
+        {
+            if skip_past_updates {
+                continue;
+            }
+            return Err(prefixed(format!(
+                "illegal attempt to update using time {seconds} when last update time is {} (minimum one second step)",
+                info.last_update
+            )));
+        }
+        let raw = texts.iter().map(|text| Some(*text)).collect::<Vec<_>>();
+        let values = parse_raw_values(&raw)?;
+        let written = apply_update(
+            &mut file,
+            &mut info,
+            &mut state_cache,
+            seconds,
+            microseconds,
+            &values,
+            Some(&raw),
+        )
+        .map_err(|error| match error {
+            StoreError::Rrd(message) => prefixed(message),
+            error => error,
+        })?;
+        summaries.extend(written);
+    }
+    Ok(())
+}
+
 /// One sample for [`update_rrd_raw_batch`], with the caller's exact text for
 /// each data source (`None` is unknown).
 #[derive(Clone, Debug, PartialEq)]
@@ -1003,16 +1176,45 @@ fn update_pdp_new(
     let Some(sample) = value else {
         return Ok(rrd_nan());
     };
-    if (source.heartbeat as f64) < interval {
+    // rrd_update.c:1458-1460: text starting with 'U' is unknown, and nothing
+    // is converted past the heartbeat.
+    if raw_value.is_some_and(|text| text.starts_with('U')) || (source.heartbeat as f64) < interval {
         return Ok(rrd_nan());
     }
     let previous = source.last_value.as_str();
+    let previous_known = !previous.starts_with('U');
+    let context = format!("Function update_pdp_prep, case DST_{}", source.kind);
+    let convert =
+        |text: &str| crate::rrd_number::rrd_strtodbl(text, &context).map_err(StoreError::Rrd);
     let (amount, rate) = match source.kind.as_str() {
-        "GAUGE" => (sample * interval, sample),
-        "ABSOLUTE" => (sample, sample / interval),
-        "COUNTER" | "DERIVE" if previous != "U" => {
+        "GAUGE" => {
+            let sample = raw_value.map_or(Ok(sample), convert)?;
+            (sample * interval, sample)
+        }
+        "ABSOLUTE" => {
+            let sample = raw_value.map_or(Ok(sample), convert)?;
+            (sample, sample / interval)
+        }
+        "COUNTER" | "DERIVE" => {
+            if let Some(text) = raw_value {
+                // rrd_update.c:1470-1484 checks digits only; a leading '-'
+                // is allowed for DERIVE.
+                let signed = source.kind == "DERIVE";
+                let simple = text.bytes().enumerate().all(|(index, byte)| {
+                    byte.is_ascii_digit() || (index == 0 && signed && byte == b'-')
+                });
+                if !simple {
+                    return Err(StoreError::Rrd(format!(
+                        "not a simple {} integer: '{text}'",
+                        if signed { "signed" } else { "unsigned" }
+                    )));
+                }
+            }
+            if !previous_known {
+                return Ok(rrd_nan());
+            }
             let delta = if let Some(current) = raw_value {
-                exact_integer_delta(current, previous)
+                Some(crate::rrd_number::rrd_diff(current, previous))
             } else {
                 previous
                     .parse::<f64>()
@@ -1032,21 +1234,10 @@ fn update_pdp_new(
             }
             (delta, delta / interval)
         }
-        "DCOUNTER" | "DDERIVE" if previous != "U" => {
+        "DCOUNTER" | "DDERIVE" if previous_known => {
             // rrd_update.c:1520-1533 converts the new text, then the stored
             // one, and fails the update if either does not convert.
-            let convert = |text: &str| {
-                crate::parse_rrd_number(text).ok_or_else(|| {
-                    StoreError::RrdExpression(format!(
-                        "Function update_pdp_prep, case DST_{} - Cannot convert '{text}' to float",
-                        source.kind
-                    ))
-                })
-            };
-            let sample = match raw_value {
-                Some(text) => convert(text)?,
-                None => sample,
-            };
+            let sample = raw_value.map_or(Ok(sample), convert)?;
             let previous = convert(previous)?;
             if source.kind == "DCOUNTER"
                 && ((sample > 0.0 && previous > sample) || (sample < 0.0 && sample > previous))
@@ -1315,29 +1506,6 @@ fn write_rra_rows(
         }
     }
     Ok(())
-}
-
-fn valid_integer_sample(value: &str, unsigned: bool) -> bool {
-    if value.is_empty() || value.len() > 29 {
-        return false;
-    }
-    let digits = if !unsigned && value.starts_with('-') {
-        &value[1..]
-    } else {
-        value
-    };
-    !digits.is_empty()
-        && digits.bytes().all(|byte| byte.is_ascii_digit())
-        && value.parse::<i128>().is_ok()
-}
-
-fn exact_integer_delta(current: &str, previous: &str) -> Option<f64> {
-    let current = current.parse::<i128>().ok()?;
-    let previous = previous.parse::<i128>().ok()?;
-    if (current < 0) != (previous < 0) {
-        return None;
-    }
-    Some((current - previous) as f64)
 }
 
 /// One archive row written by a verbose RRDtool-compatible update.
