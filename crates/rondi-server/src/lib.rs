@@ -341,7 +341,6 @@ struct RrdcachedStats {
 
 #[derive(Debug, Clone)]
 struct PendingRrdUpdate {
-    id: u64,
     samples: Vec<String>,
 }
 
@@ -354,6 +353,9 @@ struct CacheTree {
 struct CacheTreeNode {
     path: PathBuf,
     last_flush_time: i64,
+    // ci->last_update_stamp: seeded from the file's whole-second last_up and
+    // advanced by each accepted sample, even after its values are written.
+    last_update_stamp: f64,
     left: Option<Box<CacheTreeNode>>,
     right: Option<Box<CacheTreeNode>>,
     height: usize,
@@ -391,6 +393,18 @@ impl CacheTree {
                 }
             }
         }
+    }
+
+    fn node_mut(&mut self, path: &Path) -> Option<&mut CacheTreeNode> {
+        let mut node = self.root.as_deref_mut();
+        while let Some(current) = node {
+            match path.cmp(&current.path) {
+                std::cmp::Ordering::Less => node = current.left.as_deref_mut(),
+                std::cmp::Ordering::Greater => node = current.right.as_deref_mut(),
+                std::cmp::Ordering::Equal => return Some(current),
+            }
+        }
+        None
     }
 
     fn last_flush_time(&self, path: &Path) -> Option<i64> {
@@ -515,6 +529,7 @@ fn cache_tree_insert(
             Some(Box::new(CacheTreeNode {
                 path,
                 last_flush_time: now,
+                last_update_stamp: 0.0,
                 left: None,
                 right: None,
                 height: 1,
@@ -595,7 +610,6 @@ struct RrdcachedQueue {
     suspended: std::collections::HashSet<PathBuf>,
     journal: Option<RrdcachedJournal>,
     journal_rotations: u64,
-    next_id: u64,
     journal_bytes: u64,
     flush_at_shutdown: bool,
     pending_bytes: usize,
@@ -616,7 +630,6 @@ impl RrdcachedQueue {
             suspended: std::collections::HashSet::new(),
             journal: None,
             journal_rotations: 0,
-            next_id: 1,
             journal_bytes: 0,
             flush_at_shutdown: true,
             pending_bytes: 0,
@@ -832,22 +845,11 @@ impl RrdcachedQueue {
             let Ok(path) = resolve_rrdcached_path(root, &file) else {
                 return false;
             };
-            if !rrdcached_journal_path_is_safe(&path) {
-                return false;
-            }
-            let Ok(info) = inspect_rrdcached_target(&path) else {
-                return false;
-            };
-            self.known.insert(path.clone(), now);
             let mut samples = Vec::new();
             while let Some(sample) = rrdcached_buffer_field(&mut buffer) {
                 samples.push(sample);
             }
-            let samples = samples.iter().map(String::as_str).collect::<Vec<_>>();
-            !samples.is_empty()
-                && self
-                    .enqueue_inspected(path, &info, &samples, None, now)
-                    .is_ok()
+            self.update(path, None, &samples, None, now).is_ok()
         } else if command.eq_ignore_ascii_case("WROTE") {
             let path = Path::new(buffer.unwrap_or_default());
             if self.known.contains(path) {
@@ -955,93 +957,122 @@ impl RrdcachedQueue {
     }
 
     #[cfg(test)]
-    fn enqueue(&mut self, path: PathBuf, samples: &[&str]) -> Result<(), String> {
-        let info = inspect_rrdcached_target(&path)?;
+    fn enqueue(&mut self, path: PathBuf, samples: &[&str]) -> Result<usize, String> {
         let arguments = format!("{} {}", path.display(), samples.join(" "));
-        self.enqueue_inspected(
+        let samples = samples
+            .iter()
+            .map(|sample| (*sample).to_owned())
+            .collect::<Vec<_>>();
+        self.update(
             path,
-            &info,
-            samples,
+            None,
+            &samples,
             Some(arguments.as_bytes()),
             wall_time_seconds(),
         )
     }
 
-    /// `journal_arguments` is the request text after the command word; it is
-    /// `None` during replay, which neither journals nor applies the cap.
-    fn enqueue_inspected(
+    /// Port of handle_request_update from the cache lookup on
+    /// (rrd_daemon.c:1679-1856). `info` is the RRD read for a path not yet
+    /// cached, taken before the queue lock; `journal_arguments` is the request
+    /// text after the command word, or `None` during replay, which neither
+    /// journals nor applies the pending cap. Only timestamps are checked here:
+    /// values are first parsed when rrd_update_r writes the batch.
+    fn update(
         &mut self,
         path: PathBuf,
-        info: &rondi::RrdInfo,
-        samples: &[&str],
+        info: Option<&rondi::RrdInfo>,
+        samples: &[String],
         journal_arguments: Option<&[u8]>,
         now: i64,
-    ) -> Result<(), String> {
+    ) -> Result<usize, String> {
         if !rrdcached_journal_path_is_safe(&path) {
             // The canonical path may be a symlink target the client cannot see.
             return Err("Invalid file name".to_owned());
         }
-        let mut last_timestamp = self
-            .pending
-            .get(&path)
-            .and_then(|entries| entries.last())
-            .and_then(|entry| entry.samples.last())
-            .and_then(|sample| sample.split_once(':'))
-            .map(|(timestamp, _)| rrdcached_update_timestamp(timestamp))
-            .transpose()?
-            .unwrap_or((info.last_update, info.last_update_usec));
-        for sample in samples {
-            let Some((timestamp, values)) = sample.split_once(':') else {
-                return Err(format!("Cannot find timestamp in '{sample}'!"));
-            };
-            let timestamp = rrdcached_update_timestamp(timestamp)
-                .map_err(|_| format!("Cannot find timestamp in '{sample}'!"))?;
-            let values = values.split(':').collect::<Vec<_>>();
-            if values.len() != info.data_sources.len()
-                || values.iter().any(|value| {
-                    !value.eq_ignore_ascii_case("U")
-                        && rondi::parse_rrd_number(value).is_none_or(|number| !number.is_finite())
-                })
-            {
-                return Err(format!("Invalid update value: {sample}"));
-            }
-            if timestamp <= last_timestamp {
-                let timestamp_seconds = timestamp.0 as f64 + timestamp.1 as f64 / 1_000_000.0;
-                let last_timestamp_seconds =
-                    last_timestamp.0 as f64 + last_timestamp.1 as f64 / 1_000_000.0;
-                return Err(format!(
-                    "illegal attempt to update using time {:.6} when last update time is {:.6} (minimum one second step)",
-                    timestamp_seconds, last_timestamp_seconds
-                ));
-            }
-            last_timestamp = timestamp;
+        let added_bytes = pending_entry_bytes(samples);
+        if journal_arguments.is_some()
+            && self.pending_bytes.saturating_add(added_bytes) > self.max_pending_bytes
+        {
+            return Err(format!(
+                "rrdcached pending queue is full ({} of {} bytes)",
+                self.pending_bytes, self.max_pending_bytes
+            ));
         }
-        let id = self.next_id;
-        self.next_id = self.next_id.saturating_add(1);
-        let samples = samples
-            .iter()
-            .map(|sample| (*sample).to_owned())
-            .collect::<Vec<_>>();
-        let added_bytes = pending_entry_bytes(&samples);
-        if let Some(arguments) = journal_arguments {
-            if self.pending_bytes.saturating_add(added_bytes) > self.max_pending_bytes {
-                return Err(format!(
-                    "rrdcached pending queue is full ({} of {} bytes)",
-                    self.pending_bytes, self.max_pending_bytes
-                ));
+        if !self.known.contains(&path) {
+            let last_update = match info {
+                Some(info) => info.last_update,
+                None => inspect_rrdcached_target(&path)?.last_update,
+            };
+            if last_update < 1 {
+                return Err("Error: rrdcached: Invalid timestamp returned".to_owned());
             }
+            self.known.insert(path.clone(), now);
+            if let Some(node) = self.known.node_mut(&path) {
+                node.last_update_stamp = last_update as f64;
+            }
+        }
+        if let Some(arguments) = journal_arguments {
             self.journal_write("update", arguments);
         }
-        self.known.insert(path.clone(), now);
-        let entries = self.pending.entry(path.clone()).or_default();
-        if entries.len() == entries.capacity() {
-            entries.reserve(self.allocation_chunk);
+        let mut last_update_stamp = self
+            .known
+            .node_mut(&path)
+            .map_or(0.0, |node| node.last_update_stamp);
+        let mut accepted = Vec::new();
+        let mut result = Ok(());
+        for sample in samples {
+            let Some(stamp) = rrdcached_sample_stamp(sample) else {
+                result = Err(format!("Cannot find timestamp in '{sample}'!"));
+                break;
+            };
+            if stamp <= last_update_stamp {
+                result = Err(format!(
+                    "illegal attempt to update using time {stamp:.6} when last update time is {last_update_stamp:.6} (minimum one second step)"
+                ));
+                break;
+            }
+            last_update_stamp = stamp;
+            accepted.push(sample.clone());
         }
-        entries.push(PendingRrdUpdate { id, samples });
-        self.pending_bytes = self.pending_bytes.saturating_add(added_bytes);
+        if let Some(node) = self.known.node_mut(&path) {
+            node.last_update_stamp = last_update_stamp;
+        }
+        let count = accepted.len();
+        // Samples before a rejected one stay queued, as upstream appends each
+        // before parsing the next.
+        if count > 0 {
+            self.pending_bytes = self
+                .pending_bytes
+                .saturating_add(pending_entry_bytes(&accepted));
+            let entries = self.pending.entry(path.clone()).or_default();
+            if entries.len() == entries.capacity() {
+                entries.reserve(self.allocation_chunk);
+            }
+            entries.push(PendingRrdUpdate { samples: accepted });
+        }
+        result?;
         self.schedule_path(&path, now);
-        Ok(())
+        if count == 0 {
+            return Err("No values updated.".to_owned());
+        }
+        Ok(count)
     }
+}
+
+/// The `rrd_strtodbl(value, &eostamp, ...) != 1 || *eostamp != ':'` test:
+/// rrd_strtod must stop exactly at the first colon, and the NaN/Inf
+/// spellings, which return 2, are refused.
+fn rrdcached_sample_stamp(sample: &str) -> Option<f64> {
+    let (head, _) = sample.split_once(':')?;
+    let special = ["nan", "inf", "-nan", "-inf"].iter().any(|prefix| {
+        head.get(..prefix.len())
+            .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+    });
+    if special {
+        return None;
+    }
+    rondi::parse_rrd_number(head)
 }
 
 /// Rondi keys the cache by canonical path, which a symlink can give a
@@ -1637,11 +1668,6 @@ fn handle_rrdcached_line(
             stats.updates_received.fetch_add(1, Ordering::Relaxed);
             if fields.is_empty() {
                 "-1 Usage: UPDATE <filename> <values> [<values> ...]\n".to_owned()
-            } else if fields.len() == 1 {
-                match resolve_rrdcached_path(root, &fields[0]) {
-                    Ok(_) => "-1 No values updated.\n".to_owned(),
-                    Err(error) => format!("-1 {error}\n"),
-                }
             } else {
                 let arguments = rrdcached_request_arguments(line);
                 // Upstream journals the request truncated at a NUL or at
@@ -1659,19 +1685,30 @@ fn handle_rrdcached_line(
                     samples.push(sample);
                 }
                 match resolve_rrdcached_path(root, &file).and_then(|path| {
-                    let info = inspect_rrdcached_target(&path)?;
+                    let cached = queue
+                        .lock()
+                        .map_err(|_| "rrdcached queue lock poisoned".to_owned())?
+                        .known
+                        .contains(&path);
+                    // stat and rrd_open may block, so upstream reads a new
+                    // file before taking cache_lock again.
+                    let info = if cached {
+                        None
+                    } else {
+                        Some(inspect_rrdcached_target(&path)?)
+                    };
                     queue
                         .lock()
                         .map_err(|_| "rrdcached queue lock poisoned".to_owned())?
-                        .enqueue_inspected(
+                        .update(
                             path,
-                            &info,
-                            &samples.iter().map(String::as_str).collect::<Vec<_>>(),
+                            info.as_ref(),
+                            &samples,
                             Some(arguments.as_bytes()),
                             wall_time_seconds(),
                         )
                 }) {
-                    Ok(()) => format!("0 errors, enqueued {} value(s).\n", samples.len()),
+                    Ok(count) => format!("0 errors, enqueued {count} value(s).\n"),
                     Err(error) => format!("-1 {error}\n"),
                 }
             }
@@ -2648,53 +2685,51 @@ fn flush_rrdcached_path(
     result
 }
 
+/// Port of queue_thread_main for one cache item (rrd_daemon.c:1228-1285):
+/// the values leave the cache before the write, a failed rrd_update_r is only
+/// logged, and `wrote` is journaled either way.
 fn flush_owned_rrdcached_path(
     path: &Path,
     queue: &Mutex<RrdcachedQueue>,
     stats: &RrdcachedStats,
 ) -> Result<bool, String> {
     let entries = {
-        let queue = queue
+        let mut queue = queue
             .lock()
             .map_err(|_| "rrdcached queue lock poisoned".to_owned())?;
         if queue.suspended.contains(path) {
             return Ok(false);
         }
-        queue.pending.get(path).cloned()
-    };
-    let Some(entries) = entries else {
-        return Ok(false);
-    };
-    for entry in entries {
-        let samples = entry.samples.iter().map(String::as_str).collect::<Vec<_>>();
-        let datasets = update_rrdcached_file(path, &samples)?;
-        let entry_bytes = pending_entry_bytes(&entry.samples);
-        let mut queue = queue
-            .lock()
-            .map_err(|_| "rrdcached queue lock poisoned".to_owned())?;
+        let Some(entries) = queue.pending.get(path).cloned() else {
+            return Ok(false);
+        };
+        queue.drop_pending(path);
         queue.known.mark_flushed(path, wall_time_seconds());
-        if let Some(pending) = queue.pending.get_mut(path) {
-            pending.retain(|candidate| candidate.id != entry.id);
-            if pending.is_empty() {
-                queue.pending.remove(path);
-                queue
-                    .pending_order
-                    .retain(|pending_path| pending_path != path);
-            }
-        }
-        queue.pending_bytes = queue.pending_bytes.saturating_sub(entry_bytes);
-        stats
-            .updates_written
-            .fetch_add(entry.samples.len() as u64, Ordering::Relaxed);
-        stats
-            .datasets_written
-            .fetch_add(datasets, Ordering::Relaxed);
+        entries
+    };
+    let samples = entries
+        .iter()
+        .flat_map(|entry| entry.samples.iter().map(String::as_str))
+        .collect::<Vec<_>>();
+    let status = update_rrdcached_file(path, &samples);
+    if let Err(error) = &status {
+        tracing::warn!(
+            file = %path.display(),
+            error = %error,
+            "rrdcached_rrd_update_failed"
+        );
     }
     use std::os::unix::ffi::OsStrExt;
     queue
         .lock()
         .map_err(|_| "rrdcached queue lock poisoned".to_owned())?
         .journal_write("wrote", path.as_os_str().as_bytes());
+    if status.is_ok() {
+        stats.updates_written.fetch_add(1, Ordering::Relaxed);
+        stats
+            .datasets_written
+            .fetch_add(samples.len() as u64, Ordering::Relaxed);
+    }
     Ok(true)
 }
 
@@ -2716,45 +2751,77 @@ fn rrdcached_update_timestamp(value: &str) -> Result<(i64, u64), String> {
     Ok((seconds, microseconds))
 }
 
-fn update_rrdcached_file(path: &Path, samples: &[&str]) -> Result<u64, String> {
-    let info = rondi::inspect_rrd_file(path).map_err(|error| error.to_string())?;
-    let mut last_update = (info.last_update, info.last_update_usec);
-    let mut count = 0;
-    for sample in samples {
-        let (timestamp, values) = sample
-            .split_once(':')
-            .ok_or_else(|| format!("Invalid update value: {sample}"))?;
-        let (timestamp, timestamp_usec) = rrdcached_update_timestamp(timestamp)
-            .map_err(|error| format!("Invalid timestamp in {sample}: {error}"))?;
-        if (timestamp, timestamp_usec) <= last_update {
-            continue;
-        }
-        let values = values
-            .split(':')
-            .map(|value| {
-                if value == "U" {
-                    Ok(None)
-                } else {
-                    value
-                        .parse::<f64>()
-                        .map(|_| Some(value))
-                        .map_err(|error| format!("Invalid data value {value}: {error}"))
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if values.len() != info.data_sources.len() {
-            return Err(format!(
-                "Expected {} data values, got {}",
-                info.data_sources.len(),
-                values.len()
-            ));
-        }
-        rondi::update_rrd_raw_values_precise(path, timestamp, timestamp_usec, &values)
-            .map_err(|error| error.to_string())?;
-        last_update = (timestamp, timestamp_usec);
-        count += values.len() as u64;
+/// Opens an RRD for a daemon write. Upstream writes through whatever the
+/// name resolves to; Rondi refuses a symlink, a file with another link, which
+/// a local user could plant to point a privileged daemon's write elsewhere,
+/// and an owner other than root when the daemon is root or root when it is
+/// not. The checks run on the descriptor that is then written.
+fn open_rrdcached_write_target(path: &Path) -> Result<File, String> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    // SAFETY: geteuid has no preconditions.
+    let privileged = unsafe { libc::geteuid() } == 0;
+    if !metadata.is_file() || metadata.nlink() != 1 || privileged != (metadata.uid() == 0) {
+        return Err("refusing to write a linked, special, or differently owned file".to_owned());
     }
-    Ok(count)
+    Ok(file)
+}
+
+/// rrd_update_r over a cache item's values: one open and lock for the batch,
+/// samples applied in turn, and the first failure stops the rest, leaving
+/// earlier ones written.
+fn update_rrdcached_file(path: &Path, samples: &[&str]) -> Result<(), String> {
+    let info = rondi::inspect_rrd_file(path).map_err(|error| error.to_string())?;
+    let mut updates = Vec::with_capacity(samples.len());
+    let mut failure = None;
+    for sample in samples {
+        let parsed = (|| -> Result<rondi::RrdRawUpdate<'_>, String> {
+            // process_arg prefers '@' time syntax, which the daemon never
+            // queues as a number, so such a sample fails like a bad time.
+            let (timestamp, values) = sample
+                .split_once(':')
+                .filter(|_| !sample.contains('@'))
+                .ok_or_else(|| {
+                    format!("expected timestamp not found in data source from {sample}")
+                })?;
+            let (timestamp, timestamp_usec) = rrdcached_update_timestamp(timestamp)
+                .map_err(|error| format!("Invalid timestamp in {sample}: {error}"))?;
+            let values = values
+                .split(':')
+                .map(|value| (!value.starts_with('U')).then_some(value))
+                .collect::<Vec<_>>();
+            if values.len() != info.data_sources.len() {
+                return Err(format!(
+                    "expected {} data source readings (got {}) from {sample}",
+                    info.data_sources.len(),
+                    values.len()
+                ));
+            }
+            Ok(rondi::RrdRawUpdate {
+                timestamp,
+                timestamp_usec,
+                values,
+            })
+        })();
+        match parsed {
+            Ok(update) => updates.push(update),
+            Err(error) => {
+                failure = Some(error);
+                break;
+            }
+        }
+    }
+    if !updates.is_empty() {
+        rondi::update_rrd_raw_batch_file(open_rrdcached_write_target(path)?, path, &updates, false)
+            .map_err(|error| error.to_string())?;
+    }
+    failure.map_or(Ok(()), Err)
 }
 
 fn rrdcached_create(
@@ -3004,7 +3071,7 @@ mod rrdcached_queue_tests {
     use super::*;
 
     #[test]
-    fn invalid_updates_are_rejected_before_journaling() {
+    fn enqueue_checks_only_timestamps_and_flush_drops_the_batch_at_a_bad_value() {
         let temp = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(temp.path()).unwrap();
         let file = root.join("metric.rrd");
@@ -3017,11 +3084,37 @@ mod rrdcached_queue_tests {
             true,
         )
         .unwrap();
-        let mut queue = RrdcachedQueue::new(1024, 300);
-        assert!(queue.enqueue(file.clone(), &["1000000010.x:1"]).is_err());
-        assert!(queue.enqueue(file.clone(), &["1000000010:1:2"]).is_err());
-        assert_eq!(queue.journal_bytes, 0);
-        assert!(!queue.pending.contains_key(&file));
+        let before = std::fs::read(&file).unwrap();
+        let queue = Mutex::new(RrdcachedQueue::new(1024 * 1024, 300));
+        let enqueue = |samples: &[&str]| queue.lock().unwrap().enqueue(file.clone(), samples);
+        assert_eq!(
+            enqueue(&["1000000010.x:1"]),
+            Err("Cannot find timestamp in '1000000010.x:1'!".to_owned())
+        );
+        assert_eq!(
+            enqueue(&["nan:1"]),
+            Err("Cannot find timestamp in 'nan:1'!".to_owned())
+        );
+        assert_eq!(enqueue(&["1000000010:x", "1000000020:1:2"]), Ok(2));
+        assert_eq!(
+            enqueue(&["1000000030:3", "1000000025:4", "1000000040:5"]),
+            Err("illegal attempt to update using time 1000000025.000000 when last update time is 1000000030.000000 (minimum one second step)".to_owned())
+        );
+        assert_eq!(
+            queue.lock().unwrap().pending[&file]
+                .iter()
+                .flat_map(|entry| entry.samples.clone())
+                .collect::<Vec<_>>(),
+            ["1000000010:x", "1000000020:1:2", "1000000030:3"]
+        );
+        let stats = RrdcachedStats::default();
+        assert_eq!(flush_rrdcached_path(&file, &queue, &stats), Ok(true));
+        assert!(queue.lock().unwrap().pending.is_empty());
+        assert_eq!(stats.updates_written.load(Ordering::Relaxed), 0);
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+        // The cache keeps the newest accepted stamp after the batch is gone.
+        assert!(enqueue(&["1000000030:1"]).is_err());
+        assert_eq!(enqueue(&["1000000031:1"]), Ok(1));
     }
 
     #[test]
@@ -3053,14 +3146,12 @@ mod rrdcached_queue_tests {
         queue.pending.insert(
             z_path.clone(),
             vec![PendingRrdUpdate {
-                id: 1,
                 samples: vec!["1000000010:1".to_owned()],
             }],
         );
         queue.pending.insert(
             a_path.clone(),
             vec![PendingRrdUpdate {
-                id: 2,
                 samples: vec!["1000000010:1".to_owned()],
             }],
         );
@@ -3117,7 +3208,6 @@ mod rrdcached_queue_tests {
         queue.pending.insert(
             pending.clone(),
             vec![PendingRrdUpdate {
-                id: 2,
                 samples: vec!["1000000010:1".to_owned()],
             }],
         );
@@ -3271,7 +3361,8 @@ mod rrdcached_queue_tests {
                 rondi::dump_rrd_file(&reference).unwrap(),
                 "attempt {attempt}: concurrent flush produced a different RRD"
             );
-            assert_eq!(stats.updates_written.load(Ordering::Relaxed), 100);
+            assert_eq!(stats.updates_written.load(Ordering::Relaxed), 1);
+            assert_eq!(stats.datasets_written.load(Ordering::Relaxed), 100);
         }
     }
 
@@ -3588,7 +3679,7 @@ mod rrdcached_queue_tests {
         queue.journal_done();
         assert_eq!(
             journal_contents_of(&journal),
-            "update a\\.rrd 1000000010:1\n"
+            "update a.rrd  1000000010:1\nupdate a\\.rrd 1000000010:1\n"
         );
         let (replayed, _) =
             RrdcachedQueue::open(&root, Some(&journal), 1024 * 1024, 300, false, &stats).unwrap();
@@ -3628,5 +3719,97 @@ mod rrdcached_queue_tests {
         assert!(had_journal);
         assert!(queue.pending.contains_key(&kept));
         assert_eq!(queue.pending.len(), 1);
+    }
+
+    #[test]
+    fn flush_refuses_to_write_through_a_hard_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let outside = base.join("outside.rrd");
+        create_test_rrd(&outside);
+        let root = base.join("root");
+        std::fs::create_dir(&root).unwrap();
+        let linked = root.join("linked.rrd");
+        std::fs::hard_link(&outside, &linked).unwrap();
+        let before = std::fs::read(&outside).unwrap();
+        let queue = Mutex::new(RrdcachedQueue::new(1024 * 1024, 300));
+        queue
+            .lock()
+            .unwrap()
+            .enqueue(linked.clone(), &["1000000010:1"])
+            .unwrap();
+        let stats = RrdcachedStats::default();
+        assert_eq!(flush_rrdcached_path(&linked, &queue, &stats), Ok(true));
+        assert_eq!(std::fs::read(&outside).unwrap(), before);
+        assert_eq!(stats.updates_written.load(Ordering::Relaxed), 0);
+    }
+
+    /// queue_thread_main takes a file's values out of the cache before
+    /// rrd_update_r and only logs a failure (rrd_daemon.c:1228-1262), so a
+    /// value refused at write is dropped with the rest of its batch rather
+    /// than blocking the file.
+    #[test]
+    fn values_refused_at_write_drop_their_batch() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let counter = root.join("counter.rrd");
+        rondi::create_rrd_file(
+            &counter,
+            1_000_000_000,
+            10,
+            &["DS:c:COUNTER:30:U:U".to_owned()],
+            &["RRA:AVERAGE:0.5:1:8".to_owned()],
+            true,
+        )
+        .unwrap();
+        let queue = Mutex::new(RrdcachedQueue::new(1 << 20, 300));
+        queue
+            .lock()
+            .unwrap()
+            .enqueue(counter.clone(), &["1000000010:1.5"])
+            .unwrap();
+        queue
+            .lock()
+            .unwrap()
+            .enqueue(counter.clone(), &["1000000020:100"])
+            .unwrap();
+        let stats = RrdcachedStats::default();
+        assert_eq!(flush_rrdcached_path(&counter, &queue, &stats), Ok(true));
+        assert!(!queue.lock().unwrap().pending.contains_key(&counter));
+        assert_eq!(
+            rondi::inspect_rrd_file(&counter).unwrap().last_update,
+            1_000_000_000
+        );
+        queue
+            .lock()
+            .unwrap()
+            .enqueue(counter.clone(), &["1000000030:200"])
+            .unwrap();
+        assert_eq!(flush_rrdcached_path(&counter, &queue, &stats), Ok(true));
+        assert_eq!(
+            rondi::inspect_rrd_file(&counter).unwrap().last_update,
+            1_000_000_030
+        );
+    }
+
+    /// `5e` passes UPDATE and rrd_strtodbl accepts it at write too.
+    #[test]
+    fn flush_parses_values_like_rrd_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let file = root.join("metric.rrd");
+        create_test_rrd(&file);
+        let queue = Mutex::new(RrdcachedQueue::new(1 << 20, 300));
+        queue
+            .lock()
+            .unwrap()
+            .enqueue(file.clone(), &["1000000010:5e"])
+            .unwrap();
+        let stats = RrdcachedStats::default();
+        assert_eq!(flush_rrdcached_path(&file, &queue, &stats), Ok(true));
+        assert_eq!(
+            rondi::inspect_rrd_file(&file).unwrap().last_update,
+            1_000_000_010
+        );
     }
 }

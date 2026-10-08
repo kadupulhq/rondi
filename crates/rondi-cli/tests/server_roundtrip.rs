@@ -3314,6 +3314,65 @@ fn rrdcached_journal_shutdown_and_rotation_match_upstream() {
 }
 
 #[test]
+fn rrdcached_update_values_fail_at_flush_like_upstream() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping UPDATE validation differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let baseline = work.join("baseline.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&baseline)
+        .args(["--start", "1000000000", "--step", "10"])
+        .args(["DS:v:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:8"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let journal = work.join("j");
+    let socket = work.join("s.sock");
+    let script = "UPDATE a.rrd 1000000010:1 1000000020:x 1000000030:3\n\
+                  UPDATE a.rrd 1000000040:4 1000000035:5 1000000050:6\n\
+                  UPDATE a.rrd 1000000060.x:1\n\
+                  UPDATE a.rrd 1000000070:7:8\n\
+                  PENDING a.rrd\nFLUSH a.rrd\nPENDING a.rrd\n\
+                  UPDATE a.rrd 1000000070:9\nUPDATE a.rrd 1000000080:8\nFLUSH a.rrd\n\
+                  STATS\nQUIT\n";
+    let mut observed = Vec::new();
+    for rondi in [false, true] {
+        reset_journal_work(&work, &baseline);
+        let daemon = start_journaled_rrdcached(&work, rondi, &["-j", journal.to_str().unwrap()]);
+        // FLUSH wakes its caller before the written counters move upstream.
+        let responses = rrdcached_dump(&socket, script)
+            .lines()
+            .filter(|line| {
+                !line.starts_with("UpdatesWritten:") && !line.starts_with("DataSetsWritten:")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        stop_rrdcached(daemon, libc::SIGTERM);
+        observed.push((
+            responses,
+            journal_contents(&journal),
+            std::fs::read(work.join("b/a.rrd")).unwrap(),
+        ));
+    }
+    assert!(
+        observed[0].0.contains("0 errors, enqueued 3 value(s).\n"),
+        "{}",
+        observed[0].0
+    );
+    assert_eq!(observed[1].0, observed[0].0);
+    assert_eq!(observed[1].1, observed[0].1, "journal contents differ");
+    assert!(
+        observed[1].2 == observed[0].2,
+        "a.rrd differs from upstream"
+    );
+}
+
+#[test]
 fn rrdcached_update_waiting_on_an_rrd_lock_does_not_stall_other_clients() {
     use std::os::fd::AsRawFd;
     let dir = tempfile::tempdir().unwrap();

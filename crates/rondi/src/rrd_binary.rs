@@ -1138,8 +1138,20 @@ pub fn update_rrd_raw_batch(
     updates: &[RrdRawUpdate<'_>],
     skip_past_updates: bool,
 ) -> Result<Vec<RrdUpdateSummary>, StoreError> {
-    let mut file = RrdFileLock::exclusive(open_rrd_write(path.as_ref())?)?;
-    let mut info = read_info(&mut file, path.as_ref())?;
+    let path = path.as_ref();
+    update_rrd_raw_batch_file(open_rrd_write(path)?, path, updates, skip_past_updates)
+}
+
+/// [`update_rrd_raw_batch`] on a file the caller opened read-write, so it
+/// can check the descriptor it writes through. `path` names it in errors.
+pub fn update_rrd_raw_batch_file(
+    file: File,
+    path: &Path,
+    updates: &[RrdRawUpdate<'_>],
+    skip_past_updates: bool,
+) -> Result<Vec<RrdUpdateSummary>, StoreError> {
+    let mut file = RrdFileLock::exclusive(file)?;
+    let mut info = read_info(&mut file, path)?;
     let mut state_cache = None;
     let mut summaries = Vec::new();
     for update in updates {
