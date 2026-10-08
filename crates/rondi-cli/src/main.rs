@@ -1,9 +1,10 @@
 use clap::{Parser, Subcommand};
 use rondi::{
-    DatabaseConfig, RrdDataSourceTune, RrdDumpHeader, RrdResizeAction, RrdTuneBound, Store, Update,
-    create_rrd_file, dump_rrd_file_with_header, fetch_rrd_file, first_rrd_time,
-    parse_rrd_scaled_duration, resize_rrd_file, restore_rrd_file, tune_rrd_data_sources,
-    update_rrd_raw_values_precise, update_rrd_raw_values_precise_verbose,
+    DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, DatabaseConfig, RrdDataSourceTune, RrdDumpHeader,
+    RrdResizeAction, RrdTuneBound, Store, StoreOptions, Update, create_rrd_file,
+    dump_rrd_file_with_header, fetch_rrd_file, first_rrd_time, parse_rrd_scaled_duration,
+    resize_rrd_file, restore_rrd_file, tune_rrd_data_sources, update_rrd_raw_values_precise,
+    update_rrd_raw_values_precise_verbose,
 };
 use std::fmt::Write as FmtWrite;
 use std::io::{BufRead, Read, Seek, Write};
@@ -18,6 +19,12 @@ struct Args {
     /// Local storage root.
     #[arg(long, global = true, default_value = "./data")]
     root: PathBuf,
+    /// Largest archive row count accepted by create and import.
+    #[arg(long, global = true, default_value_t = DEFAULT_MAX_ROWS)]
+    max_rows: usize,
+    /// Seconds a server update's request ID stays available for retries.
+    #[arg(long, global = true, default_value_t = DEFAULT_IDEMPOTENCY_WINDOW.as_secs())]
+    idempotency_window: u64,
     #[command(subcommand)]
     command: Command,
 }
@@ -131,7 +138,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(socket) = args.socket {
         return server_mode(socket, args.command).await;
     }
-    let store = Store::open(&args.root)?;
+    let options = StoreOptions {
+        max_rows: args.max_rows,
+        idempotency_window: std::time::Duration::from_secs(args.idempotency_window),
+    };
+    let store = Store::open_with(&args.root, options)?;
     match args.command {
         Command::Server {
             listen,
@@ -142,6 +153,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 root: args.root,
                 socket: listen,
                 queue_capacity,
+                store: options,
             })
             .await;
         }

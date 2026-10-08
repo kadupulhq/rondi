@@ -14,7 +14,17 @@ Opening a storage root takes an OS advisory exclusive lock on `.rondi.lock`. The
 
 Each GAUGE update is assigned to fixed step intervals. Values are weighted by elapsed seconds. A sample gap greater than heartbeat, or an explicit unknown value, contributes unknown time. A PDP is unknown when less than half of its seconds are known. The last incomplete step is kept as accumulator state and is not returned by fetch until its boundary is complete. Out-of-order and duplicate timestamps are rejected by local update calls.
 
-The daemon uses a bounded write channel. Full queues fail immediately with HTTP 429; clients should retry. Server updates append a journal record and sync it before checkpointing storage. The HTTP success response is sent only after both the journal and storage checkpoint have been synced. Startup replays journal records that are newer than each database checkpoint. The journal currently has no compaction and grows with accepted writes; this is a tracked operational limitation.
+The daemon uses a bounded write channel. Full queues fail immediately with HTTP 429; clients should retry. Server updates append a journal record and sync it before checkpointing storage. The HTTP success response is sent only after both the journal and storage checkpoint have been synced. Startup replays journal records that are newer than each database checkpoint.
+
+## Store limits and journal compaction
+
+These limits apply only to the `.rondi` store and its HTTP API. They do not touch `.rrd` files, the `rrdtool` alias, or the `rrdcached` adapter.
+
+Each `.rondi` update rewrites and syncs the whole JSON file, so update cost grows with retained rows. One optimized local run measured 114.7 updates/s for 300 updates and 120 retained rows on the documented Mac environment. `--max-rows` (default 100000, must be positive) caps `rows` for `create` and snapshot import to bound that cost and the work a long gap can cause.
+
+The journal records each server update with its request ID and acceptance time. After startup recovery, and whenever the journal reaches twice the records kept by the last compaction (at least 1024), the store rewrites it without records that are both applied to their database and older than `--idempotency-window` (default 86400 seconds, must be positive). The rewrite goes to `rondi.journal.compact.tmp`, which is synced, renamed over `rondi.journal`, and followed by a directory sync; a crash leaves the old or the new journal, and a leftover temporary file is ignored and later overwritten. Records not yet applied are always kept for replay.
+
+The trade-off: a retry with the same request ID is deduplicated for at least the window. After the window its record may be gone, and the retry is handled as a new update: the same timestamp is rejected as out of order, and different contents are accepted instead of being reported as a request ID conflict. Journal size and the in-memory request ID index are bounded by the window times the update rate, plus at most one doubling before the next compaction. Records written before this change carry no acceptance time and are dropped by the first compaction once applied.
 
 ## Format migration roadmap
 
