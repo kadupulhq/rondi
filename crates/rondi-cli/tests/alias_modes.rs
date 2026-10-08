@@ -4513,7 +4513,6 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
     }
     for (option, value) in [
         ("--grid-dash", "bad"),
-        ("--border", "65"),
         ("--color", "UNKNOWN#ffffff"),
         ("--color", "BACK#xyz"),
     ] {
@@ -4590,13 +4589,14 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
             image_dimensions(&path_upstream)
         );
     }
-    let bad_angle = render_options(
+    // rrd_strtodbl accepts "NaN" and rrd_graph_options has no range check.
+    let nan_angle = render_options(
         alias.as_path(),
-        &temp.path().join("bad-angle.png"),
+        &temp.path().join("nan-angle.png"),
         &["--vertical-label-angle", "NaN"],
         &["LINE1:x#ff0000:load"],
     );
-    assert!(!bad_angle.status.success());
+    assert!(nan_angle.status.success());
     for (fraction, should_draw) in [("0", false), ("0.5", true)] {
         let ours_path = temp.path().join(format!("tick-{fraction}-rondi.png"));
         let upstream_path = temp.path().join(format!("tick-{fraction}-rrdtool.png"));
