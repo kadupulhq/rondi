@@ -437,6 +437,13 @@ pub(crate) fn inspect_path(path: &Path) -> Result<RrdInfo, StoreError> {
     read_info(&mut file, path)
 }
 
+/// [`inspect_rrd_file`] on a file the caller opened, so the header comes
+/// from the descriptor it checked. `path` names it in errors.
+pub fn inspect_rrd_open_file(file: File, path: &Path) -> Result<RrdInfo, StoreError> {
+    let mut file = RrdFileLock::shared(file)?;
+    read_info(&mut file, path)
+}
+
 pub(crate) fn fetch_path(
     path: &Path,
     consolidation: &str,
@@ -1652,8 +1659,19 @@ pub fn tune_rrd_data_sources(
     path: impl AsRef<Path>,
     changes: &[RrdDataSourceTune],
 ) -> Result<(), StoreError> {
-    let mut file = RrdFileLock::exclusive(open_rrd_write(path.as_ref())?)?;
-    let info = read_info(&mut file, path.as_ref())?;
+    let path = path.as_ref();
+    tune_rrd_data_sources_file(open_rrd_write(path)?, path, changes)
+}
+
+/// [`tune_rrd_data_sources`] on a file the caller opened read-write, so it
+/// can check the descriptor it writes through. `path` names it in errors.
+pub fn tune_rrd_data_sources_file(
+    file: File,
+    path: &Path,
+    changes: &[RrdDataSourceTune],
+) -> Result<(), StoreError> {
+    let mut file = RrdFileLock::exclusive(file)?;
+    let info = read_info(&mut file, path)?;
     if info.data_sources.iter().any(|source| {
         !matches!(
             source.kind.as_str(),

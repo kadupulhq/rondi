@@ -703,6 +703,8 @@ struct RrdcachedQueue {
     // A flusher owns a path while it applies a snapshot of its entries, so a
     // concurrent FLUSH, FETCH, or worker waits instead of applying them again.
     flush_owners: std::collections::HashMap<PathBuf, Arc<Mutex<()>>>,
+    // Signals queue_cond: a path was added to pending_order.
+    wake: Arc<tokio::sync::Notify>,
 }
 
 impl RrdcachedQueue {
@@ -721,6 +723,7 @@ impl RrdcachedQueue {
             write_timeout_seconds,
             allocation_chunk: 1,
             flush_owners: std::collections::HashMap::new(),
+            wake: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -1016,7 +1019,10 @@ impl RrdcachedQueue {
             .filter(|path| !self.pending_order.contains(path))
             .cloned()
             .collect::<Vec<_>>();
-        self.pending_order.extend(eligible);
+        if !eligible.is_empty() {
+            self.pending_order.extend(eligible);
+            self.wake.notify_one();
+        }
     }
 
     fn schedule_path(&mut self, path: &Path, now: i64) {
@@ -1033,6 +1039,7 @@ impl RrdcachedQueue {
             .is_some_and(|last_flush| now.saturating_sub(last_flush) >= timeout)
         {
             self.pending_order.push_back(path.to_path_buf());
+            self.wake.notify_one();
         }
     }
 
@@ -1348,7 +1355,13 @@ pub async fn run(args: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         return Err("queue capacity must be positive".into());
     }
     let store = Store::open_with(&args.root, args.store)?;
-    let replayed = store.recover()?;
+    let (replayed, skipped) = store.recover_counting_skipped()?;
+    if skipped > 0 {
+        tracing::warn!(
+            skipped,
+            "server_journal_records_for_missing_databases_skipped"
+        );
+    }
     tracing::info!(root = %args.root.display(), recovered = replayed, "server_started");
     if let Some(parent) = args.socket.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1565,6 +1578,47 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
     tracing::info!(root = %base.root.display(), socket = %args.socket.display(), "rrdcached_started");
     let mut connections = JoinSet::new();
     let (shutdown_sender, shutdown) = tokio::sync::watch::channel(false);
+    // queue_thread_main: -t workers write each path as soon as it is queued,
+    // instead of waiting for the next -f pass.
+    let wake = queue
+        .lock()
+        .map_err(|_| "rrdcached queue lock poisoned")?
+        .wake
+        .clone();
+    let mut workers = JoinSet::new();
+    for _ in 0..args.queue_threads.max(1) {
+        let queue = Arc::clone(&queue);
+        let stats = Arc::clone(&stats);
+        let wake = Arc::clone(&wake);
+        let mut shutdown = shutdown.clone();
+        workers.spawn(async move {
+            loop {
+                let next = queue
+                    .lock()
+                    .ok()
+                    .and_then(|mut queue| queue.pending_order.pop_front());
+                let Some(path) = next else {
+                    tokio::select! {
+                        _ = wake.notified() => continue,
+                        _ = shutdown.wait_for(|stopping| *stopping) => return,
+                    }
+                };
+                let queue = Arc::clone(&queue);
+                let stats = Arc::clone(&stats);
+                match tokio::task::spawn_blocking(move || {
+                    flush_rrdcached_path(&path, &queue, &stats)
+                })
+                .await
+                {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        tracing::error!(error = %error, "rrdcached_queued_flush_failed")
+                    }
+                    Err(error) => tracing::error!(error = %error, "rrdcached_flush_worker_failed"),
+                }
+            }
+        });
+    }
     let flush_interval = Duration::from_secs(args.flush_interval_seconds.max(1));
     let mut expiry_tick =
         tokio::time::interval_at(tokio::time::Instant::now() + flush_interval, flush_interval);
@@ -1600,17 +1654,15 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
                 // then rotates the journal while the queued writes proceed.
                 let tick_queue = Arc::clone(&queue);
                 let flush_interval_seconds = args.flush_interval_seconds;
-                let paths = tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>, String> {
+                tokio::task::spawn_blocking(move || -> Result<(), String> {
                     let mut queue = tick_queue.lock().map_err(|_| "rrdcached queue lock poisoned")?;
                     let now = wall_time_seconds();
                     queue.schedule_eligible(now);
                     queue.expire_idle(now, flush_interval_seconds);
-                    let paths = queue.pending_order.iter().cloned().collect::<Vec<_>>();
                     queue.rotate_journal();
-                    Ok(paths)
+                    Ok(())
                 })
                 .await??;
-                flush_rrdcached_paths(paths, Arc::clone(&queue), Arc::clone(&stats), args.queue_threads).await;
             }
             _ = shutdown_signals.0.recv() => break,
             _ = shutdown_signals.1.recv() => break,
@@ -1631,6 +1683,7 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
         );
         connections.shutdown().await;
     }
+    while workers.join_next().await.is_some() {}
     // With -j and without -F upstream leaves pending values to the journal.
     let paths = queue
         .lock()
@@ -1865,6 +1918,45 @@ pub fn rrdcached_route(
     Ok(name)
 }
 
+/// Runs FETCH on the blocking pool and writes its reply as it is formatted,
+/// so a long range is never held in memory as one string.
+async fn stream_rrdcached_fetch(
+    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    base: &RrdcachedBase,
+    fields: Vec<String>,
+    stats: &Arc<RrdcachedStats>,
+    queue: &Arc<Mutex<RrdcachedQueue>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    const CHUNK: usize = 64 * 1024;
+    let (sender, mut receiver) = mpsc::channel::<Vec<u8>>(4);
+    let (base, stats, queue) = (base.clone(), Arc::clone(stats), Arc::clone(queue));
+    let producer = tokio::task::spawn_blocking(move || {
+        let mut chunk = Vec::with_capacity(CHUNK);
+        let mut open = true;
+        let result = handle_rrdcached_fetch(&base, &fields, &stats, &queue, |text| {
+            chunk.extend_from_slice(text.as_bytes());
+            if open && chunk.len() >= CHUNK {
+                open = sender
+                    .blocking_send(std::mem::replace(&mut chunk, Vec::with_capacity(CHUNK)))
+                    .is_ok();
+            }
+        });
+        let last = match result {
+            Ok(()) => chunk,
+            Err(error) => format!("-1 {error}\n").into_bytes(),
+        };
+        if open && !last.is_empty() {
+            let _ = sender.blocking_send(last);
+        }
+    });
+    while let Some(chunk) = receiver.recv().await {
+        writer.write_all(&chunk).await?;
+    }
+    producer.await?;
+    writer.flush().await?;
+    Ok(())
+}
+
 /// What a handler asks of the connection, mirroring a handler's send_response
 /// followed by its return code.
 enum RrdcachedReply {
@@ -1921,19 +2013,50 @@ async fn serve_rrdcached_connection(
                 let (_, _, errors) = batch.take().unwrap_or_default();
                 RrdcachedReply::Text(format!("{} errors\n{errors}", errors.matches('\n').count()))
             }
+            // Handlers read files, take RRD locks, and flush, so they run on
+            // the blocking pool rather than stalling every connection.
             Ok("FETCHBIN") => {
-                RrdcachedReply::Bytes(handle_rrdcached_fetchbin(&base, rest, &stats, &queue))
+                let (base, stats, queue) = (base.clone(), Arc::clone(&stats), Arc::clone(&queue));
+                let rest = rest.map(str::to_owned);
+                RrdcachedReply::Bytes(
+                    tokio::task::spawn_blocking(move || {
+                        handle_rrdcached_fetchbin(&base, rest.as_deref(), &stats, &queue)
+                    })
+                    .await?,
+                )
             }
-            Ok(name) => handle_rrdcached_line(
-                &base,
-                name,
-                rest,
-                &stats,
-                &queue,
-                no_overwrite,
-                allow_recursive_mkdir,
-                now,
-            ),
+            Ok("FETCH") => {
+                let mut fields = Vec::new();
+                let mut cursor = rest;
+                while let Some(field) = next_field(&mut cursor) {
+                    fields.push(field);
+                }
+                if fields.len() < 2 {
+                    RrdcachedReply::Text(
+                        "-1 Usage: FETCH <file> <CF> [<start> [<end>] [<column>...]]\n".to_owned(),
+                    )
+                } else {
+                    stream_rrdcached_fetch(&mut writer, &base, fields, &stats, &queue).await?;
+                    continue;
+                }
+            }
+            Ok(name) => {
+                let (base, stats, queue) = (base.clone(), Arc::clone(&stats), Arc::clone(&queue));
+                let rest = rest.map(str::to_owned);
+                tokio::task::spawn_blocking(move || {
+                    handle_rrdcached_line(
+                        &base,
+                        name,
+                        rest.as_deref(),
+                        &stats,
+                        &queue,
+                        no_overwrite,
+                        allow_recursive_mkdir,
+                        now,
+                    )
+                })
+                .await?
+            }
         };
         let (text, close) = match reply {
             RrdcachedReply::Close => return Ok(()),
@@ -2230,11 +2353,9 @@ fn handle_rrdcached_line(
             }
         }
         "FETCH" if fields.len() >= 2 => {
-            match base.target(&fields[0]).and_then(|path| {
-                flush_rrdcached_path(&path, queue, stats)?;
-                rrdcached_fetch(base, &fields.iter().map(String::as_str).collect::<Vec<_>>())
-            }) {
-                Ok(body) => format!("{} Success\n{body}", body.lines().count()),
+            let mut reply = String::new();
+            match handle_rrdcached_fetch(base, &fields, stats, queue, |text| reply.push_str(text)) {
+                Ok(()) => reply,
                 Err(error) => format!("-1 {error}\n"),
             }
         }
@@ -2247,11 +2368,9 @@ fn handle_rrdcached_line(
             };
             format!(
                 "9 Statistics follow\nQueueLength: {}\nUpdatesReceived: {}\nFlushesReceived: {}\nUpdatesWritten: {}\nDataSetsWritten: {}\nTreeNodesNumber: {}\nTreeDepth: {}\nJournalBytes: {}\nJournalRotate: {}\n",
-                queue
-                    .pending
-                    .keys()
-                    .filter(|path| !queue.suspended.contains(*path))
-                    .count(),
+                // stats_queue_length: items enqueued and not yet taken by
+                // a queue thread.
+                queue.pending_order.len(),
                 stats.updates_received.load(Ordering::Relaxed),
                 stats.flushes_received.load(Ordering::Relaxed),
                 stats.updates_written.load(Ordering::Relaxed),
@@ -2331,8 +2450,6 @@ fn handle_rrdcached_line(
             };
             match Ok(path).and_then(|path: PathBuf| {
                 rrdcached_rrd_open(&display, &path, true)?;
-                // rrd_tune still opens by path; this checks the file it names.
-                drop(open_rrdcached_write_target(&path)?);
                 tune_rrdcached_file(
                     &path,
                     &fields[3..].iter().map(String::as_str).collect::<Vec<_>>(),
@@ -2704,7 +2821,8 @@ fn tune_rrdcached_file(path: &Path, arguments: &[&str]) -> Result<(), String> {
         }
         index += 1;
     }
-    rondi::tune_rrd_data_sources(path, &changes).map_err(|error| error.to_string())
+    rondi::tune_rrd_data_sources_file(open_rrdcached_write_target(path)?, path, &changes)
+        .map_err(|error| error.to_string())
 }
 
 fn rrdcached_list(base: &RrdcachedBase, fields: &[&str]) -> Result<String, String> {
@@ -2774,10 +2892,16 @@ fn collect_rrdcached_list(
     Ok(())
 }
 
-fn rrdcached_fetch(base: &RrdcachedBase, fields: &[&str]) -> Result<String, String> {
-    let (result, selected) = rrdcached_fetch_data(base, fields)?;
-    let mut body = format!(
-        "FlushVersion: 1\nStart: {}\nEnd: {}\nStep: {}\nDSCount: {}\nDSName: {}\n",
+/// handle_request_fetch's reply, emitted in pieces so a large range can be
+/// sent as it is formatted.
+fn rrdcached_fetch_reply(
+    result: &rondi::RrdFetchResult,
+    selected: &[usize],
+    mut emit: impl FnMut(&str),
+) {
+    emit(&format!(
+        "{} Success\nFlushVersion: 1\nStart: {}\nEnd: {}\nStep: {}\nDSCount: {}\nDSName: {}\n",
+        result.rows.len() + 6,
         result.start,
         result.end,
         result.step,
@@ -2787,16 +2911,36 @@ fn rrdcached_fetch(base: &RrdcachedBase, fields: &[&str]) -> Result<String, Stri
             .map(|index| result.data_sources[*index].as_str())
             .collect::<Vec<_>>()
             .join(" ")
-    );
-    for row in result.rows {
-        body.push_str(&format!("{:10}:", row.timestamp));
-        for index in &selected {
+    ));
+    let mut line = String::new();
+    for row in &result.rows {
+        line.clear();
+        line.push_str(&format!("{:10}:", row.timestamp));
+        for index in selected {
             let value = row.values[*index].map_or_else(|| "nan".to_owned(), format_c_exponent17);
-            body.push_str(&format!(" {value}"));
+            line.push(' ');
+            line.push_str(&value);
         }
-        body.push('\n');
+        line.push('\n');
+        emit(&line);
     }
-    Ok(body)
+}
+
+/// The FETCH handler: flush the file, then fetch, reporting the reply in
+/// pieces.
+fn handle_rrdcached_fetch(
+    base: &RrdcachedBase,
+    fields: &[String],
+    stats: &RrdcachedStats,
+    queue: &Mutex<RrdcachedQueue>,
+    emit: impl FnMut(&str),
+) -> Result<(), String> {
+    let path = base.target(&fields[0])?;
+    flush_rrdcached_path(&path, queue, stats)?;
+    let (result, selected) =
+        rrdcached_fetch_data(base, &fields.iter().map(String::as_str).collect::<Vec<_>>())?;
+    rrdcached_fetch_reply(&result, &selected, emit);
+    Ok(())
 }
 
 /// C `%0.17e`: Rust omits the exponent sign and padding that clients parse.
@@ -4297,5 +4441,21 @@ mod rrdcached_queue_tests {
                 assert_eq!(replayed, live, "{text:?}");
             }
         }
+    }
+
+    #[test]
+    fn tune_refuses_to_write_through_a_hard_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(temp.path()).unwrap();
+        let outside = base.join("outside.rrd");
+        create_test_rrd(&outside);
+        let linked = base.join("linked.rrd");
+        std::fs::hard_link(&outside, &linked).unwrap();
+        let before = std::fs::read(&outside).unwrap();
+        assert!(tune_rrdcached_file(&linked, &["-h", "value:60"]).is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), before);
+        std::fs::remove_file(&linked).unwrap();
+        tune_rrdcached_file(&outside, &["-h", "value:60"]).unwrap();
+        assert_ne!(std::fs::read(&outside).unwrap(), before);
     }
 }

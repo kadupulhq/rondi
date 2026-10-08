@@ -3706,6 +3706,59 @@ fn rrdcached_dash_b_confinement_matches_upstream() {
 }
 
 #[test]
+fn rrdcached_writes_queued_values_without_waiting_for_the_flush_interval() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!(
+            "skipping rrdcached queue timing differential: upstream tools are not installed"
+        );
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let baseline = work.join("baseline.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&baseline)
+        .args(["--start", "1000000000", "--step", "10"])
+        .args(["DS:v:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:8"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let socket = work.join("s.sock");
+    let mut observed = Vec::new();
+    for rondi in [false, true] {
+        reset_journal_work(&work, &baseline);
+        // The later -w wins, so -w 1 with the helper's -f 7200: the second
+        // UPDATE finds the file older than -w and queues it for a write.
+        let daemon = start_journaled_rrdcached(&work, rondi, &["-w", "1"]);
+        rrdcached_dump(&socket, "UPDATE a.rrd 1000000010:1\nQUIT\n");
+        thread::sleep(Duration::from_millis(1500));
+        rrdcached_dump(&socket, "UPDATE a.rrd 1000000020:2\nQUIT\n");
+        // UpdatesWritten moves after the write completes, in both daemons.
+        let deadline = Instant::now() + common::io_timeout();
+        let mut stats = String::new();
+        while Instant::now() < deadline {
+            stats = rrdcached_dump(&socket, "STATS\nQUIT\n");
+            if rrdcached_stat_value(&stats, "UpdatesWritten") == 1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let written = rrdcached_dump(&socket, "PENDING a.rrd\nQUIT\n");
+        stop_rrdcached(daemon, libc::SIGKILL);
+        observed.push((
+            written,
+            rrdcached_stat_value(&stats, "UpdatesWritten"),
+            rrdcached_stat_value(&stats, "QueueLength"),
+            std::fs::read(work.join("b/a.rrd")).unwrap(),
+        ));
+    }
+    assert_eq!(observed[0].0, "0 updates pending\n");
+    assert_eq!(observed[1], observed[0]);
+}
+
+#[test]
 fn rrdcached_update_waiting_on_an_rrd_lock_does_not_stall_other_clients() {
     use std::os::fd::AsRawFd;
     let dir = tempfile::tempdir().unwrap();
