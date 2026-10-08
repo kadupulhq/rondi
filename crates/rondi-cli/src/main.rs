@@ -3647,6 +3647,17 @@ fn draw_line_with_width(
         draw_line(pixels, width, height, start, end, color);
         return;
     }
+    // rrd_graph_helper.c only rejects negative widths and leaves the rest to
+    // cairo_set_line_width. A stroke whose half width reaches past every
+    // corner covers the whole surface, which is what Cairo paints.
+    if stroke_width / 2.0 >= f64::from(width).hypot(f64::from(height)) {
+        for py in 0..height {
+            for px in 0..width {
+                set_pixel(pixels, width, height, px, py, color);
+            }
+        }
+        return;
+    }
     let radius = (stroke_width / 2.0).ceil() as i32;
     let mut x = start.0 as i32;
     let mut y = start.1 as i32;
