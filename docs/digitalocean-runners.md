@@ -1,11 +1,13 @@
 # DigitalOcean GitHub Actions runners
 
+Rondi is public, so its workflows run on GitHub-hosted runners by default.
 Eligible Linux jobs use the ephemeral DigitalOcean runners managed by
 [github-runners-infra](https://github.com/somethingwithproof/github-runners-infra)
-when the Actions variable `DO_RUNNERS_ENABLED` equals `true`. An unset or false
-variable keeps the existing GitHub-hosted runner selection. The variable can be
-set for a single repository during rollout, then at organization scope with
-access to all repositories.
+only when the repository Actions variable `RONDI_DO_RUNNERS_ENABLED` equals
+`true`. Rondi's own workflows deliberately ignore the organization-wide
+`DO_RUNNERS_ENABLED` variable. The reusable release workflow in
+`kadupulhq/.github` still reads `DO_RUNNERS_ENABLED`; set it to `false` at
+repository scope to keep tagged releases on GitHub-hosted runners.
 
 Push, schedule, manual workflow events, and pull requests with branches in the
 same repository are eligible. Fork pull requests and comment-triggered reviews
@@ -40,11 +42,11 @@ Before enabling routing:
    Check successful registration, job completion, and actual droplet deletion.
    A job timeout does not limit the time spent waiting for a runner: cancel a
    queued smoke run if provisioning fails.
-6. Set `DO_RUNNERS_ENABLED=true` for a pilot repository and verify an ordinary
+6. Set `RONDI_DO_RUNNERS_ENABLED=true` for this repository and verify an ordinary
    eligible workflow, including its runtime setup. Enable the remaining
    repositories only after provisioning and cleanup are confirmed.
 
-Rollback: set the variable to `false` and cancel queued self-hosted runs.
+Rollback: set `RONDI_DO_RUNNERS_ENABLED` to `false` and cancel queued self-hosted runs.
 New eligible runs use GitHub-hosted runners; already queued jobs do not change
 their runner selection. Re-run cancelled work after rollback. No credentials
 belong in this document or repository variables.
