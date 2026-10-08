@@ -527,7 +527,9 @@ fn dcounter_dderive_special_samples_match_rrdtool_byte_for_byte() {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
         })
     {
-        eprintln!("skipping special-sample differential: pinned RRDtool 1.11.0 is not installed");
+        oracle_skip!(
+            "skipping special-sample differential: pinned RRDtool 1.11.0 is not installed"
+        );
         return;
     }
     let samples = [

@@ -7555,7 +7555,7 @@ fn rrdtool_update_converts_dcounter_text_only_after_a_known_sample() {
             output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
         })
     {
-        eprintln!("skipping DCOUNTER text differential: pinned RRDtool 1.11.0 is not installed");
+        oracle_skip!("skipping DCOUNTER text differential: pinned RRDtool 1.11.0 is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
