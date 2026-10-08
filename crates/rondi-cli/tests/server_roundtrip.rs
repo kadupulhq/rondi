@@ -1164,28 +1164,6 @@ fn rrdcached_accepts_attached_arguments_and_cacti_options() {
     drop(stream);
     unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
     assert!(child.wait().unwrap().success());
-
-    // Rondi can neither switch accounts nor serve several sockets, so it
-    // refuses these configurations instead of silently ignoring them.
-    let mut refused = vec![vec![
-        "-l".to_owned(),
-        format!("unix:{}", dir.path().join("first.sock").display()),
-        "-l".to_owned(),
-        format!("unix:{}", dir.path().join("second.sock").display()),
-    ]];
-    if uid != 0 {
-        refused.push(vec!["-U".to_owned(), "0".to_owned()]);
-    }
-    for args in refused {
-        let output = Command::new(&alias)
-            .args(["-g", "-b", root.to_str().unwrap()])
-            .args(&args)
-            .output()
-            .unwrap();
-        assert!(!output.status.success(), "{args:?}");
-        assert!(!output.stderr.is_empty(), "{args:?}");
-        assert!(!dir.path().join("first.sock").exists());
-    }
 }
 
 #[test]

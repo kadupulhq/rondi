@@ -14,11 +14,17 @@ use std::io::{BufRead as StdBufRead, BufReader as StdBufReader, Write as StdWrit
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::{Duration, timeout};
+
+mod rrdcached_listen;
+pub use rrdcached_listen::{
+    RrdcachedListenAddress, RrdcachedListener, RrdcachedSocket, RrdcachedUser,
+    block_shutdown_signals, drop_rrdcached_privileges, open_rrdcached_listener,
+};
 
 pub const DEFAULT_RRDCACHED_QUEUE_BYTES: usize = 64 * 1024 * 1024;
 const JOURNAL_BASE: &str = "rrd.journal";
@@ -320,26 +326,23 @@ pub struct ServerConfig {
     pub store: StoreOptions,
 }
 
-/// Configuration for the legacy rrdcached line protocol. This first protocol
-/// slice deliberately listens on a Unix socket only. With a journal directory,
-/// UPDATE is journaled as upstream does (buffered, never synced) before the
-/// acknowledgment, and queued writes flush later.
-#[derive(Debug, Clone)]
+/// Configuration for the legacy rrdcached line protocol. The listeners and
+/// pid file are opened, and privileges dropped, before this is built. With a
+/// journal directory, UPDATE is journaled as upstream does (buffered, never
+/// synced) before the acknowledgment, and queued writes flush later.
+#[derive(Debug)]
 pub struct RrdcachedConfig {
     /// `-b`; `None` when not given.
     pub root: Option<PathBuf>,
     /// `-B`: confine file arguments to `-b`.
     pub base_only: bool,
-    pub socket: PathBuf,
+    pub listeners: Vec<RrdcachedListener>,
     pub journal_directory: Option<PathBuf>,
     pub flush_at_shutdown: bool,
-    pub pid_file: Option<PathBuf>,
-    pub log_file: Option<PathBuf>,
+    pub pid_file: Option<PidFile>,
+    pub log_file: Option<File>,
     pub no_overwrite: bool,
     pub allow_recursive_mkdir: bool,
-    pub socket_mode: Option<u32>,
-    pub socket_commands: Option<Vec<String>>,
-    pub socket_group: Option<u32>,
     pub allocation_chunk: usize,
     pub write_timeout_seconds: u64,
     pub flush_interval_seconds: u64,
@@ -347,14 +350,15 @@ pub struct RrdcachedConfig {
     pub max_pending_bytes: usize,
 }
 
-struct PidFile {
+#[derive(Debug)]
+pub struct PidFile {
     path: PathBuf,
     pid: u32,
     _file: File,
 }
 
 impl PidFile {
-    fn create(path: &Path) -> Result<Option<Self>, Box<dyn std::error::Error>> {
+    pub fn create(path: &Path) -> Result<Option<Self>, Box<dyn std::error::Error>> {
         let Some(path) = (!path.as_os_str().is_empty()).then(|| path.to_path_buf()) else {
             return Ok(None);
         };
@@ -367,12 +371,12 @@ impl PidFile {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o644);
+            options.mode(0o644).custom_flags(libc::O_NOFOLLOW);
         }
         let file = match options.open(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                let existing = std::fs::read_to_string(&path)?;
+                let existing = read_pid_file(&path)?;
                 let existing_pid = existing
                     .trim()
                     .parse::<libc::pid_t>()
@@ -389,14 +393,27 @@ impl PidFile {
                     )
                     .into());
                 }
-                std::fs::remove_file(&path)?;
-                options.open(&path)?
+                // The pid file is created as root. Writing a new file and
+                // renaming it over the stale one leaves no window in which
+                // another user could recreate the name and block startup.
+                let (staged, mut file) = create_staged_pid_file(&path, &options)?;
+                let renamed = writeln!(&mut file, "{pid}")
+                    .and_then(|()| file.sync_all())
+                    .and_then(|()| std::fs::rename(&staged, &path));
+                if let Err(error) = renamed {
+                    let _ = std::fs::remove_file(&staged);
+                    return Err(error.into());
+                }
+                file
             }
             Err(error) => return Err(error.into()),
         };
         let mut file = file;
-        writeln!(&mut file, "{pid}")?;
-        file.sync_all()?;
+        check_pid_file_handle(&file, &path)?;
+        if file.metadata()?.len() == 0 {
+            writeln!(&mut file, "{pid}")?;
+            file.sync_all()?;
+        }
         Ok(Some(Self {
             path,
             pid,
@@ -405,11 +422,68 @@ impl PidFile {
     }
 }
 
+/// Trust a pid file only through its open handle: a regular file with one
+/// link, and, while running as root, owned by root. A hard link to another
+/// file, or a file another user planted, is refused.
+fn check_pid_file_handle(file: &File, path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    // SAFETY: geteuid has no preconditions.
+    let privileged = unsafe { libc::geteuid() } == 0;
+    let problem = if !metadata.file_type().is_file() {
+        Some("is not a regular file".to_owned())
+    } else if metadata.nlink() != 1 {
+        Some(format!("has {} links", metadata.nlink()))
+    } else if privileged && metadata.uid() != 0 {
+        Some(format!("is owned by uid {}", metadata.uid()))
+    } else {
+        None
+    };
+    match problem {
+        Some(problem) => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("rrdcached pid file {problem}: {}", path.display()),
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Read a pid file without following a symlink or blocking on a FIFO, and
+/// only if it is a small regular file.
+fn read_pid_file(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    check_pid_file_handle(&file, path)?;
+    let mut contents = String::new();
+    file.take(64).read_to_string(&mut contents)?;
+    Ok(contents)
+}
+
+/// Create a uniquely named file beside `path` with `options` (which carry
+/// create_new and O_NOFOLLOW), for renaming over it.
+fn create_staged_pid_file(path: &Path, options: &OpenOptions) -> std::io::Result<(PathBuf, File)> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    for attempt in 0..100_u32 {
+        let staged = path.with_file_name(format!(".{name}.{}.{attempt}", std::process::id()));
+        match options.open(&staged) {
+            Ok(file) => return Ok((staged, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("cannot stage rrdcached pid file beside {}", path.display()),
+    ))
+}
+
 impl Drop for PidFile {
     fn drop(&mut self) {
-        if std::fs::read_to_string(&self.path)
-            .is_ok_and(|contents| contents.trim() == self.pid.to_string())
-        {
+        if read_pid_file(&self.path).is_ok_and(|contents| contents.trim() == self.pid.to_string()) {
             let _ = std::fs::remove_file(&self.path);
         }
     }
@@ -1473,14 +1547,21 @@ pub async fn run(args: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Serve a journaled subset of the rrdcached ASCII protocol over a
-/// permission-restricted Unix socket. UPDATE is acknowledged after the
-/// accepted write is synced to the journal; file visibility follows a flush.
-pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::error::Error>> {
+/// Serve a journaled subset of the rrdcached ASCII protocol on the
+/// listeners in `args`. UPDATE is acknowledged after the accepted write is
+/// synced to the journal; file visibility follows a flush.
+pub async fn run_rrdcached(mut args: RrdcachedConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let mut shutdown_signals = {
+        use tokio::signal::unix::{SignalKind, signal};
+        (
+            signal(SignalKind::interrupt())?,
+            signal(SignalKind::terminate())?,
+        )
+    };
+    rrdcached_listen::unblock_shutdown_signals();
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    if let Some(path) = args.log_file.as_deref() {
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+    if let Some(file) = args.log_file.take() {
         let _ = tracing_subscriber::fmt()
             .json()
             .with_env_filter(filter)
@@ -1526,56 +1607,47 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
         )
         .await;
     }
-    let _pid_file = args
-        .pid_file
-        .as_deref()
-        .map(PidFile::create)
-        .transpose()?
-        .flatten();
-    let mut shutdown_signals = {
-        use tokio::signal::unix::{SignalKind, signal};
-        (
-            signal(SignalKind::interrupt())?,
-            signal(SignalKind::terminate())?,
-        )
-    };
-    if let Some(parent) = args.socket.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if args.socket.exists() {
-        use std::os::unix::fs::FileTypeExt;
-        match UnixStream::connect(&args.socket).await {
-            Ok(_) => {
-                return Err(format!("socket is already active: {}", args.socket.display()).into());
+    let _pid_file = args.pid_file.take();
+    let (accepted_sender, mut accepted) = mpsc::channel::<RrdcachedAccepted>(1);
+    let mut accept_tasks = JoinSet::new();
+    let mut unix_paths = Vec::new();
+    for listener in std::mem::take(&mut args.listeners) {
+        let commands = listener.commands;
+        let sender = accepted_sender.clone();
+        match listener.socket {
+            RrdcachedSocket::Unix { listener, path } => {
+                listener.set_nonblocking(true)?;
+                let listener = tokio::net::UnixListener::from_std(listener)?;
+                tracing::info!(socket = %path.display(), "rrdcached_listening");
+                unix_paths.push(path);
+                accept_tasks.spawn(async move {
+                    loop {
+                        let accepted = listener.accept().await;
+                        let stream = accepted.map(|(stream, _)| Box::new(stream) as _);
+                        if !forward_rrdcached_accept(stream, &commands, &sender).await {
+                            return;
+                        }
+                    }
+                });
             }
-            Err(_)
-                if std::fs::symlink_metadata(&args.socket)?
-                    .file_type()
-                    .is_socket() =>
-            {
-                std::fs::remove_file(&args.socket)?;
+            RrdcachedSocket::Tcp(listener) => {
+                listener.set_nonblocking(true)?;
+                let listener = tokio::net::TcpListener::from_std(listener)?;
+                tracing::info!(socket = %listener.local_addr()?, "rrdcached_listening");
+                accept_tasks.spawn(async move {
+                    loop {
+                        let accepted = listener.accept().await;
+                        let stream = accepted.map(|(stream, _)| Box::new(stream) as _);
+                        if !forward_rrdcached_accept(stream, &commands, &sender).await {
+                            return;
+                        }
+                    }
+                });
             }
-            Err(error) => return Err(format!("refusing to replace socket path: {error}").into()),
         }
     }
-    let listener = UnixListener::bind(&args.socket)?;
-    use std::os::unix::fs::PermissionsExt;
-    if let Some(group) = args.socket_group {
-        use std::os::unix::ffi::OsStrExt;
-        let path = std::ffi::CString::new(args.socket.as_os_str().as_bytes())?;
-        // SAFETY: the CString is NUL terminated and remains alive for the call.
-        let result = unsafe { libc::chown(path.as_ptr(), libc::getuid(), group as libc::gid_t) };
-        if result != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-    }
-    if let Some(socket_mode) = args
-        .socket_mode
-        .or_else(|| args.socket_group.map(|_| 0o760))
-    {
-        std::fs::set_permissions(&args.socket, std::fs::Permissions::from_mode(socket_mode))?;
-    }
-    tracing::info!(root = %base.root.display(), socket = %args.socket.display(), "rrdcached_started");
+    drop(accepted_sender);
+    tracing::info!(root = %base.root.display(), "rrdcached_started");
     let mut connections = JoinSet::new();
     let (shutdown_sender, shutdown) = tokio::sync::watch::channel(false);
     // queue_thread_main: -t workers write each path as soon as it is queued,
@@ -1624,24 +1696,12 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
         tokio::time::interval_at(tokio::time::Instant::now() + flush_interval, flush_interval);
     loop {
         tokio::select! {
-            accepted = listener.accept() => {
-                let (stream, _) = match accepted {
-                    Ok(accepted) => accepted,
-                    // listen_thread_main logs a failed accept(2) and keeps
-                    // listening (rrd_daemon.c:4395). The pause stops an
-                    // exhausted descriptor table from spinning the loop.
-                    Err(error) => {
-                        tracing::error!(error = %error, "rrdcached_accept_failed");
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        continue;
-                    }
-                };
+            Some((stream, socket_commands)) = accepted.recv() => {
                 let base = base.clone();
                 let stats = Arc::clone(&stats);
                 let queue = Arc::clone(&queue);
                 let no_overwrite = args.no_overwrite;
                 let allow_recursive_mkdir = args.allow_recursive_mkdir;
-                let socket_commands = args.socket_commands.clone();
                 let shutdown = shutdown.clone();
                 connections.spawn(async move {
                     if let Err(error) = serve_rrdcached_connection(stream, base, stats, queue, no_overwrite, allow_recursive_mkdir, socket_commands, shutdown).await {
@@ -1701,7 +1761,17 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
     if let Ok(mut queue) = queue.lock() {
         queue.journal_done();
     }
-    let _ = std::fs::remove_file(&args.socket);
+    accept_tasks.shutdown().await;
+    // After a privilege drop the socket directory may be root-owned, so
+    // removal can fail, as it does for upstream.
+    tokio::task::spawn_blocking(move || {
+        for path in unix_paths {
+            if let Err(error) = std::fs::remove_file(&path) {
+                tracing::warn!(socket = %path.display(), error = %error, "rrdcached_socket_unlink_failed");
+            }
+        }
+    })
+    .await?;
     tracing::info!("rrdcached_stopped");
     Ok(())
 }
@@ -1921,7 +1991,7 @@ pub fn rrdcached_route(
 /// Runs FETCH on the blocking pool and writes its reply as it is formatted,
 /// so a long range is never held in memory as one string.
 async fn stream_rrdcached_fetch(
-    writer: &mut tokio::net::unix::OwnedWriteHalf,
+    writer: &mut (impl AsyncWrite + Unpin),
     base: &RrdcachedBase,
     fields: Vec<String>,
     stats: &Arc<RrdcachedStats>,
@@ -1966,9 +2036,36 @@ enum RrdcachedReply {
     Close,
 }
 
+/// Hand one accepted connection to the serve loop; false once it has stopped.
+/// A failed accept(2) is logged and listening continues, as in
+/// listen_thread_main (rrd_daemon.c:4395); the pause keeps an exhausted
+/// descriptor table from spinning the loop.
+async fn forward_rrdcached_accept(
+    accepted: std::io::Result<Box<dyn RrdcachedStream>>,
+    commands: &Option<Vec<String>>,
+    sender: &mpsc::Sender<RrdcachedAccepted>,
+) -> bool {
+    match accepted {
+        Ok(stream) => sender.send((stream, commands.clone())).await.is_ok(),
+        Err(error) => {
+            tracing::error!(error = %error, "rrdcached_accept_failed");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            !sender.is_closed()
+        }
+    }
+}
+
+/// An accepted connection and its listener's `-P` list.
+type RrdcachedAccepted = (Box<dyn RrdcachedStream>, Option<Vec<String>>);
+
+/// A Unix or TCP client connection.
+trait RrdcachedStream: AsyncRead + AsyncWrite + Send + Unpin {}
+
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> RrdcachedStream for T {}
+
 #[allow(clippy::too_many_arguments)] // Per-connection settings fixed at startup.
 async fn serve_rrdcached_connection(
-    stream: UnixStream,
+    stream: Box<dyn RrdcachedStream>,
     base: RrdcachedBase,
     stats: Arc<RrdcachedStats>,
     queue: Arc<Mutex<RrdcachedQueue>>,
@@ -1977,7 +2074,7 @@ async fn serve_rrdcached_connection(
     socket_commands: Option<Vec<String>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (reader, mut writer) = stream.into_split();
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
     // batch_start and batch_cmd plus the buffered error lines.

@@ -144,7 +144,7 @@ pub mod server {
         let (client, server) = UnixStream::pair().expect("socketpair");
         let (_stop, stop_rx) = tokio::sync::watch::channel(false);
         let serve = serve_rrdcached_connection(
-            server,
+            Box::new(server),
             base,
             stats,
             Arc::clone(&queue),
