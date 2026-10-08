@@ -113,21 +113,60 @@ fn open_unix(sock: &RrdcachedListenAddress, listeners: &mut Vec<RrdcachedListene
             return false;
         }
     }
+    let name = match path.trim_end_matches('/').rsplit('/').next() {
+        Some(name) if !name.is_empty() && name != "." && name != ".." => name,
+        _ => {
+            eprintln!(
+                "rrdcached: bind({path}) failed: {}.",
+                strerror(libc::EINVAL)
+            );
+            return false;
+        }
+    };
+    let (Ok(c_dir), Ok(c_name)) = (CString::new(dir), CString::new(name)) else {
+        eprintln!(
+            "rrdcached: bind({path}) failed: {}.",
+            strerror(libc::EINVAL)
+        );
+        return false;
+    };
+    // Everything below works relative to this descriptor, so renaming or
+    // replacing the directory's path afterwards cannot redirect it.
+    // SAFETY: c_dir is NUL terminated and outlives the call.
+    let parent = unsafe {
+        libc::open(
+            c_dir.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if parent < 0 {
+        eprintln!("rrdcached: bind({path}) failed: {}.", strerror(errno()));
+        return false;
+    }
+    // SAFETY: parent was just returned by open(2) and nothing else owns it.
+    let parent = unsafe { OwnedFd::from_raw_fd(parent) };
+    let Some(parent_stat) = fstat(&parent) else {
+        eprintln!("rrdcached: bind({path}) failed: {}.", strerror(errno()));
+        return false;
+    };
+    if !socket_parent_is_private(&parent_stat) {
+        eprintln!("rrdcached: refusing socket directory {dir}: another user can write it");
+        return false;
+    }
     // Upstream unlinks whatever is at the path because the pid file proves
     // no other daemon owns it. Rondi refuses a live socket or a non-socket,
     // and otherwise renames the new socket over a stale one.
-    if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        use std::os::unix::fs::FileTypeExt;
+    if let Some(existing) = fstatat(&parent, &c_name) {
         if std::os::unix::net::UnixStream::connect(path).is_ok() {
             eprintln!("rrdcached: socket is already active: {path}");
             return false;
         }
-        if !metadata.file_type().is_socket() {
+        if existing.st_mode & libc::S_IFMT != libc::S_IFSOCK {
             eprintln!("rrdcached: refusing to replace non-socket path {path}");
             return false;
         }
     }
-    let Some(staging) = StagingDir::create(dir) else {
+    let Some(staging) = StagingDir::create(&parent, &parent_stat) else {
         eprintln!("rrdcached: bind({path}) failed: {}.", strerror(errno()));
         return false;
     };
@@ -135,8 +174,18 @@ fn open_unix(sock: &RrdcachedListenAddress, listeners: &mut Vec<RrdcachedListene
         return false;
     };
     // The socket is complete and listening before its name appears, and
-    // rename(2) replaces a stale socket in one step.
-    if std::fs::rename(staging.socket(), path).is_err() {
+    // renameat(2) replaces a stale socket in one step.
+    // SAFETY: both descriptors are open directories and both names are NUL
+    // terminated.
+    let renamed = unsafe {
+        libc::renameat(
+            staging.fd.as_raw_fd(),
+            StagingDir::SOCKET.as_ptr(),
+            parent.as_raw_fd(),
+            c_name.as_ptr(),
+        )
+    };
+    if renamed != 0 {
         eprintln!("rrdcached: bind({path}) failed: {}.", strerror(errno()));
         return false;
     }
@@ -150,38 +199,136 @@ fn open_unix(sock: &RrdcachedListenAddress, listeners: &mut Vec<RrdcachedListene
     true
 }
 
-/// A fresh mode-0700 directory beside the socket path. The socket is bound,
-/// chowned, and chmodded inside it, where no other user can swap the name
-/// for a symlink or hard link between bind(2) and chown/chmod.
-struct StagingDir(PathBuf);
+fn fstat(fd: &OwnedFd) -> Option<libc::stat> {
+    // SAFETY: stat is plain old data; fstat fills it for an open descriptor.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    (unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) } == 0).then_some(stat)
+}
+
+fn fstatat(dir: &OwnedFd, name: &CStr) -> Option<libc::stat> {
+    // SAFETY: stat is plain old data; name is NUL terminated and dir is an
+    // open directory.
+    let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+    let status = unsafe {
+        libc::fstatat(
+            dir.as_raw_fd(),
+            name.as_ptr(),
+            &mut stat,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    (status == 0).then_some(stat)
+}
+
+/// Whether only root, or the daemon itself when unprivileged, can add,
+/// rename, or remove entries in the socket's directory. A root daemon
+/// refuses a directory another account owns, or one writable by a non-root
+/// group or by others unless the sticky bit limits those writers to their
+/// own entries.
+fn socket_parent_is_private(stat: &libc::stat) -> bool {
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        return true;
+    }
+    let mode = stat.st_mode;
+    let sticky = mode & libc::S_ISVTX != 0;
+    let foreign_owner = stat.st_uid != 0;
+    let shared = mode & 0o002 != 0 || (mode & 0o020 != 0 && stat.st_gid != 0);
+    !foreign_owner && (!shared || sticky)
+}
+
+/// A fresh mode-0700 directory beside the socket path, created and used only
+/// through descriptors. The socket is bound, chowned, and chmodded inside it,
+/// where no other account can add or swap entries.
+struct StagingDir {
+    parent: libc::c_int,
+    name: CString,
+    fd: OwnedFd,
+}
 
 impl StagingDir {
-    const SOCKET: &str = "s";
+    const SOCKET: &CStr = c"s";
 
-    fn create(dir: &str) -> Option<Self> {
-        let template = CString::new(format!("{dir}/.rrdcached.XXXXXX")).ok()?;
-        let mut template = template.into_bytes_with_nul();
-        // SAFETY: template is a writable NUL-terminated buffer ending in
-        // XXXXXX, as mkdtemp requires.
-        let created = unsafe { libc::mkdtemp(template.as_mut_ptr().cast::<libc::c_char>()) };
-        if created.is_null() {
-            return None;
+    fn create(parent: &OwnedFd, parent_stat: &libc::stat) -> Option<Self> {
+        use std::hash::{BuildHasher, Hasher};
+        for _ in 0..100 {
+            let random = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish();
+            let name = CString::new(format!(".rrdcached.{random:016x}")).ok()?;
+            // SAFETY: parent is an open directory and name is NUL terminated.
+            if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+                if errno() == libc::EEXIST {
+                    continue;
+                }
+                return None;
+            }
+            // SAFETY: as above; O_NOFOLLOW refuses a symlink put in its place.
+            let fd = unsafe {
+                libc::openat(
+                    parent.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return None;
+            }
+            // SAFETY: fd was just returned by openat(2) and nothing else owns it.
+            let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+            let stat = fstat(&fd)?;
+            // SAFETY: geteuid has no preconditions.
+            let ours = stat.st_mode & libc::S_IFMT == libc::S_IFDIR
+                && stat.st_uid == unsafe { libc::geteuid() }
+                && stat.st_mode & 0o077 == 0
+                && stat.st_dev == parent_stat.st_dev;
+            if !ours {
+                // Not the directory mkdirat made; leave it alone.
+                return None;
+            }
+            // SAFETY: fd is an open directory owned by this function.
+            if unsafe { libc::fchmod(fd.as_raw_fd(), 0o700) } != 0 {
+                return None;
+            }
+            return Some(Self {
+                parent: parent.as_raw_fd(),
+                name,
+                fd,
+            });
         }
-        template.pop();
-        Some(Self(PathBuf::from(String::from_utf8(template).ok()?)))
-    }
-
-    fn socket(&self) -> PathBuf {
-        self.0.join(Self::SOCKET)
+        None
     }
 }
 
 impl Drop for StagingDir {
     fn drop(&mut self) {
-        // After a successful rename only the empty directory remains.
-        let _ = std::fs::remove_file(self.socket());
-        if let Err(error) = std::fs::remove_dir(&self.0) {
-            eprintln!("rrdcached: rmdir({}) failed: {error}", self.0.display());
+        // After a successful renameat the socket is gone and only the empty
+        // directory remains; remove it only if the name still refers to it.
+        // SAFETY: the descriptor and names stay valid for these calls; the
+        // parent descriptor outlives self in open_unix.
+        unsafe { libc::unlinkat(self.fd.as_raw_fd(), Self::SOCKET.as_ptr(), 0) };
+        let Some(ours) = fstat(&self.fd) else {
+            return;
+        };
+        let mut current: libc::stat = unsafe { std::mem::zeroed() };
+        let same = unsafe {
+            libc::fstatat(
+                self.parent,
+                self.name.as_ptr(),
+                &mut current,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } == 0
+            && current.st_dev == ours.st_dev
+            && current.st_ino == ours.st_ino;
+        if same
+            && unsafe { libc::unlinkat(self.parent, self.name.as_ptr(), libc::AT_REMOVEDIR) } != 0
+        {
+            eprintln!(
+                "rrdcached: rmdir({}) failed: {}",
+                self.name.to_string_lossy(),
+                strerror(errno())
+            );
         }
     }
 }
@@ -190,11 +337,14 @@ impl Drop for StagingDir {
 struct WorkingDirectory(OwnedFd);
 
 impl WorkingDirectory {
-    /// Enter `dir`. Only for single-threaded startup: the working directory
-    /// is process-wide.
-    fn enter(dir: &std::path::Path) -> Option<Self> {
+    /// Enter the directory open on `dir`. Only for single-threaded startup:
+    /// the working directory is process-wide.
+    fn enter(dir: &OwnedFd) -> Option<Self> {
         let previous = std::fs::File::open(".").ok()?;
-        std::env::set_current_dir(dir).ok()?;
+        // SAFETY: dir is an open directory descriptor.
+        if unsafe { libc::fchdir(dir.as_raw_fd()) } != 0 {
+            return None;
+        }
         Some(Self(previous.into()))
     }
 }
@@ -209,15 +359,15 @@ impl Drop for WorkingDirectory {
     }
 }
 
-/// Bind, set ownership and mode, and listen on the staged socket, binding
-/// the short relative name so a long `path` still fits `sun_path`. Errors
-/// use upstream's text with the final `path`.
+/// Bind, set ownership and mode, and listen on the staged socket. bind(2)
+/// needs a path, so it binds the relative name after fchdir to the staging
+/// descriptor, which also keeps a long `path` within `sun_path`. Errors use
+/// upstream's text with the final `path`.
 fn bind_staged(sock: &RrdcachedListenAddress, path: &str, staging: &StagingDir) -> Option<OwnedFd> {
-    let Some(_cwd) = WorkingDirectory::enter(&staging.0) else {
+    let Some(_cwd) = WorkingDirectory::enter(&staging.fd) else {
         eprintln!("rrdcached: bind({path}) failed: {}.", strerror(errno()));
         return None;
     };
-    let name = c"s";
     // SAFETY: socket(2) has no memory preconditions.
     let fd = unsafe { libc::socket(libc::PF_UNIX, libc::SOCK_STREAM, 0) };
     if fd < 0 {
@@ -232,7 +382,7 @@ fn bind_staged(sock: &RrdcachedListenAddress, path: &str, staging: &StagingDir) 
     // SAFETY: sockaddr_un is plain old data; all-zero is a valid value.
     let mut address: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     address.sun_family = libc::AF_UNIX as libc::sa_family_t;
-    address.sun_path[0] = StagingDir::SOCKET.as_bytes()[0] as libc::c_char;
+    address.sun_path[0] = StagingDir::SOCKET.to_bytes()[0] as libc::c_char;
     // SAFETY: address is a fully initialized sockaddr_un and the length
     // passed is its size.
     let status = unsafe {
@@ -246,13 +396,21 @@ fn bind_staged(sock: &RrdcachedListenAddress, path: &str, staging: &StagingDir) 
         eprintln!("rrdcached: bind({path}) failed: {}.", strerror(errno()));
         return None;
     }
+    let dir = staging.fd.as_raw_fd();
+    let name = StagingDir::SOCKET.as_ptr();
     // Upstream reports a failure here and listens anyway; Rondi reports it
     // and does not start.
     if let Some(group) = sock.group {
-        // SAFETY: name is NUL terminated and static.
+        // SAFETY: dir is the open staging directory and name is static.
         let failed = unsafe {
-            libc::chown(name.as_ptr(), libc::getuid(), group as libc::gid_t) != 0
-                || libc::chmod(name.as_ptr(), 0o760) != 0
+            libc::fchownat(
+                dir,
+                name,
+                libc::getuid(),
+                group as libc::gid_t,
+                libc::AT_SYMLINK_NOFOLLOW,
+            ) != 0
+                || libc::fchmodat(dir, name, 0o760, 0) != 0
         };
         if failed {
             eprintln!(
@@ -263,8 +421,8 @@ fn bind_staged(sock: &RrdcachedListenAddress, path: &str, staging: &StagingDir) 
         }
     }
     if let Some(mode) = sock.mode {
-        // SAFETY: name is NUL terminated and static.
-        if unsafe { libc::chmod(name.as_ptr(), mode as libc::mode_t) } != 0 {
+        // SAFETY: dir is the open staging directory and name is static.
+        if unsafe { libc::fchmodat(dir, name, mode as libc::mode_t, 0) } != 0 {
             eprintln!(
                 "rrdcached: failed to set socket file permissions ({mode:o}): {}",
                 strerror(errno())

@@ -364,3 +364,62 @@ fn rrdcached_systemd_unit_never_runs_with_group_zero() {
     unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
     child.wait().unwrap();
 }
+
+#[test]
+fn rrdcached_root_refuses_a_socket_directory_another_user_can_write() {
+    let Some(account) = test_account("rrdcached socket directory ownership") else {
+        return;
+    };
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // (directory owner, mode, expected to start)
+    let cases = [
+        (account.uid, 0o755, false),
+        (0, 0o777, false),
+        (0, 0o1777, true),
+        (0, 0o755, true),
+    ];
+    for (index, (owner, mode, starts)) in cases.into_iter().enumerate() {
+        let run = base.join(format!("case-{index}"));
+        let sockets = run.join("sockets");
+        std::fs::create_dir_all(&sockets).unwrap();
+        std::os::unix::fs::chown(&sockets, Some(owner), Some(0)).unwrap();
+        std::fs::set_permissions(&sockets, std::fs::Permissions::from_mode(mode)).unwrap();
+        let socket = sockets.join("rrdcached.sock");
+        let mut child = Command::new(daemon("rondi", &run))
+            .args(["-g", "-b", run.to_str().unwrap(), "-m", "0660", "-l"])
+            .arg(&socket)
+            .arg("-p")
+            .arg(run.join("rrdcached.pid"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        if starts {
+            wait_until_serving(&mut child, &socket);
+            let metadata = std::fs::symlink_metadata(&socket).unwrap();
+            assert_eq!(metadata.mode() & 0o7777, 0o660, "case {index}");
+            // Only the socket remains; the staging directory is gone.
+            let entries = std::fs::read_dir(&sockets).unwrap().count();
+            assert_eq!(entries, 1, "case {index} left a staging directory");
+            // SAFETY: the child is a daemon started by this test.
+            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+            child.wait().unwrap();
+        } else {
+            let output = child.wait_with_output().unwrap();
+            assert_eq!(output.status.code(), Some(1), "case {index}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).starts_with(&format!(
+                    "rrdcached: refusing socket directory {}: another user can write it\n",
+                    sockets.display()
+                )),
+                "case {index}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(std::fs::read_dir(&sockets).unwrap().count(), 0);
+        }
+    }
+}
