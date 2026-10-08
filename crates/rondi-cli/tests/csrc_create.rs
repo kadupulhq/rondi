@@ -11,36 +11,16 @@ use std::os::unix::fs::PermissionsExt;
 const DS: &str = "DS:x:GAUGE:20:U:U";
 const RRA: &str = "RRA:AVERAGE:0.5:1:5";
 
-/// Header with zeroed rra_ptr words, then each archive oldest row first.
-/// Assumes the 64-bit little-endian version 3-5 layout.
-fn masked(bytes: &[u8]) -> Vec<u8> {
-    let word =
-        |offset: usize| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()) as usize;
-    let (ds, rra) = (word(24), word(32));
-    let pointers = 128 + 120 * ds + 120 * rra + 16 + 112 * ds + 80 * ds * rra;
-    let mut out = bytes[..pointers].to_vec();
-    out.extend(std::iter::repeat_n(0, 8 * rra));
-    let mut data = pointers + 8 * rra;
-    for index in 0..rra {
-        let rows = word(128 + 120 * ds + 120 * index + 24);
-        let length = rows * ds * 8;
-        let archive = &bytes[data..data + length];
-        let next = ((word(pointers + 8 * index) + 1) % rows) * ds * 8;
-        out.extend_from_slice(&archive[next..]);
-        out.extend_from_slice(&archive[..next]);
-        data += length;
-    }
-    out.extend_from_slice(&bytes[data..]);
-    out
-}
-
 fn assert_same_created(sides: &common::Sides, args: &[&str], name: &str) {
     sides.assert_same(args);
     let up = std::fs::read(sides.up.join(name)).ok();
     let ro = std::fs::read(sides.ro.join(name)).ok();
     assert_eq!(up.is_some(), ro.is_some(), "{args:?}");
     if let (Some(up), Some(ro)) = (up, ro) {
-        assert!(masked(&ro) == masked(&up), "{name} differs for {args:?}");
+        assert!(
+            common::masked_rrd(&ro) == common::masked_rrd(&up),
+            "{name} differs for {args:?}"
+        );
     }
     for dir in [&sides.up, &sides.ro] {
         let _ = std::fs::remove_file(dir.join(name));
@@ -198,7 +178,7 @@ fn b7_write_rrd_filesystem_behavior_matches_upstream() {
         (ro.status.code(), &ro.stderr),
         (up.status.code(), &up.stderr)
     );
-    assert!(masked(&ro.stdout) == masked(&up.stdout));
+    assert!(common::masked_rrd(&ro.stdout) == common::masked_rrd(&up.stdout));
     assert!(!sides.up.join("-").exists());
 }
 
