@@ -420,10 +420,7 @@ impl ParsedArgs {
 fn get_long(text: &str) -> (i32, i64) {
     let bytes = text.as_bytes();
     let mut position = 0;
-    while bytes
-        .get(position)
-        .is_some_and(|byte| byte.is_ascii_whitespace())
-    {
+    while bytes.get(position).is_some_and(u8::is_ascii_whitespace) {
         position += 1;
     }
     let negative = match bytes.get(position) {

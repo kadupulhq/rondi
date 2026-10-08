@@ -25,7 +25,7 @@ fn upstream_ok(args: &[String]) {
 }
 
 fn owned(items: &[&str]) -> Vec<String> {
-    items.iter().map(|item| item.to_string()).collect()
+    items.iter().map(ToString::to_string).collect()
 }
 
 /// `a.rrd` holds x and y at a 10-second step and `b.rrd` holds z at a
@@ -125,7 +125,7 @@ impl Fixture {
             "DEF:x=a.rrd:x:AVERAGE",
             "DEF:z=b.rrd:z:AVERAGE",
         ]);
-        args.extend(elements.iter().map(|item| item.to_string()));
+        args.extend(elements.iter().map(ToString::to_string));
         args
     }
 
