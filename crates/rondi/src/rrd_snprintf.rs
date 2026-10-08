@@ -550,4 +550,78 @@ mod tests {
         assert_eq!(format("%+.3lg%%", 0.000_123_45), "+0.000123%");
         assert_eq!(format("%'.0lf", 1_234_567.0), "1,234,567");
     }
+
+    #[test]
+    fn integer_conversions_follow_fmtint() {
+        let int = |text, value| rrd_snprintf(text, &[Arg::Int(value)]);
+        assert_eq!(int("%d", -42), "-42");
+        assert_eq!(int("%+5i|", 7), "   +7|");
+        assert_eq!(int("% d", 7), " 7");
+        assert_eq!(int("%05d", -42), "-0042");
+        assert_eq!(int("%-5d|", 42), "42   |");
+        assert_eq!(int("%.4d", 42), "0042");
+        assert_eq!(int("%#x %#X", 255), "0xff 0");
+        assert_eq!(
+            rrd_snprintf("%#x %#X", &[Arg::Int(255), Arg::Int(255)]),
+            "0xff 0XFF"
+        );
+        assert_eq!(int("%#o", 8), "010");
+        assert_eq!(int("%u", 3), "3");
+        assert_eq!(int("%'d", 1_234_567), "1,234,567");
+        assert_eq!(int("%c", 65), "A");
+        assert_eq!(int("%lld %hd %hhd %jd %zd %td", 1), "1 0 0 0 0 0");
+    }
+
+    #[test]
+    fn string_and_star_arguments() {
+        assert_eq!(
+            rrd_snprintf(
+                "[%5s][%-5s][%.2s]",
+                &[Arg::Str("ab"), Arg::Str("ab"), Arg::Str("abc")]
+            ),
+            "[   ab][ab   ][ab]"
+        );
+        assert_eq!(rrd_snprintf("%s", &[]), "(null)");
+        assert_eq!(rrd_snprintf("%*d|", &[Arg::Int(-4), Arg::Int(1)]), "1   |");
+        assert_eq!(
+            rrd_snprintf("%.*f", &[Arg::Int(2), Arg::Double(1.0)]),
+            "1.00"
+        );
+        assert_eq!(
+            rrd_snprintf("%.*f", &[Arg::Int(-1), Arg::Double(1.0)]),
+            "1.000000"
+        );
+        assert_eq!(rrd_snprintf("100%% %q", &[]), "100% ");
+        assert_eq!(rrd_snprintf("%", &[]), "");
+    }
+
+    #[test]
+    fn float_special_cases() {
+        let double = |text, value| rrd_snprintf(text, &[Arg::Double(value)]);
+        assert_eq!(double("%f", f64::NAN), "nan");
+        assert_eq!(double("%5F|", f64::NAN), "  NAN|");
+        assert_eq!(double("%+e", f64::INFINITY), "+inf");
+        assert_eq!(double("%E", 1234.5), "1.234500E+03");
+        assert_eq!(double("%G", 1e-10), "1E-10");
+        assert_eq!(double("%g", 100_000.0), "100000");
+        assert_eq!(double("%g", 1e6), "1e+06");
+        assert_eq!(double("%#g", 1.0), "1.00000");
+        assert_eq!(double("%.0g", 2.5), "3");
+        assert_eq!(double("%+08.2f", 3.125), "+0003.13");
+        assert_eq!(double("% .1f", 2.0), " 2.0");
+        assert_eq!(double("%#.0f", 2.0), "2.");
+        assert_eq!(double("%.25f", 0.5), "0.5000000000000000000");
+        assert_eq!(double("%.1e", 9.96), "1.0e+01");
+        assert_eq!(double("%a", 1.5), "1.500000");
+        assert_eq!(double("%f", 0.0), "0.000000");
+        assert_eq!(rrd_snprintf("%f", &[Arg::Int(2)]), "2.000000");
+        assert_eq!(rrd_snprintf("%d", &[Arg::Double(2.9)]), "2");
+    }
+
+    #[test]
+    fn overflowing_conversions_stop_the_output() {
+        assert_eq!(rrd_snprintf("a%fb", &[Arg::Double(1e30)]), "a");
+        assert_eq!(rrd_snprintf("a%99999999999db", &[Arg::Int(1)]), "a");
+        assert_eq!(rrd_snprintf("a%.99999999999fb", &[Arg::Double(1.0)]), "a");
+    }
 }
