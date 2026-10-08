@@ -38,3 +38,30 @@ jobs:
           persist-credentials: false
       - name: Build pinned RRDtool oracle and run workspace checks
         run: docker build --progress=plain -f docker/Dockerfile.test -t rondi-ci .
+
+  fuzz-build:
+    # fuzz/src/lib.rs compiles the CLI and rrdcached sources a second time, so
+    # it breaks whenever their private functions change. Build every target
+    # and replay the committed seeds so that drift fails the pull request.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned nightly and cargo-fuzz
+        run: |
+          rustup toolchain install nightly-2026-10-06 --profile minimal
+          cargo +nightly-2026-10-06 install cargo-fuzz --version 0.13.2 --locked
+      - name: Build fuzz targets and replay seeds
+        working-directory: fuzz
+        run: |
+          cargo +nightly-2026-10-06 fuzz build -O -a
+          # rpn_diff spawns rrdtool, which this job does not build; it is
+          # compiled above but only run locally against the oracle.
+          for target in $(cargo +nightly-2026-10-06 fuzz list | grep -vx rpn_diff); do
+            seeds="seeds/$target"
+            corpus="$RUNNER_TEMP/corpus/$target"
+            mkdir -p "$corpus"
+            cargo +nightly-2026-10-06 fuzz run -O -a "$target" "$corpus" "$seeds" -- -runs=0
+          done

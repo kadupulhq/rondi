@@ -1,0 +1,3 @@
+{"record":"update","id":1,"path":"ROOT/c.rrd","samples":["1000000080:1:2:3"]}
+{"record":"flushed","id":1}
+{"record":"update","id":2,"path":"ROOT/c.rrd","samples":["1000000090:4:5:6"]}

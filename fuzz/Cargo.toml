@@ -1,0 +1,102 @@
+[package]
+name = "rondi-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "GPL-2.0-or-later WITH RRDtool-FLOSS-exception-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Kept out of the main workspace so stable `cargo test` never builds libFuzzer.
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3"
+rondi = { path = "../crates/rondi" }
+rondi-server = { path = "../crates/rondi-server" }
+# The CLI and rrdcached internals are private, so src/lib.rs compiles their
+# sources directly; these mirror those crates' dependencies.
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+font8x8 = "0.3"
+glob = "0.3"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+libc = "0.2"
+png = "0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+shell-words = "1.1"
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "signal", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "rrd_file"
+path = "fuzz_targets/rrd_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "restore_xml"
+path = "fuzz_targets/restore_xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rrdcached_protocol"
+path = "fuzz_targets/rrdcached_protocol.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rrdcached_journal"
+path = "fuzz_targets/rrdcached_journal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rpn_xport"
+path = "fuzz_targets/rpn_xport.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "time_spec"
+path = "fuzz_targets/time_spec.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "update_args"
+path = "fuzz_targets/update_args.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_api"
+path = "fuzz_targets/http_api.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "rpn_diff"
+path = "fuzz_targets/rpn_diff.rs"
+test = false
+doc = false
+bench = false

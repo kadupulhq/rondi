@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE rrd SYSTEM "https://oss.oetiker.ch/rrdtool/rrdtool.dtd">
+<!-- Round Robin Database Dump -->
+<rrd>
+	<version>0003</version>
+	<step>10</step> <!-- Seconds -->
+	<lastupdate>1000000130</lastupdate> <!-- 2001-09-08 18:48:50 -0700 -->
+
+	<ds>
+		<name> g </name>
+		<type> GAUGE </type>
+		<minimal_heartbeat>30</minimal_heartbeat>
+		<min>NaN</min>
+		<max>NaN</max>
+
+		<!-- PDP Status -->
+		<last_ds>9</last_ds>
+		<value>0.0000000000e+00</value>
+		<unknown_sec> 0 </unknown_sec>
+	</ds>
+
+	<!-- Round Robin Archives -->
+	<rra>
+		<cf>AVERAGE</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>9.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<value>NaN</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-08 18:48:30 -0700 / 1000000110 --> <row><v>9.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:48:40 -0700 / 1000000120 --> <row><v>9.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:48:50 -0700 / 1000000130 --> <row><v>9.0000000000e+00</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>AVERAGE</cf>
+		<pdp_per_row>4</pdp_per_row> <!-- 40 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>9.0000000000e+00</primary_value>
+			<secondary_value>9.0000000000e+00</secondary_value>
+			<value>9.0000000000e+00</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-08 18:48:00 -0700 / 1000000080 --> <row><v>9.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:48:40 -0700 / 1000000120 --> <row><v>9.0000000000e+00</v></row>
+		</database>
+	</rra>
+</rrd>

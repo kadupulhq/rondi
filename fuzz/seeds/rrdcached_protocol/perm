@@ -1,0 +1,6 @@
+UPDATE g.rrd 1000000080:5 1000000090:6
+PENDING g.rrd
+FLUSH g.rrd
+LAST g.rrd
+FIRST g.rrd 0
+INFO g.rrd

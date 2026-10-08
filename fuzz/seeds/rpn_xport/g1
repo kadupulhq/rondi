@@ -1,0 +1,4 @@
+CDEF:x=a,UN,0,a,IF
+VDEF:v=x,AVERAGE
+PRINT:v:%6.2lf %S
+XPORT:x
