@@ -4447,7 +4447,7 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
             options.extend(["--border", "2"]);
         }
         let elements = if *tag == "FRAME" {
-            &["TICK:x#ff0000:events"][..]
+            &["TICK:x#ff0000:0.5:events"][..]
         } else {
             &["LINE1:x#ff0000:load"][..]
         };
@@ -4468,7 +4468,7 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
         alias.as_path(),
         &back_path,
         &["--border", "0", "--color=BACK#12ab34"],
-        &[],
+        &["LINE1:x"],
     );
     assert!(back_result.status.success());
     assert_eq!(image_pixel(&back_path, 0, 0), [0x12, 0xab, 0x34]);
@@ -4477,7 +4477,7 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
         alias.as_path(),
         &canvas_path,
         &["--only-graph", "-c", "CANVAS#12ab34"],
-        &[],
+        &["LINE1:x"],
     );
     assert!(canvas_result.status.success());
     assert_eq!(image_pixel(&canvas_path, 10, 10), [0x12, 0xab, 0x34]);
@@ -4486,7 +4486,7 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
         alias.as_path(),
         &alpha_path,
         &["--border", "0", "--color", "BACK#ff000080"],
-        &[],
+        &["LINE1:x"],
     );
     assert!(alpha_result.status.success());
     assert_eq!(image_pixel(&alpha_path, 0, 0), [255, 127, 127]);

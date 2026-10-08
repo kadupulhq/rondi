@@ -1,6 +1,8 @@
 #![cfg(unix)]
-//! Differential tests for the number formatting of xport output, which
-//! goes through `rrd_snprintf` (rrd_snprintf.c fmtflt).
+//! Differential tests for the number formatting of xport and graph output:
+//! `rrd_snprintf` (rrd_snprintf.c fmtflt) for data values and xport PRINT
+//! entries, and the C library printf for graph PRINT/GPRINT, under the C
+//! locale and de_DE.
 
 #[macro_use]
 mod common;
@@ -140,4 +142,64 @@ fn xport_values_use_rrd_snprintf_rounding() {
         cdefs.push(format!("x,0,*,{mantissa}e{exponent},+"));
     }
     check_all(cdefs.iter().map(|cdef| f.compare(&f.xport_cdef(cdef), "C")));
+}
+
+fn locale_available(name: &str) -> bool {
+    Command::new("locale")
+        .arg("-a")
+        .output()
+        .is_ok_and(|output| {
+            String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+                line.eq_ignore_ascii_case(name) || line == name.replace("UTF-8", "utf8")
+            })
+        })
+}
+
+// rrd_tool.c:464 sets LC_ALL from the environment. rrd_snprintf is built
+// without localeconv, so xport values and xport PRINT entries keep '.',
+// while graph print_calc and graphv values use the C library and follow
+// LC_NUMERIC.
+#[test]
+fn locale_decimal_point_follows_the_printf_used() {
+    let Some(f) = fixture() else { return };
+    if !locale_available("de_DE.UTF-8") {
+        oracle_skip!("skipping locale differential: de_DE.UTF-8 is not installed");
+        return;
+    }
+    let base = |command: &str, target: Option<&str>| {
+        let mut args = vec![command.to_owned()];
+        args.extend(target.map(str::to_owned));
+        args.extend(
+            [
+                "--start",
+                "1000000000",
+                "--end",
+                "1000000300",
+                "DEF:x=a.rrd:x:AVERAGE",
+                "VDEF:v=x,AVERAGE",
+                "PRINT:v:%6.2lf",
+                "GPRINT:v:%8.3lf %s",
+            ]
+            .map(String::from),
+        );
+        args
+    };
+    let mut xport_json = base("xport", None);
+    xport_json.insert(1, String::from("--json"));
+    xport_json.push(String::from("XPORT:x"));
+    let mut xport_xml = base("xport", None);
+    xport_xml.push(String::from("XPORT:x"));
+    let mut graph_json = base("graphv", Some("-"));
+    graph_json.extend(["--imgformat", "JSON", "LINE1:x#ff0000:x"].map(String::from));
+    let mut graph_csv = base("graph", Some("-"));
+    graph_csv.extend(["--imgformat", "CSV", "LINE1:x#ff0000:x"].map(String::from));
+    let mut graph_print = base("graph", Some("/dev/null"));
+    graph_print.extend(["--imgformat", "XML", "LINE1:x#ff0000:x"].map(String::from));
+    let cases = [xport_json, xport_xml, graph_json, graph_csv, graph_print];
+    check_all(
+        ["C", "de_DE.UTF-8"]
+            .iter()
+            .flat_map(|locale| cases.iter().map(move |args| (locale, args)))
+            .map(|(locale, args)| f.compare(args, locale)),
+    );
 }

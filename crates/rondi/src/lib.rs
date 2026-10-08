@@ -3,15 +3,16 @@ pub mod compatibility;
 mod consolidation;
 mod data_source;
 mod format;
+pub mod graph;
 pub mod import_export;
 mod queries;
+mod rpn;
 mod rrd_binary;
 mod rrd_number;
 pub mod rrd_snprintf;
 pub(crate) mod storage;
 pub mod time;
 pub mod vdef;
-pub mod xport;
 
 pub use format::{
     ArchivePoint, DatabaseConfig, FORMAT_VERSION, FetchResult, RrdFetchResult, RrdFetchRow, Update,
@@ -28,7 +29,3 @@ pub use rrd_binary::{
 pub use rrd_number::parse_rrd_number;
 pub use storage::{DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, Store, StoreError, StoreOptions};
 pub use vdef::{VdefError, VdefFunction, VdefResult, evaluate_vdef};
-pub use xport::{
-    RrdXportCdef, RrdXportColumn, RrdXportDefinition, RrdXportResult, fetch_xport,
-    fetch_xport_with_cdefs,
-};
