@@ -22,7 +22,6 @@ rondi-server = { path = "../crates/rondi-server" }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 font8x8 = "0.3"
-glob = "0.3"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
