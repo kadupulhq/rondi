@@ -8,9 +8,9 @@ User=rondi
 Group=rondi
 UMask=0007
 StateDirectory=rondi rondi-journal
-StateDirectoryMode=2770
+StateDirectoryMode=0750
 RuntimeDirectory=rondi
-RuntimeDirectoryMode=2770
+RuntimeDirectoryMode=0750
 # The journal holds trusted replay input; only the service account may
 # read or replace it. StateDirectoryMode applies to both state directories.
 ExecStartPre=/bin/chmod 0700 /var/lib/rondi-journal
