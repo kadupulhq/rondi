@@ -259,6 +259,7 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let mut root = PathBuf::from("/tmp");
     let mut base_seen = false;
     let mut journal_directory = None;
+    let mut flush_at_shutdown = false;
     let mut pid_file = None;
     let mut log_file = None;
     let mut no_overwrite = false;
@@ -310,16 +311,57 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 base_seen = true;
                 root = PathBuf::from(value);
             }
-            'j' => journal_directory = Some(PathBuf::from(value)),
+            'j' => {
+                let strerror = |error: std::io::Error| {
+                    error.raw_os_error().map_or_else(String::new, |errno| {
+                        // SAFETY: strerror returns a valid NUL-terminated string.
+                        unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)) }
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                };
+                let directory = match std::fs::canonicalize(&value) {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        eprintln!(
+                            "Unable to resolve journal path ({value},{})",
+                            strerror(error)
+                        );
+                        std::process::exit(6);
+                    }
+                };
+                if let Err(error) = std::fs::create_dir_all(&directory) {
+                    eprintln!(
+                        "Failed to create journal directory '{}': {}",
+                        directory.display(),
+                        strerror(error)
+                    );
+                    std::process::exit(6);
+                }
+                let writable = std::ffi::CString::new(directory.as_os_str().as_encoded_bytes())
+                    .is_ok_and(|path| {
+                        let mode = libc::R_OK | libc::W_OK | libc::X_OK;
+                        // SAFETY: the CString is NUL terminated and outlives the call.
+                        let status = unsafe { libc::access(path.as_ptr(), mode) };
+                        status == 0
+                    });
+                if !writable {
+                    eprintln!(
+                        "Must specify a writable directory with -j! ({})",
+                        strerror(std::io::Error::last_os_error())
+                    );
+                    std::process::exit(6);
+                }
+                journal_directory = Some(directory);
+            }
             'p' => pid_file = Some(PathBuf::from(value)),
             'o' => log_file = Some(PathBuf::from(value)),
             'O' => no_overwrite = true,
             'R' => allow_recursive_mkdir = true,
             'B' => base_only = true,
-            // Rondi always stays in the foreground and flushes accepted
-            // entries during graceful shutdown, so these request behavior
-            // already enabled.
-            'F' | 'g' => {}
+            'F' => flush_at_shutdown = true,
+            // Rondi always stays in the foreground.
+            'g' => {}
             'm' => {
                 let mode = u32::from_str_radix(&value, 8)
                     .ok()
@@ -492,6 +534,7 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
         root,
         socket,
         journal_directory,
+        flush_at_shutdown,
         pid_file,
         log_file,
         no_overwrite,

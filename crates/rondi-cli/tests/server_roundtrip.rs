@@ -3071,90 +3071,246 @@ fn rrdtool_update_daemon_and_environment_route_writes_through_rrdcached() {
     }
 }
 
-#[test]
-fn rrdcached_recovers_journaled_update_after_crash() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("rra");
-    let socket = dir.path().join("run/rrdcached.sock");
-    let journal_directory = dir.path().join("run/journal");
-    let alias = dir.path().join("rrdcached");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(&journal_directory).unwrap();
-    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+fn upstream_rrdcached_available() -> bool {
+    ["rrdcached", "rrdtool"].iter().all(|tool| {
+        Command::new(tool)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    })
+}
 
-    let start = || {
-        Command::new(&alias)
-            .args([
-                "-b",
-                root.to_str().unwrap(),
-                "-j",
-                journal_directory.to_str().unwrap(),
-                "-l",
-            ])
-            .arg(format!("unix:{}", socket.display()))
-            .arg("-w")
-            .arg("3600")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap()
+/// Starts upstream (`rondi == false`) or Rondi rrdcached on fixed paths, so
+/// journals written by either name the same files.
+fn start_journaled_rrdcached(work: &std::path::Path, rondi: bool, options: &[&str]) -> Child {
+    let socket = work.join("s.sock");
+    let _ = std::fs::remove_file(&socket);
+    let alias = work.join("rrdcached");
+    if rondi && !alias.exists() {
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    }
+    let program = if rondi {
+        alias.into_os_string()
+    } else {
+        "rrdcached".into()
     };
-    let mut child = start();
+    let mut child = Command::new(program)
+        .arg("-g")
+        .arg("-p")
+        .arg(work.join("rrdcached.pid"))
+        .arg("-b")
+        .arg(work.join("b"))
+        .arg("-l")
+        .arg(format!("unix:{}", socket.display()))
+        .args(["-w", "3600", "-f", "7200"])
+        .args(options)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
     wait_for_socket(&mut child, &socket);
-    let mut stream = UnixStream::connect(&socket).unwrap();
-    let mut reader = BufReader::new(&mut stream);
-    assert_eq!(
-        rrdcached_request(
-            &mut reader,
-            "CREATE crash.rrd -b 1000000000 -s 10 DS:load:GAUGE:20:U:U RRA:AVERAGE:0.5:1:8\n"
-        ),
-        "0 RRD created OK\n"
-    );
-    assert_eq!(
-        rrdcached_request(&mut reader, "UPDATE crash.rrd 1000000010:9\n"),
-        "0 errors, enqueued 1 value(s).\n"
-    );
-    assert!(journal_directory.join(".rrdcached.journal").is_file());
-    assert_eq!(
-        rrdcached_request(&mut reader, "LAST crash.rrd\n"),
-        "0 1000000010\n"
-    );
-    drop(reader);
-    drop(stream);
+    child
+}
 
-    // SIGKILL simulates loss before a graceful flush. The synced journal must
-    // retain the accepted update and startup must recover it.
-    // SAFETY: `child.id()` belongs to the still-running test child.
-    assert_eq!(
-        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGKILL) },
-        0
-    );
+fn stop_rrdcached(mut child: Child, signal: libc::c_int) {
+    // SAFETY: the child is still running and owned by this test.
+    assert_eq!(unsafe { libc::kill(child.id() as libc::pid_t, signal) }, 0);
     child.wait().unwrap();
+}
 
-    let mut restarted = start();
-    wait_for_socket(&mut restarted, &socket);
-    let mut stream = UnixStream::connect(&socket).unwrap();
-    let mut reader = BufReader::new(&mut stream);
-    assert_eq!(
-        rrdcached_request(&mut reader, "PENDING crash.rrd\n"),
-        "1 updates pending\n"
+fn journal_contents(directory: &std::path::Path) -> Vec<Vec<u8>> {
+    let mut names = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+        .into_iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect()
+}
+
+fn reset_journal_work(work: &std::path::Path, baseline: &std::path::Path) {
+    for directory in ["b", "j"] {
+        let _ = std::fs::remove_dir_all(work.join(directory));
+        std::fs::create_dir_all(work.join(directory)).unwrap();
+    }
+    for name in ["a.rrd", "c.rrd"] {
+        std::fs::copy(baseline, work.join("b").join(name)).unwrap();
+    }
+}
+
+#[test]
+fn rrdcached_journal_replays_across_upstream_and_rondi() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping journal replay differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let baseline = work.join("baseline.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&baseline)
+        .args(["--start", "1000000000", "--step", "10"])
+        .args([
+            "DS:v:GAUGE:20:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+            "RRA:MAX:0.5:2:4",
+        ])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let journal = work.join("j");
+    let journal_option = journal.to_str().unwrap();
+    let base = work.join("b");
+    let mut writes = format!(
+        "UPDATE a.rrd 1000000010:1 1000000020:2\nUPDATE c.rrd 1000000010:5\nFLUSH a.rrd\n\
+         UPDATE a.rrd 1000000030:3\nUPDATE c.rrd 1000000020:6 1000000030:7\nFORGET c.rrd\n\
+         UPDATE c.rrd 1000000040:8\nUPDATE {}/a.rrd 1000000040:4\n",
+        base.display()
     );
-    let mut sample = String::new();
-    reader.read_line(&mut sample).unwrap();
-    assert_eq!(sample, "1000000010:9\n");
+    let mut killed_writes = writes.clone();
+    for step in 0..200 {
+        killed_writes.push_str(&format!(
+            "UPDATE a.rrd {}:{step}\n",
+            1_000_000_050 + step * 10
+        ));
+    }
+    writes.push_str("STATS\nQUIT\n");
+    killed_writes.push_str("STATS\nQUIT\n");
+    // Upstream counts QueueLength and UpdatesWritten differently (RD-007),
+    // and bumps DataSetsWritten only after waking the FLUSH waiter, so a
+    // following STATS can race it (rrd_daemon.c queue_thread_main).
+    let comparable = |response: String| {
+        response
+            .lines()
+            .filter(|line| {
+                !["QueueLength:", "UpdatesWritten:", "DataSetsWritten:"]
+                    .iter()
+                    .any(|name| line.starts_with(name))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let socket = work.join("s.sock");
+    let run = |writer_is_rondi: bool, replayer_is_rondi: bool, signal: libc::c_int| {
+        reset_journal_work(&work, &baseline);
+        let writer = start_journaled_rrdcached(&work, writer_is_rondi, &["-j", journal_option]);
+        let script = if signal == libc::SIGKILL {
+            &killed_writes
+        } else {
+            &writes
+        };
+        let written = comparable(rrdcached_dump(&socket, script));
+        // SIGTERM without -F keeps the journal and skips the final flush;
+        // SIGKILL leaves only what stdio buffering already wrote.
+        stop_rrdcached(writer, signal);
+        let journal_written = journal_contents(&journal);
+        let replayer = start_journaled_rrdcached(&work, replayer_is_rondi, &["-j", journal_option]);
+        let replayed = comparable(rrdcached_dump(
+            &socket,
+            "PENDING a.rrd\nPENDING c.rrd\nSTATS\nFLUSH a.rrd\nFLUSH c.rrd\nQUIT\n",
+        ));
+        stop_rrdcached(replayer, libc::SIGTERM);
+        (
+            written,
+            journal_written,
+            replayed,
+            std::fs::read(base.join("a.rrd")).unwrap(),
+            std::fs::read(base.join("c.rrd")).unwrap(),
+        )
+    };
+    for signal in [libc::SIGTERM, libc::SIGKILL] {
+        let control = run(false, false, signal);
+        assert!(!control.1.is_empty() && !control.1[0].is_empty());
+        if signal == libc::SIGTERM {
+            assert_eq!(
+                rrdcached_stat_value(&control.0, "JournalBytes"),
+                control.1[0].len() as u64
+            );
+            assert!(
+                control
+                    .2
+                    .contains("2 updates pending\n1000000030:3\n1000000040:4\n")
+            );
+        }
+        for (writer, replayer) in [(true, false), (false, true), (true, true)] {
+            let observed = run(writer, replayer, signal);
+            let label =
+                format!("signal {signal}, writer rondi={writer}, replayer rondi={replayer}");
+            assert_eq!(observed.0, control.0, "{label}: writer responses");
+            assert_eq!(observed.1, control.1, "{label}: journal bytes");
+            assert_eq!(observed.2, control.2, "{label}: replay responses");
+            assert!(observed.3 == control.3, "{label}: a.rrd differs");
+            assert!(observed.4 == control.4, "{label}: c.rrd differs");
+        }
+    }
+}
+
+#[test]
+fn rrdcached_journal_shutdown_and_rotation_match_upstream() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping journal lifecycle differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let baseline = work.join("baseline.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&baseline)
+        .args(["--start", "1000000000", "--step", "10"])
+        .args(["DS:v:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:8"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let journal = work.join("j");
+    let journal_option = journal.to_str().unwrap().to_owned();
+    let socket = work.join("s.sock");
+    let mut results = Vec::new();
+    for rondi in [false, true] {
+        // -F flushes at shutdown and then removes the journals; without -j
+        // nothing is journaled and shutdown always flushes.
+        let mut observed = Vec::new();
+        for options in [vec!["-F", "-j", &journal_option], vec![]] {
+            reset_journal_work(&work, &baseline);
+            let daemon = start_journaled_rrdcached(&work, rondi, &options);
+            let stats = rrdcached_dump(&socket, "UPDATE a.rrd 1000000010:1\nSTATS\nQUIT\n");
+            stop_rrdcached(daemon, libc::SIGTERM);
+            observed.push((
+                rrdcached_stat_value(&stats, "JournalBytes"),
+                std::fs::read_dir(&journal).unwrap().count(),
+                std::fs::read(work.join("b/a.rrd")).unwrap(),
+            ));
+        }
+        // Each -f interval starts a new journal and deletes the set before
+        // the previous one, so two files remain once rotation has begun.
+        reset_journal_work(&work, &baseline);
+        let daemon =
+            start_journaled_rrdcached(&work, rondi, &["-j", &journal_option, "-w", "1", "-f", "1"]);
+        thread::sleep(Duration::from_millis(3500));
+        let stats = rrdcached_dump(&socket, "STATS\nQUIT\n");
+        let files = std::fs::read_dir(&journal).unwrap().count();
+        stop_rrdcached(daemon, libc::SIGKILL);
+        assert!(
+            rrdcached_stat_value(&stats, "JournalRotate") >= 2,
+            "rondi={rondi}: {stats}"
+        );
+        observed.push((0, files, Vec::new()));
+        results.push(observed);
+    }
+    assert_eq!(results[0][0].0, "update a.rrd 1000000010:1\n".len() as u64);
+    assert_eq!(results[0][0].1, 0);
+    assert_eq!(results[0][1].0, 0);
+    assert_eq!(results[0][2].1, 2);
     assert!(
-        rrdcached_request(&mut reader, "FLUSH crash.rrd\n").starts_with("0 Successfully flushed")
+        results[0] == results[1],
+        "Rondi journal lifecycle differs from upstream"
     );
-    assert_eq!(
-        rrdcached_request(&mut reader, "LAST crash.rrd\n"),
-        "0 1000000010\n"
-    );
-    drop(reader);
-    drop(stream);
-    restarted.kill().unwrap();
-    restarted.wait().unwrap();
 }
 
 #[test]

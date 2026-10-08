@@ -133,11 +133,11 @@ pub mod server {
         socket_commands: Option<Vec<String>>,
     ) -> Vec<u8> {
         use tokio::io::AsyncReadExt;
-        let queue = match RrdcachedQueue::open(root, 1 << 20, 0) {
-            Ok(queue) => Arc::new(Mutex::new(queue)),
+        let stats = Arc::new(RrdcachedStats::default());
+        let queue = match RrdcachedQueue::open(root, None, 1 << 20, 0, false, &stats) {
+            Ok((queue, _)) => Arc::new(Mutex::new(queue)),
             Err(_) => return Vec::new(),
         };
-        let stats = Arc::new(RrdcachedStats::default());
         let (client, server) = UnixStream::pair().expect("socketpair");
         let (_stop, stop_rx) = tokio::sync::watch::channel(false);
         let serve = serve_rrdcached_connection(
@@ -178,12 +178,17 @@ pub mod server {
 
     /// Replay an arbitrary journal and flush what it recovers.
     pub fn fuzz_journal(root: &Path, journal: &[u8]) {
-        std::fs::write(root.join(RRDCACHED_JOURNAL_NAME), journal).expect("journal");
-        let Ok(queue) = RrdcachedQueue::open(root, 1 << 20, 0) else {
+        let directory = root.join("journal");
+        std::fs::create_dir_all(&directory).expect("journal directory");
+        std::fs::write(directory.join("rrd.journal.0000000001.000000"), journal)
+            .expect("journal");
+        let stats = RrdcachedStats::default();
+        let Ok((queue, _)) =
+            RrdcachedQueue::open(root, Some(&directory), 1 << 20, 0, false, &stats)
+        else {
             return;
         };
         let queue = Mutex::new(queue);
-        let stats = RrdcachedStats::default();
         let paths = queue
             .lock()
             .map(|q| q.pending.keys().cloned().collect::<Vec<_>>())
@@ -198,7 +203,8 @@ pub mod server {
             let _ = flush_rrdcached_path(&path, &queue, &stats);
         }
         if let Ok(mut queue) = queue.lock() {
-            let _ = queue.rotate_journal();
+            queue.rotate_journal();
+            queue.journal_done();
         }
     }
 
