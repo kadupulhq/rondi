@@ -12,6 +12,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -53,13 +54,62 @@ pub enum StoreError {
 
 /// Every update rewrites the whole snapshot and a long gap materializes up to
 /// `rows` points, so the row count bounds per-update work and file size.
-const MAX_ROWS: usize = 100_000;
+pub const DEFAULT_MAX_ROWS: usize = 100_000;
+
+/// How long a durable request ID stays available for retry deduplication.
+pub const DEFAULT_IDEMPOTENCY_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Compaction runs once the journal holds this many records, or twice the
+/// number kept by the previous compaction, whichever is larger, so its cost
+/// stays amortized over the appends that triggered it.
+const COMPACT_MIN_RECORDS: usize = 1024;
+
+const JOURNAL: &str = "rondi.journal";
+const JOURNAL_COMPACT_TMP: &str = "rondi.journal.compact.tmp";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoreOptions {
+    /// Largest `rows` value accepted by `create` and `import_snapshot`.
+    pub max_rows: usize,
+    /// Minimum time a journaled request ID is kept for retry deduplication.
+    pub idempotency_window: Duration,
+}
+
+impl Default for StoreOptions {
+    fn default() -> Self {
+        Self {
+            max_rows: DEFAULT_MAX_ROWS,
+            idempotency_window: DEFAULT_IDEMPOTENCY_WINDOW,
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize)]
 struct JournalRecord {
     id: String,
     database: String,
     update: Update,
+    /// Unix seconds when the record was journaled. Records written before
+    /// this field existed read as 0 and are treated as outside the window.
+    #[serde(default)]
+    accepted: i64,
+}
+
+struct JournalIndex {
+    ids: HashMap<String, JournalRecord>,
+    records: usize,
+    compact_at: usize,
+}
+
+impl JournalIndex {
+    fn new(records: Vec<JournalRecord>) -> Self {
+        let count = records.len();
+        Self {
+            ids: index_journal(records),
+            records: count,
+            compact_at: count.saturating_mul(2).max(COMPACT_MIN_RECORDS),
+        }
+    }
 }
 
 /// A process-exclusive store. Mutations through one `Store` instance are
@@ -69,14 +119,29 @@ struct JournalRecord {
 pub struct Store {
     root: PathBuf,
     _lock: File,
+    options: StoreOptions,
     mutations: Mutex<()>,
     /// Journal records by request ID, loaded on first use so durable updates
     /// do not re-read the whole journal. Only touched while `mutations` is held.
-    journal_ids: Mutex<Option<HashMap<String, JournalRecord>>>,
+    journal_ids: Mutex<Option<JournalIndex>>,
 }
 
 impl Store {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, StoreError> {
+        Self::open_with(root, StoreOptions::default())
+    }
+
+    pub fn open_with(root: impl AsRef<Path>, options: StoreOptions) -> Result<Self, StoreError> {
+        if options.max_rows == 0 {
+            return Err(StoreError::InvalidConfig(
+                "maximum rows must be positive".into(),
+            ));
+        }
+        if options.idempotency_window.is_zero() {
+            return Err(StoreError::InvalidConfig(
+                "idempotency window must be positive".into(),
+            ));
+        }
         let root = root.as_ref().to_path_buf();
         fs::create_dir_all(&root)?;
         let mut lock_options = OpenOptions::new();
@@ -101,6 +166,7 @@ impl Store {
         Ok(Self {
             root,
             _lock: lock,
+            options,
             mutations: Mutex::new(()),
             journal_ids: Mutex::new(None),
         })
@@ -114,11 +180,7 @@ impl Store {
                 "step, heartbeat, and rows must be positive".into(),
             ));
         }
-        if config.rows > MAX_ROWS {
-            return Err(StoreError::InvalidConfig(format!(
-                "rows must not exceed {MAX_ROWS}"
-            )));
-        }
+        self.check_rows(config.rows)?;
         let step = i64::try_from(config.step).map_err(|_| {
             StoreError::InvalidConfig("step exceeds supported timestamp range".into())
         })?;
@@ -166,8 +228,8 @@ impl Store {
             ));
         }
         let mut journal_ids = self.journal_ids()?;
-        let ids = journal_ids.as_mut().expect("journal index is loaded");
-        if let Some(prior) = ids.get(id) {
+        let index = journal_ids.as_mut().expect("journal index is loaded");
+        if let Some(prior) = index.ids.get(id) {
             if prior.database != name || prior.update != update {
                 return Err(StoreError::RequestIdConflict);
             }
@@ -188,11 +250,12 @@ impl Store {
             use std::os::unix::fs::OpenOptionsExt;
             journal_options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
         }
-        let mut journal = journal_options.open(self.root.join("rondi.journal"))?;
+        let mut journal = journal_options.open(self.root.join(JOURNAL))?;
         let record = JournalRecord {
             id: id.into(),
             database: name.into(),
             update,
+            accepted: unix_now(),
         };
         let mut line = serde_json::to_vec(&record)?;
         line.push(b'\n');
@@ -202,8 +265,15 @@ impl Store {
             *journal_ids = None;
             return Err(error.into());
         }
-        ids.insert(record.id.clone(), record);
-        self.write_db(&self.path(name), &db)
+        index.ids.insert(record.id.clone(), record);
+        index.records += 1;
+        self.write_db(&self.path(name), &db)?;
+        if index.records >= index.compact_at {
+            // Every journaled record is now applied, so compaction only has
+            // to honor the idempotency window.
+            self.compact_journal(&mut journal_ids, unix_now())?;
+        }
+        Ok(())
     }
 
     pub fn recover(&self) -> Result<usize, StoreError> {
@@ -219,24 +289,94 @@ impl Store {
             self.update_unlocked(&record.database, record.update.clone())?;
             replayed += 1;
         }
-        *journal_ids = Some(index_journal(records));
+        *journal_ids = Some(JournalIndex::new(records));
+        self.compact_journal(&mut journal_ids, unix_now())?;
         Ok(replayed)
     }
 
-    fn journal_ids_lock(
+    /// Rewrite the journal without records that are both applied to their
+    /// database and older than the idempotency window. The replacement is
+    /// synced before the rename and the directory after it, so a crash leaves
+    /// either the old or the new journal; a leftover temporary file is
+    /// truncated by the next compaction and never read.
+    fn compact_journal(
         &self,
-    ) -> Result<MutexGuard<'_, Option<HashMap<String, JournalRecord>>>, StoreError> {
+        journal_ids: &mut MutexGuard<'_, Option<JournalIndex>>,
+        now: i64,
+    ) -> Result<(), StoreError> {
+        let window = i64::try_from(self.options.idempotency_window.as_secs()).unwrap_or(i64::MAX);
+        let cutoff = now.saturating_sub(window);
+        let records = self.read_journal()?;
+        let total = records.len();
+        let mut last_updates: HashMap<String, Option<i64>> = HashMap::new();
+        let mut kept = Vec::with_capacity(total);
+        for record in records {
+            if record.accepted >= cutoff {
+                kept.push(record);
+                continue;
+            }
+            let last_update = match last_updates.get(&record.database) {
+                Some(last_update) => *last_update,
+                None => {
+                    let last_update = match self.read_db(&record.database) {
+                        Ok(db) => Some(db.last_update),
+                        Err(StoreError::NotFound(_) | StoreError::InvalidName) => None,
+                        Err(error) => return Err(error),
+                    };
+                    last_updates.insert(record.database.clone(), last_update);
+                    last_update
+                }
+            };
+            // Keep anything recovery could still need to replay.
+            if last_update.is_none_or(|last| record.update.timestamp > last) {
+                kept.push(record);
+            }
+        }
+        if kept.len() < total {
+            let mut bytes = Vec::new();
+            for record in &kept {
+                serde_json::to_writer(&mut bytes, record)?;
+                bytes.push(b'\n');
+            }
+            let tmp = self.root.join(JOURNAL_COMPACT_TMP);
+            let mut options = OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+            }
+            let mut file = options.open(&tmp)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
+            fs::rename(&tmp, self.root.join(JOURNAL))?;
+            File::open(&self.root)?.sync_all()?;
+        }
+        **journal_ids = Some(JournalIndex::new(kept));
+        Ok(())
+    }
+
+    fn check_rows(&self, rows: usize) -> Result<(), StoreError> {
+        if rows > self.options.max_rows {
+            return Err(StoreError::InvalidConfig(format!(
+                "rows must not exceed {}",
+                self.options.max_rows
+            )));
+        }
+        Ok(())
+    }
+
+    fn journal_ids_lock(&self) -> Result<MutexGuard<'_, Option<JournalIndex>>, StoreError> {
         self.journal_ids
             .lock()
             .map_err(|_| StoreError::InvalidConfig("journal index lock is poisoned".into()))
     }
 
-    fn journal_ids(
-        &self,
-    ) -> Result<MutexGuard<'_, Option<HashMap<String, JournalRecord>>>, StoreError> {
+    fn journal_ids(&self) -> Result<MutexGuard<'_, Option<JournalIndex>>, StoreError> {
         let mut journal_ids = self.journal_ids_lock()?;
         if journal_ids.is_none() {
-            *journal_ids = Some(index_journal(self.read_journal()?));
+            *journal_ids = Some(JournalIndex::new(self.read_journal()?));
         }
         Ok(journal_ids)
     }
@@ -252,7 +392,7 @@ impl Store {
             use std::os::unix::fs::OpenOptionsExt;
             options.custom_flags(libc::O_NOFOLLOW);
         }
-        let mut journal = match options.open(self.root.join("rondi.journal")) {
+        let mut journal = match options.open(self.root.join(JOURNAL)) {
             Ok(journal) => journal,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -336,11 +476,7 @@ impl Store {
         validate_name(name)?;
         let path = self.path(name);
         let db = decode_snapshot(snapshot)?;
-        if db.config.rows > MAX_ROWS {
-            return Err(StoreError::InvalidConfig(format!(
-                "rows must not exceed {MAX_ROWS}"
-            )));
-        }
+        self.check_rows(db.config.rows)?;
         self.write_new_db(name, &path, &db)
     }
 
@@ -413,6 +549,14 @@ impl Store {
         file.sync_all()?;
         Ok(tmp)
     }
+}
+
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 fn index_journal(records: Vec<JournalRecord>) -> HashMap<String, JournalRecord> {
@@ -872,8 +1016,253 @@ mod tests {
             Err(StoreError::InvalidConfig(_))
         ));
         let mut cfg = config();
-        cfg.rows = MAX_ROWS;
+        cfg.rows = DEFAULT_MAX_ROWS;
         store.create("cpu", cfg).unwrap();
+    }
+
+    fn compact_at(store: &Store, now: i64) {
+        let mut ids = store.journal_ids().unwrap();
+        store.compact_journal(&mut ids, now).unwrap();
+    }
+
+    fn journal_lines(dir: &Path) -> usize {
+        fs::read_to_string(dir.join(JOURNAL))
+            .unwrap()
+            .lines()
+            .count()
+    }
+
+    const WINDOW: i64 = 24 * 60 * 60;
+
+    #[test]
+    fn store_options_reject_zero_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        for options in [
+            StoreOptions {
+                max_rows: 0,
+                ..StoreOptions::default()
+            },
+            StoreOptions {
+                idempotency_window: Duration::ZERO,
+                ..StoreOptions::default()
+            },
+        ] {
+            assert!(matches!(
+                Store::open_with(dir.path(), options),
+                Err(StoreError::InvalidConfig(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn configured_row_cap_applies_to_create_and_import() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_with(
+            dir.path(),
+            StoreOptions {
+                max_rows: 10,
+                ..StoreOptions::default()
+            },
+        )
+        .unwrap();
+        let mut cfg = config();
+        cfg.rows = 11;
+        assert!(matches!(
+            store.create("big", cfg),
+            Err(StoreError::InvalidConfig(message)) if message == "rows must not exceed 10"
+        ));
+        let mut cfg = config();
+        cfg.rows = 10;
+        store.create("cpu", cfg).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let source = Store::open(other.path()).unwrap();
+        let mut cfg = config();
+        cfg.rows = 11;
+        source.create("big", cfg).unwrap();
+        let snapshot = source.export_snapshot("big").unwrap();
+        assert!(matches!(
+            store.import_snapshot("big", &snapshot),
+            Err(StoreError::InvalidConfig(_))
+        ));
+    }
+
+    #[test]
+    fn retry_inside_the_window_stays_idempotent_after_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.create("cpu", config()).unwrap();
+        let update = Update {
+            timestamp: 1_700_000_010,
+            value: Some(7.0),
+        };
+        store
+            .update_durable("cpu", update.clone(), "req-1")
+            .unwrap();
+        compact_at(&store, unix_now() + WINDOW - 60);
+        assert_eq!(journal_lines(dir.path()), 1);
+        store.update_durable("cpu", update, "req-1").unwrap();
+        assert!(matches!(
+            store.update_durable(
+                "cpu",
+                Update {
+                    timestamp: 1_700_000_010,
+                    value: Some(9.0),
+                },
+                "req-1"
+            ),
+            Err(StoreError::RequestIdConflict)
+        ));
+    }
+
+    #[test]
+    fn retry_after_the_window_is_a_new_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.create("cpu", config()).unwrap();
+        let update = Update {
+            timestamp: 1_700_000_010,
+            value: Some(7.0),
+        };
+        store
+            .update_durable("cpu", update.clone(), "req-1")
+            .unwrap();
+        compact_at(&store, unix_now() + WINDOW + 60);
+        assert_eq!(journal_lines(dir.path()), 0);
+        // The ID is forgotten, so the old sample is rejected as stale rather
+        // than acknowledged as a duplicate.
+        assert!(matches!(
+            store.update_durable("cpu", update, "req-1"),
+            Err(StoreError::OutOfOrder { .. })
+        ));
+        store
+            .update_durable(
+                "cpu",
+                Update {
+                    timestamp: 1_700_000_020,
+                    value: Some(9.0),
+                },
+                "req-1",
+            )
+            .unwrap();
+        assert_eq!(journal_lines(dir.path()), 1);
+    }
+
+    #[test]
+    fn compaction_keeps_records_recovery_still_needs() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(dir.path()).unwrap();
+            store.create("cpu", config()).unwrap();
+        }
+        // A record older than the window whose database write never landed.
+        fs::write(
+            dir.path().join(JOURNAL),
+            b"{\"id\":\"req-1\",\"database\":\"cpu\",\"update\":{\"timestamp\":1700000010,\"value\":7.0},\"accepted\":1}\n",
+        )
+        .unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        compact_at(&store, unix_now());
+        assert_eq!(journal_lines(dir.path()), 1);
+        assert_eq!(store.recover().unwrap(), 1);
+        assert_eq!(store.fetch("cpu").unwrap().points[0].value, Some(7.0));
+        // Applied and outside the window, so recovery's compaction drops it.
+        assert_eq!(journal_lines(dir.path()), 0);
+        assert_eq!(store.recover().unwrap(), 0);
+    }
+
+    #[test]
+    fn records_without_an_acceptance_time_compact_once_applied() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(dir.path()).unwrap();
+            store.create("cpu", config()).unwrap();
+            store
+                .update_durable(
+                    "cpu",
+                    Update {
+                        timestamp: 1_700_000_010,
+                        value: Some(7.0),
+                    },
+                    "req-1",
+                )
+                .unwrap();
+        }
+        let legacy = fs::read_to_string(dir.path().join(JOURNAL))
+            .unwrap()
+            .replace(",\"accepted\":", ",\"ignored\":");
+        fs::write(dir.path().join(JOURNAL), legacy).unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.recover().unwrap(), 0);
+        assert_eq!(journal_lines(dir.path()), 0);
+    }
+
+    #[test]
+    fn durable_updates_compact_once_the_threshold_is_reached() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.create("cpu", config()).unwrap();
+        // An applied record from outside the window.
+        fs::write(
+            dir.path().join(JOURNAL),
+            b"{\"id\":\"old\",\"database\":\"cpu\",\"update\":{\"timestamp\":1700000000,\"value\":1.0},\"accepted\":1}\n",
+        )
+        .unwrap();
+        store.journal_ids().unwrap().as_mut().unwrap().compact_at = 2;
+        store
+            .update_durable(
+                "cpu",
+                Update {
+                    timestamp: 1_700_000_010,
+                    value: Some(7.0),
+                },
+                "req-1",
+            )
+            .unwrap();
+        let journal = fs::read_to_string(dir.path().join(JOURNAL)).unwrap();
+        assert_eq!(journal.lines().count(), 1);
+        assert!(journal.contains("req-1"));
+        let ids = store.journal_ids().unwrap();
+        let index = ids.as_ref().unwrap();
+        assert!(!index.ids.contains_key("old"));
+        assert_eq!(index.compact_at, COMPACT_MIN_RECORDS);
+    }
+
+    #[test]
+    fn interrupted_compaction_leaves_a_usable_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(dir.path()).unwrap();
+            store.create("cpu", config()).unwrap();
+            store
+                .update_durable(
+                    "cpu",
+                    Update {
+                        timestamp: 1_700_000_010,
+                        value: Some(7.0),
+                    },
+                    "req-1",
+                )
+                .unwrap();
+        }
+        // A crash before the rename leaves a stray, possibly partial, file.
+        fs::write(dir.path().join(JOURNAL_COMPACT_TMP), b"{\"id\":\"par").unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.recover().unwrap(), 0);
+        assert_eq!(journal_lines(dir.path()), 1);
+        store
+            .update_durable(
+                "cpu",
+                Update {
+                    timestamp: 1_700_000_010,
+                    value: Some(7.0),
+                },
+                "req-1",
+            )
+            .unwrap();
+        compact_at(&store, unix_now() + WINDOW + 60);
+        assert_eq!(journal_lines(dir.path()), 0);
+        assert!(!dir.path().join(JOURNAL_COMPACT_TMP).exists());
+        assert_eq!(store.fetch("cpu").unwrap().points[0].value, Some(7.0));
     }
 
     #[test]

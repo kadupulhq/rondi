@@ -24,7 +24,7 @@ pub use rrd_binary::{
     update_rrd_values_verbose,
 };
 pub use rrd_number::parse_rrd_number;
-pub use storage::{Store, StoreError};
+pub use storage::{DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, Store, StoreError, StoreOptions};
 pub use vdef::{VdefError, VdefFunction, VdefResult, evaluate_vdef};
 pub use xport::{
     RrdXportCdef, RrdXportColumn, RrdXportDefinition, RrdXportResult, fetch_xport,

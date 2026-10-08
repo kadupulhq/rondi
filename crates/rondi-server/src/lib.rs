@@ -5,7 +5,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use rondi::{DatabaseConfig, Store, StoreError, Update};
+use rondi::{DatabaseConfig, Store, StoreError, StoreOptions, Update};
 use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::fs::{File, OpenOptions};
@@ -104,6 +104,7 @@ pub struct ServerConfig {
     pub root: PathBuf,
     pub socket: PathBuf,
     pub queue_capacity: usize,
+    pub store: StoreOptions,
 }
 
 /// Configuration for the legacy rrdcached line protocol. This first protocol
@@ -909,7 +910,7 @@ pub async fn run(args: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     if args.queue_capacity == 0 {
         return Err("queue capacity must be positive".into());
     }
-    let store = Store::open(&args.root)?;
+    let store = Store::open_with(&args.root, args.store)?;
     let replayed = store.recover()?;
     tracing::info!(root = %args.root.display(), recovered = replayed, "server_started");
     if let Some(parent) = args.socket.parent() {
