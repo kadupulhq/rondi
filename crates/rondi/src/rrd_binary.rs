@@ -8,15 +8,15 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-const STAT_HEAD_LEN: usize = 128;
-const DS_DEF_LEN: usize = 120;
-const RRA_DEF_LEN: usize = 120;
-const LIVE_HEAD_LEN: usize = 16;
-const PDP_PREP_LEN: usize = 112;
-const CDP_PREP_LEN: usize = 80;
-const RRA_PTR_LEN: usize = 8;
-const VALUE_LEN: usize = 8;
-const FLOAT_COOKIE: f64 = 8.642135E130;
+pub(crate) const STAT_HEAD_LEN: usize = 128;
+pub(crate) const DS_DEF_LEN: usize = 120;
+pub(crate) const RRA_DEF_LEN: usize = 120;
+pub(crate) const LIVE_HEAD_LEN: usize = 16;
+pub(crate) const PDP_PREP_LEN: usize = 112;
+pub(crate) const CDP_PREP_LEN: usize = 80;
+pub(crate) const RRA_PTR_LEN: usize = 8;
+pub(crate) const VALUE_LEN: usize = 8;
+pub(crate) const FLOAT_COOKIE: f64 = 8.642135E130;
 
 /// Match the NaN produced by RRDtool's `rrd_set_to_DNAN`: the pinned x86_64
 /// build uses a negative quiet NaN, while aarch64 and the other supported
@@ -48,9 +48,8 @@ pub(crate) fn rrd_mul_add(a: f64, b: f64, c: f64) -> f64 {
     }
 }
 
-/// Create an interoperable RRDtool file for the basic DS/RRA grammar.
-/// The archive row pointer is initialized deterministically; RRDtool itself may
-/// choose any row because every row in a newly created archive is unknown.
+/// Create an RRDtool file from `DS:` and `RRA:` definitions with
+/// `rrd_create_r2`; the data sources are parsed before the archives.
 pub fn create_rrd_file(
     path: impl AsRef<Path>,
     start: i64,
@@ -59,330 +58,115 @@ pub fn create_rrd_file(
     archives: &[String],
     no_overwrite: bool,
 ) -> Result<(), StoreError> {
-    if !cfg!(target_pointer_width = "64") || cfg!(target_endian = "big") {
-        return Err(StoreError::RrdUnsupported(
-            "RRD v3 creation currently requires a 64-bit little-endian target".into(),
-        ));
-    }
-    if step == 0 || data_sources.is_empty() || archives.is_empty() {
-        return Err(StoreError::RrdUnsupported(
-            "RRD create requires a positive step, at least one DS, and at least one RRA".into(),
-        ));
-    }
     if start < 315_360_000 {
-        return Err(StoreError::RrdUnsupported(
+        return Err(StoreError::Rrd(
             "the first entry to the RRD should be after 1980".into(),
         ));
     }
-    let mut sources = Vec::new();
-    let mut source_names = std::collections::HashSet::new();
-    for definition in data_sources {
-        let fields = definition.split(':').collect::<Vec<_>>();
-        if fields.len() != 6
-            || fields[0] != "DS"
-            || !matches!(
-                fields[2],
-                "GAUGE" | "COUNTER" | "DERIVE" | "ABSOLUTE" | "DCOUNTER" | "DDERIVE"
-            )
-        {
-            return Err(StoreError::RrdUnsupported(format!(
-                "unsupported data source definition: {definition}"
-            )));
-        }
-        if fields[1].is_empty()
-            || fields[1].len() > 19
-            || !fields[1]
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        {
-            return Err(StoreError::RrdUnsupported(format!(
-                "invalid data source name: {}",
-                fields[1]
-            )));
-        }
-        if !source_names.insert(fields[1]) {
-            return Err(StoreError::RrdUnsupported(format!(
-                "duplicate data source name: {}",
-                fields[1]
-            )));
-        }
-        let heartbeat = parse_rrd_scaled_duration(fields[3], 1)?;
-        if heartbeat == 0 {
-            return Err(StoreError::RrdUnsupported(
-                "heartbeat must be positive".into(),
-            ));
-        }
-        let minimum = parse_rrd_bound(fields[4])?;
-        let maximum = parse_rrd_bound(fields[5])?;
-        if minimum.zip(maximum).is_some_and(|(min, max)| min >= max) {
-            return Err(StoreError::RrdUnsupported(format!(
-                "minimum must be less than maximum for data source {}",
-                fields[1]
-            )));
-        }
-        sources.push((fields[1], fields[2], heartbeat, minimum, maximum));
-    }
-    let mut rras = Vec::new();
-    for definition in archives {
-        let fields = definition.split(':').collect::<Vec<_>>();
-        if fields.len() != 5
-            || fields[0] != "RRA"
-            || !matches!(fields[1], "AVERAGE" | "MIN" | "MAX" | "LAST")
-        {
-            return Err(StoreError::RrdUnsupported(format!(
-                "unsupported archive definition: {definition}"
-            )));
-        }
-        let xff = fields[2]
-            .parse::<f64>()
-            .map_err(|_| StoreError::RrdUnsupported("invalid RRA xff".into()))?;
-        let pdps = parse_rrd_scaled_duration(fields[3], step)?;
-        let row_divisor = step
-            .checked_mul(pdps)
-            .ok_or_else(|| StoreError::RrdUnsupported("RRA duration divisor overflows".into()))?;
-        let rows = parse_rrd_scaled_duration(fields[4], row_divisor)?;
-        if !xff.is_finite() || !(0.0..1.0).contains(&xff) || pdps == 0 || rows == 0 {
-            return Err(StoreError::RrdUnsupported(format!(
-                "invalid archive parameters: {definition}"
-            )));
-        }
-        rras.push((fields[1], xff, pdps, rows));
-    }
-    let mut bytes = vec![0_u8; STAT_HEAD_LEN];
-    bytes[0..4].copy_from_slice(b"RRD\0");
-    let file_version = if sources
-        .iter()
-        .any(|(_, kind, _, _, _)| matches!(*kind, "DCOUNTER" | "DDERIVE"))
-    {
-        "0005"
-    } else {
-        "0003"
-    };
-    copy_fixed(&mut bytes[4..9], file_version);
-    put_f64(&mut bytes, 16, FLOAT_COOKIE);
-    put_u64(&mut bytes, 24, sources.len() as u64);
-    put_u64(&mut bytes, 32, rras.len() as u64);
-    put_u64(&mut bytes, 40, step);
-    for (name, kind, heartbeat, minimum, maximum) in &sources {
-        let offset = bytes.len();
-        bytes.resize(offset + DS_DEF_LEN, 0);
-        copy_fixed(&mut bytes[offset..offset + 20], name);
-        copy_fixed(&mut bytes[offset + 20..offset + 40], kind);
-        put_u64(&mut bytes, offset + 40, *heartbeat);
-        put_f64(&mut bytes, offset + 48, minimum.unwrap_or(rrd_nan()));
-        put_f64(&mut bytes, offset + 56, maximum.unwrap_or(rrd_nan()));
-    }
-    for (cf, xff, pdps, rows) in &rras {
-        let offset = bytes.len();
-        bytes.resize(offset + RRA_DEF_LEN, 0);
-        copy_fixed(&mut bytes[offset..offset + 20], cf);
-        put_u64(&mut bytes, offset + 24, *rows);
-        put_u64(&mut bytes, offset + 32, *pdps);
-        put_f64(&mut bytes, offset + 40, *xff);
-    }
-    let live_offset = bytes.len();
-    bytes.resize(live_offset + LIVE_HEAD_LEN, 0);
-    put_i64(&mut bytes, live_offset, start);
-    let unknown = start.rem_euclid(
-        i64::try_from(step).map_err(|_| StoreError::RrdUnsupported("step too large".into()))?,
-    ) as u64;
-    for _ in &sources {
-        let offset = bytes.len();
-        bytes.resize(offset + PDP_PREP_LEN, 0);
-        copy_fixed(&mut bytes[offset..offset + 30], "U");
-        put_u64(&mut bytes, offset + 32, unknown);
-        put_f64(&mut bytes, offset + 40, rrd_nan());
-    }
-    let step_i64 =
-        i64::try_from(step).map_err(|_| StoreError::RrdUnsupported("step too large".into()))?;
-    for (_, _, pdps, _) in &rras {
-        let period = step_i64
-            .checked_mul(
-                i64::try_from(*pdps)
-                    .map_err(|_| StoreError::RrdUnsupported("RRA period too large".into()))?,
-            )
-            .ok_or_else(|| StoreError::RrdUnsupported("RRA period too large".into()))?;
-        let unknown_pdps = (start - unknown as i64).rem_euclid(period) as u64 / step;
-        for _ in &sources {
-            let offset = bytes.len();
-            bytes.resize(offset + CDP_PREP_LEN, 0);
-            put_f64(&mut bytes, offset, rrd_nan());
-            put_u64(&mut bytes, offset + 8, unknown_pdps);
-        }
-    }
-    for _ in &rras {
-        bytes.extend_from_slice(&0_u64.to_le_bytes());
-    }
-    for (_, _, _, rows) in &rras {
-        let cells = rows
-            .checked_mul(sources.len() as u64)
-            .ok_or_else(|| StoreError::RrdUnsupported("RRA size overflow".into()))?;
-        let byte_count = cells
-            .checked_mul(VALUE_LEN as u64)
-            .and_then(|n| usize::try_from(n).ok())
-            .ok_or_else(|| StoreError::RrdUnsupported("RRA size overflow".into()))?;
-        bytes.reserve(byte_count);
-        for _ in 0..cells {
-            bytes.extend_from_slice(&rrd_nan().to_le_bytes());
-        }
-    }
     let path = path.as_ref();
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
     let filename = path
-        .file_name()
-        .ok_or_else(|| StoreError::RrdUnsupported("invalid output filename".into()))?
-        .to_string_lossy();
-    let existing_metadata = std::fs::metadata(path).ok();
-    if no_overwrite && existing_metadata.is_some() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("creating '{}': File exists", path.display()),
-        )
-        .into());
-    }
-    static TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let (temp_path, mut file) = (0..100)
-        .find_map(|_| {
-            let id = TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let candidate =
-                parent.join(format!(".{filename}.rondi-{}-{id}.tmp", std::process::id()));
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&candidate)
-            {
-                Ok(file) => Some(Ok((candidate, file))),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
-                Err(error) => Some(Err(error)),
-            }
-        })
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "unable to allocate temporary RRD filename",
-            )
-        })??;
-    let result = (|| -> Result<(), StoreError> {
-        file.write_all(&bytes)?;
-        if let Some(metadata) = &existing_metadata {
-            file.set_permissions(metadata.permissions())?;
-        }
-        drop(file);
-        if no_overwrite {
-            std::fs::hard_link(&temp_path, path)?;
-            std::fs::remove_file(&temp_path)?;
-        } else {
-            std::fs::rename(&temp_path, path)?;
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
-    }
-    result
+        .to_str()
+        .ok_or_else(|| StoreError::RrdUnsupported("RRD path is not UTF-8".into()))?;
+    let argv = data_sources
+        .iter()
+        .chain(archives)
+        .cloned()
+        .collect::<Vec<_>>();
+    crate::rrd_create::rrd_create_r2(filename, step, start, no_overwrite, None, &argv)
 }
 
-/// Parse RRDtool's integer or suffixed duration syntax. The source implementation
-/// (`rrd_scaled_duration`) treats bare integers as counts and scales suffixed
-/// values, rejecting values that would be truncated by the supplied divisor.
+/// The parts of an existing file that `rrd_create_r2` copies from a
+/// `--template`: its step, last update and the raw DS and RRA definitions.
+pub(crate) struct TemplateDefinitions {
+    pub(crate) pdp_step: u64,
+    pub(crate) last_up: i64,
+    pub(crate) ds_defs: Vec<[u8; DS_DEF_LEN]>,
+    pub(crate) rra_defs: Vec<[u8; RRA_DEF_LEN]>,
+}
+
+pub(crate) fn read_template_definitions(path: &Path) -> Result<TemplateDefinitions, StoreError> {
+    let mut file = RrdFileLock::shared(open_rrd_read(path)?)?;
+    let info = read_info(&mut file, path)?;
+    let ds_count = info.data_sources.len();
+    let rra_count = info.archives.len();
+    let live_start = STAT_HEAD_LEN + ds_count * DS_DEF_LEN + rra_count * RRA_DEF_LEN;
+    let mut header = vec![0; live_start + 8];
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut header)?;
+    let definitions = |start: usize, count: usize, length: usize| {
+        (0..count)
+            .map(|index| {
+                let offset = start + index * length;
+                header[offset..offset + length].try_into().unwrap()
+            })
+            .collect::<Vec<[u8; 120]>>()
+    };
+    Ok(TemplateDefinitions {
+        pdp_step: info.step,
+        last_up: i64_at(&header, live_start)?,
+        ds_defs: definitions(STAT_HEAD_LEN, ds_count, DS_DEF_LEN),
+        rra_defs: definitions(
+            STAT_HEAD_LEN + ds_count * DS_DEF_LEN,
+            rra_count,
+            RRA_DEF_LEN,
+        ),
+    })
+}
+
+/// Parse RRDtool's integer or suffixed duration syntax, reporting
+/// `rrd_scaled_duration`'s text without a prefix.
 pub fn parse_rrd_scaled_duration(text: &str, divisor: u64) -> Result<u64, StoreError> {
-    let bytes = text.as_bytes();
+    rrd_scaled_duration(text, divisor).map_err(|reason| StoreError::Rrd(reason.into()))
+}
+
+/// rrd_utils.c:235 `rrd_scaled_duration`. A bare count is not scaled; a
+/// suffixed duration must divide evenly. As in C, `strtoul` saturates and the
+/// suffix multiplication wraps.
+pub(crate) fn rrd_scaled_duration(token: &str, divisor: u64) -> Result<u64, &'static str> {
+    let bytes = token.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_digit) {
+        return Err("value must be (suffixed) positive number");
+    }
     let digits = bytes
         .iter()
         .take_while(|byte| byte.is_ascii_digit())
         .count();
-    if digits == 0 {
-        return Err(StoreError::RrdUnsupported(
-            "duration must be a positive integer".into(),
-        ));
+    let mut value = bytes[..digits].iter().fold(0_u64, |total, digit| {
+        total
+            .checked_mul(10)
+            .and_then(|total| total.checked_add(u64::from(digit - b'0')))
+            .unwrap_or(u64::MAX)
+    });
+    if divisor == 0 {
+        return Err("INTERNAL ERROR: Zero divisor");
     }
-    let mut value = text[..digits]
-        .parse::<u64>()
-        .map_err(|_| StoreError::RrdUnsupported("duration overflows".into()))?;
-    let suffix = bytes.get(digits).copied();
-    let Some(suffix) = suffix else {
-        if value == 0 {
-            return Err(StoreError::RrdUnsupported(
-                "duration must be positive".into(),
-            ));
-        }
-        return Ok(value);
+    let multiplier = match bytes.get(digits) {
+        None => 0,
+        Some(b's') => 1,
+        Some(b'm') => 60,
+        Some(b'h') => 60 * 60,
+        Some(b'd') => 24 * 60 * 60,
+        Some(b'w') => 7 * 24 * 60 * 60,
+        Some(b'M') => 31 * 24 * 60 * 60,
+        Some(b'y') => 366 * 24 * 60 * 60,
+        Some(_) => return Err("value has trailing garbage"),
     };
-    let multiplier = match suffix {
-        b's' => 1,
-        b'm' => 60,
-        b'h' => 60 * 60,
-        b'd' => 24 * 60 * 60,
-        b'w' => 7 * 24 * 60 * 60,
-        b'M' => 31 * 24 * 60 * 60,
-        b'y' => 366 * 24 * 60 * 60,
-        _ => {
-            return Err(StoreError::RrdUnsupported(
-                "duration has trailing garbage".into(),
-            ));
-        }
-    };
-    value = value
-        .checked_mul(multiplier)
-        .ok_or_else(|| StoreError::RrdUnsupported("duration overflows".into()))?;
+    if multiplier != 0 {
+        value = value.wrapping_mul(multiplier);
+    }
     if value == 0 {
-        return Err(StoreError::RrdUnsupported(
-            "duration must be positive".into(),
-        ));
+        return Err("value must be positive");
     }
-    if divisor == 0 || value % divisor != 0 {
-        return Err(StoreError::RrdUnsupported(
-            "duration would truncate when scaled".into(),
-        ));
+    if multiplier != 0 {
+        if value % divisor != 0 {
+            return Err("value would truncate when scaled");
+        }
+        value /= divisor;
     }
-    Ok(value / divisor)
-}
-
-/// rrd_create.c parseGENERIC_DS reads bounds with rrd_strtodbl. A NaN bound
-/// is unbounded like `U`, but its bits are stored as parsed.
-fn parse_rrd_bound(text: &str) -> Result<Option<f64>, StoreError> {
-    if text == "U" {
-        return Ok(None);
-    }
-    crate::parse_rrd_number(text)
-        .or_else(|| parse_rrd_special(text))
-        .map(Some)
-        .ok_or_else(|| StoreError::RrdUnsupported(format!("invalid DS bound: {text}")))
-}
-
-/// rrd_strtod.c parse_special: case-insensitive prefixes, with the sign of
-/// the NaN inverted as upstream does.
-fn parse_rrd_special(text: &str) -> Option<f64> {
-    let prefix = |special: &str| {
-        text.get(..special.len())
-            .is_some_and(|start| start.eq_ignore_ascii_case(special))
-    };
-    if prefix("-nan") {
-        Some(rrd_nan())
-    } else if prefix("nan") {
-        Some(-rrd_nan())
-    } else if prefix("inf") {
-        Some(f64::INFINITY)
-    } else if prefix("-inf") {
-        Some(f64::NEG_INFINITY)
-    } else {
-        None
-    }
-}
-
-fn copy_fixed(destination: &mut [u8], value: &str) {
-    let count = value.len().min(destination.len().saturating_sub(1));
-    destination[..count].copy_from_slice(&value.as_bytes()[..count]);
+    Ok(value)
 }
 
 fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
-    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-}
-fn put_i64(bytes: &mut [u8], offset: usize, value: i64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 fn put_f64(bytes: &mut [u8], offset: usize, value: f64) {
@@ -397,6 +181,8 @@ pub struct RrdInfo {
     /// Microsecond component of the RRDtool live header's last update time.
     pub last_update_usec: u64,
     pub header_size: usize,
+    /// 16, or 8 for a version 0001/0002 file whose live head is a time_t.
+    pub(crate) live_head_len: usize,
     pub data_sources: Vec<RrdDataSourceInfo>,
     pub archives: Vec<RrdArchiveInfo>,
 }
@@ -465,10 +251,19 @@ pub(crate) fn fetch_path(
         .ok_or_else(|| rrd_error("RRD archive step overflows"))?;
     let step_i64 = i64::try_from(step).map_err(|_| rrd_error("RRD archive step overflows"))?;
     let start = requested_start
-        .checked_sub(requested_start.rem_euclid(step_i64))
+        .checked_sub(
+            requested_start
+                .checked_rem_euclid(step_i64)
+                .ok_or_else(divides_by_zero)?,
+        )
         .ok_or_else(|| rrd_error("RRD fetch start overflows"))?;
     let mut end = requested_end
-        .checked_add(step_i64 - requested_end.rem_euclid(step_i64))
+        .checked_add(
+            step_i64
+                - requested_end
+                    .checked_rem_euclid(step_i64)
+                    .ok_or_else(divides_by_zero)?,
+        )
         .ok_or_else(|| rrd_error("RRD fetch end overflows"))?;
     let range_rows = end
         .checked_sub(start)
@@ -482,7 +277,11 @@ pub(crate) fn fetch_path(
 
     let archive_end = info
         .last_update
-        .checked_sub(info.last_update.rem_euclid(step_i64))
+        .checked_sub(
+            info.last_update
+                .checked_rem_euclid(step_i64)
+                .ok_or_else(divides_by_zero)?,
+        )
         .ok_or_else(|| rrd_error("RRD archive end overflows"))?;
     let archive_start = archive_end
         .checked_sub(
@@ -507,7 +306,8 @@ pub(crate) fn fetch_path(
         } else {
             i128::from(archive.current_row) + 1 + start_offset
         }
-        .rem_euclid(row_count);
+        .checked_rem_euclid(row_count)
+        .ok_or_else(divides_by_zero)?;
     }
 
     // The rows inside the archive form one circular run starting at
@@ -717,10 +517,18 @@ fn apply_update(
         .ok_or_else(|| rrd_error("RRD update interval overflows"))? as f64)
         + (timestamp_usec as f64 - last_update_usec as f64) / 1_000_000.0;
     let previous_boundary = last_update
-        .checked_sub(last_update.rem_euclid(step))
+        .checked_sub(
+            last_update
+                .checked_rem_euclid(step)
+                .ok_or_else(divides_by_zero)?,
+        )
         .ok_or_else(|| rrd_error("RRD timestamp alignment overflows"))?;
     let current_boundary = timestamp
-        .checked_sub(timestamp.rem_euclid(step))
+        .checked_sub(
+            timestamp
+                .checked_rem_euclid(step)
+                .ok_or_else(divides_by_zero)?,
+        )
         .ok_or_else(|| rrd_error("RRD timestamp alignment overflows"))?;
     let elapsed_steps = current_boundary
         .checked_sub(previous_boundary)
@@ -729,7 +537,7 @@ fn apply_update(
     let ds_count = info.data_sources.len();
     let rra_start = STAT_HEAD_LEN + ds_count * DS_DEF_LEN;
     let live_start = rra_start + info.archives.len() * RRA_DEF_LEN;
-    let pdp_start = live_start + LIVE_HEAD_LEN;
+    let pdp_start = live_start + info.live_head_len;
     let cdp_start = pdp_start + ds_count * PDP_PREP_LEN;
     let pointer_start = cdp_start + ds_count * info.archives.len() * CDP_PREP_LEN;
 
@@ -919,7 +727,10 @@ fn apply_update(
     file.write_all(&state)?;
     file.seek(SeekFrom::Start(live_start as u64))?;
     file.write_all(&timestamp.to_le_bytes())?;
-    file.write_all(&(timestamp_usec as i64).to_le_bytes())?;
+    // rrd_update.c:2509-2520 writes only the time_t before version 3.
+    if info.live_head_len == LIVE_HEAD_LEN {
+        file.write_all(&(timestamp_usec as i64).to_le_bytes())?;
+    }
     // No fsync: RRDtool leaves writeback to the kernel on every .rrd write
     // path (rrd_flush is a no-op, rrd_close only unmaps and closes).
     *state_cache = Some(state);
@@ -1711,7 +1522,7 @@ pub fn tune_rrd_data_sources(
                 let pdp_start = STAT_HEAD_LEN
                     + info.data_sources.len() * DS_DEF_LEN
                     + info.archives.len() * RRA_DEF_LEN
-                    + LIVE_HEAD_LEN;
+                    + info.live_head_len;
                 let pdp_offset = pdp_start + index * PDP_PREP_LEN;
                 file.seek(SeekFrom::Start(pdp_offset as u64))?;
                 file.write_all(b"UNKN\0")?;
@@ -1974,7 +1785,11 @@ pub fn first_rrd_time(path: impl AsRef<Path>, archive_index: usize) -> Result<i6
         .ok_or_else(|| rrd_error("RRD archive resolution overflows"))?;
     let aligned_last = info
         .last_update
-        .checked_sub(info.last_update.rem_euclid(resolution))
+        .checked_sub(
+            info.last_update
+                .checked_rem_euclid(resolution)
+                .ok_or_else(divides_by_zero)?,
+        )
         .ok_or_else(|| rrd_error("RRD first timestamp alignment overflows"))?;
     let retained = i64::try_from(archive.rows - 1)
         .ok()
@@ -2024,7 +1839,13 @@ pub fn dump_rrd_file_with_header(
         RrdDumpHeader::Dtd => out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!DOCTYPE rrd SYSTEM \"https://oss.oetiker.ch/rrdtool/rrdtool.dtd\">\n<!-- Round Robin Database Dump -->\n<rrd>\n"),
         RrdDumpHeader::Xsd => out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!-- Round Robin Database Dump -->\n<rrd xmlns=\"https://oss.oetiker.ch/rrdtool/rrdtool-dump.xml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n\txsi:schemaLocation=\"https://oss.oetiker.ch/rrdtool/rrdtool-dump.xml https://oss.oetiker.ch/rrdtool/rrdtool-dump.xsd\">\n"),
     }
-    writeln!(out, "\t<version>{}</version>", info.version).unwrap();
+    // rrd_dump.c:119-123 writes 0003 for every version up to 3.
+    let version = if c_atoi(info.version.as_bytes()) <= 3 {
+        "0003"
+    } else {
+        info.version.as_str()
+    };
+    writeln!(out, "\t<version>{version}</version>").unwrap();
     writeln!(out, "\t<step>{}</step> <!-- Seconds -->", info.step).unwrap();
     writeln!(
         out,
@@ -2085,7 +1906,11 @@ pub fn dump_rrd_file_with_header(
             .ok_or_else(|| rrd_error("RRA resolution overflows"))?;
         let aligned_last = info
             .last_update
-            .checked_sub(info.last_update.rem_euclid(resolution))
+            .checked_sub(
+                info.last_update
+                    .checked_rem_euclid(resolution)
+                    .ok_or_else(divides_by_zero)?,
+            )
             .ok_or_else(|| rrd_error("RRD last timestamp alignment overflows"))?;
         writeln!(out, "\t<rra>\n\t\t<cf>{}</cf>", archive.consolidation).unwrap();
         writeln!(
@@ -2095,7 +1920,15 @@ pub fn dump_rrd_file_with_header(
         )
         .unwrap();
         out.push_str("\t\t<params>\n");
-        writeln!(out, "\t\t<xff>{}</xff>", format_rrd_float(archive.xff)).unwrap();
+        writeln!(
+            out,
+            "\t\t<xff>{}</xff>",
+            crate::rrd_snprintf::rrd_snprintf(
+                "%0.10e",
+                &[crate::rrd_snprintf::Arg::Double(archive.xff)]
+            )
+        )
+        .unwrap();
         out.push_str("\t\t</params>\n\t\t<cdp_prep>\n");
         for prep in &archive.cdp_prep {
             out.push_str("\t\t\t<ds>\n");
@@ -2123,8 +1956,14 @@ pub fn dump_rrd_file_with_header(
         out.push_str("\t\t</cdp_prep>\n\t\t<database>\n");
         let rows =
             usize::try_from(archive.rows).map_err(|_| rrd_error("RRA row count overflows"))?;
+        // rrd_dump.c:330-340 steps past cur_row and wraps to row 0 once it
+        // reaches row_cnt, so a cur_row at or past the end starts at row 0.
+        let first_row = match archive.current_row.checked_add(1) {
+            Some(row) if row < archive.rows => row,
+            _ => 0,
+        };
         for row in 0..rows {
-            let ring_row = (archive.current_row + 1 + row as u64) % archive.rows;
+            let ring_row = (first_row + row as u64) % archive.rows;
             let offset = archive
                 .data_offset
                 .checked_add(
@@ -2692,6 +2531,9 @@ pub(crate) fn rrd_strerror(error: &std::io::Error) -> String {
     }
 }
 
+/// Decode a header that passed rrd_open's checks. RRDtool validates nothing
+/// beyond those, so neither does this: a zero step, an out-of-range xff,
+/// cur_row past row_cnt or an empty name are reported as stored.
 fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
     if !cfg!(target_pointer_width = "64") || cfg!(target_endian = "big") {
         return Err(StoreError::RrdUnsupported(
@@ -2699,40 +2541,21 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
         ));
     }
     require(bytes, 0, STAT_HEAD_LEN)?;
-    if &bytes[0..4] != b"RRD\0" {
-        return Err(StoreError::RrdFormat("invalid RRD cookie".into()));
-    }
     let version = fixed_string(bytes, 4, 5)?;
-    if !matches!(version.as_str(), "0003" | "0004" | "0005") {
-        return Err(StoreError::RrdUnsupported(format!(
-            "RRD format version {version} is not supported by the inspector"
-        )));
-    }
-    if f64_at(bytes, 16)? != FLOAT_COOKIE {
-        return Err(StoreError::RrdFormat(
-            "RRD float cookie does not match the host representation".into(),
-        ));
-    }
-
     let ds_count = usize_at(bytes, 24)?;
     let rra_count = usize_at(bytes, 32)?;
     let step = u64_at(bytes, 40)?;
-    if ds_count == 0 || rra_count == 0 || step == 0 {
-        return Err(StoreError::RrdFormat(
-            "RRD requires data sources, archives, and a positive step".into(),
-        ));
-    }
     let ds_start = STAT_HEAD_LEN;
     let rra_start = checked_add(ds_start, checked_mul(ds_count, DS_DEF_LEN)?)?;
     let live_start = checked_add(rra_start, checked_mul(rra_count, RRA_DEF_LEN)?)?;
     let last_update = i64_at(bytes, live_start)?;
-    let last_update_usec = u64_at(bytes, checked_add(live_start, 8)?)?;
-    if last_update_usec >= 1_000_000 {
-        return Err(StoreError::RrdFormat(
-            "RRD last update microseconds are out of range".into(),
-        ));
-    }
-    let pdp_start = checked_add(live_start, LIVE_HEAD_LEN)?;
+    // rrd_open.c:519-533: before version 3 the live head is a bare time_t.
+    let (live_head_len, last_update_usec) = if c_atoi(version.as_bytes()) < 3 {
+        (8, 0)
+    } else {
+        (LIVE_HEAD_LEN, u64_at(bytes, checked_add(live_start, 8)?)?)
+    };
+    let pdp_start = checked_add(live_start, live_head_len)?;
     let cdp_start = checked_add(pdp_start, checked_mul(ds_count, PDP_PREP_LEN)?)?;
     let pointer_start = checked_add(
         cdp_start,
@@ -2746,11 +2569,6 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
         let start = checked_add(ds_start, checked_mul(index, DS_DEF_LEN)?)?;
         let name = fixed_string(bytes, start, 20)?;
         let kind = fixed_string(bytes, checked_add(start, 20)?, 20)?;
-        if name.is_empty() || kind.is_empty() {
-            return Err(StoreError::RrdFormat(
-                "RRD data source definition has an empty name or type".into(),
-            ));
-        }
         let heartbeat = u64_at(bytes, checked_add(start, 40)?)?;
         // NaN means unbounded; infinite bounds are kept as RRDtool prints them.
         let minimum = Some(f64_at(bytes, checked_add(start, 48)?)?).filter(|v| !v.is_nan());
@@ -2798,17 +2616,6 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
             bytes,
             checked_add(pointer_start, checked_mul(index, RRA_PTR_LEN)?)?,
         )?;
-        if consolidation.is_empty()
-            || rows == 0
-            || pdp_per_row == 0
-            || !xff.is_finite()
-            || !(0.0..=1.0).contains(&xff)
-            || current_row >= rows
-        {
-            return Err(StoreError::RrdFormat(format!(
-                "RRD archive {index} has invalid metadata"
-            )));
-        }
         let archive_bytes = checked_mul(
             checked_mul(
                 usize::try_from(rows).map_err(|_| rrd_error("row count overflows"))?,
@@ -2856,6 +2663,7 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
         last_update,
         last_update_usec,
         header_size: data_start,
+        live_head_len,
         data_sources,
         archives,
     })
@@ -2887,7 +2695,11 @@ fn choose_archive(
             i64::try_from(archive_step).map_err(|_| rrd_error("RRD archive step overflows"))?;
         let archive_end = info
             .last_update
-            .checked_sub(info.last_update.rem_euclid(archive_step_i64))
+            .checked_sub(
+                info.last_update
+                    .checked_rem_euclid(archive_step_i64)
+                    .ok_or_else(divides_by_zero)?,
+            )
             .ok_or_else(|| rrd_error("RRD archive end overflows"))?;
         let span = archive_step_i64
             .checked_mul(
@@ -3142,9 +2954,7 @@ fn fixed_string(bytes: &[u8], offset: usize, length: usize) -> Result<String, St
         .iter()
         .position(|byte| *byte == 0)
         .unwrap_or(field.len());
-    let value = std::str::from_utf8(&field[..end])
-        .map_err(|_| StoreError::RrdFormat("RRD string field is not UTF-8/ASCII".into()))?;
-    Ok(value.to_owned())
+    Ok(String::from_utf8_lossy(&field[..end]).into_owned())
 }
 
 fn xml_escape_text(value: &str) -> String {
@@ -3217,6 +3027,12 @@ fn checked_add(left: usize, right: usize) -> Result<usize, StoreError> {
 fn checked_mul(left: usize, right: usize) -> Result<usize, StoreError> {
     left.checked_mul(right)
         .ok_or_else(|| rrd_error("RRD length overflows"))
+}
+
+/// RRDtool opens files with a zero step, pdp_cnt or row_cnt and then divides
+/// by it, which traps on x86_64 and yields garbage on aarch64.
+fn divides_by_zero() -> StoreError {
+    StoreError::RrdUnsupported("RRD step, pdp_cnt or row_cnt is zero".into())
 }
 
 fn rrd_error(message: &str) -> StoreError {

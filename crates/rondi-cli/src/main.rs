@@ -21,9 +21,9 @@ use rondi::time::{
 };
 use rondi::{
     DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, DatabaseConfig, RrdDataSourceTune, RrdDumpHeader,
-    RrdResizeAction, RrdTuneBound, Store, StoreOptions, Update, create_rrd_file,
-    dump_rrd_file_with_header, fetch_rrd_file, first_rrd_time, parse_rrd_scaled_duration,
-    resize_rrd_file, restore_rrd_file, tune_rrd_data_sources, update_rrd_text,
+    RrdResizeAction, RrdTuneBound, Store, StoreOptions, Update, dump_rrd_file_with_header,
+    fetch_rrd_file, first_rrd_time, parse_rrd_scaled_duration, resize_rrd_file, restore_rrd_file,
+    tune_rrd_data_sources, update_rrd_text,
 };
 use std::fmt::Write as FmtWrite;
 use std::io::{BufRead, Read, Write};
@@ -1207,6 +1207,20 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err("need name of an rrd file to create".into());
     }
     let filename = positional.remove(0);
+    let daemon_address = daemon_address
+        .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
+        .filter(|address| !address.is_empty());
+    if source_files.is_empty() && daemon_address.is_none() {
+        rondi::rrd_create_r2(
+            &filename,
+            if step_was_set { step } else { 0 },
+            if start_was_set { start } else { -1 },
+            no_overwrite,
+            template_file.as_deref(),
+            &positional,
+        )?;
+        return Ok(());
+    }
     let extra_data_sources = positional
         .iter()
         .filter(|value| value.starts_with("DS:"))
@@ -1297,35 +1311,8 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 "create --source currently supports one source file and cannot be combined with --template".into(),
             );
         }
-        if daemon_address
-            .as_ref()
-            .is_some_and(|address| !address.is_empty())
-            || std::env::var("RRDCACHED_ADDRESS").is_ok_and(|address| !address.is_empty())
-        {
+        if daemon_address.is_some() {
             return Err("create --source with --daemon is unsupported".into());
-        }
-        let source_path = std::path::Path::new(&source_files[0]);
-        match std::fs::metadata(source_path) {
-            Ok(metadata) if !metadata.is_file() => {
-                return Err(format!("Not a regular file: {}", source_files[0]).into());
-            }
-            Ok(_) => {}
-            Err(error) => {
-                let detail = match error.kind() {
-                    std::io::ErrorKind::NotFound => "No such file or directory".to_owned(),
-                    _ => error
-                        .to_string()
-                        .split(" (os error ")
-                        .next()
-                        .unwrap_or("I/O error")
-                        .to_owned(),
-                };
-                return Err(format!(
-                    "error checking for source RRD {}: {}",
-                    source_files[0], detail
-                )
-                .into());
-            }
         }
         if no_overwrite && std::fs::metadata(&filename).is_ok() {
             return Err(format!("creating '{}': File exists", filename).into());
@@ -1384,39 +1371,28 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         restore_rrd_file(&xml, &filename, !no_overwrite, false)?;
         return Ok(());
     }
-    if let Some(address) = daemon_address
-        .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
-        .filter(|address| !address.is_empty())
-    {
-        let mut fields = vec![
-            "CREATE".to_owned(),
-            filename.clone(),
-            "-b".to_owned(),
-            start.to_string(),
-            "-s".to_owned(),
-            step.to_string(),
-        ];
-        if no_overwrite {
-            fields.push("-O".to_owned());
-        }
-        fields.extend(data_sources);
-        fields.extend(archives);
-        let command = fields
-            .iter()
-            .map(|field| field.replace('\\', "\\\\").replace(' ', "\\ "))
-            .collect::<Vec<_>>()
-            .join(" ");
-        send_rrdcached_command(&address, &command)?;
-    } else {
-        create_rrd_file(
-            filename,
-            start,
-            step,
-            &data_sources,
-            &archives,
-            no_overwrite,
-        )?;
+    let Some(address) = daemon_address else {
+        unreachable!("a local create without --source returned above");
+    };
+    let mut fields = vec![
+        "CREATE".to_owned(),
+        filename.clone(),
+        "-b".to_owned(),
+        start.to_string(),
+        "-s".to_owned(),
+        step.to_string(),
+    ];
+    if no_overwrite {
+        fields.push("-O".to_owned());
     }
+    fields.extend(data_sources);
+    fields.extend(archives);
+    let command = fields
+        .iter()
+        .map(|field| field.replace('\\', "\\\\").replace(' ', "\\ "))
+        .collect::<Vec<_>>()
+        .join(" ");
+    send_rrdcached_command(&address, &command)?;
     Ok(())
 }
 
@@ -5524,23 +5500,7 @@ fn parse_scaled_duration_option(
     value: &str,
     label: &str,
 ) -> Result<u64, Box<dyn std::error::Error>> {
-    match parse_rrd_scaled_duration(value, 1) {
-        Ok(duration) => Ok(duration),
-        Err(_) if is_rrd_zero_duration(value) => {
-            Err(format!("{label}: value must be positive").into())
-        }
-        Err(error) => {
-            let message = error.to_string();
-            let detail = if message.contains("duration must be a positive integer") {
-                "value must be (suffixed) positive number"
-            } else if message.contains("duration has trailing garbage") {
-                "value has trailing garbage"
-            } else {
-                return Err(error.into());
-            };
-            Err(format!("{label}: {detail}").into())
-        }
-    }
+    Ok(parse_rrd_scaled_duration(value, 1).map_err(|error| format!("{label}: {error}"))?)
 }
 
 fn is_rrd_zero_duration(value: &str) -> bool {
