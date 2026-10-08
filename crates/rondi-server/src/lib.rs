@@ -2777,7 +2777,8 @@ fn store_error(error: StoreError) -> Response<Full<Bytes>> {
         StoreError::InvalidName
         | StoreError::InvalidConfig(_)
         | StoreError::InvalidValue
-        | StoreError::RrdExpression(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
+        | StoreError::RrdExpression(_)
+        | StoreError::Rrd(_) => (StatusCode::BAD_REQUEST, "invalid_request"),
         StoreError::Io(_) => (StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable"),
         StoreError::FormatVersion(_)
         | StoreError::RrdFormat(_)

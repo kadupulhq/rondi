@@ -42,6 +42,10 @@ pub enum StoreError {
     /// An RPN expression error reported with RRDtool's own wording.
     #[error("{0}")]
     RrdExpression(String),
+    /// An `.rrd` error carrying the exact text RRDtool passes to
+    /// rrd_set_error, with no Rondi prefix.
+    #[error("{0}")]
+    Rrd(String),
     #[error("storage ownership lock is held by another process")]
     Owned,
     #[error("could not lock RRD")]
