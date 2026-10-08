@@ -634,6 +634,15 @@ fn update_path_values_with_raw(
     }
     for (index, (source, value)) in info.data_sources.iter().zip(values).enumerate() {
         if let Some(value) = value {
+            // update_pdp_prep converts DCOUNTER/DDERIVE text only when the
+            // previous sample is known, so those are checked in update_pdp_new.
+            if !matches!(source.kind.as_str(), "DCOUNTER" | "DDERIVE")
+                && raw_values
+                    .and_then(|raw| raw[index])
+                    .is_some_and(|raw| crate::parse_rrd_number(raw).is_none())
+            {
+                return Err(StoreError::InvalidValue);
+            }
             if matches!(source.kind.as_str(), "COUNTER" | "DERIVE") {
                 let valid = if let Some(raw) = raw_values.and_then(|raw| raw[index]) {
                     valid_integer_sample(raw, source.kind == "COUNTER")
@@ -687,7 +696,7 @@ fn update_path_values_with_raw(
             *value,
             raw_values.and_then(|raw| raw[index]),
             interval,
-        ));
+        )?);
         let mut last_ds = value.map_or_else(
             || "U".to_owned(),
             |v| {
@@ -854,12 +863,12 @@ fn update_pdp_new(
     value: Option<f64>,
     raw_value: Option<&str>,
     interval: f64,
-) -> f64 {
+) -> Result<f64, StoreError> {
     let Some(sample) = value else {
-        return rrd_nan();
+        return Ok(rrd_nan());
     };
     if (source.heartbeat as f64) < interval {
-        return rrd_nan();
+        return Ok(rrd_nan());
     }
     let previous = source.last_value.as_str();
     let (amount, rate) = match source.kind.as_str() {
@@ -875,7 +884,7 @@ fn update_pdp_new(
                     .map(|previous| sample - previous)
             };
             let Some(mut delta) = delta else {
-                return rrd_nan();
+                return Ok(rrd_nan());
             };
             if source.kind == "COUNTER" {
                 if delta < 0.0 {
@@ -888,27 +897,38 @@ fn update_pdp_new(
             (delta, delta / interval)
         }
         "DCOUNTER" | "DDERIVE" if previous != "U" => {
-            // update_pdp_prep converts the stored text with rrd_strtodbl too.
-            let Some(previous) = crate::parse_rrd_number(previous) else {
-                return rrd_nan();
+            // rrd_update.c:1520-1533 converts the new text, then the stored
+            // one, and fails the update if either does not convert.
+            let convert = |text: &str| {
+                crate::parse_rrd_number(text).ok_or_else(|| {
+                    StoreError::RrdExpression(format!(
+                        "Function update_pdp_prep, case DST_{} - Cannot convert '{text}' to float",
+                        source.kind
+                    ))
+                })
             };
+            let sample = match raw_value {
+                Some(text) => convert(text)?,
+                None => sample,
+            };
+            let previous = convert(previous)?;
             if source.kind == "DCOUNTER"
                 && ((sample > 0.0 && previous > sample) || (sample < 0.0 && sample > previous))
             {
-                return rrd_nan();
+                return Ok(rrd_nan());
             }
             let delta = sample - previous;
             (delta, delta / interval)
         }
-        _ => return rrd_nan(),
+        _ => return Ok(rrd_nan()),
     };
     if !rate.is_nan()
         && (source.maximum.is_some_and(|maximum| rate > maximum)
             || source.minimum.is_some_and(|minimum| rate < minimum))
     {
-        return rrd_nan();
+        return Ok(rrd_nan());
     }
-    amount
+    Ok(amount)
 }
 
 /// rrd_update.c process_pdp_st for every data source. Returns the rate for
@@ -1252,15 +1272,13 @@ pub fn update_rrd_raw_values_precise(
 }
 
 /// RRDtool's update and updatev both convert samples with rrd_strtodbl.
+/// Text that does not convert is kept as NaN here; whether it is an error
+/// depends on the data source type and is decided once the file is read.
 fn parse_raw_values(values: &[Option<&str>]) -> Result<Vec<Option<f64>>, StoreError> {
-    values
+    Ok(values
         .iter()
-        .map(|value| {
-            value
-                .map(|value| crate::parse_rrd_number(value).ok_or(StoreError::InvalidValue))
-                .transpose()
-        })
-        .collect()
+        .map(|value| value.map(|value| crate::parse_rrd_number(value).unwrap_or_else(rrd_nan)))
+        .collect())
 }
 
 /// Update an RRD and return the archive rows written, in RRA and row order.

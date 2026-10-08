@@ -506,3 +506,150 @@ fn seeded_random_updates_match_rrdtool_byte_for_byte() {
         }
     }
 }
+
+/// DCOUNTER/DDERIVE samples that are infinite, NaN, or not numbers, in every
+/// ordered pair and across multi-step spans. update_pdp_prep converts the
+/// sample and the previous one only when the previous is known, so text that
+/// does not convert is accepted after an unknown sample and fails one update
+/// later.
+#[test]
+fn dcounter_dderive_special_samples_match_rrdtool_byte_for_byte() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        eprintln!("skipping special-sample differential: pinned RRDtool 1.11.0 is not installed");
+        return;
+    }
+    let samples = [
+        "inf",
+        "-inf",
+        "-Infinity",
+        "nan",
+        "5",
+        "-5",
+        "0",
+        "1e308",
+        "abc",
+        "+inf",
+        "1x",
+    ];
+    let temp = tempfile::tempdir().unwrap();
+    let mut case_index = 0;
+    for (kind, bounds) in [
+        ("DCOUNTER", "U:U"),
+        ("DDERIVE", "U:U"),
+        ("DCOUNTER", "-100:100"),
+        ("DDERIVE", "-100:100"),
+    ] {
+        for seed in ["3", "U"] {
+            for first in samples {
+                for second in samples {
+                    let oracle = temp.path().join(format!("special-{case_index}-oracle.rrd"));
+                    let ours = temp.path().join(format!("special-{case_index}-rondi.rrd"));
+                    case_index += 1;
+                    let create = [
+                        "--start".to_owned(),
+                        "1000000000".to_owned(),
+                        "--step".to_owned(),
+                        "10".to_owned(),
+                        format!("DS:d:{kind}:100:{bounds}"),
+                        "DS:g:GAUGE:100:U:U".to_owned(),
+                        "RRA:AVERAGE:0.5:1:10".to_owned(),
+                        "RRA:MIN:0.5:2:10".to_owned(),
+                        "RRA:MAX:0.9:3:10".to_owned(),
+                        "RRA:LAST:0:1:10".to_owned(),
+                    ];
+                    let created = Command::new("rrdtool")
+                        .arg("create")
+                        .arg(&oracle)
+                        .args(&create)
+                        .output()
+                        .unwrap();
+                    assert!(
+                        created.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&created.stderr)
+                    );
+                    std::fs::copy(&oracle, &ours).unwrap();
+                    // The pair spans several steps; the finite samples after
+                    // it consume whatever prep state the pair left.
+                    let updates = [
+                        (1_000_000_003_i64, 0_u64, seed),
+                        (1_000_000_027, 500_000, first),
+                        (1_000_000_061, 0, second),
+                        (1_000_000_064, 0, "7"),
+                        (1_000_000_095, 0, "9"),
+                    ];
+                    let arguments = updates
+                        .iter()
+                        .map(|(timestamp, usec, value)| {
+                            let value = (*value != "U").then(|| (*value).to_owned());
+                            update_argument(*timestamp, *usec, &[value, Some("1".to_owned())])
+                        })
+                        .collect::<Vec<_>>();
+                    let context = format!(
+                        "rrdtool create {} then update {}",
+                        create.join(" "),
+                        arguments.join(" ")
+                    );
+                    // One pipe-mode session per case: each line reports its own
+                    // status and a failed line does not stop the next one.
+                    let mut session = Command::new("rrdtool")
+                        .arg("-")
+                        .stdin(Stdio::piped())
+                        .stdout(Stdio::piped())
+                        .stderr(Stdio::piped())
+                        .spawn()
+                        .unwrap();
+                    let mut input = String::new();
+                    for argument in &arguments {
+                        input.push_str(&format!("update {} {argument}\n", oracle.display()));
+                    }
+                    session
+                        .stdin
+                        .take()
+                        .unwrap()
+                        .write_all(input.as_bytes())
+                        .unwrap();
+                    let output = session.wait_with_output().unwrap();
+                    let upstream = String::from_utf8_lossy(&output.stdout)
+                        .lines()
+                        .filter(|line| line.starts_with("OK") || line.starts_with("ERROR"))
+                        .map(|line| line.starts_with("OK"))
+                        .collect::<Vec<_>>();
+                    let local = updates
+                        .iter()
+                        .map(|(timestamp, usec, value)| {
+                            let value = (*value != "U").then_some(*value);
+                            rondi::update_rrd_raw_values_precise(
+                                &ours,
+                                *timestamp,
+                                *usec,
+                                &[value, Some("1")],
+                            )
+                            .is_ok()
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(upstream, local, "{context}: accepted updates differ");
+                    let expected = std::fs::read(&oracle).unwrap();
+                    let actual = std::fs::read(&ours).unwrap();
+                    let first_difference = expected
+                        .iter()
+                        .zip(&actual)
+                        .position(|(left, right)| left != right);
+                    assert!(
+                        expected.len() == actual.len() && first_difference.is_none(),
+                        "{context}: files differ first at byte {first_difference:?}"
+                    );
+                }
+            }
+        }
+    }
+}
