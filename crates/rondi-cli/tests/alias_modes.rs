@@ -2,6 +2,7 @@
 
 use std::io::Write;
 use std::os::unix::fs::symlink;
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 fn normalize_rrdtool_compiled_stamp(output: &[u8]) -> Vec<u8> {
@@ -7538,4 +7539,57 @@ fn rrdtool_updatev_matches_upstream_output_and_file_changes() {
 
 fn upstream_path(directory: &std::path::Path) -> std::path::PathBuf {
     directory.join("upstream-dump.xml")
+}
+
+#[test]
+fn rrdtool_update_converts_dcounter_text_only_after_a_known_sample() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        eprintln!("skipping DCOUNTER text differential: pinned RRDtool 1.11.0 is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    for kind in ["DCOUNTER", "DDERIVE"] {
+        for value in ["abc", "+inf"] {
+            let mut transcripts = Vec::new();
+            for (name, program) in [("oracle", Path::new("rrdtool")), ("rondi", alias.as_path())] {
+                let file = temp.path().join(format!("{name}-{kind}-{value}.rrd"));
+                let created = Command::new("rrdtool")
+                    .arg("create")
+                    .arg(&file)
+                    .args([
+                        "--start",
+                        "1000000000",
+                        "--step",
+                        "10",
+                        &format!("DS:d:{kind}:100:U:U"),
+                        "RRA:LAST:0:1:5",
+                    ])
+                    .output()
+                    .unwrap();
+                assert!(created.status.success());
+                let mut transcript = Vec::new();
+                for sample in [format!("1000000005:{value}"), "1000000015:3".to_owned()] {
+                    let output = Command::new(program)
+                        .arg("update")
+                        .arg(&file)
+                        .arg(&sample)
+                        .output()
+                        .unwrap();
+                    let stderr = String::from_utf8_lossy(&output.stderr)
+                        .replace(file.to_str().unwrap(), "FILE");
+                    transcript.push((output.status.code(), stderr));
+                }
+                transcripts.push(transcript);
+            }
+            assert_eq!(transcripts[0], transcripts[1], "{kind} {value}");
+        }
+    }
 }

@@ -4595,7 +4595,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
             .split(':')
             .enumerate()
             .map(|(value_index, value)| {
-                parse_rrd_update_value(value).ok_or_else(|| {
+                parse_rrd_update_value(value).map_or_else(|| {
                     let data_sources = inspect_rrd(&args[1])
                         .map(|info| info.data_sources)
                         .unwrap_or_default();
@@ -4610,11 +4610,16 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                         })
                         .or_else(|| data_sources.get(value_index).map(|source| source.kind.as_str()))
                         .unwrap_or("GAUGE");
-                    format!(
+                    // update_pdp_prep converts DCOUNTER/DDERIVE text only when
+                    // the previous sample is known; the library decides.
+                    if matches!(source_index, "DCOUNTER" | "DDERIVE") {
+                        return Ok(None);
+                    }
+                    Err(format!(
                         "{}: Function update_pdp_prep, case DST_{source_index} - Cannot convert '{value}' to float",
                         filename.display()
-                    )
-                })
+                    ))
+                }, Ok)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let raw_values = if let Some(indices) = &source_names {
@@ -4731,7 +4736,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
 /// RRDtool prefixes per-sample update failures with the file name.
 fn rrd_update_error(filename: &Path, error: rondi::StoreError) -> Box<dyn std::error::Error> {
     match error {
-        rondi::StoreError::RrdTimestamp(message) => {
+        rondi::StoreError::RrdTimestamp(message) | rondi::StoreError::RrdExpression(message) => {
             format!("{}: {message}", filename.display()).into()
         }
         error => error.into(),
