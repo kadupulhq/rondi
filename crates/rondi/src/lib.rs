@@ -7,6 +7,7 @@ pub mod import_export;
 mod queries;
 mod rrd_binary;
 mod rrd_number;
+pub mod rrd_snprintf;
 pub(crate) mod storage;
 pub mod time;
 pub mod vdef;

@@ -4896,10 +4896,11 @@ fn send_rrdcached_update_on_stream(
         .into())
 }
 
-// xport rows go through rrd_snprintf, which only emits '-' for values below
-// zero, so -0 prints unsigned. updatev uses libc printf and keeps the sign.
+/// xport and graph data values go through `rrd_snprintf("%0.10e")`
+/// (rrd_xport.c:714, 968, 985), which is not correctly rounded and never
+/// signs -0. updatev uses libc printf and keeps the sign.
 fn format_xport_value(value: f64) -> String {
-    format_rrd_scientific(if value == 0.0 { 0.0 } else { value })
+    rondi::rrd_snprintf::rrd_snprintf("%0.10e", &[rondi::rrd_snprintf::Arg::Double(value)])
 }
 
 fn format_rrd_scientific(value: f64) -> String {
