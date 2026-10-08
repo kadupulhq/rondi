@@ -11,6 +11,7 @@ mod rpn;
 mod rrd_binary;
 mod rrd_number;
 pub mod rrd_snprintf;
+pub mod rrdc_proto;
 pub(crate) mod storage;
 pub mod time;
 pub mod vdef;

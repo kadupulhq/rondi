@@ -256,8 +256,7 @@ fn current_local_year() -> i32 {
 }
 
 async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut root = PathBuf::from("/tmp");
-    let mut base_seen = false;
+    let mut root = None;
     let mut journal_directory = None;
     let mut flush_at_shutdown = false;
     let mut pid_file = None;
@@ -307,10 +306,7 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
                     active_socket_group,
                 ));
             }
-            'b' => {
-                base_seen = true;
-                root = PathBuf::from(value);
-            }
+            'b' => root = Some(PathBuf::from(value)),
             'j' => {
                 let strerror = |error: std::io::Error| {
                     error.raw_os_error().map_or_else(String::new, |errno| {
@@ -481,7 +477,7 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
     if write_jitter_seconds > write_timeout_seconds {
         eprintln!("WARNING: write delay (-z) should NOT be larger than write interval (-w) !");
     }
-    if base_only && !base_seen {
+    if base_only && root.is_none() {
         eprintln!(
             "WARNING: -B does not make sense without -b!\n  Consult the rrdcached documentation"
         );
@@ -532,6 +528,7 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
     };
     rondi_server::run_rrdcached(rondi_server::RrdcachedConfig {
         root,
+        base_only,
         socket,
         journal_directory,
         flush_at_shutdown,

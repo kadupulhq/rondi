@@ -2698,7 +2698,11 @@ fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
     reader.get_mut().write_all(b"PING\nINVALID\n.\n").unwrap();
     let mut batch_result = String::new();
     reader.read_line(&mut batch_result).unwrap();
-    assert_eq!(batch_result, "1 errors\n");
+    // PING is a client-only command, so a BATCH refuses it.
+    assert_eq!(batch_result, "2 errors\n");
+    batch_result.clear();
+    reader.read_line(&mut batch_result).unwrap();
+    assert_eq!(batch_result, "1 Can't use 'PING' here.\n");
     batch_result.clear();
     reader.read_line(&mut batch_result).unwrap();
     assert!(
@@ -3100,10 +3104,11 @@ fn start_journaled_rrdcached(work: &std::path::Path, rondi: bool, options: &[&st
         .arg(work.join("rrdcached.pid"))
         .arg("-b")
         .arg(work.join("b"))
+        .args(["-w", "3600", "-f", "7200"])
+        // -P and -m apply to the -l options after them.
+        .args(options)
         .arg("-l")
         .arg(format!("unix:{}", socket.display()))
-        .args(["-w", "3600", "-f", "7200"])
-        .args(options)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -3369,6 +3374,334 @@ fn rrdcached_update_values_fail_at_flush_like_upstream() {
     assert!(
         observed[1].2 == observed[0].2,
         "a.rrd differs from upstream"
+    );
+}
+
+#[test]
+fn rrdcached_error_replies_and_batch_sessions_match_upstream() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping rrdcached error differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let baseline = work.join("baseline.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&baseline)
+        .args(["--start", "1000000000", "--step", "10"])
+        .args(["DS:v:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:8"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    // Each entry is one connection; QUIT ends it unless the daemon closes it
+    // first, as it does after SUSPEND or RESUME of an unknown file.
+    let sessions = [
+        "UPDATE missing.rrd 1000000010:1\n",
+        "UPDATE dir 1000000010:1\n",
+        "UPDATE empty.rrd 1000000010:1\n",
+        "UPDATE junk.rrd 1000000010:1\n",
+        "UPDATE\n",
+        "UPDATE a.rrd 1000000030:1 \nPENDING a.rrd\n",
+        "INFO missing.rrd\n",
+        "INFO dir\n",
+        "INFO empty.rrd\n",
+        "INFO junk.rrd\n",
+        "FIRST missing.rrd 0\n",
+        "FIRST a.rrd 9\n",
+        "FIRST a.rrd -1\n",
+        "FIRST a.rrd x\n",
+        "FIRST dir 0\n",
+        "FIRST a.rrd\n",
+        "LAST missing.rrd\n",
+        "LAST junk.rrd\n",
+        "FETCH missing.rrd AVERAGE\n",
+        "FETCH a.rrd BOGUS\n",
+        "FETCH dir AVERAGE\n",
+        "FETCH junk.rrd AVERAGE\n",
+        "FETCH a.rrd\n",
+        "FETCHBIN missing.rrd AVERAGE\n",
+        "FETCHBIN a.rrd BOGUS\n",
+        "TUNE missing.rrd 3 tune missing.rrd -h\n",
+        "TUNE dir 3 tune dir -h\n",
+        "TUNE junk.rrd 3 tune junk.rrd -h\n",
+        "DUMP missing.rrd\n",
+        "DUMP dir\n",
+        "DUMP junk.rrd\n",
+        "FORGET missing.rrd\n",
+        "FLUSH missing.rrd\n",
+        "FLUSH dir\n",
+        "FLUSH  a.rrd\n",
+        "PENDING missing.rrd\n",
+        "SUSPEND missing.rrd\nPING\n",
+        "RESUME missing.rrd\nPING\n",
+        "LIST /missing\n",
+        "LIST RECURSIVE /missing\n",
+        "LIST missing\n",
+        "PING extra\n",
+        ".\n",
+        "\n",
+        "WROTE x\n",
+        "\\\\\n",
+        "BATCH x\nPING\n.\n",
+        "BATCH\n.\nBATCH\nUPDATE a.rrd 5:1\n.\n",
+        "BATCH\nUPDATE missing.rrd 1000000010:1\nINFO a.rrd\nFLUSH missing.rrd\nFOO\n\
+         FETCH a.rrd AVERAGE\nUPDATE a.rrd\nPING\n\nCREATE nodir/x.rrd DS:v:GAUGE:20:U:U \
+         RRA:AVERAGE:0.5:1:8\nFORGET missing.rrd\nUPDATE a.rrd 1000000010:x\nBATCH\nWROTE x\n\
+         UPDATE a.rrd 1000000020:1\nflush a.rrd\n.\nPING\n",
+        "BATCH\nupdate a.rrd 1000000010:1\nquit\n.\n",
+        "BATCH\nSUSPEND missing.rrd\nPING\n.\n",
+    ];
+    let socket = work.join("s.sock");
+    let mut observed = Vec::new();
+    for rondi in [false, true] {
+        reset_journal_work(&work, &baseline);
+        std::fs::create_dir(work.join("b/dir")).unwrap();
+        std::fs::write(work.join("b/empty.rrd"), b"").unwrap();
+        std::fs::write(work.join("b/junk.rrd"), "garbage ".repeat(40)).unwrap();
+        let daemon = start_journaled_rrdcached(&work, rondi, &[]);
+        let replies = sessions
+            .iter()
+            .map(|session| {
+                let mut stream = UnixStream::connect(&socket).unwrap();
+                stream.set_read_timeout(Some(common::io_timeout())).unwrap();
+                stream.write_all(session.as_bytes()).unwrap();
+                let _ = stream.write_all(b"QUIT\n");
+                let mut reply = String::new();
+                stream.read_to_string(&mut reply).unwrap();
+                format!("[{session:?}]\n{reply}")
+            })
+            .collect::<Vec<_>>();
+        stop_rrdcached(daemon, libc::SIGTERM);
+        observed.push(replies);
+    }
+    for (upstream, rondi) in observed[0].iter().zip(&observed[1]) {
+        assert_eq!(rondi, upstream);
+    }
+}
+
+#[test]
+fn rrdcached_permissions_apply_inside_batch_like_upstream() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!(
+            "skipping rrdcached permission differential: upstream tools are not installed"
+        );
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let baseline = work.join("baseline.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&baseline)
+        .args(["--start", "1000000000", "--step", "10"])
+        .args(["DS:v:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:8"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let socket = work.join("s.sock");
+    let session = "BATCH\nFLUSH a.rrd\nupdate a.rrd 1000000010:1\nFoRgEt a.rrd\n\
+                   CREATE x.rrd DS:v:GAUGE:20:U:U RRA:AVERAGE:0.5:1:8\nSUSPENDALL\n.\n\
+                   FLUSH a.rrd\nHELP PING\nPENDING a.rrd\nQUIT\n";
+    let mut observed = Vec::new();
+    for rondi in [false, true] {
+        reset_journal_work(&work, &baseline);
+        let daemon = start_journaled_rrdcached(&work, rondi, &["-P", "BATCH,update,pending"]);
+        observed.push(rrdcached_dump(&socket, session));
+        stop_rrdcached(daemon, libc::SIGTERM);
+    }
+    assert!(
+        observed[0].contains("Permission denied."),
+        "{}",
+        observed[0]
+    );
+    assert_eq!(observed[1], observed[0]);
+}
+
+#[test]
+fn rrdcached_without_base_directory_matches_upstream_and_writes_nothing_to_tmp() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping rrdcached no-base differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let rrd = work.join("a.rrd");
+    let socket = work.join("s.sock");
+    let alias = work.join("rrdcached");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let baseline = work.join("baseline.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&baseline)
+        .args(["--start", "1000000000", "--step", "10"])
+        .args(["DS:v:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:8"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let tmp_lock = std::path::Path::new("/tmp/.rondi.lock");
+    let lock_existed = tmp_lock.exists();
+    let session = format!(
+        "LIST /\nUPDATE {0} 1000000010:1\nFLUSH {0}\nINFO missing-{1}.rrd\nQUIT\n",
+        rrd.display(),
+        std::process::id()
+    );
+    let mut observed = Vec::new();
+    for rondi in [false, true] {
+        std::fs::copy(&baseline, &rrd).unwrap();
+        let _ = std::fs::remove_file(&socket);
+        let program = if rondi {
+            alias.clone().into_os_string()
+        } else {
+            "rrdcached".into()
+        };
+        let mut daemon = Command::new(program)
+            .arg("-g")
+            .arg("-p")
+            .arg(work.join("pid"))
+            .arg("-l")
+            .arg(format!("unix:{}", socket.display()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        wait_for_socket(&mut daemon, &socket);
+        observed.push(rrdcached_dump(&socket, &session));
+        stop_rrdcached(daemon, libc::SIGTERM);
+        observed.push(format!("{:?}", std::fs::read(&rrd).unwrap()));
+    }
+    assert!(
+        observed[0].starts_with("-1 No base directory defined\n"),
+        "{}",
+        observed[0]
+    );
+    assert_eq!(observed[2], observed[0]);
+    assert_eq!(observed[3], observed[1]);
+    if !lock_existed {
+        assert!(
+            !tmp_lock.exists(),
+            "rrdcached without -b created /tmp/.rondi.lock"
+        );
+    }
+}
+
+#[test]
+fn rrdcached_dash_b_confinement_matches_upstream() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping rrdcached -B differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let baseline = work.join("baseline.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&baseline)
+        .args(["--start", "1000000000", "--step", "10"])
+        .args(["DS:v:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:8"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let outside = work.join("out");
+    std::fs::create_dir_all(&outside).unwrap();
+    let outside_rrd = outside.join("o.rrd");
+    let socket = work.join("s.sock");
+    let escaping = [
+        format!("UPDATE {} 1000000010:1\n", outside_rrd.display()),
+        "UPDATE sub/../a.rrd 1000000010:1\n".to_owned(),
+        "INFO ../out/p.rrd\n".to_owned(),
+        "FIRST ../out/p.rrd 0\n".to_owned(),
+        "LAST ../out/p.rrd\n".to_owned(),
+        "FETCH ../out/p.rrd AVERAGE 1000000000 1000000020\n".to_owned(),
+        format!("FLUSH {}\n", outside_rrd.display()),
+        "FORGET ../out/p.rrd\n".to_owned(),
+        "TUNE ../out/p.rrd 3 tune -h v:30\n".to_owned(),
+        "CREATE ../out/n.rrd DS:v:GAUGE:20:U:U RRA:AVERAGE:0.5:1:8\n".to_owned(),
+        "BATCH\nUPDATE ../out/p.rrd 1000000010:1\n.\n".to_owned(),
+    ];
+    // Upstream keys its cache by the name as spelled and Rondi by the
+    // resolved file (RD-007), so each file is named one way only.
+    // Upstream compares strings, so these pass its check; Rondi resolves
+    // them and refuses both.
+    let symlinked = [
+        "UPDATE linkdir/o.rrd 1000000010:1\n",
+        "UPDATE link.rrd 1000000010:1\n",
+    ];
+    let mut observed = Vec::new();
+    for rondi in [false, true] {
+        for options in [&["-B"][..], &[][..]] {
+            reset_journal_work(&work, &baseline);
+            std::fs::copy(&baseline, outside.join("p.rrd")).unwrap();
+            std::fs::copy(&baseline, &outside_rrd).unwrap();
+            std::os::unix::fs::symlink(&outside, work.join("b/linkdir")).unwrap();
+            std::os::unix::fs::symlink(&outside_rrd, work.join("b/link.rrd")).unwrap();
+            let daemon = start_journaled_rrdcached(&work, rondi, options);
+            let replies = escaping
+                .iter()
+                .map(String::as_str)
+                .chain(symlinked)
+                .map(|session| rrdcached_dump(&socket, &format!("{session}QUIT\n")))
+                .collect::<Vec<_>>();
+            stop_rrdcached(daemon, libc::SIGTERM);
+            observed.push(replies);
+        }
+    }
+    let (upstream_confined, upstream_open) = (&observed[0], &observed[1]);
+    let (rondi_confined, rondi_open) = (&observed[2], &observed[3]);
+    assert_eq!(
+        upstream_confined[0],
+        format!("-1 {}: Permission denied\n", outside_rrd.display())
+    );
+    for (index, session) in escaping.iter().enumerate() {
+        assert_eq!(
+            rondi_confined[index], upstream_confined[index],
+            "-B {session:?}"
+        );
+    }
+    for (index, session) in escaping
+        .iter()
+        .map(String::as_str)
+        .chain(symlinked)
+        .enumerate()
+    {
+        assert_eq!(rondi_open[index], upstream_open[index], "{session:?}");
+    }
+    for (index, session) in symlinked.iter().enumerate() {
+        let name = session.split(' ').nth(1).unwrap();
+        assert_eq!(
+            upstream_confined[escaping.len() + index],
+            "0 errors, enqueued 1 value(s).\n"
+        );
+        assert_eq!(
+            rondi_confined[escaping.len() + index],
+            format!("-1 {}/b/{name}: Permission denied\n", work.display())
+        );
+    }
+
+    // Replay skips the access check upstream; with -B Rondi counts a record
+    // outside -b as a failure instead of queueing it.
+    reset_journal_work(&work, &baseline);
+    std::fs::copy(&baseline, &outside_rrd).unwrap();
+    let journal = work.join("j");
+    std::fs::write(
+        journal.join("rrd.journal.0000000001.000000"),
+        "update ../out/o.rrd 1000000010:1\nupdate a.rrd 1000000010:1\n",
+    )
+    .unwrap();
+    let daemon = start_journaled_rrdcached(&work, true, &["-B", "-j", journal.to_str().unwrap()]);
+    let pending = rrdcached_dump(
+        &socket,
+        &format!("PENDING {}\nPENDING a.rrd\nQUIT\n", outside_rrd.display()),
+    );
+    stop_rrdcached(daemon, libc::SIGTERM);
+    assert_eq!(
+        pending,
+        "0 updates pending\n1 updates pending\n1000000010:1\n"
     );
 }
 

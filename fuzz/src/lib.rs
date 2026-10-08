@@ -134,7 +134,10 @@ pub mod server {
     ) -> Vec<u8> {
         use tokio::io::AsyncReadExt;
         let stats = Arc::new(RrdcachedStats::default());
-        let queue = match RrdcachedQueue::open(root, None, 1 << 20, 0, false, &stats) {
+        // -B keeps every name inside the scratch root, so a fuzz input cannot
+        // reach files outside it.
+        let base = RrdcachedBase::new(Some(root), true).expect("base");
+        let queue = match RrdcachedQueue::open(&base, None, 1 << 20, 0, false, &stats) {
             Ok((queue, _)) => Arc::new(Mutex::new(queue)),
             Err(_) => return Vec::new(),
         };
@@ -142,8 +145,7 @@ pub mod server {
         let (_stop, stop_rx) = tokio::sync::watch::channel(false);
         let serve = serve_rrdcached_connection(
             server,
-            root.to_path_buf(),
-            root.to_path_buf(),
+            base,
             stats,
             Arc::clone(&queue),
             false,
@@ -184,7 +186,14 @@ pub mod server {
             .expect("journal");
         let stats = RrdcachedStats::default();
         let Ok((queue, _)) =
-            RrdcachedQueue::open(root, Some(&directory), 1 << 20, 0, false, &stats)
+            RrdcachedQueue::open(
+                &RrdcachedBase::new(Some(root), true).expect("base"),
+                Some(&directory),
+                1 << 20,
+                0,
+                false,
+                &stats,
+            )
         else {
             return;
         };

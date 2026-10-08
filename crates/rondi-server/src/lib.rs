@@ -5,6 +5,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use rondi::rrdc_proto::{next_field, strip_line_end};
 use rondi::{DatabaseConfig, Store, StoreError, StoreOptions, Update};
 use serde::Deserialize;
 use std::convert::Infallible;
@@ -202,25 +203,105 @@ fn remove_journal_files(files: &[PathBuf]) {
     }
 }
 
-/// Port of rrd_daemon.c buffer_get_field. `None` is an exhausted buffer and
-/// `Some("")` is one holding only its terminating NUL, which still yields an
-/// empty field.
-fn rrdcached_buffer_field(buffer: &mut Option<&str>) -> Option<String> {
-    let text = (*buffer)?;
-    let mut field = String::new();
-    let mut characters = text.char_indices();
-    while let Some((index, character)) = characters.next() {
-        match character {
-            ' ' => {
-                *buffer = Some(&text[index + 1..]);
-                return Some(field);
+/// The -b directory as upstream uses it. Without -b upstream works in /tmp
+/// and uses names as given; only -B confines requests to -b.
+#[derive(Debug, Clone)]
+struct RrdcachedBase {
+    /// The canonical -b directory, or `/` without -b.
+    root: PathBuf,
+    /// Where relative names resolve: the canonical -b directory or `/tmp`.
+    cwd: PathBuf,
+    /// -b as given, trailing slashes removed; `None` without -b.
+    given: Option<PathBuf>,
+    /// -B: confine file arguments to -b.
+    base_only: bool,
+}
+
+impl RrdcachedBase {
+    fn new(given: Option<&Path>, base_only: bool) -> std::io::Result<Self> {
+        Ok(match given {
+            Some(given) => {
+                let root = std::fs::canonicalize(given)?;
+                let trimmed = match given.to_string_lossy().trim_end_matches('/') {
+                    "" => root.clone(),
+                    trimmed => PathBuf::from(trimmed),
+                };
+                Self {
+                    cwd: root.clone(),
+                    root,
+                    given: Some(trimmed),
+                    base_only,
+                }
             }
-            '\\' => field.push(characters.next()?.1),
-            _ => field.push(character),
+            None => Self {
+                root: PathBuf::from("/"),
+                cwd: PathBuf::from("/tmp"),
+                given: None,
+                base_only,
+            },
+        })
+    }
+
+    /// get_abs_path: the name joined to -b unless it is absolute.
+    fn abs(&self, requested: &str) -> String {
+        match &self.given {
+            Some(base) if !requested.starts_with('/') => format!("{}/{requested}", base.display()),
+            _ => requested.to_owned(),
         }
     }
-    *buffer = None;
-    Some(field)
+
+    fn fs_path(&self, requested: &str) -> PathBuf {
+        let requested = Path::new(requested);
+        if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            self.cwd.join(requested)
+        }
+    }
+
+    /// check_file_access (rrd_daemon.c:1354) and the path the daemon then
+    /// uses. Only -B with -b confines, as upstream. Where upstream compares
+    /// strings, Rondi resolves the parent's real path and refuses a final
+    /// symlink, so neither a symlinked directory nor a symlinked file can
+    /// lead outside -b.
+    fn target(&self, requested: &str) -> Result<PathBuf, String> {
+        let path = self.fs_path(requested);
+        if !self.confined() {
+            return Ok(std::fs::canonicalize(&path).unwrap_or(path));
+        }
+        let denied = || format!("{}: Permission denied", self.abs(requested));
+        if path
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+        {
+            return Err(denied());
+        }
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return Err(denied());
+        };
+        let Ok(parent) = std::fs::canonicalize(parent) else {
+            // A missing directory is confined by its nearest existing one.
+            let confined = path
+                .ancestors()
+                .skip(1)
+                .find_map(|ancestor| std::fs::canonicalize(ancestor).ok())
+                .is_some_and(|ancestor| ancestor.starts_with(&self.root));
+            return if confined { Ok(path) } else { Err(denied()) };
+        };
+        let resolved = parent.join(name);
+        if !parent.starts_with(&self.root)
+            || resolved == self.root
+            || std::fs::symlink_metadata(&resolved)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err(denied());
+        }
+        Ok(resolved)
+    }
+
+    fn confined(&self) -> bool {
+        self.base_only && self.given.is_some()
+    }
 }
 
 fn wall_time_seconds() -> i64 {
@@ -245,7 +326,10 @@ pub struct ServerConfig {
 /// acknowledgment, and queued writes flush later.
 #[derive(Debug, Clone)]
 pub struct RrdcachedConfig {
-    pub root: PathBuf,
+    /// `-b`; `None` when not given.
+    pub root: Option<PathBuf>,
+    /// `-B`: confine file arguments to `-b`.
+    pub base_only: bool,
     pub socket: PathBuf,
     pub journal_directory: Option<PathBuf>,
     pub flush_at_shutdown: bool,
@@ -642,7 +726,7 @@ impl RrdcachedQueue {
 
     /// Returns the queue and whether any journal file replayed an entry.
     fn open(
-        root: &Path,
+        base: &RrdcachedBase,
         journal_directory: Option<&Path>,
         max_pending_bytes: usize,
         write_timeout_seconds: u64,
@@ -653,7 +737,7 @@ impl RrdcachedQueue {
         // Without -j upstream always flushes at shutdown (read_options).
         queue.flush_at_shutdown = flush_at_shutdown || journal_directory.is_none();
         let had_journal =
-            journal_directory.is_some_and(|directory| queue.journal_init(root, directory, stats));
+            journal_directory.is_some_and(|directory| queue.journal_init(base, directory, stats));
         if queue.pending_bytes > max_pending_bytes {
             return Err(format!(
                 "recovered rrdcached queue requires {} bytes, exceeding configured limit {max_pending_bytes}",
@@ -672,7 +756,12 @@ impl RrdcachedQueue {
                 .is_some_and(|journal| journal.disabled)
     }
 
-    fn journal_init(&mut self, root: &Path, directory: &Path, stats: &RrdcachedStats) -> bool {
+    fn journal_init(
+        &mut self,
+        base: &RrdcachedBase,
+        directory: &Path,
+        stats: &RrdcachedStats,
+    ) -> bool {
         use std::os::unix::ffi::OsStrExt;
         let mut journal = RrdcachedJournal {
             directory: directory.to_path_buf(),
@@ -731,14 +820,19 @@ impl RrdcachedQueue {
         });
         let mut had_journal = false;
         for file in &journal.current {
-            had_journal |= self.journal_replay(root, file, stats);
+            had_journal |= self.journal_replay(base, file, stats);
         }
         journal.new_file();
         self.journal = Some(journal);
         had_journal
     }
 
-    fn journal_replay(&mut self, root: &Path, file: &Path, stats: &RrdcachedStats) -> bool {
+    fn journal_replay(
+        &mut self,
+        base: &RrdcachedBase,
+        file: &Path,
+        stats: &RrdcachedStats,
+    ) -> bool {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
         // Upstream stats the path, then opens it. Checking the opened handle
         // instead closes the window for swapping in a symlink, which is
@@ -800,7 +894,7 @@ impl RrdcachedQueue {
                 match chunk.split_last() {
                     None => {}
                     Some((b'\n', entry)) => {
-                        if self.replay_entry(root, entry, now, stats) {
+                        if self.replay_entry(base, entry, now, stats) {
                             entries += 1;
                         } else {
                             failures += 1;
@@ -825,7 +919,7 @@ impl RrdcachedQueue {
     /// socket: only commands allowed in the journal context succeed.
     fn replay_entry(
         &mut self,
-        root: &Path,
+        base: &RrdcachedBase,
         entry: &[u8],
         now: i64,
         stats: &RrdcachedStats,
@@ -834,19 +928,19 @@ impl RrdcachedQueue {
             return false;
         };
         let mut buffer = Some(entry);
-        let Some(command) = rrdcached_buffer_field(&mut buffer) else {
+        let Some(command) = next_field(&mut buffer) else {
             return false;
         };
         if command.eq_ignore_ascii_case("UPDATE") {
-            let Some(file) = rrdcached_buffer_field(&mut buffer) else {
+            let Some(file) = next_field(&mut buffer) else {
                 return false;
             };
             stats.updates_received.fetch_add(1, Ordering::Relaxed);
-            let Ok(path) = resolve_rrdcached_path(root, &file) else {
+            let Ok(path) = resolve_rrdcached_path(base, &file) else {
                 return false;
             };
             let mut samples = Vec::new();
-            while let Some(sample) = rrdcached_buffer_field(&mut buffer) {
+            while let Some(sample) = next_field(&mut buffer) {
                 samples.push(sample);
             }
             self.update(path, None, &samples, None, now).is_ok()
@@ -858,8 +952,8 @@ impl RrdcachedQueue {
             }
             true
         } else if command.eq_ignore_ascii_case("FORGET") {
-            rrdcached_buffer_field(&mut buffer)
-                .and_then(|file| resolve_rrdcached_path(root, &file).ok())
+            next_field(&mut buffer)
+                .and_then(|file| resolve_rrdcached_path(base, &file).ok())
                 .is_some_and(|path| self.forget(&path))
         } else {
             false
@@ -1082,15 +1176,135 @@ fn rrdcached_journal_path_is_safe(path: &Path) -> bool {
     !path.as_os_str().as_bytes().contains(&b'\n')
 }
 
-/// The text after the command word, which upstream journals raw and still
-/// escaped. Replay decodes it with the same field parser the live request
-/// uses, so the journal reproduces exactly what was acknowledged.
-fn rrdcached_request_arguments(line: &str) -> &str {
-    let line = line.strip_suffix('\n').unwrap_or(line);
-    let line = line.strip_suffix('\r').unwrap_or(line);
-    let mut buffer = Some(line);
-    let _ = rrdcached_buffer_field(&mut buffer);
-    buffer.unwrap_or_default()
+fn rrdcached_strerror(errno: i32) -> String {
+    // SAFETY: strerror returns a valid NUL-terminated string.
+    unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// strtol(text, &end, 10) accepted only when it consumed the whole field and
+/// did not overflow.
+fn c_strtol_exact(text: &str) -> Option<i64> {
+    let digits = text.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);
+    let unsigned = digits.strip_prefix(['+', '-']).unwrap_or(digits);
+    if unsigned.is_empty() || !unsigned.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<i64>().ok()
+}
+
+/// The steps of rrd_open (rrd_open.c:336-511) that fail before Rondi parses
+/// the file, with their error texts: open, fstat, mmap of the whole file, and
+/// the static header. The header is read with pread, not through the mapping,
+/// so a file truncated meanwhile cannot fault the daemon.
+fn rrdcached_rrd_open(display: &str, path: &Path, read_write: bool) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{FileExt, OpenOptionsExt};
+    let errno = |error: &std::io::Error| rrdcached_strerror(error.raw_os_error().unwrap_or(0));
+    // O_NONBLOCK keeps a planted FIFO from blocking; it fails at mmap.
+    let file = OpenOptions::new()
+        .read(true)
+        .write(read_write)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| format!("opening '{display}': {}", errno(&error)))?;
+    let length = file
+        .metadata()
+        .map_err(|error| format!("fstat '{display}': {}", errno(&error)))?
+        .len();
+    let length = usize::try_from(length).map_err(|_| {
+        format!(
+            "mmaping file '{display}': {}",
+            rrdcached_strerror(libc::EOVERFLOW)
+        )
+    })?;
+    let protection = if read_write {
+        libc::PROT_READ | libc::PROT_WRITE
+    } else {
+        libc::PROT_READ
+    };
+    // SAFETY: a new shared mapping of an open descriptor; it is never read
+    // and is unmapped at once. Only its errno is wanted.
+    let mapped = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            length,
+            protection,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            0,
+        )
+    };
+    if mapped == libc::MAP_FAILED {
+        let error = std::io::Error::last_os_error();
+        return Err(format!("mmaping file '{display}': {}", errno(&error)));
+    }
+    // SAFETY: `mapped` and `length` come from the successful mmap above.
+    unsafe { libc::munmap(mapped, length) };
+    // stat_head_t: cookie[4], version[5], float_cookie at 16, then ds_cnt,
+    // rra_cnt, pdp_step and par[10], 128 bytes in all.
+    let mut header = [0_u8; 128];
+    if length < header.len() || file.read_exact_at(&mut header, 0).is_err() {
+        return Err("reached EOF while loading header rrd->stat_head".to_owned());
+    }
+    if header[..4] != *b"RRD\0" {
+        return Err(format!("'{display}' is not an RRD file"));
+    }
+    let float_cookie = f64::from_ne_bytes(header[16..24].try_into().expect("eight bytes"));
+    if float_cookie != 8.642135e130 {
+        return Err("This RRD was created on another architecture".to_owned());
+    }
+    let version = header[4..9]
+        .split(|byte| *byte == 0)
+        .next()
+        .unwrap_or_default();
+    let version = String::from_utf8_lossy(version);
+    let number = version
+        .trim_start()
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .fold(0_u64, |number, digit| {
+            number
+                .saturating_mul(10)
+                .saturating_add(u64::from(digit - b'0'))
+        });
+    if number > 5 {
+        return Err(format!("can't handle RRD file version {version}"));
+    }
+    Ok(())
+}
+
+/// handle_request_update's checks for a file not yet cached
+/// (rrd_daemon.c:1704-1764).
+fn rrdcached_update_target(display: &str, path: &Path) -> Result<rondi::RrdInfo, String> {
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+            return Err(format!("No such file: {display}"));
+        }
+        Err(error) => {
+            return Err(format!(
+                "stat failed with error {}.",
+                error.raw_os_error().unwrap_or(0)
+            ));
+        }
+    };
+    if !metadata.is_file() {
+        return Err(format!("Not a regular file: {display}"));
+    }
+    let readable = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())
+        .map_err(|error| error.to_string())?;
+    // SAFETY: the CString is NUL terminated and outlives the call.
+    if unsafe { libc::access(readable.as_ptr(), libc::R_OK | libc::W_OK) } != 0 {
+        let error = std::io::Error::last_os_error();
+        return Err(format!(
+            "Cannot read/write {display}: {}",
+            rrdcached_strerror(error.raw_os_error().unwrap_or(0))
+        ));
+    }
+    rrdcached_rrd_open(display, path, false).map_err(|error| format!("RRD Error: {error}"))?;
+    rondi::inspect_rrd_file(path).map_err(|error| format!("RRD Error: {error}"))
 }
 
 /// Reading the RRD can wait on another process's file lock, so callers do it
@@ -1198,7 +1412,17 @@ pub async fn run(args: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (stream, _) = accepted?;
+                let (stream, _) = match accepted {
+                    Ok(accepted) => accepted,
+                    // listen_thread_main logs a failed accept(2) and keeps
+                    // listening (rrd_daemon.c:4395). The pause stops an
+                    // exhausted descriptor table from spinning the loop.
+                    Err(error) => {
+                        tracing::error!(error = %error, "server_accept_failed");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                };
                 let sender = tx.clone();
                 let request_store = Arc::clone(&store);
                 connections.spawn(async move {
@@ -1255,16 +1479,19 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
             .with_env_filter(filter)
             .try_init();
     }
-    let _store = Store::open(&args.root)?;
-    let root = std::fs::canonicalize(&args.root)?;
-    // RRDtool strips trailing slashes from -b before joining request names.
-    let echo_base = match args.root.to_string_lossy().trim_end_matches('/') {
-        "" => root.clone(),
-        base => PathBuf::from(base),
-    };
+    // Without -b upstream has no base directory, so nothing is locked or
+    // created in /tmp on its behalf.
+    let _store = args.root.as_deref().map(Store::open).transpose()?;
+    let base = RrdcachedBase::new(args.root.as_deref(), args.base_only)?;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 && !base.confined() {
+        // Upstream logs nothing here; a root daemon without -B lets any
+        // client name any file.
+        tracing::warn!("rrdcached_running_as_root_without_base_only");
+    }
     let stats = Arc::new(RrdcachedStats::default());
     let (mut queue, had_journal) = RrdcachedQueue::open(
-        &root,
+        &base,
         args.journal_directory.as_deref(),
         args.max_pending_bytes,
         args.write_timeout_seconds,
@@ -1335,7 +1562,7 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
     {
         std::fs::set_permissions(&args.socket, std::fs::Permissions::from_mode(socket_mode))?;
     }
-    tracing::info!(root = %root.display(), socket = %args.socket.display(), "rrdcached_started");
+    tracing::info!(root = %base.root.display(), socket = %args.socket.display(), "rrdcached_started");
     let mut connections = JoinSet::new();
     let (shutdown_sender, shutdown) = tokio::sync::watch::channel(false);
     let flush_interval = Duration::from_secs(args.flush_interval_seconds.max(1));
@@ -1344,9 +1571,18 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let (stream, _) = accepted?;
-                let root = root.clone();
-                let echo_base = echo_base.clone();
+                let (stream, _) = match accepted {
+                    Ok(accepted) => accepted,
+                    // listen_thread_main logs a failed accept(2) and keeps
+                    // listening (rrd_daemon.c:4395). The pause stops an
+                    // exhausted descriptor table from spinning the loop.
+                    Err(error) => {
+                        tracing::error!(error = %error, "rrdcached_accept_failed");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                };
+                let base = base.clone();
                 let stats = Arc::clone(&stats);
                 let queue = Arc::clone(&queue);
                 let no_overwrite = args.no_overwrite;
@@ -1354,7 +1590,7 @@ pub async fn run_rrdcached(args: RrdcachedConfig) -> Result<(), Box<dyn std::err
                 let socket_commands = args.socket_commands.clone();
                 let shutdown = shutdown.clone();
                 connections.spawn(async move {
-                    if let Err(error) = serve_rrdcached_connection(stream, root, echo_base, stats, queue, no_overwrite, allow_recursive_mkdir, socket_commands, shutdown).await {
+                    if let Err(error) = serve_rrdcached_connection(stream, base, stats, queue, no_overwrite, allow_recursive_mkdir, socket_commands, shutdown).await {
                         tracing::warn!(error = %error, "rrdcached_connection_failed");
                     }
                 });
@@ -1488,11 +1724,160 @@ where
     Ok(length)
 }
 
+const RRDCACHED_CONTEXT_CLIENT: u8 = 1;
+const RRDCACHED_CONTEXT_BATCH: u8 = 2;
+const RRDCACHED_CONTEXT_JOURNAL: u8 = 4;
+const RRDCACHED_CONTEXT_ANY: u8 = 0x7f;
+/// RBUF_SIZE: a longer line fills the read buffer and upstream drops the
+/// connection.
+const RRDCACHED_LINE_MAX: usize = 2 * RRD_CMD_MAX;
+/// Rondi bounds the error text a BATCH can accumulate; upstream does not.
+const RRDCACHED_BATCH_ERRORS_MAX: usize = 16 * 1024 * 1024;
+
+/// rrd_daemon.c list_of_commands: name, permitted contexts, and usage text.
+const RRDCACHED_COMMAND_TABLE: &[(&str, u8, &str)] = &[
+    (
+        "UPDATE",
+        RRDCACHED_CONTEXT_ANY,
+        "UPDATE <filename> <values> [<values> ...]\n",
+    ),
+    ("WROTE", RRDCACHED_CONTEXT_JOURNAL, ""),
+    (
+        "TUNE",
+        RRDCACHED_CONTEXT_CLIENT,
+        "TUNE <filename> [options]\n",
+    ),
+    (
+        "DUMP",
+        RRDCACHED_CONTEXT_CLIENT,
+        "DUMP <filename> [-h none|xsd|dtd]\n",
+    ),
+    (
+        "FLUSH",
+        RRDCACHED_CONTEXT_CLIENT | RRDCACHED_CONTEXT_BATCH,
+        "FLUSH <filename>\n",
+    ),
+    ("FLUSHALL", RRDCACHED_CONTEXT_CLIENT, "FLUSHALL\n"),
+    ("PENDING", RRDCACHED_CONTEXT_CLIENT, "PENDING <filename>\n"),
+    ("FORGET", RRDCACHED_CONTEXT_ANY, "FORGET <filename>\n"),
+    ("QUEUE", RRDCACHED_CONTEXT_CLIENT, "QUEUE\n"),
+    ("STATS", RRDCACHED_CONTEXT_CLIENT, "STATS\n"),
+    ("HELP", RRDCACHED_CONTEXT_CLIENT, "HELP [<command>]\n"),
+    ("PING", RRDCACHED_CONTEXT_CLIENT, "PING\n"),
+    ("BATCH", RRDCACHED_CONTEXT_CLIENT, "BATCH\n"),
+    (".", RRDCACHED_CONTEXT_BATCH, ""),
+    (
+        "FETCH",
+        RRDCACHED_CONTEXT_CLIENT,
+        "FETCH <file> <CF> [<start> [<end>] [<column>...]]\n",
+    ),
+    (
+        "FETCHBIN",
+        RRDCACHED_CONTEXT_CLIENT,
+        "FETCHBIN <file> <CF> [<start> [<end>] [<column>...]]\n",
+    ),
+    ("INFO", RRDCACHED_CONTEXT_CLIENT, "INFO <filename>\n"),
+    (
+        "FIRST",
+        RRDCACHED_CONTEXT_CLIENT,
+        "FIRST <filename> <rra index>\n",
+    ),
+    ("LAST", RRDCACHED_CONTEXT_CLIENT, "LAST <filename>\n"),
+    (
+        "CREATE",
+        RRDCACHED_CONTEXT_CLIENT | RRDCACHED_CONTEXT_BATCH,
+        "CREATE <filename> [-b start] [-s step] [-O] <DS definitions> <RRA definitions>\n",
+    ),
+    (
+        "LIST",
+        RRDCACHED_CONTEXT_CLIENT,
+        "LIST [RECURSIVE] /[<path>]\n",
+    ),
+    (
+        "SUSPEND",
+        RRDCACHED_CONTEXT_CLIENT | RRDCACHED_CONTEXT_BATCH,
+        "SUSPEND <filename>\n",
+    ),
+    (
+        "RESUME",
+        RRDCACHED_CONTEXT_CLIENT | RRDCACHED_CONTEXT_BATCH,
+        "RESUME <filename>\n",
+    ),
+    (
+        "SUSPENDALL",
+        RRDCACHED_CONTEXT_CLIENT | RRDCACHED_CONTEXT_BATCH,
+        "SUSPENDALL\n",
+    ),
+    (
+        "RESUMEALL",
+        RRDCACHED_CONTEXT_CLIENT | RRDCACHED_CONTEXT_BATCH,
+        "RESUMEALL\n",
+    ),
+    (
+        "QUIT",
+        RRDCACHED_CONTEXT_CLIENT | RRDCACHED_CONTEXT_BATCH,
+        "QUIT\n",
+    ),
+];
+
+/// find_command: a case-insensitive match on the whole field.
+fn rrdcached_find_command(command: &str) -> Option<&'static (&'static str, u8, &'static str)> {
+    RRDCACHED_COMMAND_TABLE
+        .iter()
+        .find(|(name, _, _)| name.eq_ignore_ascii_case(command))
+}
+
+/// socket_permission_check for a command-table name: HELP and QUIT are always
+/// allowed, `.` needs BATCH, and no `-P` list allows everything.
+pub fn rrdcached_command_permitted(allowed: Option<&[String]>, command: &str) -> bool {
+    let Some(allowed) = allowed else {
+        return true;
+    };
+    let name = if command == "." { "BATCH" } else { command };
+    name.eq_ignore_ascii_case("HELP")
+        || name.eq_ignore_ascii_case("QUIT")
+        || allowed
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(name))
+}
+
+/// handle_request's checks, in its order, for a command field already split
+/// by rrdc_proto::next_field. Returns the table name to dispatch to.
+pub fn rrdcached_route(
+    command: &str,
+    in_batch: bool,
+    allowed: Option<&[String]>,
+) -> Result<&'static str, String> {
+    let Some(&(name, context, _)) = rrdcached_find_command(command) else {
+        return Err(format!("Unknown command: {command}"));
+    };
+    if !rrdcached_command_permitted(allowed, name) {
+        return Err("Permission denied.".to_owned());
+    }
+    let wanted = if in_batch {
+        RRDCACHED_CONTEXT_BATCH
+    } else {
+        RRDCACHED_CONTEXT_CLIENT
+    };
+    if context & wanted == 0 {
+        return Err(format!("Can't use '{command}' here."));
+    }
+    Ok(name)
+}
+
+/// What a handler asks of the connection, mirroring a handler's send_response
+/// followed by its return code.
+enum RrdcachedReply {
+    Text(String),
+    Bytes(Vec<u8>),
+    TextThenClose(String),
+    Close,
+}
+
 #[allow(clippy::too_many_arguments)] // Per-connection settings fixed at startup.
 async fn serve_rrdcached_connection(
     stream: UnixStream,
-    root: PathBuf,
-    echo_base: PathBuf,
+    base: RrdcachedBase,
     stats: Arc<RrdcachedStats>,
     queue: Arc<Mutex<RrdcachedQueue>>,
     no_overwrite: bool,
@@ -1503,220 +1888,178 @@ async fn serve_rrdcached_connection(
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     let mut line = String::new();
+    // batch_start and batch_cmd plus the buffered error lines.
+    let mut batch: Option<(i64, u64, String)> = None;
     loop {
         line.clear();
         let read = tokio::select! {
-            read = read_bounded_async_line(&mut reader, &mut line, 1024 * 1024) => read?,
+            read = read_bounded_async_line(&mut reader, &mut line, RRDCACHED_LINE_MAX) => read?,
             _ = shutdown.wait_for(|stopping| *stopping) => return Ok(()),
         };
         if read == 0 {
             return Ok(());
         }
-        if line
-            .split_ascii_whitespace()
-            .next()
-            .is_some_and(|command| command.eq_ignore_ascii_case("FETCHBIN"))
-        {
-            if socket_commands
-                .as_deref()
-                .is_some_and(|allowed| !allowed.iter().any(|candidate| candidate == "FETCHBIN"))
-            {
-                writer.write_all(b"-1 Permission denied.\n").await?;
+        let mut rest = Some(strip_line_end(&line));
+        // handle_request drops the connection when no command field parses.
+        let Some(command) = next_field(&mut rest) else {
+            return Ok(());
+        };
+        let buffered = batch.is_some();
+        let now = batch
+            .as_mut()
+            .map_or_else(wall_time_seconds, |(start, count, _)| {
+                *count += 1;
+                *start
+            });
+        let reply = match rrdcached_route(&command, buffered, socket_commands.as_deref()) {
+            Err(error) => RrdcachedReply::Text(format!("-1 {error}\n")),
+            Ok("BATCH") => {
+                batch = Some((wall_time_seconds(), 0, String::new()));
+                RrdcachedReply::Text("0 Go ahead.  End with dot '.' on its own line.\n".to_owned())
+            }
+            Ok(".") => {
+                let (_, _, errors) = batch.take().unwrap_or_default();
+                RrdcachedReply::Text(format!("{} errors\n{errors}", errors.matches('\n').count()))
+            }
+            Ok("FETCHBIN") => {
+                RrdcachedReply::Bytes(handle_rrdcached_fetchbin(&base, rest, &stats, &queue))
+            }
+            Ok(name) => handle_rrdcached_line(
+                &base,
+                name,
+                rest,
+                &stats,
+                &queue,
+                no_overwrite,
+                allow_recursive_mkdir,
+                now,
+            ),
+        };
+        let (text, close) = match reply {
+            RrdcachedReply::Close => return Ok(()),
+            RrdcachedReply::Bytes(bytes) => {
+                writer.write_all(&bytes).await?;
                 writer.flush().await?;
                 continue;
             }
-            let response = handle_rrdcached_fetchbin(&root, &line, &stats, &queue);
-            writer.write_all(&response).await?;
-            writer.flush().await?;
-            continue;
-        }
-        let Some(response) = handle_rrdcached_line(
-            &root,
-            &echo_base,
-            &line,
-            &stats,
-            &queue,
-            no_overwrite,
-            allow_recursive_mkdir,
-            socket_commands.as_deref(),
-        ) else {
-            return Ok(());
+            RrdcachedReply::Text(text) => (text, false),
+            RrdcachedReply::TextThenClose(text) => (text, true),
         };
-        let is_dump = line
-            .split_ascii_whitespace()
-            .next()
-            .is_some_and(|command| command.eq_ignore_ascii_case("DUMP"));
-        let dump_succeeded = is_dump && !response.starts_with("-1 ");
-        writer.write_all(response.as_bytes()).await?;
-        writer.flush().await?;
-        if dump_succeeded {
-            return Ok(());
-        }
-        if line.trim().eq_ignore_ascii_case("BATCH") && response.starts_with("0 Go ahead.") {
-            let mut errors = Vec::new();
-            let mut command_number = 0_u64;
-            loop {
-                line.clear();
-                let read = tokio::select! {
-                    read = read_bounded_async_line(&mut reader, &mut line, 1024 * 1024) => read?,
-                    _ = shutdown.wait_for(|stopping| *stopping) => return Ok(()),
-                };
-                if read == 0 {
-                    return Ok(());
-                }
-                if line.trim() == "." {
-                    break;
-                }
-                command_number += 1;
-                if line.split_ascii_whitespace().next().is_some_and(|command| {
-                    command.eq_ignore_ascii_case("DUMP")
-                        || command.eq_ignore_ascii_case("TUNE")
-                        || command.eq_ignore_ascii_case("FETCHBIN")
-                }) {
-                    let command = line.split_ascii_whitespace().next().unwrap_or_default();
-                    errors.push(format!("{command_number} Can't use '{command}' here."));
-                    continue;
-                }
-                match handle_rrdcached_line(
-                    &root,
-                    &echo_base,
-                    &line,
-                    &stats,
-                    &queue,
-                    no_overwrite,
-                    allow_recursive_mkdir,
-                    socket_commands.as_deref(),
-                ) {
-                    Some(command_response) if command_response.starts_with('-') => {
-                        let message = command_response
-                            .split_once(' ')
-                            .map(|(_, message)| message.trim())
-                            .unwrap_or(command_response.trim());
-                        errors.push(format!("{command_number} {message}"));
+        // In a BATCH, send_response keeps only errors, numbered by command,
+        // until "." resets the batch and sends them.
+        match batch.as_mut().filter(|_| buffered) {
+            Some((_, count, errors)) => {
+                if let Some(message) = text.strip_prefix("-1 ") {
+                    if errors.len().saturating_add(message.len()) > RRDCACHED_BATCH_ERRORS_MAX {
+                        tracing::warn!("rrdcached_batch_errors_exceeded_limit");
+                        return Ok(());
                     }
-                    None => return Ok(()),
-                    _ => {}
+                    errors.push_str(&format!("{count} {message}"));
                 }
             }
-            let mut batch_response = format!("{} errors\n", errors.len());
-            for error in errors {
-                batch_response.push_str(&error);
-                batch_response.push('\n');
+            None => {
+                writer.write_all(text.as_bytes()).await?;
+                writer.flush().await?;
             }
-            writer.write_all(batch_response.as_bytes()).await?;
-            writer.flush().await?;
+        }
+        if close {
+            return Ok(());
         }
     }
 }
 
+/// Dispatch for a command that rrdcached_route accepted. `rest` is the request
+/// after the command field, still escaped.
 #[allow(clippy::too_many_arguments)] // Per-connection settings fixed at startup.
 fn handle_rrdcached_line(
-    root: &Path,
-    echo_base: &Path,
-    line: &str,
+    base: &RrdcachedBase,
+    command: &str,
+    rest: Option<&str>,
     stats: &RrdcachedStats,
     queue: &Mutex<RrdcachedQueue>,
     no_overwrite: bool,
     allow_recursive_mkdir: bool,
-    socket_commands: Option<&[String]>,
-) -> Option<String> {
-    let mut fields = rrdcached_fields(line);
-    let command = fields.first()?.to_ascii_uppercase();
-    let raw_command = fields.remove(0);
-    if let Some(allowed) = socket_commands {
-        let permission_name = if command == "." { "BATCH" } else { &command };
-        let known = matches!(
-            permission_name,
-            "UPDATE"
-                | "WROTE"
-                | "TUNE"
-                | "DUMP"
-                | "FLUSH"
-                | "FLUSHALL"
-                | "PENDING"
-                | "FORGET"
-                | "QUEUE"
-                | "STATS"
-                | "HELP"
-                | "PING"
-                | "BATCH"
-                | "FETCH"
-                | "FETCHBIN"
-                | "INFO"
-                | "FIRST"
-                | "LAST"
-                | "CREATE"
-                | "LIST"
-                | "SUSPEND"
-                | "RESUME"
-                | "SUSPENDALL"
-                | "RESUMEALL"
-                | "QUIT"
-                | "."
-        );
-        if known
-            && !matches!(permission_name, "HELP" | "QUIT")
-            && !allowed.iter().any(|candidate| candidate == permission_name)
-        {
-            return Some("-1 Permission denied.\n".to_owned());
-        }
+    now: i64,
+) -> RrdcachedReply {
+    let mut fields = Vec::new();
+    let mut cursor = rest;
+    while let Some(field) = next_field(&mut cursor) {
+        fields.push(field);
     }
-    let response = match command.as_str() {
-        "QUIT" if fields.is_empty() => return None,
+    // Handlers read only the fields they use, so extra ones are ignored.
+    let arity = match command {
+        "PING" | "QUIT" | "QUEUE" | "STATS" | "FLUSHALL" | "SUSPENDALL" | "RESUMEALL" => Some(0),
+        "FLUSH" | "PENDING" | "FORGET" | "INFO" | "LAST" | "SUSPEND" | "RESUME" => Some(1),
+        "FIRST" => Some(2),
+        _ => None,
+    };
+    if let Some(arity) = arity {
+        fields.truncate(arity);
+    }
+    let usage = || {
+        let syntax = rrdcached_find_command(command).map_or("", |(_, _, syntax)| *syntax);
+        format!("-1 Usage: {syntax}")
+    };
+    let response = match command {
+        "QUIT" => return RrdcachedReply::Close,
         "PING" if fields.is_empty() => "0 PONG\n".to_owned(),
         "UPDATE" => {
+            let Some(arguments) = rest else {
+                return RrdcachedReply::Text(usage());
+            };
+            // Upstream journals the request truncated at a NUL or at
+            // RRD_CMD_MAX while acting on all of it. Refusing such a request
+            // keeps replay equal to what was acknowledged.
+            if arguments.contains('\0') || arguments.len() > RRD_CMD_MAX - 1 {
+                return RrdcachedReply::Text(format!(
+                    "-1 Request must be under {RRD_CMD_MAX} bytes without NUL\n"
+                ));
+            }
+            let mut buffer = Some(arguments);
+            let Some(file) = next_field(&mut buffer) else {
+                return RrdcachedReply::Text(usage());
+            };
             stats.updates_received.fetch_add(1, Ordering::Relaxed);
-            if fields.is_empty() {
-                "-1 Usage: UPDATE <filename> <values> [<values> ...]\n".to_owned()
-            } else {
-                let arguments = rrdcached_request_arguments(line);
-                // Upstream journals the request truncated at a NUL or at
-                // RRD_CMD_MAX while acting on all of it. Refusing such a
-                // request keeps replay equal to what was acknowledged.
-                if arguments.contains('\0') || arguments.len() > RRD_CMD_MAX - 1 {
-                    return Some(format!(
-                        "-1 Request must be under {RRD_CMD_MAX} bytes without NUL\n"
-                    ));
-                }
-                let mut buffer = Some(arguments);
-                let file = rrdcached_buffer_field(&mut buffer).unwrap_or_default();
-                let mut samples = Vec::new();
-                while let Some(sample) = rrdcached_buffer_field(&mut buffer) {
-                    samples.push(sample);
-                }
-                match resolve_rrdcached_path(root, &file).and_then(|path| {
-                    let cached = queue
-                        .lock()
-                        .map_err(|_| "rrdcached queue lock poisoned".to_owned())?
-                        .known
-                        .contains(&path);
-                    // stat and rrd_open may block, so upstream reads a new
-                    // file before taking cache_lock again.
-                    let info = if cached {
-                        None
-                    } else {
-                        Some(inspect_rrdcached_target(&path)?)
-                    };
-                    queue
-                        .lock()
-                        .map_err(|_| "rrdcached queue lock poisoned".to_owned())?
-                        .update(
-                            path,
-                            info.as_ref(),
-                            &samples,
-                            Some(arguments.as_bytes()),
-                            wall_time_seconds(),
-                        )
-                }) {
-                    Ok(count) => format!("0 errors, enqueued {count} value(s).\n"),
-                    Err(error) => format!("-1 {error}\n"),
-                }
+            let mut samples = Vec::new();
+            while let Some(sample) = next_field(&mut buffer) {
+                samples.push(sample);
+            }
+            let display = base.abs(&file);
+            match base.target(&file).and_then(|path| {
+                let cached = queue
+                    .lock()
+                    .map_err(|_| "rrdcached queue lock poisoned".to_owned())?
+                    .known
+                    .contains(&path);
+                // stat and rrd_open may block, so upstream reads a new file
+                // before taking cache_lock again.
+                let info = if cached {
+                    None
+                } else {
+                    Some(rrdcached_update_target(&display, &path)?)
+                };
+                queue
+                    .lock()
+                    .map_err(|_| "rrdcached queue lock poisoned".to_owned())?
+                    .update(
+                        path,
+                        info.as_ref(),
+                        &samples,
+                        Some(arguments.as_bytes()),
+                        now,
+                    )
+            }) {
+                Ok(count) => format!("0 errors, enqueued {count} value(s).\n"),
+                Err(error) => format!("-1 {error}\n"),
             }
         }
         "FLUSH" if fields.len() == 1 => {
             stats.flushes_received.fetch_add(1, Ordering::Relaxed);
-            let echo = rrdcached_echo_path(echo_base, &fields[0]);
-            match resolve_rrdcached_path(root, &fields[0]) {
+            if let Err(error) = base.target(&fields[0]) {
+                return RrdcachedReply::Text(format!("-1 {error}\n"));
+            }
+            let echo = base.abs(&fields[0]);
+            match resolve_rrdcached_path(base, &fields[0]) {
                 Ok(path) => {
                     let (known, suspended) = queue
                         .lock()
@@ -1742,39 +2085,60 @@ fn handle_rrdcached_line(
                 .unwrap_or_default();
             for path in paths {
                 if let Err(error) = flush_rrdcached_path(&path, queue, stats) {
-                    return Some(format!("-1 {error}\n"));
+                    return RrdcachedReply::Text(format!("-1 {error}\n"));
                 }
             }
             "0 Started flush.\n".to_owned()
         }
-        "FORGET" if fields.len() == 1 => match resolve_rrdcached_path(root, &fields[0]) {
-            Ok(path) => match forget_rrdcached_path(&path, queue) {
-                Ok(true) => "0 Gone!\n".to_owned(),
-                Ok(false) => "-1 No such file or directory\n".to_owned(),
-                Err(error) => format!("-1 {error}\n"),
-            },
-            Err(_) => "-1 No such file or directory\n".to_owned(),
-        },
+        "FORGET" if fields.len() == 1 => {
+            if let Err(error) = base.target(&fields[0]) {
+                return RrdcachedReply::Text(format!("-1 {error}\n"));
+            }
+            match resolve_rrdcached_path(base, &fields[0]) {
+                Ok(path) => match forget_rrdcached_path(&path, queue) {
+                    Ok(true) => "0 Gone!\n".to_owned(),
+                    Ok(false) => "-1 No such file or directory\n".to_owned(),
+                    Err(error) => format!("-1 {error}\n"),
+                },
+                Err(_) => "-1 No such file or directory\n".to_owned(),
+            }
+        }
         "SUSPEND" if fields.len() == 1 => {
-            let echo = rrdcached_echo_path(echo_base, &fields[0]);
-            match resolve_rrdcached_path(root, &fields[0]) {
+            let echo = base.abs(&fields[0]);
+            match resolve_rrdcached_path(base, &fields[0]) {
                 Ok(path) => match suspend_rrdcached_path(&path, queue) {
                     Ok(SuspendResult::Changed) => format!("0 {echo} suspended\n"),
                     Ok(SuspendResult::Unchanged) => format!("0 {echo} already suspended\n"),
-                    Err(()) => format!("-1 {echo} - No such file or directory\n"),
+                    Err(()) => {
+                        return RrdcachedReply::TextThenClose(format!(
+                            "-1 {echo} - No such file or directory\n"
+                        ));
+                    }
                 },
-                Err(_) => format!("-1 {echo} - No such file or directory\n"),
+                Err(_) => {
+                    return RrdcachedReply::TextThenClose(format!(
+                        "-1 {echo} - No such file or directory\n"
+                    ));
+                }
             }
         }
         "RESUME" if fields.len() == 1 => {
-            let echo = rrdcached_echo_path(echo_base, &fields[0]);
-            match resolve_rrdcached_path(root, &fields[0]) {
+            let echo = base.abs(&fields[0]);
+            match resolve_rrdcached_path(base, &fields[0]) {
                 Ok(path) => match resume_rrdcached_path(&path, queue) {
                     Ok(SuspendResult::Changed) => format!("0 {echo} resumed\n"),
                     Ok(SuspendResult::Unchanged) => format!("0 {echo} not suspended\n"),
-                    Err(()) => format!("-1 {echo} - No such file or directory\n"),
+                    Err(()) => {
+                        return RrdcachedReply::TextThenClose(format!(
+                            "-1 {echo} - No such file or directory\n"
+                        ));
+                    }
                 },
-                Err(_) => format!("-1 {echo} - No such file or directory\n"),
+                Err(_) => {
+                    return RrdcachedReply::TextThenClose(format!(
+                        "-1 {echo} - No such file or directory\n"
+                    ));
+                }
             }
         }
         "SUSPENDALL" if fields.is_empty() => {
@@ -1786,7 +2150,7 @@ fn handle_rrdcached_line(
             format!("0 {count} rrds resumed\n")
         }
         "PENDING" if fields.len() == 1 => {
-            let path = rrdcached_pending_key(root, &fields[0]);
+            let path = rrdcached_pending_key(base, &fields[0]);
             let pending = queue
                 .lock()
                 .ok()
@@ -1807,7 +2171,9 @@ fn handle_rrdcached_line(
         "QUEUE" if fields.is_empty() => {
             let queue = match queue.lock() {
                 Ok(queue) => queue,
-                Err(_) => return Some("-1 rrdcached queue lock poisoned\n".to_owned()),
+                Err(_) => {
+                    return RrdcachedReply::Text("-1 rrdcached queue lock poisoned\n".to_owned());
+                }
             };
             let mut body = String::new();
             for path in &queue.pending_order {
@@ -1822,35 +2188,51 @@ fn handle_rrdcached_line(
             }
             format!("{} in queue.\n{body}", body.lines().count())
         }
-        "LAST" if fields.len() == 1 => match rrdcached_last(root, &fields[0], queue) {
+        "LAST" if fields.len() == 1 => match rrdcached_last(base, &fields[0], queue) {
             Ok(timestamp) => format!("0 {timestamp}\n"),
             Err(error) => format!("-1 {error}\n"),
         },
         "FIRST" if fields.len() == 2 => {
-            let index = fields[1].parse::<usize>();
-            match (resolve_rrdcached_path(root, &fields[0]), index) {
-                (Ok(path), Ok(index)) => match rondi::first_rrd_time(path, index) {
-                    Ok(timestamp) => format!("0 {timestamp}\n"),
-                    Err(error) => format!("-1 {error}\n"),
-                },
-                (_, Err(_)) => format!("-1 Invalid index specified: {}\n", fields[1]),
-                (Err(error), _) => format!("-1 {error}\n"),
+            let display = base.abs(&fields[0]);
+            let path = match base.target(&fields[0]) {
+                Ok(path) => path,
+                Err(error) => return RrdcachedReply::Text(format!("-1 {error}\n")),
+            };
+            let Some(index) = c_strtol_exact(&fields[1])
+                .filter(|index| (0..=i64::from(i32::MAX)).contains(index))
+                .and_then(|index| usize::try_from(index).ok())
+            else {
+                return RrdcachedReply::Text(format!(
+                    "-1 Invalid index specified: {}\n",
+                    fields[1]
+                ));
+            };
+            match rrdcached_rrd_open(&display, &path, false)
+                .and_then(|()| rondi::inspect_rrd_file(&path).map_err(|error| error.to_string()))
+                .and_then(|info| {
+                    if index >= info.archives.len() {
+                        return Err("invalid rraindex number".to_owned());
+                    }
+                    rondi::first_rrd_time(&path, index).map_err(|error| error.to_string())
+                }) {
+                Ok(timestamp) => format!("0 {timestamp}\n"),
+                Err(error) => format!("-1 RRD Error: {error}\n"),
             }
         }
-        "INFO" if fields.len() == 1 => match rrdcached_info(root, echo_base, &fields[0]) {
+        "INFO" if fields.len() == 1 => match rrdcached_info(base, &fields[0]) {
             Ok(response) => response,
-            Err(error) => format!("-1 RRD Error: {error}\n"),
+            Err(error) => format!("-1 {error}\n"),
         },
         "LIST" => {
-            match rrdcached_list(root, &fields.iter().map(String::as_str).collect::<Vec<_>>()) {
+            match rrdcached_list(base, &fields.iter().map(String::as_str).collect::<Vec<_>>()) {
                 Ok(response) => response,
                 Err(error) => format!("-1 {error}\n"),
             }
         }
         "FETCH" if fields.len() >= 2 => {
-            match resolve_rrdcached_path(root, &fields[0]).and_then(|path| {
+            match base.target(&fields[0]).and_then(|path| {
                 flush_rrdcached_path(&path, queue, stats)?;
-                rrdcached_fetch(root, &fields.iter().map(String::as_str).collect::<Vec<_>>())
+                rrdcached_fetch(base, &fields.iter().map(String::as_str).collect::<Vec<_>>())
             }) {
                 Ok(body) => format!("{} Success\n{body}", body.lines().count()),
                 Err(error) => format!("-1 {error}\n"),
@@ -1859,7 +2241,9 @@ fn handle_rrdcached_line(
         "STATS" if fields.is_empty() => {
             let queue = match queue.lock() {
                 Ok(queue) => queue,
-                Err(_) => return Some("-1 rrdcached queue lock poisoned\n".to_owned()),
+                Err(_) => {
+                    return RrdcachedReply::Text("-1 rrdcached queue lock poisoned\n".to_owned());
+                }
             };
             format!(
                 "9 Statistics follow\nQueueLength: {}\nUpdatesReceived: {}\nFlushesReceived: {}\nUpdatesWritten: {}\nDataSetsWritten: {}\nTreeNodesNumber: {}\nTreeDepth: {}\nJournalBytes: {}\nJournalRotate: {}\n",
@@ -1879,7 +2263,7 @@ fn handle_rrdcached_line(
             )
         }
         "CREATE" => match rrdcached_create(
-            root,
+            base,
             &fields.iter().map(String::as_str).collect::<Vec<_>>(),
             no_overwrite,
             allow_recursive_mkdir,
@@ -1888,36 +2272,67 @@ fn handle_rrdcached_line(
             Err(error) => format!("-1 {error}\n"),
         },
         "DUMP" if !fields.is_empty() => {
-            match resolve_rrdcached_path(root, &fields[0]).and_then(|path| {
-                flush_rrdcached_path(&path, queue, stats)?;
-                // RRDtool 1.11.0's daemon handler reads only the filename and
-                // always calls rrd_dump_cb_r with the default DTD header.
-                // Trailing header options are therefore ignored on the wire.
-                rondi::dump_rrd_file_with_header(path, rondi::RrdDumpHeader::Dtd)
+            let given = &fields[0];
+            let path = match base.target(given) {
+                Ok(path) => path,
+                Err(error) => return RrdcachedReply::Text(format!("-1 {error}\n")),
+            };
+            // A non-regular file reports whatever errno holds, which in a
+            // fresh connection thread is 0.
+            match std::fs::metadata(&path) {
+                Ok(metadata) if metadata.is_file() => {}
+                result => {
+                    let errno = result
+                        .err()
+                        .and_then(|error| error.raw_os_error())
+                        .unwrap_or(0);
+                    return RrdcachedReply::Text(format!(
+                        "-1 {given}: failed to stat: {}\n",
+                        rrdcached_strerror(errno)
+                    ));
+                }
+            }
+            if flush_rrdcached_path(&path, queue, stats).is_err() {
+                return RrdcachedReply::Text(format!("-1 {given}: failed to flush\n"));
+            }
+            // RRDtool 1.11.0's daemon handler reads only the filename and
+            // always calls rrd_dump_cb_r with the default DTD header.
+            // Trailing header options are therefore ignored on the wire.
+            match rrdcached_rrd_open(&base.abs(given), &path, false).and_then(|()| {
+                rondi::dump_rrd_file_with_header(&path, rondi::RrdDumpHeader::Dtd)
                     .map_err(|error| error.to_string())
             }) {
-                Ok(xml) => xml,
-                Err(error) => format!("-1 {error}\n"),
+                Ok(xml) => return RrdcachedReply::TextThenClose(xml),
+                Err(error) => format!("-1 {given}: failed to relay dump: {error}\n"),
             }
         }
-        "DUMP" => "-1 Usage: DUMP <filename> [-h none|xsd|dtd]\n".to_owned(),
         "TUNE" if fields.len() >= 2 => {
             let argc = match fields[1].parse::<usize>() {
                 Ok(argc) if (1..=65_536).contains(&argc) => argc,
                 _ => {
-                    return Some(format!(
+                    return RrdcachedReply::Text(format!(
                         "-1 Invalid argument count specified: {}\n",
                         fields[1]
                     ));
                 }
             };
             if fields.len() - 2 > argc {
-                return Some(format!("-1 Too many arguments (expected {argc})\n"));
+                return RrdcachedReply::Text(format!("-1 Too many arguments (expected {argc})\n"));
             }
             if fields.len() - 2 != argc {
-                return Some(format!("-1 Invalid argument count specified: {argc}\n"));
+                return RrdcachedReply::Text(format!(
+                    "-1 Invalid argument count specified: {argc}\n"
+                ));
             }
-            match resolve_rrdcached_path(root, &fields[0]).and_then(|path| {
+            let display = base.abs(&fields[0]);
+            let path = match base.target(&fields[0]) {
+                Ok(path) => path,
+                Err(error) => return RrdcachedReply::Text(format!("-1 {error}\n")),
+            };
+            match Ok(path).and_then(|path: PathBuf| {
+                rrdcached_rrd_open(&display, &path, true)?;
+                // rrd_tune still opens by path; this checks the file it names.
+                drop(open_rrdcached_write_target(&path)?);
                 tune_rrdcached_file(
                     &path,
                     &fields[3..].iter().map(String::as_str).collect::<Vec<_>>(),
@@ -1927,80 +2342,10 @@ fn handle_rrdcached_line(
                 Err(error) => format!("-1 Got error {error}\n"),
             }
         }
-        "TUNE" => "-1 Usage: TUNE <filename> [options]\n".to_owned(),
-        "FIRST" => "-1 Usage: FIRST <filename> <rra index>\n".to_owned(),
-        "BATCH" if fields.is_empty() => {
-            "0 Go ahead.  End with dot '.' on its own line.\n".to_owned()
-        }
-        "BATCH" => "-1 Usage: BATCH\n".to_owned(),
         "HELP" => rrdcached_help(&fields.iter().map(String::as_str).collect::<Vec<_>>()),
-        // Upstream handlers read only the fields they need, so extra
-        // arguments are ignored and a missing filename gets the usage text.
-        _ => {
-            let needed = match command.as_str() {
-                "PING" | "QUIT" | "QUEUE" | "STATS" | "FLUSHALL" | "SUSPENDALL" | "RESUMEALL" => {
-                    Some(0)
-                }
-                "FLUSH" | "PENDING" | "FORGET" | "INFO" | "LAST" | "SUSPEND" | "RESUME" => Some(1),
-                _ => None,
-            };
-            if let Some(needed) = needed.filter(|needed| fields.len() > *needed) {
-                let mut retry = command;
-                for field in &fields[..needed] {
-                    retry.push(' ');
-                    retry.push_str(&field.replace('\\', "\\\\").replace(' ', "\\ "));
-                }
-                return handle_rrdcached_line(
-                    root,
-                    echo_base,
-                    &retry,
-                    stats,
-                    queue,
-                    no_overwrite,
-                    allow_recursive_mkdir,
-                    socket_commands,
-                );
-            }
-            match command.as_str() {
-                "FETCH" => {
-                    "-1 Usage: FETCH <file> <CF> [<start> [<end>] [<column>...]]\n".to_owned()
-                }
-                _ if needed == Some(1) => format!("-1 Usage: {command} <filename>\n"),
-                "WROTE" => format!("-1 Can't use '{raw_command}' here.\n"),
-                _ => format!("-1 Unknown command: {raw_command}\n"),
-            }
-        }
+        _ => usage(),
     };
-    Some(response)
-}
-
-fn rrdcached_fields(line: &str) -> Vec<String> {
-    let mut fields = Vec::new();
-    let mut field = String::new();
-    let mut escaped = false;
-    for character in line.trim_end_matches(['\r', '\n']).chars() {
-        if escaped {
-            field.push(character);
-            escaped = false;
-        } else {
-            match character {
-                '\\' => escaped = true,
-                ' ' => {
-                    if !field.is_empty() {
-                        fields.push(std::mem::take(&mut field));
-                    }
-                }
-                _ => field.push(character),
-            }
-        }
-    }
-    if escaped {
-        field.push('\\');
-    }
-    if !field.is_empty() {
-        fields.push(field);
-    }
-    fields
+    RrdcachedReply::Text(response)
 }
 
 fn rrdcached_help(fields: &[&str]) -> String {
@@ -2138,10 +2483,11 @@ fn rrdcached_help(fields: &[&str]) -> String {
     response
 }
 
-fn rrdcached_info(root: &Path, echo_base: &Path, filename: &str) -> Result<String, String> {
-    let path = resolve_rrdcached_path(root, filename)?;
-    let echo = rrdcached_echo_path(echo_base, filename);
-    let info = rondi::inspect_rrd_file(&path).map_err(|error| error.to_string())?;
+fn rrdcached_info(base: &RrdcachedBase, filename: &str) -> Result<String, String> {
+    let path = base.target(filename)?;
+    let echo = base.abs(filename);
+    rrdcached_rrd_open(&echo, &path, false).map_err(|error| format!("RRD Error: {error}"))?;
+    let info = rondi::inspect_rrd_file(&path).map_err(|error| format!("RRD Error: {error}"))?;
     let mut lines = vec![
         format!("filename 2 {echo}"),
         format!("rrd_version 2 {}", info.version),
@@ -2215,28 +2561,22 @@ fn rrdcached_info(root: &Path, echo_base: &Path, filename: &str) -> Result<Strin
 }
 
 fn rrdcached_last(
-    root: &Path,
+    base: &RrdcachedBase,
     filename: &str,
     queue: &Mutex<RrdcachedQueue>,
 ) -> Result<i64, String> {
-    let path = resolve_rrdcached_path(root, filename)?;
-    let info = rondi::inspect_rrd_file(&path).map_err(|error| error.to_string())?;
-    let pending_timestamp = queue
+    let path = base.target(filename)?;
+    rrdcached_rrd_open(&base.abs(filename), &path, false)
+        .map_err(|error| format!("RRD Error: {error}"))?;
+    let info = rondi::inspect_rrd_file(&path).map_err(|error| format!("RRD Error: {error}"))?;
+    // handle_request_last prefers the cache's newest accepted stamp.
+    let cached_stamp = queue
         .lock()
         .map_err(|_| "rrdcached queue lock poisoned".to_owned())?
-        .pending
-        .get(&path)
-        .and_then(|entries| entries.last())
-        .and_then(|entry| entry.samples.last())
-        .and_then(|sample| sample.split_once(':'))
-        .map(|(timestamp, _)| {
-            timestamp
-                .parse::<f64>()
-                .map(|timestamp| timestamp as i64)
-                .map_err(|error| format!("Invalid timestamp in pending update: {error}"))
-        })
-        .transpose()?;
-    let mut timestamp = pending_timestamp.unwrap_or(info.last_update);
+        .known
+        .node_mut(&path)
+        .map(|node| node.last_update_stamp as i64);
+    let mut timestamp = cached_stamp.unwrap_or(info.last_update);
     let step = i64::try_from(info.step).map_err(|error| error.to_string())?;
     timestamp -= timestamp % step;
     if timestamp < 1 {
@@ -2367,7 +2707,7 @@ fn tune_rrdcached_file(path: &Path, arguments: &[&str]) -> Result<(), String> {
     rondi::tune_rrd_data_sources(path, &changes).map_err(|error| error.to_string())
 }
 
-fn rrdcached_list(root: &Path, fields: &[&str]) -> Result<String, String> {
+fn rrdcached_list(base: &RrdcachedBase, fields: &[&str]) -> Result<String, String> {
     let (recursive, requested) = match fields {
         [path] => (false, *path),
         ["RECURSIVE", path] => (true, *path),
@@ -2376,11 +2716,19 @@ fn rrdcached_list(root: &Path, fields: &[&str]) -> Result<String, String> {
     if !requested.starts_with('/') {
         return Err("Usage: LIST [RECURSIVE] /[<path>]".to_owned());
     }
-    let root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
+    if base.given.is_none() {
+        return Err("No base directory defined".to_owned());
+    }
+    let root = base.root.clone();
     let relative = requested.trim_start_matches('/');
     let directory = root.join(relative);
-    let canonical = std::fs::canonicalize(&directory)
-        .map_err(|error| format!("List {}: {error}", directory.display()))?;
+    let canonical = std::fs::canonicalize(&directory).map_err(|error| {
+        format!(
+            "List {}: {}",
+            directory.display(),
+            rrdcached_strerror(error.raw_os_error().unwrap_or(0))
+        )
+    })?;
     if !canonical.starts_with(&root) {
         return Err(format!("Cannot read: {}", directory.display()));
     }
@@ -2426,8 +2774,8 @@ fn collect_rrdcached_list(
     Ok(())
 }
 
-fn rrdcached_fetch(root: &Path, fields: &[&str]) -> Result<String, String> {
-    let (result, selected) = rrdcached_fetch_data(root, fields)?;
+fn rrdcached_fetch(base: &RrdcachedBase, fields: &[&str]) -> Result<String, String> {
+    let (result, selected) = rrdcached_fetch_data(base, fields)?;
     let mut body = format!(
         "FlushVersion: 1\nStart: {}\nEnd: {}\nStep: {}\nDSCount: {}\nDSName: {}\n",
         result.start,
@@ -2463,13 +2811,34 @@ fn format_c_exponent17(value: f64) -> String {
 }
 
 fn rrdcached_fetch_data(
-    root: &Path,
+    base: &RrdcachedBase,
     fields: &[&str],
 ) -> Result<(rondi::RrdFetchResult, Vec<usize>), String> {
     if fields.len() < 2 {
         return Err("Usage: FETCH <file> <CF> [<start> [<end>] [<column>...]]".to_owned());
     }
-    let path = resolve_rrdcached_path(root, fields[0])?;
+    let path = base.target(fields[0])?;
+    // rrd_fetch_r converts the CF before rrd_fetch_fn opens the file.
+    const CONSOLIDATION_FUNCTIONS: [&str; 10] = [
+        "AVERAGE",
+        "MIN",
+        "MAX",
+        "LAST",
+        "HWPREDICT",
+        "MHWPREDICT",
+        "DEVPREDICT",
+        "SEASONAL",
+        "DEVSEASONAL",
+        "FAILURES",
+    ];
+    if !CONSOLIDATION_FUNCTIONS.contains(&fields[1]) {
+        return Err(format!(
+            "rrd_fetch_r failed: unknown consolidation function '{}'",
+            fields[1]
+        ));
+    }
+    rrdcached_rrd_open(&base.abs(fields[0]), &path, false)
+        .map_err(|error| format!("rrd_fetch_r failed: {error}"))?;
     let info = rondi::inspect_rrd_file(&path).map_err(|error| error.to_string())?;
     let start = fields
         .get(2)
@@ -2481,8 +2850,14 @@ fn rrdcached_fetch_data(
         .map(|value| value.parse::<i64>().map_err(|error| error.to_string()))
         .transpose()?
         .unwrap_or(info.last_update);
-    let result = rondi::fetch_rrd_file(&path, fields[1], start, end, 1)
-        .map_err(|error| error.to_string())?;
+    let result = rondi::fetch_rrd_file(&path, fields[1], start, end, 1).map_err(|error| {
+        let error = error.to_string();
+        if error.contains("no archive matching consolidation function") {
+            "rrd_fetch_r failed: the RRD does not contain an RRA matching the chosen CF".to_owned()
+        } else {
+            error
+        }
+    })?;
     let selected = if fields.len() > 4 {
         fields[4..]
             .iter()
@@ -2501,21 +2876,22 @@ fn rrdcached_fetch_data(
 }
 
 fn handle_rrdcached_fetchbin(
-    root: &Path,
-    line: &str,
+    base: &RrdcachedBase,
+    rest: Option<&str>,
     stats: &RrdcachedStats,
     queue: &Mutex<RrdcachedQueue>,
 ) -> Vec<u8> {
-    let fields = rrdcached_fields(line)
-        .into_iter()
-        .skip(1)
-        .collect::<Vec<_>>();
+    let mut fields = Vec::new();
+    let mut cursor = rest;
+    while let Some(field) = next_field(&mut cursor) {
+        fields.push(field);
+    }
     if fields.len() < 2 {
         return b"-1 Usage: FETCHBIN <file> <CF> [<start> [<end>] [<column>...]]\n".to_vec();
     }
-    let fetched = resolve_rrdcached_path(root, &fields[0]).and_then(|path| {
+    let fetched = base.target(&fields[0]).and_then(|path| {
         flush_rrdcached_path(&path, queue, stats)?;
-        rrdcached_fetch_data(root, &fields.iter().map(String::as_str).collect::<Vec<_>>())
+        rrdcached_fetch_data(base, &fields.iter().map(String::as_str).collect::<Vec<_>>())
     });
     let (result, selected) = match fetched {
         Ok(result) => result,
@@ -2563,37 +2939,18 @@ fn rrd_nan() -> f64 {
     }
 }
 
-fn resolve_rrdcached_path(root: &Path, requested: &str) -> Result<PathBuf, String> {
-    let requested = Path::new(requested);
-    let candidate = if requested.is_absolute() {
-        requested.to_path_buf()
-    } else {
-        root.join(requested)
-    };
-    let canonical = std::fs::canonicalize(&candidate).map_err(|error| error.to_string())?;
-    if !canonical.starts_with(root) || !canonical.is_file() {
-        return Err("Access denied: path is outside the configured base directory".to_owned());
+fn resolve_rrdcached_path(base: &RrdcachedBase, requested: &str) -> Result<PathBuf, String> {
+    let path = base.target(requested)?;
+    let canonical = std::fs::canonicalize(&path).map_err(|error| error.to_string())?;
+    if !canonical.is_file() {
+        return Err(format!("{}: not a regular file", base.abs(requested)));
     }
     Ok(canonical)
 }
 
-/// RRDtool echoes `-b` as given joined with the name the client sent, not
-/// the resolved file; access is still checked on the resolved path.
-fn rrdcached_echo_path(echo_base: &Path, requested: &str) -> String {
-    if requested.starts_with('/') {
-        requested.to_owned()
-    } else {
-        format!("{}/{requested}", echo_base.display())
-    }
-}
-
-fn rrdcached_pending_key(root: &Path, requested: &str) -> PathBuf {
-    let path = Path::new(requested);
-    if path.is_absolute() {
-        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-    } else {
-        std::fs::canonicalize(root.join(path)).unwrap_or_else(|_| root.join(path))
-    }
+fn rrdcached_pending_key(base: &RrdcachedBase, requested: &str) -> PathBuf {
+    let path = base.fs_path(requested);
+    std::fs::canonicalize(&path).unwrap_or(path)
 }
 
 #[derive(Clone, Copy)]
@@ -2825,7 +3182,7 @@ fn update_rrdcached_file(path: &Path, samples: &[&str]) -> Result<(), String> {
 }
 
 fn rrdcached_create(
-    root: &Path,
+    base: &RrdcachedBase,
     fields: &[&str],
     no_overwrite_default: bool,
     allow_recursive_mkdir: bool,
@@ -2836,26 +3193,13 @@ fn rrdcached_create(
                 .to_owned(),
         );
     }
-    let requested = Path::new(fields[0]);
-    if requested
-        .components()
-        .any(|component| component == std::path::Component::ParentDir)
-    {
-        return Err("Access denied: parent traversal is not allowed".to_owned());
-    }
-    let output = if requested.is_absolute() {
-        requested.to_path_buf()
-    } else {
-        root.join(requested)
-    };
-    if !output.starts_with(root) {
-        return Err("Access denied: path is outside the configured base directory".to_owned());
-    }
+    let output = base.target(fields[0])?;
+    let display = base.abs(fields[0]);
     if let Some(parent) = output.parent() {
         if !parent.exists() && !allow_recursive_mkdir {
             return Err(format!(
                 "No permission to recursively create: {}\nDid you pass -R to the daemon?",
-                parent.display()
+                Path::new(&display).parent().unwrap_or(parent).display()
             ));
         }
         if allow_recursive_mkdir {
@@ -2864,10 +3208,8 @@ fn rrdcached_create(
     }
     let canonical_parent = std::fs::canonicalize(output.parent().ok_or("invalid output path")?)
         .map_err(|error| error.to_string())?;
-    if !canonical_parent.starts_with(root) {
-        return Err(
-            "Access denied: parent resolves outside the configured base directory".to_owned(),
-        );
+    if base.confined() && !canonical_parent.starts_with(&base.root) {
+        return Err(format!("{display}: Permission denied"));
     }
     let filename = output.file_name().ok_or("invalid output filename")?;
     let output = canonical_parent.join(filename);
@@ -3070,6 +3412,38 @@ fn store_error(error: StoreError) -> Response<Full<Bytes>> {
 mod rrdcached_queue_tests {
     use super::*;
 
+    fn test_base(root: &Path) -> RrdcachedBase {
+        RrdcachedBase::new(Some(root), true).unwrap()
+    }
+
+    /// One request outside BATCH, as serve_rrdcached_connection routes it.
+    fn request_text(
+        base: &RrdcachedBase,
+        line: &str,
+        stats: &RrdcachedStats,
+        queue: &Mutex<RrdcachedQueue>,
+    ) -> String {
+        let mut rest = Some(strip_line_end(line));
+        let command = next_field(&mut rest).expect("command field");
+        match rrdcached_route(&command, false, None) {
+            Err(error) => format!("-1 {error}\n"),
+            Ok(name) => match handle_rrdcached_line(
+                base,
+                name,
+                rest,
+                stats,
+                queue,
+                false,
+                false,
+                wall_time_seconds(),
+            ) {
+                RrdcachedReply::Text(text) | RrdcachedReply::TextThenClose(text) => text,
+                RrdcachedReply::Bytes(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                RrdcachedReply::Close => String::new(),
+            },
+        }
+    }
+
     #[test]
     fn enqueue_checks_only_timestamps_and_flush_drops_the_batch_at_a_bad_value() {
         let temp = tempfile::tempdir().unwrap();
@@ -3115,14 +3489,6 @@ mod rrdcached_queue_tests {
         // The cache keeps the newest accepted stamp after the batch is gone.
         assert!(enqueue(&["1000000030:1"]).is_err());
         assert_eq!(enqueue(&["1000000031:1"]), Ok(1));
-    }
-
-    #[test]
-    fn rrdcached_protocol_fields_unescape_spaces_and_backslashes() {
-        assert_eq!(
-            rrdcached_fields(r"FLUSH directory/space\ name/and\\slash.rrd"),
-            ["FLUSH", "directory/space name/and\\slash.rrd"]
-        );
     }
 
     #[test]
@@ -3265,7 +3631,9 @@ mod rrdcached_queue_tests {
         )
         .unwrap();
         let stats = RrdcachedStats::default();
-        assert!(RrdcachedQueue::open(&root, Some(&journal), 1, 300, false, &stats).is_err());
+        assert!(
+            RrdcachedQueue::open(&test_base(&root), Some(&journal), 1, 300, false, &stats).is_err()
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -3374,7 +3742,7 @@ mod rrdcached_queue_tests {
         create_test_rrd(&file);
         for reserved in [".rondi.lock", "rondi.journal"] {
             let created = rrdcached_create(
-                &root,
+                &test_base(&root),
                 &[reserved, "DS:x:GAUGE:30:U:U", "RRA:AVERAGE:0.5:1:10"],
                 false,
                 false,
@@ -3398,29 +3766,6 @@ mod rrdcached_queue_tests {
         std::fs::write(&path, contents).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         path
-    }
-
-    #[test]
-    fn buffer_field_matches_upstream_escaping() {
-        let mut buffer = Some(r"update a\ b.rrd 1:2  x\\");
-        assert_eq!(
-            rrdcached_buffer_field(&mut buffer).as_deref(),
-            Some("update")
-        );
-        assert_eq!(
-            rrdcached_buffer_field(&mut buffer).as_deref(),
-            Some("a b.rrd")
-        );
-        assert_eq!(rrdcached_buffer_field(&mut buffer).as_deref(), Some("1:2"));
-        assert_eq!(rrdcached_buffer_field(&mut buffer).as_deref(), Some(""));
-        assert_eq!(rrdcached_buffer_field(&mut buffer).as_deref(), Some(r"x\"));
-        assert_eq!(rrdcached_buffer_field(&mut buffer), None);
-        let mut trailing = Some(r"a\");
-        assert_eq!(rrdcached_buffer_field(&mut trailing), None);
-        assert_eq!(
-            rrdcached_request_arguments("UPDATE a\\ b.rrd 1:2\r\n"),
-            r"a\ b.rrd 1:2"
-        );
     }
 
     #[test]
@@ -3449,7 +3794,7 @@ mod rrdcached_queue_tests {
         create_test_rrd(&file);
         let stats = RrdcachedStats::default();
         let (mut queue, had_journal) =
-            RrdcachedQueue::open(&root, None, 1024 * 1024, 300, false, &stats).unwrap();
+            RrdcachedQueue::open(&test_base(&root), None, 1024 * 1024, 300, false, &stats).unwrap();
         assert!(!had_journal);
         assert!(queue.flushes_at_shutdown());
         queue.enqueue(file.clone(), &["1000000010:1"]).unwrap();
@@ -3493,8 +3838,15 @@ mod rrdcached_queue_tests {
             ),
         );
         let stats = RrdcachedStats::default();
-        let (queue, had_journal) =
-            RrdcachedQueue::open(&root, Some(&journal), 1024 * 1024, 300, false, &stats).unwrap();
+        let (queue, had_journal) = RrdcachedQueue::open(
+            &test_base(&root),
+            Some(&journal),
+            1024 * 1024,
+            300,
+            false,
+            &stats,
+        )
+        .unwrap();
         assert!(had_journal);
         assert_eq!(
             queue.pending[&a]
@@ -3535,8 +3887,15 @@ mod rrdcached_queue_tests {
         // SAFETY: the CString is NUL terminated and outlives the call.
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         let stats = RrdcachedStats::default();
-        let (queue, had_journal) =
-            RrdcachedQueue::open(&root, Some(&journal), 1024 * 1024, 300, false, &stats).unwrap();
+        let (queue, had_journal) = RrdcachedQueue::open(
+            &test_base(&root),
+            Some(&journal),
+            1024 * 1024,
+            300,
+            false,
+            &stats,
+        )
+        .unwrap();
         assert!(!had_journal);
         assert!(queue.pending.is_empty());
     }
@@ -3553,7 +3912,7 @@ mod rrdcached_queue_tests {
             let replayed = private_journal(&journal, "rrd.journal.0000", "update metric.rrd x\n");
             let stats = RrdcachedStats::default();
             let (mut queue, had_journal) = RrdcachedQueue::open(
-                &root,
+                &test_base(&root),
                 Some(&journal),
                 1024 * 1024,
                 300,
@@ -3615,8 +3974,15 @@ mod rrdcached_queue_tests {
         assert!(journal.disabled && journal.file.is_none());
         private_journal(&shared, "rrd.journal.1", "update a.rrd 1000000010:1\n");
         let stats = RrdcachedStats::default();
-        let (queue, had_journal) =
-            RrdcachedQueue::open(&directory, Some(&shared), 1024, 300, false, &stats).unwrap();
+        let (queue, had_journal) = RrdcachedQueue::open(
+            &test_base(&directory),
+            Some(&shared),
+            1024,
+            300,
+            false,
+            &stats,
+        )
+        .unwrap();
         assert!(!had_journal && queue.flushes_at_shutdown());
         assert_eq!(journal_files(&shared), ["rrd.journal.1"]);
         std::fs::remove_file(shared.join("rrd.journal.1")).unwrap();
@@ -3639,7 +4005,7 @@ mod rrdcached_queue_tests {
         std::os::unix::fs::symlink(&real, &listed).unwrap();
         let stats = RrdcachedStats::default();
         let mut queue = RrdcachedQueue::new(1024 * 1024, 300);
-        assert!(!queue.journal_replay(&root, &listed, &stats));
+        assert!(!queue.journal_replay(&test_base(&root), &listed, &stats));
         assert!(queue.pending.is_empty());
     }
 
@@ -3653,12 +4019,19 @@ mod rrdcached_queue_tests {
         let journal = root.join("journal");
         std::fs::create_dir(&journal).unwrap();
         let stats = RrdcachedStats::default();
-        let (queue, _) =
-            RrdcachedQueue::open(&root, Some(&journal), 1024 * 1024, 300, false, &stats).unwrap();
+        let (queue, _) = RrdcachedQueue::open(
+            &test_base(&root),
+            Some(&journal),
+            1024 * 1024,
+            300,
+            false,
+            &stats,
+        )
+        .unwrap();
         let queue = Mutex::new(queue);
-        let request = |line: &str| {
-            handle_rrdcached_line(&root, &root, line, &stats, &queue, false, false, None).unwrap()
-        };
+        // Without -B the symlink is followed, as upstream follows it.
+        let unconfined = RrdcachedBase::new(Some(&root), false).unwrap();
+        let request = |line: &str| request_text(&unconfined, line, &stats, &queue);
         assert_eq!(
             request("UPDATE link.rrd 1000000010:1\n"),
             "-1 Invalid file name\n"
@@ -3681,8 +4054,15 @@ mod rrdcached_queue_tests {
             journal_contents_of(&journal),
             "update a.rrd  1000000010:1\nupdate a\\.rrd 1000000010:1\n"
         );
-        let (replayed, _) =
-            RrdcachedQueue::open(&root, Some(&journal), 1024 * 1024, 300, false, &stats).unwrap();
+        let (replayed, _) = RrdcachedQueue::open(
+            &test_base(&root),
+            Some(&journal),
+            1024 * 1024,
+            300,
+            false,
+            &stats,
+        )
+        .unwrap();
         assert_eq!(
             replayed.pending[&root.join("a.rrd")][0].samples,
             ["1000000010:1"]
@@ -3713,9 +4093,15 @@ mod rrdcached_queue_tests {
             "update gone/x.rrd 1000000010:1\nupdate kept.rrd 1000000010:1\n",
         );
         let stats = RrdcachedStats::default();
-        let (queue, had_journal) =
-            RrdcachedQueue::open(&root, Some(&journal), 1 << 20, 300, false, &stats)
-                .expect("a stale journal record must not stop the daemon from starting");
+        let (queue, had_journal) = RrdcachedQueue::open(
+            &test_base(&root),
+            Some(&journal),
+            1 << 20,
+            300,
+            false,
+            &stats,
+        )
+        .expect("a stale journal record must not stop the daemon from starting");
         assert!(had_journal);
         assert!(queue.pending.contains_key(&kept));
         assert_eq!(queue.pending.len(), 1);
@@ -3811,5 +4197,105 @@ mod rrdcached_queue_tests {
             rondi::inspect_rrd_file(&file).unwrap().last_update,
             1_000_000_010
         );
+    }
+
+    #[test]
+    fn routing_permission_and_journal_framing_agree_on_random_lines() {
+        let words = [
+            "UPDATE",
+            "update",
+            "UpDaTe",
+            "FLUSH",
+            "BATCH",
+            ".",
+            "QUIT",
+            "HELP",
+            "WROTE",
+            "FETCHBIN",
+            "PING",
+            "",
+            "UPDATE\t",
+            "FLUSH\r",
+            "a.rrd",
+            "a\\ b.rrd",
+            "1:2",
+            "\\",
+            "\\\\",
+            "x\ty",
+        ];
+        let separators = [" ", "  ", "\t", " \r", "\\ "];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % bound as u64) as usize
+        };
+        for _ in 0..20_000 {
+            let mut line = Vec::new();
+            for index in 0..1 + next(5) {
+                if index > 0 {
+                    line.extend_from_slice(separators[next(separators.len())].as_bytes());
+                }
+                line.extend_from_slice(words[next(words.len())].as_bytes());
+                if next(50) == 0 {
+                    line.push(0xff);
+                }
+            }
+            if next(4) == 0 {
+                line.push(b'\r');
+            }
+            line.push(b'\n');
+            // read_bounded_async_line refuses a line that is not UTF-8 before
+            // any command is parsed, so nothing below can disagree on it.
+            let Ok(text) = std::str::from_utf8(&line) else {
+                continue;
+            };
+            let mut rest = Some(strip_line_end(text));
+            let Some(command) = next_field(&mut rest) else {
+                continue;
+            };
+            let allowed = (next(2) == 0).then(|| {
+                RRDCACHED_COMMAND_TABLE
+                    .iter()
+                    .filter(|_| next(2) == 0)
+                    .map(|(name, _, _)| name.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            });
+            for in_batch in [false, true] {
+                match rrdcached_route(&command, in_batch, allowed.as_deref()) {
+                    Ok(name) => {
+                        assert!(name.eq_ignore_ascii_case(&command), "{text:?}");
+                        assert!(rrdcached_command_permitted(allowed.as_deref(), name));
+                        let context = rrdcached_find_command(name).unwrap().1;
+                        let wanted = if in_batch {
+                            RRDCACHED_CONTEXT_BATCH
+                        } else {
+                            RRDCACHED_CONTEXT_CLIENT
+                        };
+                        assert_ne!(context & wanted, 0, "{text:?}");
+                    }
+                    Err(error) => assert!(
+                        rrdcached_find_command(&command).is_none()
+                            || error == "Permission denied."
+                            || error.starts_with("Can't use"),
+                        "{text:?}: {error}"
+                    ),
+                }
+            }
+            // The journal stores the request after its command field and
+            // replay splits "update <rest>" again: the fields must survive.
+            let live = {
+                let mut cursor = rest;
+                std::iter::from_fn(|| next_field(&mut cursor)).collect::<Vec<_>>()
+            };
+            let journal_line = format!("update {}", rest.unwrap_or_default());
+            let mut replayed = Some(journal_line.as_str());
+            assert_eq!(next_field(&mut replayed).as_deref(), Some("update"));
+            let replayed = std::iter::from_fn(|| next_field(&mut replayed)).collect::<Vec<_>>();
+            if rest.is_some() {
+                assert_eq!(replayed, live, "{text:?}");
+            }
+        }
     }
 }
