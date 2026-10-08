@@ -2353,6 +2353,13 @@ fn print_calc(
                 let printval = im.print_value(i);
                 let never = source.is_some_and(|source| source.vf.never);
                 let element = &im.gdes[i];
+                // GPRINT writes into the FMT_LEG_LEN legend buffer: numeric
+                // formats through snprintf(FMT_LEG_LEN - 2), the `%.0f`
+                // timestamp fallback through snprintf(FMT_LEG_LEN).
+                let legend_limit = match (element.strftm, element.vformatter) {
+                    (false, ValueFormatter::Numeric) => FMT_LEG_LEN - 2,
+                    _ => FMT_LEG_LEN,
+                };
                 let text = if element.strftm {
                     if never {
                         Some(time_clean(&element.format))
@@ -2395,7 +2402,7 @@ fn print_calc(
                     info.push(format!("print[{prline_cnt}]"), InfoValue::Str(text));
                     prline_cnt += 1;
                 } else {
-                    im.gdes[i].legend = text;
+                    im.gdes[i].legend = truncate_c_buffer(text, legend_limit);
                     graphelement = true;
                 }
             }
@@ -2424,15 +2431,13 @@ fn print_calc(
 const BAD_FORMAT_PRINT_PATTERN: &str =
     "^(?:[^%]+|%%)*%[-+ 0#]?[0-9]*(?:[.][0-9]+)?l[eEfFgG](?:[^%]+|%%)*(?:%[sS])?(?:[^%]+|%%)*$";
 
-/// `VALUE_FORMATTER_TIMESTAMP` in print_calc: gmtime of an integral value,
-/// otherwise `%.0f`. `None` is a strftime failure, which RRDtool reports
-/// without an error message.
+/// `VALUE_FORMATTER_TIMESTAMP` in print_calc: gmtime of the value truncated
+/// to whole seconds, or `%.0f` outside the `long long` range. `None` is a
+/// strftime failure, which RRDtool reports without an error message.
 fn format_value_timestamp(value: f64, format: &str) -> Option<String> {
-    let integral = value.is_finite()
-        && value >= i64::MIN as f64
-        && value <= i64::MAX as f64
-        && (value as i64) as f64 == value;
-    if !integral {
+    // timestamp_to_tm (rrd_graph.c:1810) compares the truncated value with
+    // itself, so only the range check can reject a finite value.
+    if !value.is_finite() || value < i64::MIN as f64 || value > i64::MAX as f64 {
         return Some(c_printf_double("%.0f", value));
     }
     let timestamp = value as i64 as libc::time_t;
