@@ -272,7 +272,6 @@ pub fn create_rrd_file(
         if let Some(metadata) = &existing_metadata {
             file.set_permissions(metadata.permissions())?;
         }
-        file.sync_all()?;
         drop(file);
         if no_overwrite {
             std::fs::hard_link(&temp_path, path)?;
@@ -280,7 +279,6 @@ pub fn create_rrd_file(
         } else {
             std::fs::rename(&temp_path, path)?;
         }
-        std::fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();
     if result.is_err() {
@@ -844,7 +842,8 @@ fn update_path_values_with_raw(
     file.seek(SeekFrom::Start(live_start as u64))?;
     file.write_all(&timestamp.to_le_bytes())?;
     file.write_all(&(timestamp_usec as i64).to_le_bytes())?;
-    file.sync_data()?;
+    // No fsync: RRDtool leaves writeback to the kernel on every .rrd write
+    // path (rrd_flush is a no-op, rrd_close only unmaps and closes).
     Ok(summaries)
 }
 
@@ -1416,9 +1415,6 @@ pub fn tune_rrd_data_sources(
             }
         }
     }
-    if !changes.is_empty() {
-        file.sync_data()?;
-    }
     Ok(())
 }
 
@@ -1609,11 +1605,9 @@ pub fn resize_rrd_file(
             output.write_all(&header[pointer_start..])?;
             output.seek(SeekFrom::End(0))?;
         }
-        output.sync_all()?;
         drop(output);
         std::fs::hard_link(&temporary_path, output_path)?;
         std::fs::remove_file(&temporary_path)?;
-        std::fs::File::open(output_parent)?.sync_all()?;
         Ok(())
     })();
     if result.is_err() {
@@ -1855,7 +1849,7 @@ pub fn dump_rrd_file_with_header(
 /// Restore the basic RRDtool XML subset emitted by [`dump_rrd_file_with_header`].
 /// The file is assembled at a sibling temporary path and linked/renamed into
 /// place only after its headers, prep state, pointers, and archive rows are
-/// complete and synced.
+/// complete.
 pub fn restore_rrd_file(
     xml: &str,
     path: impl AsRef<Path>,
@@ -2159,7 +2153,6 @@ pub fn restore_rrd_file(
                 }
             }
         }
-        file.sync_all()?;
         drop(file);
         if force_overwrite {
             std::fs::rename(&temporary, destination)?;
@@ -2167,7 +2160,6 @@ pub fn restore_rrd_file(
             std::fs::hard_link(&temporary, destination)?;
             std::fs::remove_file(&temporary)?;
         }
-        std::fs::File::open(parent)?.sync_all()?;
         Ok(())
     })();
     if result.is_err() {
