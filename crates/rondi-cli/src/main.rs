@@ -9,7 +9,7 @@ use rondi::{
     resize_rrd_file, restore_rrd_file, tune_rrd_data_sources, update_rrd_text,
 };
 use std::fmt::Write as FmtWrite;
-use std::io::{BufRead, Read, Seek, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -109,9 +109,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "fetch" => rrdtool_fetch(command_args),
             "update" => rrdtool_update(command_args),
             "updatev" => rrdtool_updatev(command_args),
-            "last" => rrdtool_last(command_args),
+            "last" => print_minus_one_on_error(rrdtool_last(command_args)),
             "lastupdate" => rrdtool_lastupdate(command_args),
-            "first" => rrdtool_first(command_args),
+            "first" => print_minus_one_on_error(rrdtool_first(command_args)),
             "info" => rrdtool_info(command_args),
             "dump" => rrdtool_dump(command_args),
             "restore" => rrdtool_restore(command_args),
@@ -1277,56 +1277,6 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty());
     let from_daemon = daemon_address.is_some();
-    if !from_daemon {
-        ensure_rrd_file_exists(&filename)?;
-        let metadata = std::fs::metadata(&filename)?;
-        if !metadata.is_file() || metadata.len() == 0 {
-            let error = if metadata.len() == 0 {
-                std::io::Error::from_raw_os_error(libc::EINVAL)
-            } else {
-                let file = std::fs::File::open(&filename)?;
-                let length = usize::try_from(metadata.len()).unwrap_or(1).max(1);
-                let mapped = unsafe {
-                    libc::mmap(
-                        std::ptr::null_mut(),
-                        length,
-                        libc::PROT_READ,
-                        libc::MAP_PRIVATE,
-                        std::os::fd::AsRawFd::as_raw_fd(&file),
-                        0,
-                    )
-                };
-                if mapped == libc::MAP_FAILED {
-                    std::io::Error::last_os_error()
-                } else {
-                    unsafe { libc::munmap(mapped, length) };
-                    std::io::Error::from_raw_os_error(libc::EINVAL)
-                }
-            };
-            let errno = error.raw_os_error().unwrap_or(libc::EINVAL);
-            let message =
-                unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)).to_string_lossy() };
-            return Err(format!("mmaping file '{}': {message}", filename.display()).into());
-        }
-        if metadata.len() < 128 {
-            return Err("reached EOF while loading header rrd->stat_head".into());
-        }
-        let mut file = std::fs::File::open(&filename)?;
-        let mut cookie = [0_u8; 4];
-        file.read_exact(&mut cookie)?;
-        if cookie != *b"RRD\0" {
-            return Err(format!("'{}' is not an RRD file", filename.display()).into());
-        }
-        let mut version_bytes = [0_u8; 4];
-        file.seek(std::io::SeekFrom::Start(4))?;
-        file.read_exact(&mut version_bytes)?;
-        if version_bytes.iter().all(u8::is_ascii_digit) {
-            let version = std::str::from_utf8(&version_bytes)?.parse::<u32>()?;
-            if version > 5 {
-                return Err(format!("can't handle RRD file version {version:04}").into());
-            }
-        }
-    }
     let result = if let Some(address) = daemon_address {
         let escaped = escape_rrdcached_field(&filename.to_string_lossy());
         let command = format!("FETCH {escaped} {cf} {start} {end}");
@@ -4639,7 +4589,7 @@ fn rrdtool_last(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", rrdtool_last_help());
         return Ok(());
     }
-    let mut filename = None::<String>;
+    let mut filenames = Vec::new();
     let mut daemon_address = None::<String>;
     let mut index = 1;
     while index < args.len() {
@@ -4658,18 +4608,12 @@ fn rrdtool_last(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             option if option.starts_with('-') => {
                 return Err(format!("unsupported last option: {option}").into());
             }
-            path => {
-                if filename.replace(path.to_owned()).is_some() {
-                    return Err("rrdtool last accepts one filename".into());
-                }
-            }
+            path => filenames.push(path.to_owned()),
         }
         index += 1;
     }
-    let Some(filename) = filename else {
-        print!("{}", rrdtool_last_help());
-        return Ok(());
-    };
+    let [filename] = <[String; 1]>::try_from(filenames)
+        .map_err(|_| "Usage: rrdtool last [--daemon|-d <addr>] <file>")?;
     if let Some(address) = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty())
@@ -4682,12 +4626,6 @@ fn rrdtool_last(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("invalid rrdcached LAST response")?;
         println!("{timestamp}");
     } else {
-        if let Err(error) = std::fs::metadata(&filename) {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                println!("-1");
-                return Err(format!("opening '{filename}': No such file or directory").into());
-            }
-        }
         println!("{}", inspect_rrd(&filename)?.last_update);
     }
     Ok(())
@@ -4740,8 +4678,8 @@ fn rrdtool_first(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 let raw = args
                     .get(index)
                     .ok_or("first --rraindex requires a number")?;
-                archive_index = raw
-                    .parse::<usize>()
+                // rrd_first.c:33 stores strtol(optarg, &endptr, 0) in an int.
+                archive_index = usize::try_from(rondi::c_strtol(raw, 0).0 as i32)
                     .map_err(|_| "invalid rraindex number")?;
             }
             "--daemon" | "-d" => {
@@ -4758,14 +4696,13 @@ fn rrdtool_first(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 return Err(format!("unsupported rrdtool first option: {option}").into());
             }
             value => {
-                if filename.replace(value).is_some() {
-                    return Err("rrdtool first accepts one filename".into());
-                }
+                filename.get_or_insert(value);
             }
         }
         index += 1;
     }
-    let filename = filename.ok_or("Usage: rrdtool first [--rraindex number] filename.rrd")?;
+    let filename =
+        filename.ok_or("usage rrdtool first [--rraindex number] [--daemon|-d <addr>] file.rrd")?;
     if let Some(address) = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty())
@@ -4782,17 +4719,19 @@ fn rrdtool_first(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         println!("{timestamp}");
         return Ok(());
     }
-    if let Err(error) = ensure_rrd_file_exists(std::path::Path::new(filename)) {
-        if std::path::Path::new(filename)
-            .metadata()
-            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-        {
-            println!("-1");
-        }
-        return Err(error);
-    }
     println!("{}", first_rrd_time(filename, archive_index)?);
     Ok(())
+}
+
+/// rrd_tool.c:736-750 prints the time_t that rrd_first and rrd_last return,
+/// which is -1 on every error, before the ERROR line.
+fn print_minus_one_on_error(
+    result: Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if result.is_err() {
+        println!("-1");
+    }
+    result
 }
 
 fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -5185,47 +5124,31 @@ fn rrdtool_resize(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/resize.txt"));
         return Ok(());
     }
+    // rrd_resize.c:27-64, in order.
+    if args[1] == "resize.rrd" {
+        return Err("resize.rrd is a reserved name".into());
+    }
     if args.len() != 5 {
-        return Err("Usage: rrdtool resize <file> <rraindex> GROW|SHRINK <rows>".into());
+        return Err("wrong number of parameters".into());
     }
-    ensure_rrd_file_exists(std::path::Path::new(&args[1]))?;
-    let rra_index = parse_c_integer(&args[2])?;
-    let row_count = parse_c_integer(&args[4])?;
-    if row_count <= 0 {
-        return Err("Please grow or shrink with at least 1 row".into());
-    }
+    let target_rra = rondi::c_strtol(&args[2], 0).0 as u64;
     let action = match args[3].as_str() {
         "GROW" => RrdResizeAction::Grow,
         "SHRINK" => RrdResizeAction::Shrink,
-        _ => return Err("Invalid action: must be GROW or SHRINK".into()),
+        _ => return Err("I can only GROW or SHRINK".into()),
     };
+    let modify = rondi::c_strtol(&args[4], 0).0;
+    if modify < 1 {
+        return Err("Please grow or shrink with at least 1 row".into());
+    }
     resize_rrd_file(
         &args[1],
         std::env::current_dir()?.join("resize.rrd"),
-        usize::try_from(rra_index).map_err(|_| "invalid RRA index")?,
+        usize::try_from(target_rra).unwrap_or(usize::MAX),
         action,
-        u64::try_from(row_count).map_err(|_| "invalid row count")?,
+        modify as u64,
     )?;
     Ok(())
-}
-
-fn parse_c_integer(value: &str) -> Result<i64, Box<dyn std::error::Error>> {
-    let (negative, unsigned) = value
-        .strip_prefix('-')
-        .map_or((false, value), |rest| (true, rest));
-    let unsigned = unsigned.strip_prefix('+').unwrap_or(unsigned);
-    let (digits, radix) = if let Some(hex) = unsigned
-        .strip_prefix("0x")
-        .or_else(|| unsigned.strip_prefix("0X"))
-    {
-        (hex, 16)
-    } else if unsigned.len() > 1 && unsigned.starts_with('0') {
-        (&unsigned[1..], 8)
-    } else {
-        (unsigned, 10)
-    };
-    let parsed = i64::from_str_radix(digits, radix)?;
-    Ok(if negative { -parsed } else { parsed })
 }
 
 fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {

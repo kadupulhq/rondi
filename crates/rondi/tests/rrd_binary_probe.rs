@@ -89,7 +89,8 @@ fn truncated_rrd_is_reported_as_a_format_error() {
     let store = Store::open(temp.path()).unwrap();
     assert!(matches!(
         store.inspect_rrd("bad"),
-        Err(StoreError::RrdFormat(_))
+        Err(StoreError::RrdFile(message))
+            if message == "reached EOF while loading header rrd->stat_head"
     ));
 }
 

@@ -46,6 +46,10 @@ pub enum StoreError {
     /// rrd_set_error, with no Rondi prefix.
     #[error("{0}")]
     Rrd(String),
+    /// An `.rrd` file that rrd_open could not open, map or read, with
+    /// RRDtool's exact text.
+    #[error("{0}")]
+    RrdFile(String),
     #[error("storage ownership lock is held by another process")]
     Owned,
     #[error("could not lock RRD")]

@@ -1822,18 +1822,6 @@ fn reduce_data(
     Ok(())
 }
 
-/// `rrd_strerror(errno)` for an I/O error.
-fn strerror(error: &std::io::Error) -> String {
-    match error.raw_os_error() {
-        Some(code) => unsafe {
-            std::ffi::CStr::from_ptr(libc::strerror(code))
-                .to_string_lossy()
-                .into_owned()
-        },
-        None => error.to_string(),
-    }
-}
-
 fn gcd(mut left: u64, mut right: u64) -> u64 {
     while right != 0 {
         (left, right) = (right, left % right);
@@ -1882,7 +1870,7 @@ impl GraphImage {
                     StoreError::Io(io) => StoreError::RrdExpression(format!(
                         "opening '{}': {}",
                         element.rrd,
-                        strerror(&io)
+                        crate::rrd_binary::rrd_strerror(&io)
                     )),
                     error => error,
                 })
