@@ -142,8 +142,8 @@ Closed since the earlier draft (all EXECUTED unless noted):
 
 ### What Rondi does
 
-- PNG through the `png` crate and a bitmap font. EXECUTED: `--imgformat SVG`, `PDF`, `EPS`, `CSV`, `TSV`, and `SSV` each exit 1 with `RRDtool graph format X is unsupported`.
-- Handled elements: DEF, CDEF, VDEF, XPORT, LINE, AREA, TICK, HRULE, VRULE, PRINT, GPRINT. EXECUTED: `COMMENT:hello`, `TEXTALIGN:left`, `SHIFT:x:300`, and legacy `STACK:x#00ff00` each exit 1 with `unsupported graph element`; upstream exits 0 for all four.
+- PNG through the `png` crate and a bitmap font; CSV, TSV and SSV through a port of `rrd_xport_format_sv`. `--imgformat SVG`, `PDF` and `EPS` exit 1 with `RRDtool graph format X is unsupported`.
+- Elements parse through a port of `rrd_graph_script` (`crates/rondi/src/graph.rs`), so every element except XAXIS and YAXIS is accepted with upstream's grammar and error texts; data preparation and PRINT values follow `data_fetch`, `data_calc` and `print_calc` (`crates/rondi-cli/tests/graph_data_differential.rs`).
 - Graph options fail rather than being ignored. EXECUTED: `--logarithmic`, `--slope-mode`, `--lazy`, `--right-axis`, `--watermark`, `--utc`, `--font`, `--pango-markup`, `--x-grid`, `--units-exponent`, `--no-gridfit`, `--zoom`, `--legend-position`, and `--dynamic-labels` each exit 1 with `unsupported graph option`. That is 14 of the roughly 64 options upstream accepts; the rest were not probed one by one.
 - Image size still differs. EXECUTED (macOS probe, one `LINE1` over a short series): upstream 481x141, Rondi 481x139. The earlier draft saw equal sizes (481x155) on a different input; size parity is input dependent.
 - `graphv` with a PNG target prints `graph_start`, `graph_end`, and `graph_step`. EXECUTED: `diff` against upstream shows upstream's `graph_left`, `graph_top`, `graph_width`, `graph_height`, `image_width`, `image_height`, `value_min`, and `value_max` missing from Rondi, and `graph_step` missing from upstream.
@@ -161,7 +161,7 @@ Reaching tier 2 requires Cairo and Pango bindings; a pure-Rust rasterizer cannot
 
 ### Gaps
 
-COMMENT, TEXTALIGN, SHIFT, legacy STACK, XAXIS, YAXIS; SVG, EPS, PDF, CSV, TSV, SSV; the remaining graph options; grid and tick selection; `graphv` layout metadata; Pango text layout; Cairo strokes and gradients; `--lazy`; `-` as stdout target; graph commands in pipe mode.
+XAXIS, YAXIS; SVG, EPS, PDF; the remaining graph options; grid and tick selection; `graphv` layout metadata; Pango text layout; Cairo strokes and gradients; `--lazy`; `-` as stdout target; graph commands in pipe mode.
 
 ### Effort
 
@@ -179,7 +179,7 @@ RRDtool has 61 named RPN operators plus `+ - * / %` (counted from the `match_op`
 
 What Rondi does:
 
-- All 61 operator names appear as string literals in `crates/rondi/src/xport.rs` (EXECUTED earlier; not repeated). Presence is not parity. Number parsing, `NEWWEEK`, `AVG`/`STDEV`, `PERCENT`/`SORT`, `NOW`, `INDEX`/`COUNT`, `COPY`/`ROLL`, `LIMIT`, `TREND` windows, and mixed-resolution xport were fixed in the merged stack (#1 to #43); their differential tests pass (EXECUTED: workspace tests).
+- `crates/rondi/src/rpn.rs` ports `rpn_parse` and `rpn_calc`, including the per-variable data cursors that mixed-resolution `PREV`, `TREND` and `PREDICT` read. Number parsing, `NEWWEEK`, `AVG`/`STDEV`, `PERCENT`/`SORT`, `NOW`, `INDEX`/`COUNT`, `COPY`/`ROLL`, `LIMIT`, `TREND` windows, and mixed-resolution xport were fixed in the merged stack (#1 to #43); their differential tests pass (EXECUTED: workspace tests).
 - RPN is reachable from xport and graph, not from COMPUTE data sources.
 - Percentile with infinities depends on libc `qsort` order. The test passes on Linux CI and on macOS arm64 here.
 
