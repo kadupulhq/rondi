@@ -4,7 +4,7 @@
 [![CodeQL](https://github.com/kadupulhq/rondi/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/kadupulhq/rondi/actions/workflows/codeql.yml)
 [![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange.svg)](https://github.com/kadupulhq/rondi/pulls)
 
-Rondi is the working name for a Rust-native round-robin storage foundation for Kadupul. One Cargo workspace and coordinated release contain the storage library, CLI, and daemon. The goal is to replace RRDtool/librrd implementations over time, not to wrap librrd permanently.
+Rondi is the working name for a Rust-native round-robin storage foundation for Kadupul. One Cargo workspace and coordinated release contain the storage library, CLI, and daemon. On every surface it shares with RRDtool (the `.rrd` format, the `rrdtool` and `rrdcached` command lines and protocol) the target is the exact behavior of RRDtool 1.11.0; it reimplements that behavior in Rust rather than wrapping librrd.
 
 The native `.rondi` store implements GAUGE values, fixed sampling steps, AVERAGE consolidation, bounded retention, durable server update journaling, and a versioned local HTTP/JSON API over a Unix socket. Separately, the `rrdtool` compatibility alias can create, inspect, fetch, and update a tested subset of existing `.rrd` binary files in place. `.rondi` files are not binary-compatible `.rrd` files.
 
