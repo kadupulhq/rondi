@@ -1700,7 +1700,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             XportFormat::Separated(separator) => (format_xport_sv(separator, &data), None),
         };
         if !to_memory {
-            std::fs::write(filename, output.as_bytes())?;
+            write_output_file(filename, output.as_bytes())?;
         }
         if let Some(error) = error {
             return Err(error.into());
@@ -1828,7 +1828,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             )?;
             let (width, height) = png_dimensions(&png)?;
             if !to_memory {
-                std::fs::write(filename, &png)?;
+                write_output_file(filename, &png)?;
             }
             if let Some(format) = imginfo.as_deref().filter(|format| !format.is_empty()) {
                 let basename = if to_memory {
@@ -2018,6 +2018,48 @@ fn flush_and_prepare_data(
     }
     fetched?;
     im.data_calc()?;
+    Ok(())
+}
+
+/// Writes a command's output file like `fopen(path, "w")`, except that a
+/// symbolic link as the last component, or a regular file with other hard
+/// links, is refused instead of followed. This is a deliberate safety
+/// deviation from RRDtool: a link planted at an output path cannot redirect
+/// the write to another file.
+#[cfg(unix)]
+fn write_output_file(path: &str, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    // OpenOptions creates with 0666 less the umask, as fopen does.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| -> Box<dyn std::error::Error> {
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                format!("refusing to write '{path}': it is a symbolic link").into()
+            } else {
+                error.into()
+            }
+        })?;
+    let metadata = file.metadata()?;
+    // Devices such as /dev/null keep their contents; only a regular file is
+    // truncated, and only once it is known to have no other names.
+    if metadata.is_file() {
+        if metadata.nlink() > 1 {
+            return Err(
+                format!("refusing to write '{path}': it has more than one hard link").into(),
+            );
+        }
+        file.set_len(0)?;
+    }
+    file.write_all(bytes)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_output_file(path: &str, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::write(path, bytes)?;
     Ok(())
 }
 
@@ -4752,7 +4794,7 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     ensure_rrd_file_exists(std::path::Path::new(&positional[0]))?;
     let xml = dump_rrd_file_with_header(&positional[0], header)?;
     if let Some(output) = positional.get(1) {
-        std::fs::write(output, xml)?;
+        write_output_file(output, xml.as_bytes())?;
     } else {
         print!("{xml}");
     }
