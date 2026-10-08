@@ -1556,203 +1556,6 @@ pub enum RrdResizeAction {
     Shrink,
 }
 
-/// Write an RRDtool-compatible resized copy to `output`, preserving row order
-/// and the archive cursor. The input is held under the upstream exclusive lock.
-pub fn resize_rrd_file(
-    input_path: impl AsRef<Path>,
-    output_path: impl AsRef<Path>,
-    rra_index: usize,
-    action: RrdResizeAction,
-    row_count: u64,
-) -> Result<(), StoreError> {
-    let input_path = input_path.as_ref();
-    let output_path = output_path.as_ref();
-    if input_path == Path::new("resize.rrd") {
-        return Err(StoreError::Rrd("resize.rrd is a reserved name".into()));
-    }
-    if row_count == 0 {
-        return Err(StoreError::Rrd(
-            "Please grow or shrink with at least 1 row".into(),
-        ));
-    }
-    if input_path == output_path {
-        return Err(StoreError::RrdUnsupported(
-            "resize output must be different from the input file".into(),
-        ));
-    }
-
-    let mut input = RrdFileLock::exclusive(open_rrd_write(input_path)?)?;
-    let info = read_info(&mut input, input_path)?;
-    let archive = info
-        .archives
-        .get(rra_index)
-        .ok_or_else(|| StoreError::Rrd("no such RRA in this RRD".into()))?;
-    let new_row_count = match action {
-        RrdResizeAction::Grow => archive
-            .rows
-            .checked_add(row_count)
-            .ok_or_else(|| StoreError::RrdUnsupported("RRA row count overflows".into()))?,
-        RrdResizeAction::Shrink if archive.rows <= row_count => {
-            return Err(StoreError::Rrd("This RRA is not that big".into()));
-        }
-        RrdResizeAction::Shrink => archive.rows - row_count,
-    };
-    // rrd_resize.c:137-150 checks the version only after both RRA checks.
-    if !matches!(info.version.as_str(), "0003" | "0004") {
-        return Err(StoreError::Rrd(format!(
-            "Do not know how to handle RRD version {}",
-            info.version
-        )));
-    }
-    let data_sources = info.data_sources.len();
-    let row_bytes = data_sources
-        .checked_mul(VALUE_LEN)
-        .ok_or_else(|| StoreError::RrdUnsupported("RRA row size overflows".into()))?;
-    let header_size = info.header_size;
-    let mut header = vec![0_u8; header_size];
-    input.seek(SeekFrom::Start(0))?;
-    input.read_exact(&mut header)?;
-    let rra_start = STAT_HEAD_LEN + data_sources * DS_DEF_LEN;
-    put_u64(
-        &mut header,
-        rra_start + rra_index * RRA_DEF_LEN + 24,
-        new_row_count,
-    );
-
-    let output_parent = output_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let output_name = output_path
-        .file_name()
-        .ok_or_else(|| StoreError::RrdUnsupported("invalid resize output filename".into()))?
-        .to_string_lossy();
-    static RESIZE_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let mut temporary = None;
-    for _ in 0..100 {
-        let id = RESIZE_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let candidate = output_parent.join(format!(
-            ".{output_name}.rondi-{}-{id}.resize.tmp",
-            std::process::id()
-        ));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
-            Ok(file) => {
-                temporary = Some((candidate, file));
-                break;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    let (temporary_path, mut output) = temporary.ok_or_else(|| {
-        StoreError::RrdUnsupported("unable to allocate temporary resize filename".into())
-    })?;
-
-    let result = (|| -> Result<(), StoreError> {
-        output.write_all(&header)?;
-        let unknown_row = rrd_nan().to_le_bytes();
-        let mut row = vec![0_u8; row_bytes];
-        for (index, current_archive) in info.archives.iter().enumerate() {
-            input.seek(SeekFrom::Start(current_archive.data_offset))?;
-            if index != rra_index {
-                let byte_count = current_archive
-                    .rows
-                    .checked_mul(row_bytes as u64)
-                    .ok_or_else(|| StoreError::RrdUnsupported("RRA byte size overflows".into()))?;
-                copy_exact(&mut input, &mut output, byte_count)?;
-                continue;
-            }
-
-            match action {
-                RrdResizeAction::Grow => {
-                    let pointer = current_archive.current_row;
-                    for output_row in 0..new_row_count {
-                        if output_row > pointer && output_row <= pointer + row_count {
-                            for value in row.chunks_exact_mut(VALUE_LEN) {
-                                value.copy_from_slice(&unknown_row);
-                            }
-                        } else {
-                            let old_row = if output_row <= pointer {
-                                output_row
-                            } else {
-                                output_row - row_count
-                            };
-                            input.seek(SeekFrom::Start(
-                                current_archive.data_offset + old_row * row_bytes as u64,
-                            ))?;
-                            input.read_exact(&mut row)?;
-                        }
-                        output.write_all(&row)?;
-                    }
-                }
-                RrdResizeAction::Shrink => {
-                    let old_rows = current_archive.rows;
-                    let pointer = current_archive.current_row;
-                    let remove_start = (pointer + 1) % old_rows;
-                    let mut new_pointer = 0_u64;
-                    let mut output_row = 0_u64;
-                    for old_row in 0..old_rows {
-                        let distance = (old_row + old_rows - remove_start) % old_rows;
-                        if distance < row_count {
-                            continue;
-                        }
-                        input.seek(SeekFrom::Start(
-                            current_archive.data_offset + old_row * row_bytes as u64,
-                        ))?;
-                        input.read_exact(&mut row)?;
-                        output.write_all(&row)?;
-                        if old_row == pointer {
-                            new_pointer = output_row;
-                        }
-                        output_row += 1;
-                    }
-                    if output_row != new_row_count {
-                        return Err(StoreError::RrdFormat(
-                            "resize row mapping produced an invalid row count".into(),
-                        ));
-                    }
-                    let pointer_start = header_size - info.archives.len() * RRA_PTR_LEN;
-                    put_u64(
-                        &mut header,
-                        pointer_start + rra_index * RRA_PTR_LEN,
-                        new_pointer,
-                    );
-                }
-            }
-        }
-
-        if action == RrdResizeAction::Shrink {
-            let pointer_start = header_size - info.archives.len() * RRA_PTR_LEN;
-            output.seek(SeekFrom::Start(pointer_start as u64))?;
-            output.write_all(&header[pointer_start..])?;
-            output.seek(SeekFrom::End(0))?;
-        }
-        drop(output);
-        std::fs::hard_link(&temporary_path, output_path)?;
-        std::fs::remove_file(&temporary_path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary_path);
-    }
-    result
-}
-
-fn copy_exact(input: &mut File, output: &mut File, mut byte_count: u64) -> Result<(), StoreError> {
-    let mut buffer = [0_u8; 64 * 1024];
-    while byte_count > 0 {
-        let count = buffer.len().min(byte_count as usize);
-        input.read_exact(&mut buffer[..count])?;
-        output.write_all(&buffer[..count])?;
-        byte_count -= count as u64;
-    }
-    Ok(())
-}
-
 /// Fetch data from an existing RRDtool file by path. The file is opened
 /// without following a symlink and held under RRDtool-compatible shared
 /// advisory locking for the duration of the read.
@@ -2001,328 +1804,6 @@ pub fn dump_rrd_file_with_header(
     Ok(out)
 }
 
-/// Restore the basic RRDtool XML subset emitted by [`dump_rrd_file_with_header`].
-/// The file is assembled at a sibling temporary path and linked/renamed into
-/// place only after its headers, prep state, pointers, and archive rows are
-/// complete.
-pub fn restore_rrd_file(
-    xml: &str,
-    path: impl AsRef<Path>,
-    force_overwrite: bool,
-    range_check: bool,
-) -> Result<(), StoreError> {
-    use roxmltree::Node;
-
-    fn child_text(node: Node<'_, '_>, name: &str) -> Result<String, StoreError> {
-        node.children()
-            .find(|child| child.is_element() && child.tag_name().name() == name)
-            .and_then(|child| child.text())
-            .map(str::trim)
-            .map(str::to_owned)
-            .ok_or_else(|| StoreError::RrdUnsupported(format!("RRD XML is missing <{name}>")))
-    }
-
-    fn single_text_child(node: Node<'_, '_>, name: &str) -> Result<String, StoreError> {
-        let element = child(node, name)?;
-        let mut text_nodes = element.children().filter(|child| child.is_text());
-        let Some(text) = text_nodes.next() else {
-            return Err(StoreError::RrdUnsupported(format!(
-                "RRD XML <{name}> must contain one text node"
-            )));
-        };
-        if element.children().any(|child| child.is_element()) || text_nodes.next().is_some() {
-            return Err(StoreError::RrdUnsupported(format!(
-                "RRD XML <{name}> must contain one text node"
-            )));
-        }
-        Ok(text.text().unwrap_or_default().trim().to_owned())
-    }
-
-    fn child<'a, 'input>(
-        node: Node<'a, 'input>,
-        name: &str,
-    ) -> Result<Node<'a, 'input>, StoreError> {
-        node.children()
-            .find(|child| child.is_element() && child.tag_name().name() == name)
-            .ok_or_else(|| StoreError::RrdUnsupported(format!("RRD XML is missing <{name}>")))
-    }
-
-    fn parse_f64(text: &str) -> Result<f64, StoreError> {
-        let lower = text.to_ascii_lowercase();
-        let value = match lower.as_str() {
-            "nan" | "+nan" | "-nan" => rrd_nan(),
-            "inf" | "+inf" | "infinity" | "+infinity" => f64::INFINITY,
-            "-inf" | "-infinity" => f64::NEG_INFINITY,
-            _ => text.parse::<f64>().map_err(|_| {
-                StoreError::RrdUnsupported(format!("invalid RRD XML number: {text}"))
-            })?,
-        };
-        Ok(value)
-    }
-
-    // RRDtool's own default dump includes an external DTD declaration. Restore
-    // reads the document structure without needing that DTD, and the parser
-    // deliberately does not resolve external entities or fetch network data.
-    let xml_without_doctype = xml
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("<!DOCTYPE"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let document = roxmltree::Document::parse(&xml_without_doctype)
-        .map_err(|error| StoreError::RrdUnsupported(format!("invalid RRD XML: {error}")))?;
-    let root = document.root_element();
-    if root.tag_name().name() != "rrd" {
-        return Err(StoreError::RrdUnsupported(
-            "RRD XML root element must be <rrd>".into(),
-        ));
-    }
-    let version = child_text(root, "version")?;
-    if !matches!(version.as_str(), "0003" | "0005") {
-        return Err(StoreError::RrdUnsupported(format!(
-            "RRD XML format version {version} is unsupported"
-        )));
-    }
-    let step = child_text(root, "step")?
-        .parse::<u64>()
-        .map_err(|_| StoreError::RrdUnsupported("invalid RRD XML step".into()))?;
-    let last_update = child_text(root, "lastupdate")?
-        .parse::<i64>()
-        .map_err(|_| StoreError::RrdUnsupported("invalid RRD XML lastupdate".into()))?;
-    let ds_nodes = root
-        .children()
-        .filter(|node| node.is_element() && node.tag_name().name() == "ds")
-        .collect::<Vec<_>>();
-    let rra_nodes = root
-        .children()
-        .filter(|node| node.is_element() && node.tag_name().name() == "rra")
-        .collect::<Vec<_>>();
-    if ds_nodes.is_empty() || rra_nodes.is_empty() {
-        return Err(StoreError::RrdUnsupported(
-            "RRD XML requires at least one data source and archive".into(),
-        ));
-    }
-
-    let mut source_definitions = Vec::with_capacity(ds_nodes.len());
-    let mut source_bounds = Vec::with_capacity(ds_nodes.len());
-    for ds in &ds_nodes {
-        let name = single_text_child(*ds, "name")?;
-        let kind = child_text(*ds, "type")?;
-        if version == "0003" && matches!(kind.as_str(), "DCOUNTER" | "DDERIVE") {
-            return Err(StoreError::RrdUnsupported(
-                "RRD format version 0003 cannot store DCOUNTER or DDERIVE".into(),
-            ));
-        }
-        let heartbeat = child_text(*ds, "minimal_heartbeat")?;
-        let minimum = child_text(*ds, "min")?;
-        let maximum = child_text(*ds, "max")?;
-        let min_value = if minimum == "U" {
-            None
-        } else {
-            Some(parse_f64(&minimum)?).filter(|value| !value.is_nan())
-        };
-        let max_value = if maximum == "U" {
-            None
-        } else {
-            Some(parse_f64(&maximum)?).filter(|value| !value.is_nan())
-        };
-        let minimum = min_value.map_or_else(|| "U".to_owned(), |value| value.to_string());
-        let maximum = max_value.map_or_else(|| "U".to_owned(), |value| value.to_string());
-        source_definitions.push(format!("DS:{name}:{kind}:{heartbeat}:{minimum}:{maximum}"));
-        source_bounds.push((min_value, max_value));
-    }
-
-    let mut archive_definitions = Vec::with_capacity(rra_nodes.len());
-    let mut archive_rows = Vec::with_capacity(rra_nodes.len());
-    for rra in &rra_nodes {
-        let cf = child_text(*rra, "cf")?;
-        let pdp_per_row = child_text(*rra, "pdp_per_row")?
-            .parse::<u64>()
-            .map_err(|_| StoreError::RrdUnsupported("invalid RRD XML pdp_per_row".into()))?;
-        let xff = parse_f64(&child_text(child(*rra, "params")?, "xff")?)?;
-        let database = child(*rra, "database")?;
-        let rows = database
-            .children()
-            .filter(|node| node.is_element() && node.tag_name().name() == "row")
-            .collect::<Vec<_>>();
-        if rows.is_empty() {
-            return Err(StoreError::RrdUnsupported(
-                "RRD XML archive database must contain rows".into(),
-            ));
-        }
-        archive_definitions.push(format!("RRA:{cf}:{xff}:{pdp_per_row}:{}", rows.len()));
-        archive_rows.push(rows);
-    }
-
-    let destination = path.as_ref();
-    let parent = destination
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let filename = destination
-        .file_name()
-        .ok_or_else(|| StoreError::RrdUnsupported("invalid restore output filename".into()))?
-        .to_string_lossy();
-    static RESTORE_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let mut temporary = None;
-    for _ in 0..100 {
-        let id = RESTORE_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let candidate = parent.join(format!(
-            ".{filename}.rondi-{}-{id}.restore.tmp",
-            std::process::id()
-        ));
-        if !candidate.exists() {
-            temporary = Some(candidate);
-            break;
-        }
-    }
-    let temporary = temporary.ok_or_else(|| {
-        StoreError::RrdUnsupported("unable to allocate temporary restore filename".into())
-    })?;
-
-    let result = (|| -> Result<(), StoreError> {
-        create_rrd_file(
-            &temporary,
-            last_update,
-            step,
-            &source_definitions,
-            &archive_definitions,
-            true,
-        )?;
-        let info = inspect_path(&temporary)?;
-        let mut restore_options = std::fs::OpenOptions::new();
-        restore_options.read(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            restore_options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-        }
-        let mut file = restore_options.open(&temporary)?;
-        if !file.metadata()?.file_type().is_file() {
-            return Err(StoreError::RrdUnsupported(
-                "restore temporary path is not a regular file".into(),
-            ));
-        }
-        let ds_start = STAT_HEAD_LEN;
-        let rra_start = ds_start + info.data_sources.len() * DS_DEF_LEN;
-        let live_start = rra_start + info.archives.len() * RRA_DEF_LEN;
-        let pdp_start = live_start + LIVE_HEAD_LEN;
-        let cdp_start = pdp_start + info.data_sources.len() * PDP_PREP_LEN;
-        let pointer_start = info.header_size - info.archives.len() * RRA_PTR_LEN;
-        file.seek(SeekFrom::Start(4))?;
-        file.write_all(version.as_bytes())?;
-        file.write_all(&[0])?;
-        file.seek(SeekFrom::Start(live_start as u64))?;
-        file.write_all(&last_update.to_le_bytes())?;
-
-        for (index, ds) in ds_nodes.iter().enumerate() {
-            let offset = pdp_start + index * PDP_PREP_LEN;
-            let last_ds = single_text_child(*ds, "last_ds")?;
-            if last_ds.len() >= 30 {
-                return Err(StoreError::RrdUnsupported(
-                    "RRD XML last_ds value is too long".into(),
-                ));
-            }
-            let mut last_ds_bytes = [0_u8; 30];
-            last_ds_bytes[..last_ds.len()].copy_from_slice(last_ds.as_bytes());
-            file.seek(SeekFrom::Start(offset as u64))?;
-            file.write_all(&last_ds_bytes)?;
-            let unknown_seconds = child_text(*ds, "unknown_sec")?
-                .parse::<u64>()
-                .map_err(|_| StoreError::RrdUnsupported("invalid RRD XML unknown_sec".into()))?;
-            file.seek(SeekFrom::Start((offset + 32) as u64))?;
-            file.write_all(&unknown_seconds.to_le_bytes())?;
-            let value = parse_f64(&child_text(*ds, "value")?)?;
-            file.seek(SeekFrom::Start((offset + 40) as u64))?;
-            file.write_all(&value.to_le_bytes())?;
-        }
-
-        for (rra_index, rra) in rra_nodes.iter().enumerate() {
-            let cdp = child(*rra, "cdp_prep")?
-                .children()
-                .filter(|node| node.is_element() && node.tag_name().name() == "ds")
-                .collect::<Vec<_>>();
-            if cdp.len() != ds_nodes.len() {
-                return Err(StoreError::RrdUnsupported(
-                    "RRD XML cdp_prep data-source count does not match".into(),
-                ));
-            }
-            for (ds_index, prep) in cdp.iter().enumerate() {
-                let offset = cdp_start + (rra_index * ds_nodes.len() + ds_index) * CDP_PREP_LEN;
-                for (field, relative_offset) in [
-                    ("value", 0_usize),
-                    ("primary_value", 64),
-                    ("secondary_value", 72),
-                ] {
-                    let value = parse_f64(&child_text(*prep, field)?)?;
-                    file.seek(SeekFrom::Start((offset + relative_offset) as u64))?;
-                    file.write_all(&value.to_le_bytes())?;
-                }
-                let unknown = child_text(*prep, "unknown_datapoints")?
-                    .parse::<u64>()
-                    .map_err(|_| {
-                        StoreError::RrdUnsupported("invalid RRD XML unknown_datapoints".into())
-                    })?;
-                file.seek(SeekFrom::Start((offset + 8) as u64))?;
-                file.write_all(&unknown.to_le_bytes())?;
-            }
-
-            let archive = &info.archives[rra_index];
-            let pointer = archive.rows - 1;
-            file.seek(SeekFrom::Start(
-                (pointer_start + rra_index * RRA_PTR_LEN) as u64,
-            ))?;
-            file.write_all(&pointer.to_le_bytes())?;
-            if archive_rows[rra_index].len() as u64 != archive.rows {
-                return Err(StoreError::RrdUnsupported(
-                    "RRD XML archive row count changed during restore".into(),
-                ));
-            }
-            for (row_index, row) in archive_rows[rra_index].iter().enumerate() {
-                let values = row
-                    .children()
-                    .filter(|node| node.is_element() && node.tag_name().name() == "v")
-                    .collect::<Vec<_>>();
-                if values.len() != ds_nodes.len() {
-                    return Err(StoreError::RrdUnsupported(
-                        "RRD XML row data-source count does not match".into(),
-                    ));
-                }
-                for (ds_index, value_node) in values.iter().enumerate() {
-                    let text = value_node.text().unwrap_or_default().trim();
-                    let mut value = parse_f64(text)?;
-                    if range_check
-                        && ((source_bounds[ds_index]
-                            .0
-                            .is_some_and(|minimum| value < minimum))
-                            || source_bounds[ds_index]
-                                .1
-                                .is_some_and(|maximum| value > maximum))
-                    {
-                        value = rrd_nan();
-                    }
-                    let offset = archive.data_offset
-                        + ((row_index * ds_nodes.len() + ds_index) * VALUE_LEN) as u64;
-                    file.seek(SeekFrom::Start(offset))?;
-                    file.write_all(&value.to_le_bytes())?;
-                }
-            }
-        }
-        drop(file);
-        if force_overwrite {
-            std::fs::rename(&temporary, destination)?;
-        } else {
-            std::fs::hard_link(&temporary, destination)?;
-            std::fs::remove_file(&temporary)?;
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result
-}
-
 fn format_rrd_value(value: f64) -> String {
     if value.is_nan() {
         "NaN".to_owned()
@@ -2384,7 +1865,7 @@ fn rrd_local_timestamp(timestamp: i64) -> Result<String, StoreError> {
 /// rrd_open.c:336-560: RRDtool maps the file and reads the header piece by
 /// piece, failing with these texts in this order before anything else looks
 /// at the contents.
-fn read_info(file: &mut File, path: &Path) -> Result<RrdInfo, StoreError> {
+pub(crate) fn read_info(file: &mut File, path: &Path) -> Result<RrdInfo, StoreError> {
     let name = path.display();
     let metadata = file.metadata().map_err(|error| {
         StoreError::RrdFile(format!("fstat '{name}': {}", rrd_strerror(&error)))
@@ -2742,7 +2223,7 @@ fn choose_archive(
 /// process holds on it. Locked access is therefore also serialized per inode
 /// inside the process, and the descriptor is closed before the next thread may
 /// open its own lock on that inode.
-struct RrdFileLock {
+pub(crate) struct RrdFileLock {
     file: Option<File>,
     #[cfg(unix)]
     key: (u64, u64),
@@ -2845,7 +2326,7 @@ impl RrdFileLock {
     }
 
     #[cfg(unix)]
-    fn exclusive(file: File) -> Result<Self, StoreError> {
+    pub(crate) fn exclusive(file: File) -> Result<Self, StoreError> {
         Self::lock(file, true)
     }
 
@@ -2971,10 +2452,54 @@ fn open_rrd_read(path: &Path) -> Result<File, StoreError> {
     File::open(path).map_err(|error| open_error(path, &error))
 }
 
-fn open_rrd_write(path: &Path) -> Result<File, StoreError> {
+pub(crate) fn open_rrd_write(path: &Path) -> Result<File, StoreError> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true);
     options.open(path).map_err(|error| open_error(path, &error))
+}
+
+/// Open an output file for writing, creating it with mode 0666 (less the
+/// umask) or, with `exclusive`, only if it does not exist. RRDtool follows a
+/// symbolic link at the final component and writes through any inode; Rondi
+/// refuses a symbolic link, anything but a regular file and a file with more
+/// than one hard link, so an output path cannot redirect the write. The file
+/// is not truncated; callers that truncate do so after this check.
+pub fn open_output_file(path: &Path, exclusive: bool) -> std::io::Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    if exclusive {
+        options.create_new(true);
+    } else {
+        options.create(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        options
+            .mode(0o666)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        let file = options.open(path).map_err(|error| {
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                std::io::Error::other("refusing to follow a symbolic link")
+            } else {
+                error
+            }
+        })?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(std::io::Error::other("not a regular file"));
+        }
+        if metadata.nlink() > 1 {
+            return Err(std::io::Error::other(
+                "refusing to write a file with more than one hard link",
+            ));
+        }
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        options.open(path)
+    }
 }
 
 /// rrd_open.c:336.

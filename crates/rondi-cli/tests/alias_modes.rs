@@ -7428,14 +7428,19 @@ fn rrdtool_resize_grow_and_shrink_match_upstream_byte_for_byte() {
             std::fs::read(rondi_dir.join("resize.rrd")).unwrap(),
             "{action} output differs byte-for-byte"
         );
-        let second_resize = Command::new(&alias)
-            .current_dir(&rondi_dir)
-            .args(["resize", "sample.rrd", "0", action, "2"])
-            .output()
-            .unwrap();
-        assert!(
-            !second_resize.status.success(),
-            "resize replaced an existing output"
+        // rrd_open's RRD_CREAT truncates an existing resize.rrd.
+        for (program, dir) in [(Path::new("rrdtool"), &upstream_dir), (&*alias, &rondi_dir)] {
+            let second_resize = Command::new(program)
+                .current_dir(dir)
+                .args(["resize", "sample.rrd", "0", action, "2"])
+                .output()
+                .unwrap();
+            assert!(second_resize.status.success(), "{second_resize:?}");
+        }
+        assert_eq!(
+            std::fs::read(upstream_dir.join("resize.rrd")).unwrap(),
+            std::fs::read(rondi_dir.join("resize.rrd")).unwrap(),
+            "{action} output over an existing resize.rrd differs"
         );
         assert_eq!(std::fs::read(&upstream_file).unwrap(), original_bytes);
         assert_eq!(std::fs::read(&rondi_file).unwrap(), original_bytes);
