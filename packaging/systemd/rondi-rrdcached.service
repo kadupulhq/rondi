@@ -8,10 +8,13 @@ User=rondi
 Group=rondi
 UMask=0007
 StateDirectory=rondi rondi-journal
-StateDirectoryMode=2770
+StateDirectoryMode=0750
 RuntimeDirectory=rondi
-RuntimeDirectoryMode=2770
-ExecStart=/usr/bin/rrdcached -g -b /var/lib/rondi -j /var/lib/rondi-journal -m 0660 -s rondi -l unix:/run/rondi/rrdcached.sock
+RuntimeDirectoryMode=0750
+# The journal holds trusted replay input; only the service account may
+# read or replace it. StateDirectoryMode applies to both state directories.
+ExecStartPre=/bin/chmod 0700 /var/lib/rondi-journal
+ExecStart=/usr/bin/rrdcached -g -B -b /var/lib/rondi -j /var/lib/rondi-journal -m 0660 -s rondi -l unix:/run/rondi/rrdcached.sock
 Restart=on-failure
 NoNewPrivileges=true
 PrivateTmp=true
@@ -28,6 +31,16 @@ ProtectKernelTunables=true
 RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
+CapabilityBoundingSet=
+# Unix socket only. A TCP -l or -L needs AF_INET AF_INET6 here and
+# PrivateNetwork removed.
+RestrictAddressFamilies=AF_UNIX
+PrivateNetwork=true
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+RestrictNamespaces=true
+ProtectProc=invisible
+ProcSubset=pid
 
 [Install]
 WantedBy=multi-user.target

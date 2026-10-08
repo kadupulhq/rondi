@@ -285,12 +285,28 @@ impl Store {
     }
 
     pub fn recover(&self) -> Result<usize, StoreError> {
+        self.recover_counting_skipped()
+            .map(|(replayed, _)| replayed)
+    }
+
+    /// [`Store::recover`], also returning how many journal records named a
+    /// database that no longer exists. Those are skipped rather than stopping
+    /// startup; compaction drops them once they leave the idempotency window.
+    pub fn recover_counting_skipped(&self) -> Result<(usize, usize), StoreError> {
         let _mutation = self.mutation_guard()?;
         let mut journal_ids = self.journal_ids_lock()?;
         let records = self.read_journal()?;
         let mut replayed = 0;
+        let mut skipped = 0;
         for record in &records {
-            let db = self.read_db(&record.database)?;
+            let db = match self.read_db(&record.database) {
+                Ok(db) => db,
+                Err(StoreError::NotFound(_) | StoreError::InvalidName) => {
+                    skipped += 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if record.update.timestamp <= db.last_update {
                 continue;
             }
@@ -299,7 +315,7 @@ impl Store {
         }
         *journal_ids = Some(JournalIndex::new(records));
         self.compact_journal(&mut journal_ids, unix_now())?;
-        Ok(replayed)
+        Ok((replayed, skipped))
     }
 
     /// Rewrite the journal without records that are both applied to their
@@ -935,6 +951,31 @@ mod tests {
         assert_eq!(store.recover().unwrap(), 1);
         assert_eq!(store.fetch("cpu").unwrap().points[0].value, Some(7.0));
         assert_eq!(store.recover().unwrap(), 0);
+    }
+
+    #[test]
+    fn recovery_skips_records_for_a_removed_database() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open(dir.path()).unwrap();
+            for name in ["cpu", "gone"] {
+                store.create(name, config()).unwrap();
+                store
+                    .update_durable(
+                        name,
+                        Update {
+                            timestamp: 1_700_000_010,
+                            value: Some(7.0),
+                        },
+                        &format!("req-{name}"),
+                    )
+                    .unwrap();
+            }
+        }
+        std::fs::remove_file(dir.path().join("gone.rondi")).unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.recover_counting_skipped().unwrap(), (0, 1));
+        assert_eq!(store.fetch("cpu").unwrap().points[0].value, Some(7.0));
     }
 
     #[test]

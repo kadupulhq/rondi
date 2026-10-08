@@ -1164,28 +1164,6 @@ fn rrdcached_accepts_attached_arguments_and_cacti_options() {
     drop(stream);
     unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
     assert!(child.wait().unwrap().success());
-
-    // Rondi can neither switch accounts nor serve several sockets, so it
-    // refuses these configurations instead of silently ignoring them.
-    let mut refused = vec![vec![
-        "-l".to_owned(),
-        format!("unix:{}", dir.path().join("first.sock").display()),
-        "-l".to_owned(),
-        format!("unix:{}", dir.path().join("second.sock").display()),
-    ]];
-    if uid != 0 {
-        refused.push(vec!["-U".to_owned(), "0".to_owned()]);
-    }
-    for args in refused {
-        let output = Command::new(&alias)
-            .args(["-g", "-b", root.to_str().unwrap()])
-            .args(&args)
-            .output()
-            .unwrap();
-        assert!(!output.status.success(), "{args:?}");
-        assert!(!output.stderr.is_empty(), "{args:?}");
-        assert!(!dir.path().join("first.sock").exists());
-    }
 }
 
 #[test]
@@ -2698,7 +2676,11 @@ fn rrdcached_alias_journals_updates_and_flushes_on_fetch() {
     reader.get_mut().write_all(b"PING\nINVALID\n.\n").unwrap();
     let mut batch_result = String::new();
     reader.read_line(&mut batch_result).unwrap();
-    assert_eq!(batch_result, "1 errors\n");
+    // PING is a client-only command, so a BATCH refuses it.
+    assert_eq!(batch_result, "2 errors\n");
+    batch_result.clear();
+    reader.read_line(&mut batch_result).unwrap();
+    assert_eq!(batch_result, "1 Can't use 'PING' here.\n");
     batch_result.clear();
     reader.read_line(&mut batch_result).unwrap();
     assert!(
@@ -3071,90 +3053,687 @@ fn rrdtool_update_daemon_and_environment_route_writes_through_rrdcached() {
     }
 }
 
-#[test]
-fn rrdcached_recovers_journaled_update_after_crash() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().join("rra");
-    let socket = dir.path().join("run/rrdcached.sock");
-    let journal_directory = dir.path().join("run/journal");
-    let alias = dir.path().join("rrdcached");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-    std::fs::create_dir_all(&journal_directory).unwrap();
-    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+fn upstream_rrdcached_available() -> bool {
+    ["rrdcached", "rrdtool"].iter().all(|tool| {
+        Command::new(tool)
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    })
+}
 
-    let start = || {
-        Command::new(&alias)
-            .args([
-                "-b",
-                root.to_str().unwrap(),
-                "-j",
-                journal_directory.to_str().unwrap(),
-                "-l",
-            ])
+/// Starts upstream (`rondi == false`) or Rondi rrdcached on fixed paths, so
+/// journals written by either name the same files.
+fn start_journaled_rrdcached(work: &std::path::Path, rondi: bool, options: &[&str]) -> Child {
+    let socket = work.join("s.sock");
+    let _ = std::fs::remove_file(&socket);
+    let alias = work.join("rrdcached");
+    if rondi && !alias.exists() {
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    }
+    let program = if rondi {
+        alias.into_os_string()
+    } else {
+        "rrdcached".into()
+    };
+    let mut child = Command::new(program)
+        .arg("-g")
+        .arg("-p")
+        .arg(work.join("rrdcached.pid"))
+        .arg("-b")
+        .arg(work.join("b"))
+        .args(["-w", "3600", "-f", "7200"])
+        // -P and -m apply to the -l options after them.
+        .args(options)
+        .arg("-l")
+        .arg(format!("unix:{}", socket.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_for_socket(&mut child, &socket);
+    child
+}
+
+fn stop_rrdcached(mut child: Child, signal: libc::c_int) {
+    // SAFETY: the child is still running and owned by this test.
+    assert_eq!(unsafe { libc::kill(child.id() as libc::pid_t, signal) }, 0);
+    child.wait().unwrap();
+}
+
+fn journal_contents(directory: &std::path::Path) -> Vec<Vec<u8>> {
+    let mut names = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+        .into_iter()
+        .map(|path| std::fs::read(path).unwrap())
+        .collect()
+}
+
+fn reset_journal_work(work: &std::path::Path, baseline: &std::path::Path) {
+    for directory in ["b", "j"] {
+        let _ = std::fs::remove_dir_all(work.join(directory));
+        std::fs::create_dir_all(work.join(directory)).unwrap();
+    }
+    for name in ["a.rrd", "c.rrd"] {
+        std::fs::copy(baseline, work.join("b").join(name)).unwrap();
+    }
+}
+
+#[test]
+fn rrdcached_journal_replays_across_upstream_and_rondi() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping journal replay differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let baseline = work.join("baseline.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&baseline)
+        .args(["--start", "1000000000", "--step", "10"])
+        .args([
+            "DS:v:GAUGE:20:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+            "RRA:MAX:0.5:2:4",
+        ])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let journal = work.join("j");
+    let journal_option = journal.to_str().unwrap();
+    let base = work.join("b");
+    let mut writes = format!(
+        "UPDATE a.rrd 1000000010:1 1000000020:2\nUPDATE c.rrd 1000000010:5\nFLUSH a.rrd\n\
+         UPDATE a.rrd 1000000030:3\nUPDATE c.rrd 1000000020:6 1000000030:7\nFORGET c.rrd\n\
+         UPDATE c.rrd 1000000040:8\nUPDATE {}/a.rrd 1000000040:4\n",
+        base.display()
+    );
+    let mut killed_writes = writes.clone();
+    for step in 0..200 {
+        killed_writes.push_str(&format!(
+            "UPDATE a.rrd {}:{step}\n",
+            1_000_000_050 + step * 10
+        ));
+    }
+    writes.push_str("STATS\nQUIT\n");
+    killed_writes.push_str("STATS\nQUIT\n");
+    // Upstream counts QueueLength and UpdatesWritten differently (RD-007),
+    // and bumps DataSetsWritten only after waking the FLUSH waiter, so a
+    // following STATS can race it (rrd_daemon.c queue_thread_main).
+    let comparable = |response: String| {
+        response
+            .lines()
+            .filter(|line| {
+                !["QueueLength:", "UpdatesWritten:", "DataSetsWritten:"]
+                    .iter()
+                    .any(|name| line.starts_with(name))
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let socket = work.join("s.sock");
+    let run = |writer_is_rondi: bool, replayer_is_rondi: bool, signal: libc::c_int| {
+        reset_journal_work(&work, &baseline);
+        let writer = start_journaled_rrdcached(&work, writer_is_rondi, &["-j", journal_option]);
+        let script = if signal == libc::SIGKILL {
+            &killed_writes
+        } else {
+            &writes
+        };
+        let written = comparable(rrdcached_dump(&socket, script));
+        // SIGTERM without -F keeps the journal and skips the final flush;
+        // SIGKILL leaves only what stdio buffering already wrote.
+        stop_rrdcached(writer, signal);
+        let journal_written = journal_contents(&journal);
+        let replayer = start_journaled_rrdcached(&work, replayer_is_rondi, &["-j", journal_option]);
+        let replayed = comparable(rrdcached_dump(
+            &socket,
+            "PENDING a.rrd\nPENDING c.rrd\nSTATS\nFLUSH a.rrd\nFLUSH c.rrd\nQUIT\n",
+        ));
+        stop_rrdcached(replayer, libc::SIGTERM);
+        (
+            written,
+            journal_written,
+            replayed,
+            std::fs::read(base.join("a.rrd")).unwrap(),
+            std::fs::read(base.join("c.rrd")).unwrap(),
+        )
+    };
+    for signal in [libc::SIGTERM, libc::SIGKILL] {
+        let control = run(false, false, signal);
+        assert!(!control.1.is_empty() && !control.1[0].is_empty());
+        if signal == libc::SIGTERM {
+            assert_eq!(
+                rrdcached_stat_value(&control.0, "JournalBytes"),
+                control.1[0].len() as u64
+            );
+            assert!(
+                control
+                    .2
+                    .contains("2 updates pending\n1000000030:3\n1000000040:4\n")
+            );
+        }
+        for (writer, replayer) in [(true, false), (false, true), (true, true)] {
+            let observed = run(writer, replayer, signal);
+            let label =
+                format!("signal {signal}, writer rondi={writer}, replayer rondi={replayer}");
+            assert_eq!(observed.0, control.0, "{label}: writer responses");
+            assert_eq!(observed.1, control.1, "{label}: journal bytes");
+            assert_eq!(observed.2, control.2, "{label}: replay responses");
+            assert!(observed.3 == control.3, "{label}: a.rrd differs");
+            assert!(observed.4 == control.4, "{label}: c.rrd differs");
+        }
+    }
+}
+
+#[test]
+fn rrdcached_journal_shutdown_and_rotation_match_upstream() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping journal lifecycle differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let baseline = work.join("baseline.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&baseline)
+        .args(["--start", "1000000000", "--step", "10"])
+        .args(["DS:v:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:8"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let journal = work.join("j");
+    let journal_option = journal.to_str().unwrap().to_owned();
+    let socket = work.join("s.sock");
+    let mut results = Vec::new();
+    for rondi in [false, true] {
+        // -F flushes at shutdown and then removes the journals; without -j
+        // nothing is journaled and shutdown always flushes.
+        let mut observed = Vec::new();
+        for options in [vec!["-F", "-j", &journal_option], vec![]] {
+            reset_journal_work(&work, &baseline);
+            let daemon = start_journaled_rrdcached(&work, rondi, &options);
+            let stats = rrdcached_dump(&socket, "UPDATE a.rrd 1000000010:1\nSTATS\nQUIT\n");
+            stop_rrdcached(daemon, libc::SIGTERM);
+            observed.push((
+                rrdcached_stat_value(&stats, "JournalBytes"),
+                std::fs::read_dir(&journal).unwrap().count(),
+                std::fs::read(work.join("b/a.rrd")).unwrap(),
+            ));
+        }
+        // Each -f interval starts a new journal and deletes the set before
+        // the previous one, so two files remain once rotation has begun.
+        reset_journal_work(&work, &baseline);
+        let daemon =
+            start_journaled_rrdcached(&work, rondi, &["-j", &journal_option, "-w", "1", "-f", "1"]);
+        thread::sleep(Duration::from_millis(3500));
+        let stats = rrdcached_dump(&socket, "STATS\nQUIT\n");
+        let files = std::fs::read_dir(&journal).unwrap().count();
+        stop_rrdcached(daemon, libc::SIGKILL);
+        assert!(
+            rrdcached_stat_value(&stats, "JournalRotate") >= 2,
+            "rondi={rondi}: {stats}"
+        );
+        observed.push((0, files, Vec::new()));
+        results.push(observed);
+    }
+    assert_eq!(results[0][0].0, "update a.rrd 1000000010:1\n".len() as u64);
+    assert_eq!(results[0][0].1, 0);
+    assert_eq!(results[0][1].0, 0);
+    assert_eq!(results[0][2].1, 2);
+    assert!(
+        results[0] == results[1],
+        "Rondi journal lifecycle differs from upstream"
+    );
+}
+
+#[test]
+fn rrdcached_update_values_fail_at_flush_like_upstream() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping UPDATE validation differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let baseline = work.join("baseline.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&baseline)
+        .args(["--start", "1000000000", "--step", "10"])
+        .args(["DS:v:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:8"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let journal = work.join("j");
+    let socket = work.join("s.sock");
+    let script = "UPDATE a.rrd 1000000010:1 1000000020:x 1000000030:3\n\
+                  UPDATE a.rrd 1000000040:4 1000000035:5 1000000050:6\n\
+                  UPDATE a.rrd 1000000060.x:1\n\
+                  UPDATE a.rrd 1000000070:7:8\n\
+                  PENDING a.rrd\nFLUSH a.rrd\nPENDING a.rrd\n\
+                  UPDATE a.rrd 1000000070:9\nUPDATE a.rrd 1000000080:8\nFLUSH a.rrd\n\
+                  STATS\nQUIT\n";
+    let mut observed = Vec::new();
+    for rondi in [false, true] {
+        reset_journal_work(&work, &baseline);
+        let daemon = start_journaled_rrdcached(&work, rondi, &["-j", journal.to_str().unwrap()]);
+        // FLUSH wakes its caller before the written counters move upstream.
+        let responses = rrdcached_dump(&socket, script)
+            .lines()
+            .filter(|line| {
+                !line.starts_with("UpdatesWritten:") && !line.starts_with("DataSetsWritten:")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        stop_rrdcached(daemon, libc::SIGTERM);
+        observed.push((
+            responses,
+            journal_contents(&journal),
+            std::fs::read(work.join("b/a.rrd")).unwrap(),
+        ));
+    }
+    assert!(
+        observed[0].0.contains("0 errors, enqueued 3 value(s).\n"),
+        "{}",
+        observed[0].0
+    );
+    assert_eq!(observed[1].0, observed[0].0);
+    assert_eq!(observed[1].1, observed[0].1, "journal contents differ");
+    assert!(
+        observed[1].2 == observed[0].2,
+        "a.rrd differs from upstream"
+    );
+}
+
+#[test]
+fn rrdcached_error_replies_and_batch_sessions_match_upstream() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping rrdcached error differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let baseline = work.join("baseline.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&baseline)
+        .args(["--start", "1000000000", "--step", "10"])
+        .args(["DS:v:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:8"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    // Each entry is one connection; QUIT ends it unless the daemon closes it
+    // first, as it does after SUSPEND or RESUME of an unknown file.
+    let sessions = [
+        "UPDATE missing.rrd 1000000010:1\n",
+        "UPDATE dir 1000000010:1\n",
+        "UPDATE empty.rrd 1000000010:1\n",
+        "UPDATE junk.rrd 1000000010:1\n",
+        "UPDATE\n",
+        "UPDATE a.rrd 1000000030:1 \nPENDING a.rrd\n",
+        "INFO missing.rrd\n",
+        "INFO dir\n",
+        "INFO empty.rrd\n",
+        "INFO junk.rrd\n",
+        "FIRST missing.rrd 0\n",
+        "FIRST a.rrd 9\n",
+        "FIRST a.rrd -1\n",
+        "FIRST a.rrd x\n",
+        "FIRST dir 0\n",
+        "FIRST a.rrd\n",
+        "LAST missing.rrd\n",
+        "LAST junk.rrd\n",
+        "FETCH missing.rrd AVERAGE\n",
+        "FETCH a.rrd BOGUS\n",
+        "FETCH dir AVERAGE\n",
+        "FETCH junk.rrd AVERAGE\n",
+        "FETCH a.rrd\n",
+        "FETCHBIN missing.rrd AVERAGE\n",
+        "FETCHBIN a.rrd BOGUS\n",
+        "TUNE missing.rrd 3 tune missing.rrd -h\n",
+        "TUNE dir 3 tune dir -h\n",
+        "TUNE junk.rrd 3 tune junk.rrd -h\n",
+        "DUMP missing.rrd\n",
+        "DUMP dir\n",
+        "DUMP junk.rrd\n",
+        "FORGET missing.rrd\n",
+        "FLUSH missing.rrd\n",
+        "FLUSH dir\n",
+        "FLUSH  a.rrd\n",
+        "PENDING missing.rrd\n",
+        "SUSPEND missing.rrd\nPING\n",
+        "RESUME missing.rrd\nPING\n",
+        "LIST /missing\n",
+        "LIST RECURSIVE /missing\n",
+        "LIST missing\n",
+        "PING extra\n",
+        ".\n",
+        "\n",
+        "WROTE x\n",
+        "\\\\\n",
+        "BATCH x\nPING\n.\n",
+        "BATCH\n.\nBATCH\nUPDATE a.rrd 5:1\n.\n",
+        "BATCH\nUPDATE missing.rrd 1000000010:1\nINFO a.rrd\nFLUSH missing.rrd\nFOO\n\
+         FETCH a.rrd AVERAGE\nUPDATE a.rrd\nPING\n\nCREATE nodir/x.rrd DS:v:GAUGE:20:U:U \
+         RRA:AVERAGE:0.5:1:8\nFORGET missing.rrd\nUPDATE a.rrd 1000000010:x\nBATCH\nWROTE x\n\
+         UPDATE a.rrd 1000000020:1\nflush a.rrd\n.\nPING\n",
+        "BATCH\nupdate a.rrd 1000000010:1\nquit\n.\n",
+        "BATCH\nSUSPEND missing.rrd\nPING\n.\n",
+    ];
+    let socket = work.join("s.sock");
+    let mut observed = Vec::new();
+    for rondi in [false, true] {
+        reset_journal_work(&work, &baseline);
+        std::fs::create_dir(work.join("b/dir")).unwrap();
+        std::fs::write(work.join("b/empty.rrd"), b"").unwrap();
+        std::fs::write(work.join("b/junk.rrd"), "garbage ".repeat(40)).unwrap();
+        let daemon = start_journaled_rrdcached(&work, rondi, &[]);
+        let replies = sessions
+            .iter()
+            .map(|session| {
+                let mut stream = UnixStream::connect(&socket).unwrap();
+                stream.set_read_timeout(Some(common::io_timeout())).unwrap();
+                stream.write_all(session.as_bytes()).unwrap();
+                let _ = stream.write_all(b"QUIT\n");
+                let mut reply = String::new();
+                stream.read_to_string(&mut reply).unwrap();
+                format!("[{session:?}]\n{reply}")
+            })
+            .collect::<Vec<_>>();
+        stop_rrdcached(daemon, libc::SIGTERM);
+        observed.push(replies);
+    }
+    for (upstream, rondi) in observed[0].iter().zip(&observed[1]) {
+        assert_eq!(rondi, upstream);
+    }
+}
+
+#[test]
+fn rrdcached_permissions_apply_inside_batch_like_upstream() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!(
+            "skipping rrdcached permission differential: upstream tools are not installed"
+        );
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let baseline = work.join("baseline.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&baseline)
+        .args(["--start", "1000000000", "--step", "10"])
+        .args(["DS:v:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:8"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let socket = work.join("s.sock");
+    let session = "BATCH\nFLUSH a.rrd\nupdate a.rrd 1000000010:1\nFoRgEt a.rrd\n\
+                   CREATE x.rrd DS:v:GAUGE:20:U:U RRA:AVERAGE:0.5:1:8\nSUSPENDALL\n.\n\
+                   FLUSH a.rrd\nHELP PING\nPENDING a.rrd\nQUIT\n";
+    let mut observed = Vec::new();
+    for rondi in [false, true] {
+        reset_journal_work(&work, &baseline);
+        let daemon = start_journaled_rrdcached(&work, rondi, &["-P", "BATCH,update,pending"]);
+        observed.push(rrdcached_dump(&socket, session));
+        stop_rrdcached(daemon, libc::SIGTERM);
+    }
+    assert!(
+        observed[0].contains("Permission denied."),
+        "{}",
+        observed[0]
+    );
+    assert_eq!(observed[1], observed[0]);
+}
+
+#[test]
+fn rrdcached_without_base_directory_matches_upstream_and_writes_nothing_to_tmp() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping rrdcached no-base differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let rrd = work.join("a.rrd");
+    let socket = work.join("s.sock");
+    let alias = work.join("rrdcached");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let baseline = work.join("baseline.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&baseline)
+        .args(["--start", "1000000000", "--step", "10"])
+        .args(["DS:v:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:8"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let tmp_lock = std::path::Path::new("/tmp/.rondi.lock");
+    let lock_existed = tmp_lock.exists();
+    let session = format!(
+        "LIST /\nUPDATE {0} 1000000010:1\nFLUSH {0}\nINFO missing-{1}.rrd\nQUIT\n",
+        rrd.display(),
+        std::process::id()
+    );
+    let mut observed = Vec::new();
+    for rondi in [false, true] {
+        std::fs::copy(&baseline, &rrd).unwrap();
+        let _ = std::fs::remove_file(&socket);
+        let program = if rondi {
+            alias.clone().into_os_string()
+        } else {
+            "rrdcached".into()
+        };
+        let mut daemon = Command::new(program)
+            .arg("-g")
+            .arg("-p")
+            .arg(work.join("pid"))
+            .arg("-l")
             .arg(format!("unix:{}", socket.display()))
-            .arg("-w")
-            .arg("3600")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .unwrap()
-    };
-    let mut child = start();
-    wait_for_socket(&mut child, &socket);
-    let mut stream = UnixStream::connect(&socket).unwrap();
-    let mut reader = BufReader::new(&mut stream);
-    assert_eq!(
-        rrdcached_request(
-            &mut reader,
-            "CREATE crash.rrd -b 1000000000 -s 10 DS:load:GAUGE:20:U:U RRA:AVERAGE:0.5:1:8\n"
-        ),
-        "0 RRD created OK\n"
-    );
-    assert_eq!(
-        rrdcached_request(&mut reader, "UPDATE crash.rrd 1000000010:9\n"),
-        "0 errors, enqueued 1 value(s).\n"
-    );
-    assert!(journal_directory.join(".rrdcached.journal").is_file());
-    assert_eq!(
-        rrdcached_request(&mut reader, "LAST crash.rrd\n"),
-        "0 1000000010\n"
-    );
-    drop(reader);
-    drop(stream);
-
-    // SIGKILL simulates loss before a graceful flush. The synced journal must
-    // retain the accepted update and startup must recover it.
-    // SAFETY: `child.id()` belongs to the still-running test child.
-    assert_eq!(
-        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGKILL) },
-        0
-    );
-    child.wait().unwrap();
-
-    let mut restarted = start();
-    wait_for_socket(&mut restarted, &socket);
-    let mut stream = UnixStream::connect(&socket).unwrap();
-    let mut reader = BufReader::new(&mut stream);
-    assert_eq!(
-        rrdcached_request(&mut reader, "PENDING crash.rrd\n"),
-        "1 updates pending\n"
-    );
-    let mut sample = String::new();
-    reader.read_line(&mut sample).unwrap();
-    assert_eq!(sample, "1000000010:9\n");
+            .unwrap();
+        wait_for_socket(&mut daemon, &socket);
+        observed.push(rrdcached_dump(&socket, &session));
+        stop_rrdcached(daemon, libc::SIGTERM);
+        observed.push(format!("{:?}", std::fs::read(&rrd).unwrap()));
+    }
     assert!(
-        rrdcached_request(&mut reader, "FLUSH crash.rrd\n").starts_with("0 Successfully flushed")
+        observed[0].starts_with("-1 No base directory defined\n"),
+        "{}",
+        observed[0]
     );
+    assert_eq!(observed[2], observed[0]);
+    assert_eq!(observed[3], observed[1]);
+    if !lock_existed {
+        assert!(
+            !tmp_lock.exists(),
+            "rrdcached without -b created /tmp/.rondi.lock"
+        );
+    }
+}
+
+#[test]
+fn rrdcached_dash_b_confinement_matches_upstream() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping rrdcached -B differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let baseline = work.join("baseline.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&baseline)
+        .args(["--start", "1000000000", "--step", "10"])
+        .args(["DS:v:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:8"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let outside = work.join("out");
+    std::fs::create_dir_all(&outside).unwrap();
+    let outside_rrd = outside.join("o.rrd");
+    let socket = work.join("s.sock");
+    let escaping = [
+        format!("UPDATE {} 1000000010:1\n", outside_rrd.display()),
+        "UPDATE sub/../a.rrd 1000000010:1\n".to_owned(),
+        "INFO ../out/p.rrd\n".to_owned(),
+        "FIRST ../out/p.rrd 0\n".to_owned(),
+        "LAST ../out/p.rrd\n".to_owned(),
+        "FETCH ../out/p.rrd AVERAGE 1000000000 1000000020\n".to_owned(),
+        format!("FLUSH {}\n", outside_rrd.display()),
+        "FORGET ../out/p.rrd\n".to_owned(),
+        "TUNE ../out/p.rrd 3 tune -h v:30\n".to_owned(),
+        "CREATE ../out/n.rrd DS:v:GAUGE:20:U:U RRA:AVERAGE:0.5:1:8\n".to_owned(),
+        "BATCH\nUPDATE ../out/p.rrd 1000000010:1\n.\n".to_owned(),
+    ];
+    // Upstream keys its cache by the name as spelled and Rondi by the
+    // resolved file (RD-007), so each file is named one way only.
+    // Upstream compares strings, so these pass its check; Rondi resolves
+    // them and refuses both.
+    let symlinked = [
+        "UPDATE linkdir/o.rrd 1000000010:1\n",
+        "UPDATE link.rrd 1000000010:1\n",
+    ];
+    let mut observed = Vec::new();
+    for rondi in [false, true] {
+        for options in [&["-B"][..], &[][..]] {
+            reset_journal_work(&work, &baseline);
+            std::fs::copy(&baseline, outside.join("p.rrd")).unwrap();
+            std::fs::copy(&baseline, &outside_rrd).unwrap();
+            std::os::unix::fs::symlink(&outside, work.join("b/linkdir")).unwrap();
+            std::os::unix::fs::symlink(&outside_rrd, work.join("b/link.rrd")).unwrap();
+            let daemon = start_journaled_rrdcached(&work, rondi, options);
+            let replies = escaping
+                .iter()
+                .map(String::as_str)
+                .chain(symlinked)
+                .map(|session| rrdcached_dump(&socket, &format!("{session}QUIT\n")))
+                .collect::<Vec<_>>();
+            stop_rrdcached(daemon, libc::SIGTERM);
+            observed.push(replies);
+        }
+    }
+    let (upstream_confined, upstream_open) = (&observed[0], &observed[1]);
+    let (rondi_confined, rondi_open) = (&observed[2], &observed[3]);
     assert_eq!(
-        rrdcached_request(&mut reader, "LAST crash.rrd\n"),
-        "0 1000000010\n"
+        upstream_confined[0],
+        format!("-1 {}: Permission denied\n", outside_rrd.display())
     );
-    drop(reader);
-    drop(stream);
-    restarted.kill().unwrap();
-    restarted.wait().unwrap();
+    for (index, session) in escaping.iter().enumerate() {
+        assert_eq!(
+            rondi_confined[index], upstream_confined[index],
+            "-B {session:?}"
+        );
+    }
+    for (index, session) in escaping
+        .iter()
+        .map(String::as_str)
+        .chain(symlinked)
+        .enumerate()
+    {
+        assert_eq!(rondi_open[index], upstream_open[index], "{session:?}");
+    }
+    for (index, session) in symlinked.iter().enumerate() {
+        let name = session.split(' ').nth(1).unwrap();
+        assert_eq!(
+            upstream_confined[escaping.len() + index],
+            "0 errors, enqueued 1 value(s).\n"
+        );
+        assert_eq!(
+            rondi_confined[escaping.len() + index],
+            format!("-1 {}/b/{name}: Permission denied\n", work.display())
+        );
+    }
+
+    // Replay skips the access check upstream; with -B Rondi counts a record
+    // outside -b as a failure instead of queueing it.
+    reset_journal_work(&work, &baseline);
+    std::fs::copy(&baseline, &outside_rrd).unwrap();
+    let journal = work.join("j");
+    std::fs::write(
+        journal.join("rrd.journal.0000000001.000000"),
+        "update ../out/o.rrd 1000000010:1\nupdate a.rrd 1000000010:1\n",
+    )
+    .unwrap();
+    let daemon = start_journaled_rrdcached(&work, true, &["-B", "-j", journal.to_str().unwrap()]);
+    let pending = rrdcached_dump(
+        &socket,
+        &format!("PENDING {}\nPENDING a.rrd\nQUIT\n", outside_rrd.display()),
+    );
+    stop_rrdcached(daemon, libc::SIGTERM);
+    assert_eq!(
+        pending,
+        "0 updates pending\n1 updates pending\n1000000010:1\n"
+    );
+}
+
+#[test]
+fn rrdcached_writes_queued_values_without_waiting_for_the_flush_interval() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!(
+            "skipping rrdcached queue timing differential: upstream tools are not installed"
+        );
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let baseline = work.join("baseline.rrd");
+    let created = Command::new("rrdtool")
+        .arg("create")
+        .arg(&baseline)
+        .args(["--start", "1000000000", "--step", "10"])
+        .args(["DS:v:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:8"])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let socket = work.join("s.sock");
+    let mut observed = Vec::new();
+    for rondi in [false, true] {
+        reset_journal_work(&work, &baseline);
+        // The later -w wins, so -w 1 with the helper's -f 7200: the second
+        // UPDATE finds the file older than -w and queues it for a write.
+        let daemon = start_journaled_rrdcached(&work, rondi, &["-w", "1"]);
+        rrdcached_dump(&socket, "UPDATE a.rrd 1000000010:1\nQUIT\n");
+        thread::sleep(Duration::from_millis(1500));
+        rrdcached_dump(&socket, "UPDATE a.rrd 1000000020:2\nQUIT\n");
+        // UpdatesWritten moves after the write completes, in both daemons.
+        let deadline = Instant::now() + common::io_timeout();
+        let mut stats = String::new();
+        while Instant::now() < deadline {
+            stats = rrdcached_dump(&socket, "STATS\nQUIT\n");
+            if rrdcached_stat_value(&stats, "UpdatesWritten") == 1 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        let written = rrdcached_dump(&socket, "PENDING a.rrd\nQUIT\n");
+        stop_rrdcached(daemon, libc::SIGKILL);
+        observed.push((
+            written,
+            rrdcached_stat_value(&stats, "UpdatesWritten"),
+            rrdcached_stat_value(&stats, "QueueLength"),
+            std::fs::read(work.join("b/a.rrd")).unwrap(),
+        ));
+    }
+    assert_eq!(observed[0].0, "0 updates pending\n");
+    assert_eq!(observed[1], observed[0]);
 }
 
 #[test]
