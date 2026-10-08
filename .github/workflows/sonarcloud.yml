@@ -24,7 +24,7 @@ jobs:
       github.actor != 'dependabot[bot]' &&
       (github.event_name != 'pull_request' ||
         github.event.pull_request.head.repo.full_name == github.repository)
-    runs-on: ${{ vars.DO_RUNNERS_ENABLED == 'true' && (contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","kadupul-do"]') || 'ubuntu-latest' }}
+    runs-on: ${{ vars.RONDI_DO_RUNNERS_ENABLED == 'true' && (contains(fromJSON('["push","schedule","workflow_dispatch"]'), github.event_name) || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","Linux","X64","kadupul-do"]') || 'ubuntu-latest' }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
