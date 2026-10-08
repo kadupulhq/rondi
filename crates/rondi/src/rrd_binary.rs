@@ -569,7 +569,9 @@ pub(crate) fn fetch_path(
                 .chunks_exact(VALUE_LEN)
                 .map(|chunk| {
                     let value = f64::from_le_bytes(chunk.try_into().expect("eight byte value"));
-                    value.is_finite().then_some(value)
+                    // rrd_fetch.c:552 copies stored rows as they are; only
+                    // NaN means unknown, so infinities reach the caller.
+                    (!value.is_nan()).then_some(value)
                 })
                 .collect()
         };

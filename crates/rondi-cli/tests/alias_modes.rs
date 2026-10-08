@@ -7598,3 +7598,93 @@ fn rrdtool_update_converts_dcounter_text_only_after_a_known_sample() {
         }
     }
 }
+
+/// rrd_fetch.c copies stored values unchanged, so a stored infinity is printed
+/// as one; only NaN is unknown.
+#[test]
+fn stored_infinity_survives_fetch_and_xport() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        oracle_skip!(
+            "skipping stored infinity differential: pinned RRDtool 1.11.0 is not installed"
+        );
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let file = temp.path().join("infinity.rrd");
+    let file = file.to_str().unwrap();
+    let run = |program: &Path, args: &[&str]| {
+        let output = Command::new(program).args(args).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{program:?} {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let upstream = Path::new("rrdtool");
+    run(
+        upstream,
+        &[
+            "create",
+            file,
+            "--start",
+            "1700000000",
+            "--step",
+            "10",
+            "DS:x:GAUGE:20:U:U",
+            "DS:y:GAUGE:20:U:U",
+            "RRA:MAX:0.5:1:10",
+            "RRA:MIN:0.5:1:10",
+            "RRA:AVERAGE:0.5:1:10",
+        ],
+    );
+    for (offset, x, y) in [
+        (10, "inf", "-inf"),
+        (20, "-inf", "1"),
+        (30, "inf", "U"),
+        (40, "2", "inf"),
+    ] {
+        run(
+            upstream,
+            &[
+                "update",
+                file,
+                &format!("{}:{x}:{y}", 1_700_000_000 + offset),
+            ],
+        );
+    }
+    for cf in ["MAX", "MIN", "AVERAGE"] {
+        let fetch = [
+            "fetch",
+            file,
+            cf,
+            "--start",
+            "1700000000",
+            "--end",
+            "1700000040",
+        ];
+        assert_eq!(run(&alias, &fetch), run(upstream, &fetch), "fetch {cf}");
+        let def_x = format!("DEF:x={file}:x:{cf}");
+        let def_y = format!("DEF:y={file}:y:{cf}");
+        let xport = [
+            "xport",
+            "--start",
+            "1700000000",
+            "--end",
+            "1700000040",
+            &def_x,
+            &def_y,
+            "XPORT:x",
+            "XPORT:y",
+        ];
+        assert_eq!(run(&alias, &xport), run(upstream, &xport), "xport {cf}");
+    }
+}
