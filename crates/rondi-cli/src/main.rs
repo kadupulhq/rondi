@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use rondi::time::{
     UpdateTimestamp, parse_rrd_time, parse_rrd_update_timestamp, resolve_rrd_range_times,
+    rrd_parsetime,
 };
 use rondi::{
     DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, DatabaseConfig, RrdDataSourceTune, RrdDumpHeader,
@@ -907,20 +908,15 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             "--start" | "-b" => {
                 index += 1;
                 let value = args.get(index).ok_or("create --start requires a time")?;
-                start = parse_rrd_time(value, now).map_err(|error| {
-                    if error
-                        .to_string()
-                        .starts_with("unsupported RRDtool time specification:")
-                    {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            format!("start time: unparsable time: {value}"),
-                        )
-                        .into()
-                    } else {
-                        error
-                    }
-                })?;
+                start = rrd_parsetime(value, now)
+                    .map_err(|error| format!("start time: {error}"))?
+                    .absolute()
+                    .ok_or(
+                        "specifying time relative to the 'start' or 'end' makes no sense here",
+                    )?;
+                if start < 315_360_000 {
+                    return Err("the first entry to the RRD should be after 1980".into());
+                }
                 start_was_set = true;
             }
             "--step" | "-s" => {
@@ -1048,9 +1044,6 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 return Err(format!("Duplicate DS name: {name}").into());
             }
         }
-    }
-    if start < 315_360_000 {
-        return Err("the first entry to the RRD should be after 1980".into());
     }
     if archives.is_empty() {
         return Err("you must define at least one Round Robin Archive".into());
@@ -1224,8 +1217,6 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .as_secs() as i64;
     let mut start_spec = None::<String>;
     let mut end_spec = None::<String>;
-    let mut start = now - 24 * 60 * 60;
-    let mut end = now;
     let mut resolution = 1_u64;
     let mut align_start = false;
     let mut daemon_address = None::<String>;
@@ -1267,8 +1258,8 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             positional => return Err(format!("unexpected fetch argument: {positional}").into()),
         }
     }
-    (start, end) =
-        resolve_rrd_range_times(start_spec.as_deref(), end_spec.as_deref(), start, end, now)?;
+    let (mut start, mut end) =
+        resolve_rrd_range_times(start_spec.as_deref(), end_spec.as_deref(), now)?;
     if start < 315_360_000 {
         return Err("the first entry to fetch should be after 1980".into());
     }
@@ -1279,6 +1270,9 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let delta = start.rem_euclid(i64::try_from(resolution)?);
         start = start.checked_sub(delta).ok_or("start time overflows")?;
         end = end.checked_sub(delta).ok_or("end time overflows")?;
+    }
+    if end < start {
+        return Err(format!("start ({start}) should be less than end ({end})").into());
     }
 
     let daemon_address = daemon_address
@@ -1838,13 +1832,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     let (start, end) = if graph_start_spec.is_none() && graph_end_spec.is_none() {
         (xport_start, xport_end)
     } else {
-        resolve_rrd_range_times(
-            graph_start_spec.as_deref(),
-            graph_end_spec.as_deref(),
-            now - 24 * 60 * 60,
-            now,
-            now,
-        )?
+        resolve_rrd_range_times(graph_start_spec.as_deref(), graph_end_spec.as_deref(), now)?
     };
     if filename == "-" {
         if verbose {
@@ -2725,13 +2713,7 @@ fn render_xport_with_graph_prints(
     if definitions.is_empty() {
         return Err("xport requires at least one DEF".into());
     }
-    let (start, end) = resolve_rrd_range_times(
-        start.as_deref(),
-        end.as_deref(),
-        now - 24 * 60 * 60,
-        now,
-        now,
-    )?;
+    let (start, end) = resolve_rrd_range_times(start.as_deref(), end.as_deref(), now)?;
     if start < 315_360_000 {
         return Err(format!("the first entry to fetch should be after 1980 ({start})").into());
     }
@@ -2743,7 +2725,7 @@ fn render_xport_with_graph_prints(
         let start_spec = options.start.clone().unwrap_or_else(|| start.to_string());
         let end_spec = options.end.clone().unwrap_or_else(|| end.to_string());
         let (def_start, def_end) =
-            resolve_rrd_range_times(Some(&start_spec), Some(&end_spec), start, end, now)?;
+            resolve_rrd_range_times(Some(&start_spec), Some(&end_spec), now)?;
         if def_start < 315_360_000 {
             return Err(
                 format!("the first entry to fetch should be after 1980 ({def_start})").into(),
@@ -4655,8 +4637,17 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs_f64();
         let update_time = if at_style {
+            let seconds = rrd_parsetime(timestamp, update_now.floor() as i64)
+                .map_err(|error| format!("{}: ds time: {timestamp}: {error}", filename.display()))?
+                .absolute()
+                .ok_or_else(|| {
+                    format!(
+                        "{}: specifying time relative to the 'start' or 'end' makes no sense here: {timestamp}",
+                        filename.display()
+                    )
+                })?;
             UpdateTimestamp {
-                seconds: parse_rrd_time(timestamp, update_now.floor() as i64)?,
+                seconds,
                 microseconds: 0,
             }
         } else {
