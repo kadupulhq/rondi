@@ -13,7 +13,7 @@ The maintainer has decided the following. The work is in progress.
 - rrdcached implements `-U`, `-G`, and multiple `-l` options as upstream does.
 - After "Unable to connect to rrdcached", the client prints upstream's local-fallback text.
 - All behavior differences listed in COMPATIBILITY_DEFECTS.md are closed. Documented exceptions are limited to behavior that depends on undefined memory (see Risks).
-- Rondi is relicensed to match RRDtool: GPL-2.0-or-later with the RRDtool FLOSS exception. The license change merged in #45. An audit of past contributors' authorship is pending.
+- Rondi is relicensed to match RRDtool: GPL-2.0-or-later with the RRDtool FLOSS exception. The license change merged in #45. Author audit, EXECUTED with `git log --format='%an <%ae>%n%(trailers:key=Signed-off-by,valueonly)'`: every human commit and sign-off is Thomas Vincent; the only other author is dependabot[bot], with two workflow SHA bumps (#33, #42).
 - CI runs on GitHub-hosted runners.
 
 ## Method and labels
@@ -211,7 +211,7 @@ Nothing. EXECUTED: no `crate-type` in `crates/*/Cargo.toml`; no FFI, no headers.
 - Argc/argv entry points reuse the CLI option parser so behavior is identical, including `optind` reset.
 - Allocate `rrd_info_t` lists and fetch buffers with `libc::malloc`, so `rrd_info_free` and `rrd_freemem` (which call `free`) work.
 - `rrd_open` and `rrd_t` exposure sits on the layout descriptor from the format section. It is the hardest part; start with an error stub and inventory which consumers call it (`nm -D --undefined-only`).
-- License: with the relicense to GPL-2.0-or-later plus the RRDtool FLOSS exception (in progress, author audit pending), a Rondi `librrd` can carry the same terms as upstream. Finish the audit before the first shared-library release. This is not legal advice.
+- License: with the relicense to GPL-2.0-or-later plus the RRDtool FLOSS exception (#45; author audit above), a Rondi `librrd` can carry the same terms as upstream. This is not legal advice.
 
 ### Effort
 
@@ -304,7 +304,7 @@ Effort is for one engineer with IDE support. The total is 58 to 82 engineer-week
 
 **M3: rrdcached (4 to 7 weeks).** TCP and multiple listeners, `-U`/`-G`, daemonizing, socket activation, upstream journal format behind `-j` only, rotation, error parity, RD-015. Exit: all four client and daemon pairings pass the protocol differential over Unix and TCP; journal handover works both ways; upstream `rrdcached-*` test styles pass.
 
-**M4: librrd ABI (10 to 14 weeks, graph symbols stubbed until M5).** `rondi-ffi`, headers, `.pc`, completed license audit. Exit: 97 symbols exported without versions; struct layout checks pass; upstream binding tests pass; pecl `rrd` and collectd suites pass against the shim; `abidiff` reports no incompatible change.
+**M4: librrd ABI (10 to 14 weeks, graph symbols stubbed until M5).** `rondi-ffi`, headers, `.pc`. Prerequisites, in order: (1) argv command implementations move from `rondi-cli` into the library so the CLI and `rrd_*_r` entry points share them; (2) one `rrdc` client module for rrdcached connection, path and escaping rules; (3) a `rondi-graph` crate for graph and xport; (4) RPN parsed once into an expression tree instead of re-tokenized per row; (5) lock down the public Rust API to what the shim needs. The typed `RrdError` layer that emits exact `rrd_set_error` strings is done earlier, with the error-text work. Exit: 97 symbols exported without versions; struct layout checks pass; upstream binding tests pass; pecl `rrd` and collectd suites pass against the shim; `abidiff` reports no incompatible change.
 
 **M5: graph (18 to 26 weeks).** Cairo and Pango renderer crate; all elements, options, formats; `graphv` metadata. Exit: `graphv` output identical for the whole corpus; data formats identical; PNG hash-identical for at least 95 percent of the corpus in the pinned container; SSIM of at least 0.98 elsewhere; Cacti, Munin, and Smokeping graph pages render with unchanged templates.
 
@@ -321,7 +321,7 @@ RRDProxy (RD-008) is a Cacti protocol, not part of RRDtool. Track it outside thi
 3. **Platform-dependent output.** NaN text, `qsort` order, `printf` of `%le`, `strftime`, and locale week start differ by libc. Mitigation: generate expectations from the matching upstream build for each target; never write them by hand.
 4. **Time and locale.** `rrd_parsetime` and RPN calendar operators depend on `TZ`, DST tables, and `LC_TIME`. CI images often lack locales. Mitigation: a fixed locale and tzdata version in the CI image, and a frozen "now" in tests.
 5. **Dropping per-update sync.** Matching upstream removes a durability guarantee Rondi gives today. This is decided. Say so in the release notes.
-6. **Licensing.** Relicensing to GPL-2.0-or-later with the RRDtool FLOSS exception is in progress (#45 merged). It depends on an audit confirming who wrote each file and whether any contributor must consent. Until the audit finishes, treat the license text as provisional.
+6. **Licensing.** Rondi is GPL-2.0-or-later with the RRDtool FLOSS exception (#45). The author audit found no contributor besides the maintainer and Dependabot, so no other consent is needed.
 7. **32-bit `time_t`.** Some 32-bit distributions moved to 64-bit `time_t`, which changes `live_head_t`. Measure upstream per distribution build; do not assume (READ-ONLY concern).
 8. **Undefined upstream behavior.** `ROLL` above count 3 reads past the RPN stack (RD-005). Do not chase results that depend on stray memory; document the deviation. This is the only class of difference the goal allows.
 9. **Hosted-runner cost.** Moving CI to GitHub-hosted runners removes the self-hosted option for long fuzz and benchmark jobs. Run those on a schedule with a time limit, or add a runner later by a separate decision.
