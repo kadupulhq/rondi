@@ -8097,12 +8097,15 @@ fn graph_comments_and_alignment_preserve_upstream_metadata_order() {
 
 #[test]
 fn graph_and_xport_shift_match_ordered_upstream_calculations() {
-    if !Command::new("rrdtool")
+    let pinned = Command::new("rrdtool")
         .arg("--version")
         .output()
-        .is_ok_and(|output| output.status.success())
-    {
-        oracle_skip!("skipping SHIFT differential: rrdtool is not installed");
+        .is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).starts_with("RRDtool 1.11.0 ")
+        });
+    if !pinned {
+        oracle_skip!("skipping SHIFT differential: pinned RRDtool 1.11.0 is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -8144,15 +8147,17 @@ fn graph_and_xport_shift_match_ordered_upstream_calculations() {
     let def = format!("DEF:x={}:x:AVERAGE", file.display());
     let alias = temp.path().join("rrdtool");
     symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
-    let run = |program: &std::path::Path, mode: &str, elements: &[&str]| {
+    // One side's observable result: status, stdout, stderr and, for graphv,
+    // the XML document it wrote.
+    let run = |program: &std::path::Path, side: &str, mode: &str, elements: &[&str]| {
+        let output_file = temp.path().join(format!("{side}-shift.xml"));
+        let _ = std::fs::remove_file(&output_file);
         let mut command = Command::new(program);
         command.arg(mode);
         if mode == "graphv" {
-            command
-                .arg(temp.path().join("shift.xml"))
-                .args(["--imgformat", "XML"]);
+            command.arg(&output_file).args(["--imgformat", "XML"]);
         }
-        command
+        let output = command
             .args([
                 "--start",
                 "1000000000",
@@ -8164,14 +8169,32 @@ fn graph_and_xport_shift_match_ordered_upstream_calculations() {
             .arg(&def)
             .args(elements)
             .output()
-            .unwrap()
+            .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+            std::fs::read(&output_file).ok(),
+        )
+    };
+    let compare = |mode: &str, elements: &[&str]| {
+        let expected = run(std::path::Path::new("rrdtool"), "oracle", mode, elements);
+        let actual = run(&alias, "rondi", mode, elements);
+        assert_eq!(actual, expected, "{mode} {elements:?}");
+        expected.0
     };
     for elements in [
         vec!["SHIFT:x:15", "XPORT:x:X"],
         vec!["SHIFT:x:-15", "XPORT:x:X"],
         vec!["SHIFT:x:shift=5", "XPORT:x:X"],
         vec!["SHIFT:x:  +20", "XPORT:x:X"],
+        vec!["SHIFT:x:\t5", "XPORT:x:X"],
+        vec!["SHIFT:x: -5", "XPORT:x:X"],
         vec!["SHIFT:x:-0", "XPORT:x:X"],
+        vec!["SHIFT:x:010", "XPORT:x:X"],
+        // strtol saturates out-of-range input and getLong still accepts it.
+        vec!["SHIFT:x:99999999999999999999", "XPORT:x:X"],
+        vec!["SHIFT:x:-99999999999999999999", "XPORT:x:X"],
         vec!["SHIFT:x:20", "SHIFT:x:-10", "XPORT:x:X"],
         vec![
             "CDEF:before=x,1,*",
@@ -8183,26 +8206,11 @@ fn graph_and_xport_shift_match_ordered_upstream_calculations() {
         ],
         vec!["CDEF:y=x,2,*", "SHIFT:y:-20", "XPORT:y:Y"],
         vec!["VDEF:offset=x,AVERAGE", "SHIFT:x:offset", "XPORT:x:X"],
+        vec!["VDEF:offset=x,MAXIMUM", "SHIFT:x:shift=offset", "XPORT:x:X"],
     ] {
-        let expected = run(std::path::Path::new("rrdtool"), "xport", &elements);
-        let actual = run(&alias, "xport", &elements);
-        assert!(
-            expected.status.success(),
-            "{elements:?}: {}",
-            String::from_utf8_lossy(&expected.stderr)
-        );
-        assert!(
-            actual.status.success(),
-            "{elements:?}: {}",
-            String::from_utf8_lossy(&actual.stderr)
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&actual.stdout),
-            String::from_utf8_lossy(&expected.stdout),
-            "{elements:?}"
-        );
-        assert_eq!(actual.stderr, expected.stderr);
-        assert_eq!(actual.status.code(), expected.status.code());
+        for mode in ["xport", "graphv"] {
+            assert_eq!(compare(mode, &elements), Some(0), "{mode} {elements:?}");
+        }
     }
     let elements = [
         "VDEF:before=x,MAXIMUM",
@@ -8212,46 +8220,30 @@ fn graph_and_xport_shift_match_ordered_upstream_calculations() {
         "PRINT:before:%s:strftime",
         "PRINT:after:%s:strftime",
     ];
-    let expected = run(std::path::Path::new("rrdtool"), "graphv", &elements);
-    let expected_file = std::fs::read(temp.path().join("shift.xml")).unwrap();
-    let actual = run(&alias, "graphv", &elements);
-    assert!(
-        expected.status.success(),
-        "{}",
-        String::from_utf8_lossy(&expected.stderr)
-    );
-    assert!(
-        actual.status.success(),
-        "{}",
-        String::from_utf8_lossy(&actual.stderr)
-    );
-    assert_eq!(actual.stdout, expected.stdout);
-    assert_eq!(actual.stderr, expected.stderr);
-    assert_eq!(
-        std::fs::read(temp.path().join("shift.xml")).unwrap(),
-        expected_file
-    );
+    assert_eq!(compare("graphv", &elements), Some(0));
+    // getLong rejects an empty, sign-only, partially numeric, or
+    // non-decimal offset; parse_shift rejects bad targets and offsets.
     for invalid in [
         "SHIFT:absent:10",
         "SHIFT:x:",
         "SHIFT:x:+",
+        "SHIFT:x:+-5",
         "SHIFT:x:10trailing",
         "SHIFT:x:10 ",
+        "SHIFT:x:0x10",
+        "SHIFT:x:1e1",
+        "SHIFT:x:shift=",
+        "SHIFT:x:shift=10x",
+        "SHIFT:x:10:20",
         "SHIFT:x:nope",
         "SHIFT:x:1.5",
         "SHIFT:x:x",
         "SHIFT:maximum:10",
     ] {
         let elements = ["VDEF:maximum=x,MAXIMUM", invalid, "XPORT:x:X"];
-        let expected = run(std::path::Path::new("rrdtool"), "xport", &elements);
-        let actual = run(&alias, "xport", &elements);
-        assert!(!expected.status.success());
-        assert_eq!(actual.status.code(), expected.status.code(), "{invalid}");
-        assert_eq!(
-            String::from_utf8_lossy(&actual.stderr),
-            String::from_utf8_lossy(&expected.stderr),
-            "{invalid}"
-        );
+        for mode in ["xport", "graphv"] {
+            assert_eq!(compare(mode, &elements), Some(1), "{mode} {invalid}");
+        }
     }
 }
 
