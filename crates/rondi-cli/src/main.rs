@@ -2606,8 +2606,11 @@ fn render_xport_with_graph_prints(
                 } else {
                     let number = std::ffi::CString::new(offset)?;
                     let mut end = std::ptr::null_mut();
+                    // SAFETY: number is NUL-terminated and strtol writes its
+                    // end pointer into valid storage without retaining it.
                     let seconds = unsafe { libc::strtol(number.as_ptr(), &mut end, 10) };
-                    if end == number.as_ptr().cast_mut() || unsafe { *end } != 0 {
+                    let terminator = number.as_ptr().wrapping_add(number.as_bytes().len());
+                    if end == number.as_ptr().cast_mut() || end != terminator.cast_mut() {
                         return Err(format!("error parsing number {offset}").into());
                     }
                     rondi::RrdXportShift::Seconds(seconds as i64)

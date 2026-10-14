@@ -67,6 +67,20 @@ pub enum VdefError {
     TimestampOverflow,
 }
 
+// Generated unknowns use the same target-specific DNAN bits as the C
+// graph engine; host printf can expose the sign of an all-unknown VDEF.
+#[inline]
+fn rrd_nan() -> f64 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        f64::from_bits(0xfff8_0000_0000_0000)
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        f64::NAN
+    }
+}
+
 /// Evaluate one RRDtool VDEF aggregate over regularly spaced values.
 ///
 /// `start` is the beginning of the first interval, and values are ordered in
@@ -102,7 +116,7 @@ pub fn evaluate_vdef(
                 sorted.retain(|value| !value.is_nan());
             }
             if sorted.is_empty() {
-                no_time(f64::NAN)
+                no_time(rrd_nan())
             } else {
                 rrd_qsort_compatible(&mut sorted);
                 let index =
@@ -112,7 +126,7 @@ pub fn evaluate_vdef(
         }
         VdefFunction::Maximum | VdefFunction::Minimum => {
             let Some(mut index) = values.iter().position(|value| !value.is_nan()) else {
-                return Ok(no_time(f64::NAN));
+                return Ok(no_time(rrd_nan()));
             };
             let mut best = values[index];
             for (next_index, value) in values.iter().copied().enumerate().skip(index + 1) {
@@ -136,14 +150,14 @@ pub fn evaluate_vdef(
                 value: values[index],
                 timestamp: Some(interval_start(start, index, step)?),
             },
-            None => no_time(f64::NAN),
+            None => no_time(rrd_nan()),
         },
         VdefFunction::Last => match values.iter().rposition(|value| !value.is_nan()) {
             Some(index) => VdefResult {
                 value: values[index],
                 timestamp: Some(interval_timestamp(start, index, step)?),
             },
-            None => no_time(f64::NAN),
+            None => no_time(rrd_nan()),
         },
         VdefFunction::Average | VdefFunction::Stdev | VdefFunction::Total => {
             let finite: Vec<_> = values
@@ -152,7 +166,7 @@ pub fn evaluate_vdef(
                 .filter(|value| value.is_finite())
                 .collect();
             if finite.is_empty() {
-                no_time(f64::NAN)
+                no_time(rrd_nan())
             } else {
                 let sum = finite.iter().sum::<f64>();
                 let average = sum / finite.len() as f64;
@@ -186,7 +200,7 @@ pub fn evaluate_vdef(
                 }
             }
             if count == 0.0 {
-                no_time(f64::NAN)
+                no_time(rrd_nan())
             } else {
                 let slope = (sum_x * sum_y - count * sum_xy) / (sum_x * sum_x - count * sum_xx);
                 let intercept = (sum_y - slope * sum_x) / count;
@@ -294,6 +308,35 @@ fn rrd_qsort_compatible(values: &mut [f64]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_unknown_aggregates_preserve_rrdtool_nan_bits() {
+        let expected = if cfg!(target_arch = "x86_64") {
+            0xfff8_0000_0000_0000
+        } else {
+            f64::NAN.to_bits()
+        };
+        for function in [
+            VdefFunction::Maximum,
+            VdefFunction::Minimum,
+            VdefFunction::Average,
+            VdefFunction::Stdev,
+            VdefFunction::Total,
+            VdefFunction::First,
+            VdefFunction::Last,
+            VdefFunction::PercentNan,
+            VdefFunction::LslSlope,
+            VdefFunction::LslIntercept,
+            VdefFunction::LslCorrelation,
+        ] {
+            let percentile = (function == VdefFunction::PercentNan).then_some(50.0);
+            for values in [&[][..], &[f64::NAN, f64::NAN][..]] {
+                let result = evaluate_vdef(function, percentile, values, 100, 10).unwrap();
+                assert_eq!(result.value.to_bits(), expected, "{function:?}");
+                assert_eq!(result.timestamp, None);
+            }
+        }
+    }
 
     #[test]
     fn vdef_function_names_match_rrdtool_vocabulary() {

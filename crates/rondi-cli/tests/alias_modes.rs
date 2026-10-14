@@ -7543,6 +7543,8 @@ fn graph_and_xport_shift_match_ordered_upstream_calculations() {
         vec!["SHIFT:x:15", "XPORT:x:X"],
         vec!["SHIFT:x:-15", "XPORT:x:X"],
         vec!["SHIFT:x:shift=5", "XPORT:x:X"],
+        vec!["SHIFT:x:  +20", "XPORT:x:X"],
+        vec!["SHIFT:x:-0", "XPORT:x:X"],
         vec!["SHIFT:x:20", "SHIFT:x:-10", "XPORT:x:X"],
         vec![
             "CDEF:before=x,1,*",
@@ -7604,6 +7606,10 @@ fn graph_and_xport_shift_match_ordered_upstream_calculations() {
     );
     for invalid in [
         "SHIFT:absent:10",
+        "SHIFT:x:",
+        "SHIFT:x:+",
+        "SHIFT:x:10trailing",
+        "SHIFT:x:10 ",
         "SHIFT:x:nope",
         "SHIFT:x:1.5",
         "SHIFT:x:x",

@@ -27,6 +27,9 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ### Fixed
 
+- Validate SHIFT conversion by comparing end pointers without dereferencing the parser output.
+- Preserve target-specific C NaN bits for generated unknown VDEF aggregates, including x86-64 print output.
+
 - Match tested fixed-point PRINT/GPRINT metadata rounding and padding from the C formatter.
 
 - Buffer native RRD fetches and seek only at ring boundaries, preserving shared locks and fetch semantics. The measured four-source, 7,200-row workload improved by about 23 times.
