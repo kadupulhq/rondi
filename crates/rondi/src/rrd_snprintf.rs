@@ -42,136 +42,162 @@ pub fn rrd_snprintf(format: &str, args: &[Arg<'_>]) -> String {
             out.push(ch);
             continue;
         }
-        let mut flags = 0;
-        while let Some(&flag) = bytes.get(i) {
-            flags |= match flag {
-                b'-' => F_MINUS,
-                b'+' => F_PLUS,
-                b' ' => F_SPACE,
-                b'#' => F_NUM,
-                b'0' => F_ZERO,
-                b'\'' => F_QUOTE,
-                _ => break,
-            };
-            i += 1;
-        }
-        let mut width: i32 = 0;
-        let mut overflow = false;
-        while let Some(digit @ b'0'..=b'9') = bytes.get(i).copied() {
-            let digit = i32::from(digit - b'0');
-            if width > (i32::MAX - digit) / 10 {
-                overflow = true;
-                break;
-            }
-            width = 10 * width + digit;
-            i += 1;
-        }
-        if overflow {
-            break;
-        }
-        if bytes.get(i) == Some(&b'*') {
-            i += 1;
-            width = match args.next() {
-                Some(Arg::Int(value)) => value as i32,
-                _ => 0,
-            };
-            if width < 0 {
-                flags |= F_MINUS;
-                width = -width;
-            }
-        }
-        let mut precision: i32 = -1;
-        if bytes.get(i) == Some(&b'.') {
-            i += 1;
-            precision = 0;
-            while let Some(digit @ b'0'..=b'9') = bytes.get(i).copied() {
-                let digit = i32::from(digit - b'0');
-                if precision > (i32::MAX - digit) / 10 {
-                    overflow = true;
-                    break;
-                }
-                precision = 10 * precision + digit;
-                i += 1;
-            }
-            if overflow {
-                break;
-            }
-            if bytes.get(i) == Some(&b'*') {
-                i += 1;
-                precision = match args.next() {
-                    Some(Arg::Int(value)) => value as i32,
-                    _ => 0,
-                };
-                if precision < 0 {
-                    precision = -1;
-                }
-            }
-        }
-        // Length modifiers only select the C argument type.
-        match bytes.get(i) {
-            Some(b'h') | Some(b'l') => {
-                let modifier = bytes[i];
-                i += 1;
-                if bytes.get(i) == Some(&modifier) {
-                    i += 1;
-                }
-            }
-            Some(b'L' | b'j' | b't' | b'z') => i += 1,
-            _ => {}
-        }
-        let Some(&conversion) = bytes.get(i) else {
+        let Some(spec) = parse_spec(bytes, &mut i, &mut args) else {
             break;
         };
-        i += 1;
-        match conversion {
-            b'd' | b'i' => {
-                let value = int_arg(args.next());
-                fmtint(&mut out, value, 10, width, precision, flags);
-            }
-            b'X' | b'x' | b'o' | b'u' => {
-                if conversion == b'X' {
-                    flags |= F_UP;
-                }
-                let base = match conversion {
-                    b'X' | b'x' => 16,
-                    b'o' => 8,
-                    _ => 10,
-                };
-                flags |= F_UNSIGNED;
-                let value = int_arg(args.next());
-                fmtint(&mut out, value, base, width, precision, flags);
-            }
-            b'A' | b'E' | b'G' | b'F' | b'a' | b'e' | b'g' | b'f' => {
-                match conversion {
-                    b'E' | b'e' => flags |= F_TYPE_E,
-                    b'G' | b'g' => flags |= F_TYPE_G,
-                    _ => {}
-                }
-                if conversion.is_ascii_uppercase() {
-                    flags |= F_UP;
-                }
-                let value = match args.next() {
-                    Some(Arg::Double(value)) => value,
-                    Some(Arg::Int(value)) => value as f64,
-                    _ => 0.0,
-                };
-                if fmtflt(&mut out, value, width, precision, flags) {
-                    break;
-                }
-            }
-            b'c' => out.push(int_arg(args.next()) as u8),
-            b's' => {
-                let value = match args.next() {
-                    Some(Arg::Str(value)) => value,
-                    _ => "(null)",
-                };
-                fmtstr(&mut out, value.as_bytes(), width, precision, flags);
-            }
-            b'%' => out.push(b'%'),
-            _ => {}
+        if emit_conversion(&mut out, &mut args, spec) {
+            break;
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+struct FormatSpec {
+    flags: u32,
+    width: i32,
+    precision: i32,
+    conversion: u8,
+}
+
+fn decimal(bytes: &[u8], i: &mut usize) -> Option<i32> {
+    let mut value = 0_i32;
+    while let Some(digit @ b'0'..=b'9') = bytes.get(*i).copied() {
+        let digit = i32::from(digit - b'0');
+        if value > (i32::MAX - digit) / 10 {
+            return None;
+        }
+        value = 10 * value + digit;
+        *i += 1;
+    }
+    Some(value)
+}
+
+fn parse_spec<'a>(
+    bytes: &[u8],
+    i: &mut usize,
+    args: &mut impl Iterator<Item = Arg<'a>>,
+) -> Option<FormatSpec> {
+    let mut flags = 0;
+    while let Some(&flag) = bytes.get(*i) {
+        flags |= match flag {
+            b'-' => F_MINUS,
+            b'+' => F_PLUS,
+            b' ' => F_SPACE,
+            b'#' => F_NUM,
+            b'0' => F_ZERO,
+            b'\'' => F_QUOTE,
+            _ => break,
+        };
+        *i += 1;
+    }
+    let mut width = decimal(bytes, i)?;
+    if bytes.get(*i) == Some(&b'*') {
+        *i += 1;
+        width = match args.next() {
+            Some(Arg::Int(value)) => value as i32,
+            _ => 0,
+        };
+        if width < 0 {
+            flags |= F_MINUS;
+            width = -width;
+        }
+    }
+    let mut precision: i32 = -1;
+    if bytes.get(*i) == Some(&b'.') {
+        *i += 1;
+        precision = decimal(bytes, i)?;
+        if bytes.get(*i) == Some(&b'*') {
+            *i += 1;
+            precision = match args.next() {
+                Some(Arg::Int(value)) => value as i32,
+                _ => 0,
+            };
+            if precision < 0 {
+                precision = -1;
+            }
+        }
+    }
+    // Length modifiers only select the C argument type.
+    match bytes.get(*i) {
+        Some(b'h') | Some(b'l') => {
+            let modifier = bytes[*i];
+            *i += 1;
+            if bytes.get(*i) == Some(&modifier) {
+                *i += 1;
+            }
+        }
+        Some(b'L' | b'j' | b't' | b'z') => *i += 1,
+        _ => {}
+    }
+    let conversion = *bytes.get(*i)?;
+    *i += 1;
+    Some(FormatSpec {
+        flags,
+        width,
+        precision,
+        conversion,
+    })
+}
+
+fn emit_conversion<'a>(
+    out: &mut Vec<u8>,
+    args: &mut impl Iterator<Item = Arg<'a>>,
+    spec: FormatSpec,
+) -> bool {
+    let FormatSpec {
+        mut flags,
+        width,
+        precision,
+        conversion,
+    } = spec;
+    match conversion {
+        b'd' | b'i' => {
+            let value = int_arg(args.next());
+            fmtint(out, value, 10, width, precision, flags);
+        }
+        b'X' | b'x' | b'o' | b'u' => {
+            if conversion == b'X' {
+                flags |= F_UP;
+            }
+            let base = match conversion {
+                b'X' | b'x' => 16,
+                b'o' => 8,
+                _ => 10,
+            };
+            flags |= F_UNSIGNED;
+            let value = int_arg(args.next());
+            fmtint(out, value, base, width, precision, flags);
+        }
+        b'A' | b'E' | b'G' | b'F' | b'a' | b'e' | b'g' | b'f' => {
+            match conversion {
+                b'E' | b'e' => flags |= F_TYPE_E,
+                b'G' | b'g' => flags |= F_TYPE_G,
+                _ => {}
+            }
+            if conversion.is_ascii_uppercase() {
+                flags |= F_UP;
+            }
+            let value = match args.next() {
+                Some(Arg::Double(value)) => value,
+                Some(Arg::Int(value)) => value as f64,
+                _ => 0.0,
+            };
+            if fmtflt(out, value, width, precision, flags) {
+                return true;
+            }
+        }
+        b'c' => out.push(int_arg(args.next()) as u8),
+        b's' => {
+            let value = match args.next() {
+                Some(Arg::Str(value)) => value,
+                _ => "(null)",
+            };
+            fmtstr(out, value.as_bytes(), width, precision, flags);
+        }
+        b'%' => out.push(b'%'),
+        _ => {}
+    }
+    false
 }
 
 fn int_arg(arg: Option<Arg<'_>>) -> i64 {
@@ -361,23 +387,28 @@ fn mypow10(mut exponent: i32) -> f64 {
     result
 }
 
-/// Port of `fmtflt`. Returns true on the integer-part overflow that makes
-/// `rrd_vsnprintf` stop.
-fn fmtflt(out: &mut Vec<u8>, fvalue: f64, width: i32, mut precision: i32, flags: u32) -> bool {
-    let mut estyle = flags & F_TYPE_E != 0;
-    let mut omitzeros = false;
-    let mut exponent = 0;
-    if precision == -1 {
-        precision = 6;
-    }
-    let mut sign = 0_u8;
-    if fvalue < 0.0 {
-        sign = b'-';
+struct FloatDigits {
+    intpart: u64,
+    fracpart: u64,
+    precision: i32,
+    exponent: i32,
+    estyle: bool,
+    omitzeros: bool,
+}
+
+fn float_sign(value: f64, flags: u32) -> u8 {
+    if value < 0.0 {
+        b'-'
     } else if flags & F_PLUS != 0 {
-        sign = b'+';
+        b'+'
     } else if flags & F_SPACE != 0 {
-        sign = b' ';
+        b' '
+    } else {
+        0
     }
+}
+
+fn emit_nonfinite(out: &mut Vec<u8>, fvalue: f64, width: i32, flags: u32, sign: u8) -> bool {
     let infnan: Option<&[u8]> = if fvalue.is_nan() {
         Some(if flags & F_UP != 0 { b"NAN" } else { b"nan" })
     } else if fvalue.is_infinite() {
@@ -393,7 +424,17 @@ fn fmtflt(out: &mut Vec<u8>, fvalue: f64, width: i32, mut precision: i32, flags:
         iconvert.extend_from_slice(text);
         let len = iconvert.len() as i32;
         fmtstr(out, &iconvert, width, len, flags);
-        return false;
+        return true;
+    }
+    false
+}
+
+fn float_digits(fvalue: f64, mut precision: i32, flags: u32) -> Option<FloatDigits> {
+    let mut estyle = flags & F_TYPE_E != 0;
+    let mut omitzeros = false;
+    let mut exponent = 0;
+    if precision == -1 {
+        precision = 6;
     }
     if flags & (F_TYPE_E | F_TYPE_G) != 0 {
         if flags & F_TYPE_G != 0 {
@@ -416,7 +457,7 @@ fn fmtflt(out: &mut Vec<u8>, fvalue: f64, width: i32, mut precision: i32, flags:
         }
         let mut intpart = cast(ufvalue);
         if intpart == u64::MAX {
-            return true;
+            return None;
         }
         let mask = mypow10(precision) as u64;
         let mut fracpart = myround(mask as f64 * (ufvalue - intpart as f64));
@@ -435,22 +476,56 @@ fn fmtflt(out: &mut Vec<u8>, fvalue: f64, width: i32, mut precision: i32, flags:
         }
         break (intpart, fracpart);
     };
-    let mut econvert = Vec::new();
-    if estyle {
-        let esign = if exponent < 0 {
-            exponent = -exponent;
-            b'-'
-        } else {
-            b'+'
-        };
-        econvert = convert(exponent as u64, 10, false);
-        econvert.truncate(3);
-        if econvert.len() == 1 {
-            econvert.push(b'0');
-        }
-        econvert.push(esign);
-        econvert.push(if flags & F_UP != 0 { b'E' } else { b'e' });
+    Some(FloatDigits {
+        intpart,
+        fracpart,
+        precision,
+        exponent,
+        estyle,
+        omitzeros,
+    })
+}
+
+fn exponent_digits(mut exponent: i32, flags: u32) -> Vec<u8> {
+    let esign = if exponent < 0 {
+        exponent = -exponent;
+        b'-'
+    } else {
+        b'+'
+    };
+    let mut econvert = convert(exponent as u64, 10, false);
+    econvert.truncate(3);
+    if econvert.len() == 1 {
+        econvert.push(b'0');
     }
+    econvert.push(esign);
+    econvert.push(if flags & F_UP != 0 { b'E' } else { b'e' });
+    econvert
+}
+
+/// Port of `fmtflt`. Returns true on the integer-part overflow that makes
+/// `rrd_vsnprintf` stop.
+fn fmtflt(out: &mut Vec<u8>, fvalue: f64, width: i32, precision: i32, flags: u32) -> bool {
+    let mut sign = float_sign(fvalue, flags);
+    if emit_nonfinite(out, fvalue, width, flags, sign) {
+        return false;
+    }
+    let Some(FloatDigits {
+        intpart,
+        fracpart,
+        mut precision,
+        exponent,
+        estyle,
+        omitzeros,
+    }) = float_digits(fvalue, precision, flags)
+    else {
+        return true;
+    };
+    let econvert = if estyle {
+        exponent_digits(exponent, flags)
+    } else {
+        Vec::new()
+    };
     let iconvert = convert(intpart, 10, false);
     let fconvert = if fracpart != 0 {
         convert(fracpart, 10, false)
