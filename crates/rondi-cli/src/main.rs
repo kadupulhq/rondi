@@ -1664,7 +1664,6 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let daemon_address = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty());
-    let from_daemon = daemon_address.is_some();
     let result = if let Some(address) = daemon_address {
         let escaped = escape_rrdcached_field(&filename.to_string_lossy());
         let command = format!("FETCH {escaped} {cf} {start} {end}");
@@ -1684,7 +1683,6 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         for value in row.values {
             match value {
                 Some(value) => write!(out, " {}", format_fetch_value(value))?,
-                None if from_daemon => write!(out, " {}", rrd_daemon_unknown_text())?,
                 None => write!(out, " {}", rrd_unknown_text())?,
             }
         }
@@ -1711,14 +1709,6 @@ fn rrd_nan() -> f64 {
 // path carries the sign bit depends on the CPU's default NaN.
 fn rrd_unknown_text() -> &'static str {
     if cfg!(all(target_env = "gnu", target_arch = "x86_64")) {
-        "-nan"
-    } else {
-        "nan"
-    }
-}
-
-fn rrd_daemon_unknown_text() -> &'static str {
-    if cfg!(all(target_env = "gnu", not(target_arch = "x86_64"))) {
         "-nan"
     } else {
         "nan"
@@ -1781,14 +1771,14 @@ fn parse_rrdcached_fetch(
         let values = values
             .split_whitespace()
             .map(|value| {
-                let parsed: f64 = value.parse()?;
-                Ok(if parsed.is_finite() {
-                    Some(parsed)
-                } else {
-                    None
-                })
+                // rrd_client.c:345 uses rrd_strtodbl, whose NaN conversion
+                // differs from Rust's parser. Reuse the existing C port and
+                // retain the converted value for printf-compatible output.
+                rondi::parse_rrd_number(value)
+                    .map(Some)
+                    .ok_or("invalid rrdcached FETCH value")
             })
-            .collect::<Result<Vec<_>, std::num::ParseFloatError>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
         if values.len() != ds_count {
             return Err("rrdcached FETCH row has an invalid data-source count".into());
         }
@@ -1804,6 +1794,27 @@ fn parse_rrdcached_fetch(
         data_sources: names,
         rows,
     })
+}
+
+#[test]
+fn daemon_fetch_uses_rrd_numeric_conversion() {
+    let result = parse_rrdcached_fetch(
+        "FlushVersion: 1\nStart: 1000000000\nEnd: 1000000010\nStep: 10\nDSCount: 4\nDSName: a b c d\n1000000010: nan -nan inf -inf\n",
+    )
+    .unwrap();
+    let values = &result.rows[0].values;
+    assert!(values[0].unwrap().is_nan());
+    assert_eq!(
+        values[0].unwrap().is_sign_negative(),
+        !cfg!(target_arch = "x86_64")
+    );
+    assert!(values[1].unwrap().is_nan());
+    assert_eq!(
+        values[1].unwrap().is_sign_negative(),
+        cfg!(target_arch = "x86_64")
+    );
+    assert_eq!(values[2], Some(f64::INFINITY));
+    assert_eq!(values[3], Some(f64::NEG_INFINITY));
 }
 
 fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
