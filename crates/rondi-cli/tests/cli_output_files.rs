@@ -176,3 +176,11 @@ fn fetch_resolution_beyond_i64_aligns_like_rrdtool() {
         ]);
     }
 }
+
+#[test]
+fn fetch_align_rejects_a_zero_resolution_like_rrdtool() {
+    let Some(sides) = sides() else { return };
+    for resolution in ["0", "0s", "0m"] {
+        sides.assert_same(&["fetch", "a.rrd", "AVERAGE", "-a", "-r", resolution]);
+    }
+}
