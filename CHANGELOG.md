@@ -26,3 +26,4 @@ follows [Semantic Versioning](VERSIONING.md).
 - Publish the JSON daemon socket from private staging with mode `0600` already set.
 - Keep daemon RRD reads on checked `O_NOFOLLOW` descriptors through inspection, fetch, and dump; reuse checked descriptors for update and tune metadata.
 - Limit the initial CodeQL matrix to workflow analysis until application source is added.
+- Handle SIGUSR1 (shut down after flushing), SIGUSR2 (shut down without flushing), and SIGHUP (ignored) in rrdcached as upstream does, removing the pid file and sockets on exit.

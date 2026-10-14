@@ -1661,13 +1661,13 @@ pub async fn run(prepared: PreparedServer) -> Result<(), Box<dyn std::error::Err
 /// listeners in `args`. UPDATE is acknowledged after the accepted write is
 /// synced to the journal; file visibility follows a flush.
 pub async fn run_rrdcached(mut args: RrdcachedConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let mut shutdown_signals = {
-        use tokio::signal::unix::{SignalKind, signal};
-        (
-            signal(SignalKind::interrupt())?,
-            signal(SignalKind::terminate())?,
-        )
-    };
+    let mut signals = rrdcached_listen::RRDCACHED_SIGNALS
+        .into_iter()
+        .map(|number| {
+            use tokio::signal::unix::{SignalKind, signal};
+            signal(SignalKind::from_raw(number)).map(|stream| (number, stream))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     rrdcached_listen::unblock_shutdown_signals();
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -1834,8 +1834,22 @@ pub async fn run_rrdcached(mut args: RrdcachedConfig) -> Result<(), Box<dyn std:
                 })
                 .await??;
             }
-            _ = shutdown_signals.0.recv() => break,
-            _ = shutdown_signals.1.recv() => break,
+            number = next_rrdcached_signal(&mut signals) => {
+                tracing::info!(signal = number, "rrdcached_caught_signal");
+                match number {
+                    libc::SIGINT | libc::SIGTERM => break,
+                    // signal_receiver sets config_flush_at_shutdown before
+                    // shutting down, so USR2 drops pending values even
+                    // without -j.
+                    libc::SIGUSR1 | libc::SIGUSR2 => {
+                        if let Ok(mut queue) = queue.lock() {
+                            queue.flush_at_shutdown = number == libc::SIGUSR1;
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
         }
     }
     // An idle client must not hold the final flush hostage. Connections stop
@@ -1884,6 +1898,20 @@ pub async fn run_rrdcached(mut args: RrdcachedConfig) -> Result<(), Box<dyn std:
     .await?;
     tracing::info!("rrdcached_stopped");
     Ok(())
+}
+
+async fn next_rrdcached_signal(
+    signals: &mut [(libc::c_int, tokio::signal::unix::Signal)],
+) -> libc::c_int {
+    std::future::poll_fn(|context| {
+        for (number, stream) in signals.iter_mut() {
+            if stream.poll_recv(context).is_ready() {
+                return std::task::Poll::Ready(*number);
+            }
+        }
+        std::task::Poll::Pending
+    })
+    .await
 }
 
 async fn flush_rrdcached_paths(
