@@ -172,3 +172,37 @@ fn huge_pdp_count_wraps_like_rrd_first_and_dump() {
     patch(&sides, rra_def(0) + 32, &u64::MAX.to_le_bytes());
     sides.assert_same(&["first", "t.rrd"]);
 }
+
+// Two billion steps ahead, write_to_rras would store a billion rows into the
+// damaged archive; rrd_write stops at the end of the file instead, and Rondi
+// must stop queuing rows there too rather than allocate for all of them.
+#[test]
+fn huge_row_count_update_stops_at_end_of_file() {
+    let Some(sides) = fixture() else {
+        return;
+    };
+    patch(&sides, rra_def(3) + 24, &((1_u64 << 61) + 10).to_le_bytes());
+    sides.assert_same_bytes(&["update", "t.rrd", "600001001200:5"]);
+    sides.assert_same_file("t.rrd");
+}
+
+// rrd_resize copies once per stored value of the unwrapped row count, so
+// Rondi refuses the file (docs/COMPATIBILITY_DEFECTS.md ID-001).
+#[test]
+fn huge_row_count_resize_is_refused() {
+    let Some(sides) = fixture() else {
+        return;
+    };
+    patch(&sides, rra_def(3) + 24, &((1_u64 << 61) + 10).to_le_bytes());
+    let output = std::process::Command::new(sides.rondi())
+        .args(["resize", "t.rrd", "0", "GROW", "1"])
+        .current_dir(&sides.ro)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "ERROR: invalid RRD file: RRA rows extend past the end of the file\n"
+    );
+    assert!(!sides.ro.join("resize.rrd").exists());
+}

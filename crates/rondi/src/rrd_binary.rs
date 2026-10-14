@@ -284,6 +284,9 @@ pub fn fetch_rrd_open_file(
         requested_step,
     )?;
     let archive = &info.archives[archive_index];
+    // A damaged row_cnt that rrd_open's wrapped size check lets through
+    // would otherwise drive the row arithmetic below past the file.
+    require_rows_in_file(&info, archive, file.metadata()?.len())?;
     let step = info
         .step
         .checked_mul(archive.pdp_per_row)
@@ -642,6 +645,7 @@ fn apply_update(
         .map(|archive| archive.current_row)
         .collect::<Vec<_>>();
     let mut row_writes = Vec::new();
+    let file_len = file.metadata()?.len();
     let mut summaries = Vec::new();
 
     if elapsed_steps == 0 {
@@ -700,6 +704,7 @@ fn apply_update(
                     &mut current_rows,
                     &row_counts,
                     open_close_time,
+                    file_len,
                     &mut row_writes,
                     &mut summaries,
                 )?;
@@ -725,6 +730,7 @@ fn apply_update(
             &mut current_rows,
             &row_counts,
             timestamp,
+            file_len,
             &mut row_writes,
             &mut summaries,
         )?;
@@ -735,7 +741,6 @@ fn apply_update(
     // row_cnt can address; write_RRA_row then fails with errno still 0.
     // What was written stays, the prep areas and rra_ptr included, but
     // last_up does not move.
-    let file_len = file.metadata()?.len();
     let mut written_rows = info
         .archives
         .iter()
@@ -1353,12 +1358,17 @@ fn update_cdp(
 
 /// rrd_update.c write_to_rras: advance each archive pointer and queue the
 /// primary value for the first row and the secondary value for the rest.
+/// Queuing stops after the first row that ends past `file_len`, where
+/// rrd_write fails and the update stops, so a damaged row_cnt cannot make
+/// this queue up to `row_cnt` rows.
+#[allow(clippy::too_many_arguments)]
 fn write_rra_rows(
     info: &RrdInfo,
     cdp_prep: &[RrdCdpPrepInfo],
     current_rows: &mut [u64],
     row_counts: &[u64],
     current_time: i64,
+    file_len: u64,
     row_writes: &mut Vec<RowWrite>,
     summaries: &mut Vec<RrdUpdateSummary>,
 ) -> Result<(), StoreError> {
@@ -1373,10 +1383,32 @@ fn write_rra_rows(
         if step_time == 0 {
             return Err(divides_by_zero());
         }
+        if ds_count == 0 {
+            // write_RRA_row has nothing to write or report, so only the
+            // pointer moves; step it arithmetically rather than once per
+            // row of a possibly damaged row_cnt.
+            let current_row = &mut current_rows[archive_index];
+            *current_row = current_row.wrapping_add(1);
+            if *current_row >= archive.rows {
+                *current_row = 0;
+            }
+            *current_row = ((u128::from(*current_row) + u128::from(remaining - 1))
+                % u128::from(archive.rows)) as u64;
+            continue;
+        }
         let time = current_time as u64;
         let base_time = time.wrapping_sub(time % step_time);
         let mut step_subtract = 1_u64;
         while remaining > 0 {
+            if row_writes.last().is_some_and(|write| {
+                let length = (write.values.len() * VALUE_LEN) as u64;
+                write
+                    .offset
+                    .checked_add(length)
+                    .is_none_or(|end| end > file_len)
+            }) {
+                return Ok(());
+            }
             let current_row = &mut current_rows[archive_index];
             // cur_row is an unsigned long in rrd_update.c, so it wraps.
             *current_row = current_row.wrapping_add(1);
@@ -1420,6 +1452,30 @@ fn write_rra_rows(
         }
     }
     Ok(())
+}
+
+/// Refuses an archive whose rows, sized without wrapping, do not fit in the
+/// file. rrd_open accepts such a file because it checks only the wrapped
+/// total; the readers that walk every row then hang or read outside the
+/// mapping (docs/COMPATIBILITY_DEFECTS.md ID-001).
+pub(crate) fn require_rows_in_file(
+    info: &RrdInfo,
+    archive: &RrdArchiveInfo,
+    file_len: u64,
+) -> Result<(), StoreError> {
+    let row_bytes = info.data_sources.len() as u64 * VALUE_LEN as u64;
+    let in_file = archive
+        .rows
+        .checked_mul(row_bytes)
+        .and_then(|length| archive.data_offset.checked_add(length))
+        .is_some_and(|end| end <= file_len);
+    if in_file {
+        Ok(())
+    } else {
+        Err(StoreError::RrdFormat(
+            "RRA rows extend past the end of the file".into(),
+        ))
+    }
 }
 
 /// One row write_to_rras stores, with the rra_ptr it set just before.
@@ -1963,17 +2019,7 @@ pub fn dump_rrd_open_file_bytes(
         // rrd_dump.c walks them with an unsigned int counter, so above
         // UINT_MAX rows it never finishes, and below that it reads outside
         // the mapping. Refuse instead; see docs/COMPATIBILITY_DEFECTS.md.
-        let row_bytes = info.data_sources.len() as u64 * VALUE_LEN as u64;
-        let in_file = archive
-            .rows
-            .checked_mul(row_bytes)
-            .and_then(|length| archive.data_offset.checked_add(length))
-            .is_some_and(|end| end <= file_len);
-        if !in_file {
-            return Err(StoreError::RrdFormat(
-                "RRA rows extend past the end of the file".into(),
-            ));
-        }
+        require_rows_in_file(&info, archive, file_len)?;
         let rows = archive.rows as usize;
         // rrd_dump.c:330-340 steps past cur_row and wraps to row 0 once it
         // reaches row_cnt, so a cur_row at or past the end starts at row 0.
