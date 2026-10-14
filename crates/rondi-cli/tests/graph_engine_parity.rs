@@ -131,3 +131,18 @@ fn data_fetch_reuses_fetches_by_the_c_key() {
         assert_same(&sides, &split(line), &[]);
     }
 }
+
+// rrd_graph.c:803-868: rrd_reduce_data counts rows in an unsigned long, so
+// a window shorter than the reduced step wraps instead of going negative
+// and fails the modulo check with the wrapped count.
+#[test]
+fn reduce_data_sanity_check_counts_rows_unsigned() {
+    let Some(sides) = sides() else { return };
+    for line in [
+        "xport -s 1700000000 -e 1700000600 --step 3600 DEF:x=t.rrd:a:AVERAGE:step=600 XPORT:x",
+        "xport -s 1700000100 -e 1700000400 --step 7200 DEF:x=t.rrd:a:MAX:step=900 XPORT:x",
+        "graphv - -s 1700000000 -e 1700000600 --step 3600 DEF:x=t.rrd:a:AVERAGE:step=600 PRINT:x:AVERAGE:%lf",
+    ] {
+        assert_same(&sides, &split(line), &[]);
+    }
+}

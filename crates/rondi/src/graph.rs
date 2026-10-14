@@ -1750,7 +1750,9 @@ fn vdef_parse(gdes: &mut GraphElement, text: &str) -> Result<(), ScriptError> {
     Ok(())
 }
 
-/// Port of `rrd_reduce_data` over every column of one fetch.
+/// Port of `rrd_reduce_data` over every column of one fetch. The row
+/// count, offsets and window move through `unsigned long` in C, so a window
+/// that ends before it starts wraps instead of going negative.
 fn reduce_data(
     cf: Cf,
     cur_step: u64,
@@ -1759,25 +1761,25 @@ fn reduce_data(
     step: &mut u64,
     columns: &mut [Vec<f64>],
 ) -> Result<(), StoreError> {
-    let reduce_factor = (*step as f64 / cur_step as f64).ceil() as u64;
-    *step = cur_step * reduce_factor;
-    let (cur, new_step) = (cur_step as i64, *step as i64);
-    let mut row_cnt = (*end - *start) / cur;
-    let end_offset = end.rem_euclid(new_step);
-    let start_offset = start.rem_euclid(new_step);
-    let factor = reduce_factor as i64;
+    let reduce_factor = (*step as f64 / cur_step as f64).ceil() as i32;
+    // `int` converts to `unsigned long` by sign extension.
+    let factor = i64::from(reduce_factor) as u64;
+    *step = cur_step.wrapping_mul(factor);
+    let mut row_cnt = (end.wrapping_sub(*start) as u64) / cur_step;
+    let end_offset = (*end as u64) % *step;
+    let start_offset = (*start as u64) % *step;
     let mut src = 0_usize;
     let mut leading = false;
     if start_offset != 0 {
-        *start -= start_offset;
-        let skiprows = factor - start_offset / cur;
+        *start = (*start as u64).wrapping_sub(start_offset) as i64;
+        let skiprows = factor.wrapping_sub(start_offset / cur_step);
         src = skiprows as usize;
         leading = true;
-        row_cnt -= skiprows;
+        row_cnt = row_cnt.wrapping_sub(skiprows);
     }
     if end_offset != 0 {
-        *end = *end - end_offset + new_step;
-        row_cnt -= end_offset / cur;
+        *end = (*end as u64).wrapping_sub(end_offset).wrapping_add(*step) as i64;
+        row_cnt = row_cnt.wrapping_sub(end_offset / cur_step);
     }
     if row_cnt % factor != 0 {
         return Err(StoreError::RrdExpression(format!(
@@ -1790,7 +1792,7 @@ fn reduce_data(
             reduced.push(rrd_nan());
         }
         let (mut rows, mut src) = (row_cnt, src);
-        while rows >= factor {
+        while rows as i64 >= i64::from(reduce_factor) {
             let mut newval = rrd_nan();
             let mut validval = 0_u32;
             for i in 0..reduce_factor as usize {
@@ -1822,7 +1824,7 @@ fn reduce_data(
             }
             reduced.push(newval);
             src = src.wrapping_add(reduce_factor as usize);
-            rows -= factor;
+            rows = rows.wrapping_sub(factor);
         }
         if end_offset != 0 {
             reduced.push(rrd_nan());
