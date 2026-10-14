@@ -315,9 +315,17 @@ impl Restore<'_> {
         }
         // RRDtool picks a random cur_row and rotates the rows to match;
         // the last row keeps them in order. With no rows it divides by
-        // zero (rrd_restore.c:450).
+        // zero (rrd_restore.c:473): x86-64 traps with SIGFPE, while
+        // aarch64 divides by zero to 0, so cur_row is the random number
+        // itself and the rotation buffer size wraps; malloc fails
+        // (rrd_restore.c:505-510).
         if row_cnt == 0 {
-            self.set_error("restore of an RRA without rows is not supported".into());
+            let message = if cfg!(target_arch = "aarch64") && ds_cnt > 0 {
+                "parse_tag_rra: malloc failed."
+            } else {
+                "restore of an RRA without rows is not supported"
+            };
+            self.set_error(message.into());
             return Err(());
         }
         rrd.rra_ptrs[rra] = row_cnt - 1;

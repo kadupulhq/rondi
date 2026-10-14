@@ -64,31 +64,6 @@ fn assert_same_restored(sides: &common::Sides, name: &str) {
     }
 }
 
-/// libxml2's reader reports the parser's line, which runs ahead of the node
-/// by a buffer-dependent amount; Rondi approximates it.
-fn without_line_numbers(text: &str) -> String {
-    let mut out = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("lin") {
-        out.push_str(&rest[..start]);
-        let tail = &rest[start..];
-        let word = if tail.starts_with("line ") {
-            "line "
-        } else if tail.starts_with("ling ") {
-            "ling "
-        } else {
-            out.push_str("lin");
-            rest = &tail[3..];
-            continue;
-        };
-        out.push_str(word);
-        out.push('N');
-        rest = tail[word.len()..].trim_start_matches(|c: char| c.is_ascii_digit());
-    }
-    out.push_str(rest);
-    out
-}
-
 const SOURCE: &[&[&str]] = &[
     &[
         "create",
@@ -267,16 +242,7 @@ fn d11_restore_xml_reading_matches_the_pull_parser() {
         xml.replacen("</row>", "</row><bogus>1</bogus>", 1),
     ];
     for (index, variant) in variants.iter().enumerate() {
-        let name = format!("v{index}.xml");
-        sides.write(&name, variant.as_bytes());
-        let target = format!("v{index}.rrd");
-        let (up, ro) = sides.both(&["restore", &name, &target], &[]);
-        assert_eq!(
-            (ro.status, without_line_numbers(&ro.stderr)),
-            (up.status, without_line_numbers(&up.stderr)),
-            "{name}"
-        );
-        assert_same_restored(&sides, &target);
+        assert_same_restore(&sides, &format!("v{index}"), variant.as_bytes());
     }
     sides.assert_same(&["restore", "missing.xml", "m.rrd"]);
 }
@@ -388,6 +354,164 @@ fn restore_rejects_content_after_the_root_element() {
         variant.extend_from_slice(tail.as_bytes());
         assert_same_restore(&sides, &format!("tail-{name}"), &variant);
     }
+}
+
+// The "line"/"ling" numbers are xmlTextReaderGetParserLineNumber: how far
+// the parser has consumed, which depends on where each 512-byte chunk (or
+// stdin line) ends and on the reader pushing more input before it hands
+// out a node's only text child. Every value in the dump is made invalid in
+// turn so each lands at a different place relative to those boundaries.
+#[test]
+fn restore_error_lines_follow_the_parser() {
+    let Some(sides) = common::Sides::new(SOURCE, &[]) else {
+        return;
+    };
+    let xml = std::fs::read_to_string(sides.up.join("s.xml")).unwrap();
+    let mut cases = 0;
+    let mut rest = 0;
+    while let Some(offset) = xml[rest..].find('>') {
+        let start = rest + offset + 1;
+        rest = start;
+        let Some(length) = xml[start..].find('<') else {
+            break;
+        };
+        let value = &xml[start..start + length];
+        if value.trim().is_empty() || !xml[start + length..].starts_with("</") {
+            continue;
+        }
+        let variant = format!("{}zz{}", &xml[..start], &xml[start + length..]);
+        assert_same_restore(&sides, &format!("value{cases}"), variant.as_bytes());
+        cases += 1;
+    }
+    assert!(cases > 30, "{cases}");
+}
+
+// Malformed XML fails inside libxml2, whose message rrd_restore.c reports
+// as "error reading/parsing XML: ..." (newlines turned into spaces). For a
+// named file libxml2 also prints "file:line: parser error : ..." and the
+// offending line to stderr first; for stdin rrd_restore.c silences it.
+#[test]
+fn restore_reports_libxml2_parse_errors() {
+    let Some(sides) = common::Sides::new(SOURCE, &[]) else {
+        return;
+    };
+    let xml = std::fs::read(sides.up.join("s.xml")).unwrap();
+    let text = String::from_utf8_lossy(&xml).into_owned();
+    let mut variants: Vec<(String, Vec<u8>)> = vec![
+        ("empty".into(), Vec::new()),
+        ("blank".into(), b"\n\n".to_vec()),
+        ("text".into(), b"hello world\n".to_vec()),
+        (
+            "mismatch".into(),
+            text.replacen("</step>", "</stp>", 1).into_bytes(),
+        ),
+        (
+            "unclosed".into(),
+            text.replacen("</step>", "</step", 1).into_bytes(),
+        ),
+        (
+            "lt".into(),
+            text.replacen("<step>10", "<step>10<", 1).into_bytes(),
+        ),
+        (
+            "entity".into(),
+            text.replacen("<step>10", "<step>&nope;10", 1).into_bytes(),
+        ),
+        (
+            "charref".into(),
+            text.replacen("<step>10", "<step>&#1;10", 1).into_bytes(),
+        ),
+        (
+            "cdata-end".into(),
+            text.replacen("<step>10", "<step>1]]>0", 1).into_bytes(),
+        ),
+        (
+            "hyphens".into(),
+            text.replacen("<!-- Seconds", "<!-- Sec -- onds", 1)
+                .into_bytes(),
+        ),
+        (
+            "attr".into(),
+            text.replacen("<step>", "<step a='1' a='2'>", 1)
+                .into_bytes(),
+        ),
+        (
+            "decl".into(),
+            text.replacen("version=\"1.0\"", "version=\"2.0\"", 1)
+                .into_bytes(),
+        ),
+        (
+            "encoding".into(),
+            text.replacen("utf-8", "no-such-charset", 1).into_bytes(),
+        ),
+    ];
+    for cut in [100, 1000, 1500, 2000, xml.len() - 20] {
+        variants.push((format!("cut{cut}"), xml[..cut].to_vec()));
+    }
+    for (name, variant) in &variants {
+        assert_same_restore(&sides, name, variant);
+    }
+}
+
+// Deliberate divergence: get_xml_text loops on `xmlTextReaderRead` for as
+// long as it returns nonzero, so a parse error that leaves the reader on a
+// comment or white space (an end-tag mismatch on the next stdin line) makes
+// RRDtool spin forever. Rondi gives up and reports the libxml2 error.
+#[test]
+fn restore_stops_where_rrdtool_spins_after_a_parse_error() {
+    let Some(sides) = common::Sides::new(SOURCE, &[]) else {
+        return;
+    };
+    let xml = std::fs::read_to_string(sides.up.join("s.xml")).unwrap();
+    let xml = xml.replacen("<step>10</step>", "<step><!-- c -->\n</stp>", 1);
+    let mut child = std::process::Command::new(sides.rondi())
+        .args(["restore", "-", "spin.rrd"])
+        .current_dir(&sides.ro)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(xml.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "ERROR: error reading/parsing XML: Opening and ending tag mismatch: step line 6 and stp \n"
+    );
+    assert!(!sides.ro.join("spin.rrd").exists());
+}
+
+// An RRA without rows reaches `rrd_random() % 0` (rrd_restore.c:473). On
+// aarch64 the division yields 0, the row rotation's malloc size wraps and fails; on
+// x86-64 RRDtool dies with SIGFPE, which Rondi does not imitate.
+#[test]
+fn restore_rejects_an_empty_database() {
+    let Some(sides) = common::Sides::new(SOURCE, &[]) else {
+        return;
+    };
+    let xml = std::fs::read_to_string(sides.up.join("s.xml")).unwrap();
+    let start = xml.find("<database>").unwrap() + "<database>".len();
+    let end = xml.find("</database>").unwrap();
+    let variant = format!("{}{}", &xml[..start], &xml[end..]);
+    if cfg!(target_arch = "aarch64") {
+        assert_same_restore(&sides, "emptydb", variant.as_bytes());
+        return;
+    }
+    sides.write("emptydb.xml", variant.as_bytes());
+    let (up, ro) = sides.both(&["restore", "emptydb.xml", "emptydb.rrd"], &[]);
+    assert_eq!(up.status, None, "{up:?}");
+    assert_eq!(ro.status, Some(1));
+    assert_eq!(
+        ro.stderr,
+        "ERROR: restore of an RRA without rows is not supported\n"
+    );
+    assert!(!sides.ro.join("emptydb.rrd").exists());
 }
 
 // write_file (rrd_restore.c:1318-1336) opens the target O_WRONLY|O_CREAT,
