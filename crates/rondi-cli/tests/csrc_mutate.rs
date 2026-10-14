@@ -3,6 +3,9 @@
 
 mod common;
 
+use std::io::Write;
+use std::path::Path;
+
 const BASE: &[&str] = &[
     "create",
     "base.rrd",
@@ -276,6 +279,68 @@ fn d11_restore_xml_reading_matches_the_pull_parser() {
         assert_same_restored(&sides, &target);
     }
     sides.assert_same(&["restore", "missing.xml", "m.rrd"]);
+}
+
+/// Writes `xml` as `name.xml` on both sides, restores it from the file and
+/// from stdin, and asserts the same exit status, stdout, stderr and output.
+fn assert_same_restore(sides: &common::Sides, name: &str, xml: &[u8]) {
+    let input = format!("{name}.xml");
+    sides.write(&input, xml);
+    let target = format!("{name}.rrd");
+    let (up, ro) = sides.both(&["restore", &input, &target], &[]);
+    assert_eq!(ro, up, "{input}");
+    assert_same_restored(sides, &target);
+    let target = format!("{name}-stdin.rrd");
+    let [up, ro] = [
+        (Path::new("rrdtool"), &sides.up),
+        (sides.rondi(), &sides.ro),
+    ]
+    .map(|(program, dir)| {
+        let mut child = std::process::Command::new(program)
+            .args(["restore", "-", &target])
+            .current_dir(dir)
+            .env("TZ", "UTC")
+            .env("LC_ALL", "C")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(xml).unwrap();
+        let output = child.wait_with_output().unwrap();
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            without_line_numbers(&String::from_utf8_lossy(&output.stderr)),
+        )
+    });
+    assert_eq!(ro, up, "{input} from stdin");
+    assert_same_restored(sides, &target);
+}
+
+// get_xml_ulong and get_xml_time_t (rrd_restore.c:261-312) fail on any
+// errno after strtoul/strtoll. FreeBSD-derived libcs set EINVAL when nothing
+// converts, so there a non-numeric or empty integer field is an error;
+// glibc leaves errno alone and the field reads as 0.
+#[test]
+fn restore_integer_fields_follow_the_libc_errno() {
+    let Some(sides) = common::Sides::new(SOURCE, &[]) else {
+        return;
+    };
+    let xml = std::fs::read_to_string(sides.up.join("s.xml")).unwrap();
+    let variants = [
+        ("hb", "<minimal_heartbeat>20<", "<minimal_heartbeat>abc<"),
+        ("hbempty", "<minimal_heartbeat>20<", "<minimal_heartbeat><"),
+        ("step", "<step>10<", "<step>abc<"),
+        ("last", "<lastupdate>1000000030<", "<lastupdate>abc<"),
+        ("ppr", "<pdp_per_row>1<", "<pdp_per_row>x<"),
+        ("usec", "<unknown_sec> 0 <", "<unknown_sec> x <"),
+        ("udp", "<unknown_datapoints>0<", "<unknown_datapoints>x<"),
+    ];
+    for (name, from, to) in variants {
+        assert!(xml.contains(from), "{from}");
+        assert_same_restore(&sides, name, xml.replacen(from, to, 1).as_bytes());
+    }
 }
 
 // write_file (rrd_restore.c:1318-1336) opens the target O_WRONLY|O_CREAT,

@@ -440,9 +440,9 @@ impl Restore<'_> {
 
     fn get_xml_time_t(&mut self) -> Result<i64, ()> {
         let text = self.get_xml_text().ok_or(())?;
-        let (value, erange) = c_strtoll_errno(&text, 0);
-        self.errno = if erange { libc::ERANGE } else { 0 };
-        if erange {
+        let (value, errno) = c_strtoll_errno(&text, 0);
+        self.errno = errno;
+        if errno > 0 {
             let message = format!(
                 "ling {}: get_xml_time_t from '{text}' {}",
                 self.reader.line(),
@@ -456,9 +456,9 @@ impl Restore<'_> {
 
     fn get_xml_ulong(&mut self) -> Result<u64, ()> {
         let text = self.get_xml_text().ok_or(())?;
-        let (value, erange) = c_strtoul_errno(&text, 0);
-        self.errno = if erange { libc::ERANGE } else { 0 };
-        if erange {
+        let (value, errno) = c_strtoul_errno(&text, 0);
+        self.errno = errno;
+        if errno > 0 {
             let message = format!(
                 "ling {}: get_xml_ulong from '{text}' {}",
                 self.reader.line(),
