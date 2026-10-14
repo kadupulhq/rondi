@@ -107,8 +107,6 @@ fn graph_still_overwrites_and_creates_regular_files() {
             .unwrap()
             .starts_with(b"\x89PNG")
     );
-    let run = graph(dir.path(), "graph", "/dev/null");
-    assert!(!run.status.success(), "{run:?}");
 }
 
 #[test]
@@ -197,4 +195,36 @@ fn fetch_align_rejects_a_zero_resolution_like_rrdtool() {
     for resolution in ["0", "0s", "0m"] {
         sides.assert_same(&["fetch", "a.rrd", "AVERAGE", "-a", "-r", resolution]);
     }
+}
+
+#[test]
+fn graph_and_dump_write_to_character_devices() {
+    let Some(sides) = sides() else { return };
+    for command in ["graph", "graphv"] {
+        let mut args = vec![command, "/dev/null"];
+        args.extend(GRAPH);
+        sides.assert_same(&args);
+        let mut args = vec![command, "/dev/null", "--imgformat", "CSV"];
+        args.extend(GRAPH);
+        sides.assert_same(&args);
+    }
+    sides.assert_same(&["dump", "a.rrd", "/dev/null"]);
+}
+
+#[test]
+fn output_through_a_symlink_reaches_a_device_only() {
+    let dir = fixture();
+    symlink("/dev/null", dir.path().join("null")).unwrap();
+    let run = graph(dir.path(), "graph", "null");
+    assert!(run.status.success(), "{run:?}");
+    let run = rrdtool(dir.path(), &["dump", "a.rrd", "null"]);
+    assert!(run.status.success(), "{run:?}");
+    // The symlink still resolves to a device; a regular file stays refused.
+    symlink(dir.path().join("victim"), dir.path().join("file")).unwrap();
+    let run = rrdtool(dir.path(), &["dump", "a.rrd", "file"]);
+    assert_eq!(run.status.code(), Some(1), "{run:?}");
+    assert_eq!(
+        std::fs::read(dir.path().join("victim")).unwrap(),
+        b"keep me"
+    );
 }

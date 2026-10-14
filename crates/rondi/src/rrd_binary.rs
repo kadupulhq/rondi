@@ -2541,8 +2541,10 @@ pub(crate) fn open_rrd_write(path: &Path) -> Result<File, StoreError> {
 /// umask) or, with `exclusive`, only if it does not exist. RRDtool follows a
 /// symbolic link at the final component and writes through any inode; Rondi
 /// refuses a symbolic link, anything but a regular file and a file with more
-/// than one hard link, so an output path cannot redirect the write. The file
-/// is not truncated; callers that truncate do so after this check.
+/// than one hard link, so an output path cannot redirect the write. A
+/// character device, reached directly or through a symbolic link, is the one
+/// exception. The file is not truncated; callers that truncate do so after
+/// this check.
 pub fn open_output_file(path: &Path, exclusive: bool) -> std::io::Result<File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true);
@@ -2557,15 +2559,21 @@ pub fn open_output_file(path: &Path, exclusive: bool) -> std::io::Result<File> {
         // Private output and nonblocking opens keep FIFO destinations from waiting.
         options
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
-        let file = options.open(path).map_err(|error| {
-            if error.raw_os_error() == Some(libc::ELOOP) {
-                std::io::Error::other("refusing to follow a symbolic link")
-            } else {
-                error
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY);
+        let file = match options.open(path) {
+            Ok(file) => file,
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+                return open_linked_character_device(path);
             }
-        })?;
+            Err(error) => return Err(error),
+        };
         let metadata = file.metadata()?;
+        // The kernel already applied its own permission check to a device,
+        // so ownership says nothing about whether it may be written.
+        if is_character_device(&metadata) {
+            clear_nonblocking(&file)?;
+            return Ok(file);
+        }
         // SAFETY: geteuid has no preconditions.
         if metadata.uid() != unsafe { libc::geteuid() } {
             return Err(std::io::Error::other(
@@ -2586,6 +2594,52 @@ pub fn open_output_file(path: &Path, exclusive: bool) -> std::io::Result<File> {
     {
         options.open(path)
     }
+}
+
+#[cfg(unix)]
+fn is_character_device(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    metadata.file_type().is_char_device()
+}
+
+#[cfg(unix)]
+fn clear_nonblocking(file: &File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let fd = file.as_raw_fd();
+    // SAFETY: fd is open for the lifetime of `file`.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: as above; only the status flags change.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// A symbolic link at the output path is followed only to a character
+/// device such as /dev/stdout. Nothing is created, and the opened descriptor
+/// is checked again so a retargeted link cannot reach a regular file.
+#[cfg(unix)]
+fn open_linked_character_device(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let refused = || std::io::Error::other("refusing to follow a symbolic link");
+    // Skip the open entirely for targets whose open could have side effects.
+    if !std::fs::metadata(path).is_ok_and(|metadata| is_character_device(&metadata)) {
+        return Err(refused());
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+        .map_err(|_| refused())?;
+    if !is_character_device(&file.metadata()?) {
+        return Err(refused());
+    }
+    clear_nonblocking(&file)?;
+    Ok(file)
 }
 
 /// rrd_open.c:336.

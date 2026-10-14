@@ -2343,8 +2343,11 @@ fn write_output_file(path: &str, bytes: &[u8]) -> Result<(), OutputError> {
             OutputError::Open,
         )
     })?;
-    file.set_len(0)
-        .map_err(|error| OutputError::Write(errno_of(&error)))?;
+    // ftruncate fails on a device such as /dev/null.
+    if file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        file.set_len(0)
+            .map_err(|error| OutputError::Write(errno_of(&error)))?;
+    }
     file.write_all(bytes)
         .map_err(|error| OutputError::Write(errno_of(&error)))
 }
