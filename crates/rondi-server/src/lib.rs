@@ -303,6 +303,11 @@ impl RrdcachedBase {
                 })
                 .unwrap_or(path));
         }
+        // An empty name becomes "<base>/", which passes upstream's string
+        // check; each command then fails on the directory itself.
+        if requested.is_empty() {
+            return Ok(self.root.clone());
+        }
         let denied = || format!("{}: Permission denied", self.abs(requested));
         if path
             .components()
@@ -3645,6 +3650,11 @@ fn rrdcached_create(
     let Some((file, arguments)) = fields.split_first() else {
         return Err(USAGE.to_owned());
     };
+    // An empty name resolves to the base directory, which upstream would
+    // hand to rrd_create_r2. Rondi never creates over it.
+    if file.is_empty() {
+        return Err(format!("{}: Permission denied", base.abs(file)));
+    }
     let output = base.target(file)?;
     let display = base.abs(file);
     let parent = output.parent().ok_or("invalid output path")?;

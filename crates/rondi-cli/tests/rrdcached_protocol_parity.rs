@@ -396,3 +396,49 @@ fn list_names_entries_relative_to_the_listed_path() {
         assert_same(&observed);
     }
 }
+
+#[test]
+fn empty_file_name_names_the_base_directory() {
+    let Some(work) = Work::new() else { return };
+    // Two spaces leave an empty file field, which get_abs_path turns into
+    // "<base>/", inside -b by check_file_access's string test.
+    let sessions: [&[u8]; 14] = [
+        b"UPDATE  1000000300:1:2\n",
+        b"INFO  \n",
+        b"LAST  \n",
+        b"FIRST  0\n",
+        b"FLUSH  \n",
+        b"FORGET  \n",
+        b"PENDING  \n",
+        b"FETCH  AVERAGE\n",
+        b"FETCHBIN  AVERAGE\n",
+        b"TUNE  2 tune -h\n",
+        b"DUMP  \n",
+        b"SUSPEND  \nPING\n",
+        b"RESUME  \nPING\n",
+        b"BATCH\nUPDATE  1000000300:1:2\n.\n",
+    ];
+    for options in [&["-B"][..], &[][..]] {
+        let observed = work.differential(options, &sessions);
+        assert_eq!(
+            observed[0][0],
+            format!(
+                "[UPDATE  1000000300:1:2\n]\n-1 Not a regular file: {}/\n",
+                work.base().display()
+            )
+        );
+        assert_same(&observed);
+    }
+
+    // Upstream passes "<base>/" to rrd_create_r2; Rondi refuses it.
+    work.reset();
+    let mut daemon = work.start(true, &["-B"]);
+    let reply = work.talk(b"CREATE  -b 1000000000 DS:a:GAUGE:120:U:U RRA:AVERAGE:0.5:1:5\n");
+    unsafe { libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM) };
+    daemon.wait().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&reply),
+        format!("-1 {}/: Permission denied\n", work.base().display())
+    );
+    assert!(work.base().join("a.rrd").is_file());
+}
