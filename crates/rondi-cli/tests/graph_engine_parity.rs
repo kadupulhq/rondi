@@ -146,3 +146,22 @@ fn reduce_data_sanity_check_counts_rows_unsigned() {
         assert_same(&sides, &split(line), &[]);
     }
 }
+
+// rrd_graph.c:1288-1292: a CDEF whose DEFs do not overlap sizes its buffer
+// from a negative span converted to unsigned long, and malloc refuses it.
+#[test]
+fn cdef_over_disjoint_windows_fails_the_allocation() {
+    let Some(sides) = sides() else { return };
+    let defs =
+        "DEF:x=t.rrd:a:AVERAGE:end=1700003000 DEF:y=t.rrd:a:AVERAGE:start=1700010000 CDEF:c=x,y,+";
+    for tail in ["XPORT:c", "XPORT:x", "VDEF:v=c,AVERAGE XPORT:x"] {
+        let line = format!("xport -s 1700000000 -e 1700030000 {defs} {tail}");
+        assert_same(&sides, &split(&line), &[]);
+    }
+    for line in [
+        format!("graphv out.png -s 1700000000 -e 1700030000 {defs} LINE1:c#ff0000"),
+        format!("graph out.png -s 1700000000 -e 1700030000 {defs} PRINT:c:AVERAGE:%lf"),
+    ] {
+        assert_same(&sides, &split(&line), &[]);
+    }
+}

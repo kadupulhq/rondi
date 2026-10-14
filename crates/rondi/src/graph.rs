@@ -1834,6 +1834,10 @@ fn reduce_data(
     Ok(())
 }
 
+/// The largest request malloc grants on the pinned macOS arm64 host
+/// (2^46 bytes less one 16 KiB page); anything above returns NULL.
+const MALLOC_MAX_BYTES: u64 = 0x3fff_ffff_c000;
+
 fn gcd(mut left: u64, mut right: u64) -> u64 {
     while right != 0 {
         (left, right) = (right, left % right);
@@ -2101,6 +2105,16 @@ impl GraphImage {
             ));
         }
         let step = steps.into_iter().reduce(gcd).unwrap_or(0);
+        // C sizes the buffer as (end - start) / step doubles with the
+        // difference converted to unsigned long, so DEF windows that do not
+        // overlap ask malloc for a wrapped, enormous size.
+        let bytes = ((end.wrapping_sub(start) as u64) / step).wrapping_mul(8);
+        if bytes > MALLOC_MAX_BYTES {
+            self.gdes[gdi].rpnp = rpnp;
+            return Err(StoreError::RrdExpression(
+                "malloc im->gdes[gdi].data".into(),
+            ));
+        }
         let rows = usize::try_from((end - start) / step as i64).unwrap_or(0);
         let mut output = vec![0.0; rows];
         let gdes = &self.gdes;
