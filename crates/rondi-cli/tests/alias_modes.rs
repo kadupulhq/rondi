@@ -163,6 +163,10 @@ fn rrdcached_option_parsing_matches_pinned_daemon() {
         &["-h", "-f", "10", "-w", "20"],
         &["-U", "rondi-no-such-user"],
         &["-G", "rondi-no-such-group"],
+        // strtoul skips leading space and accepts a sign before the id.
+        &["-U", " +0", "-h"],
+        &["-G", "+0", "-h"],
+        &["-o", "/rondi-no-such-directory/rrdcached.log"],
         &["-t", ""],
         &["-a", ""],
         &["-B", "-h"],

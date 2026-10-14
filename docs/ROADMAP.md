@@ -225,7 +225,7 @@ Nothing. EXECUTED: no `crate-type` in `crates/*/Cargo.toml`; no FFI, no headers.
 - Thread test: N threads calling `rrd_update_r` and `rrd_fetch_r` on distinct files with error injection; check per-thread errors.
 - `abidiff` (libabigail) or `abi-compliance-checker` against upstream `librrd.so.8`.
 
-## Surface: rrdcached (RD-007, RD-013, RD-014, RD-015)
+## Surface: rrdcached (RD-007, RD-013, RD-014)
 
 ### What RRDtool does
 
@@ -238,14 +238,14 @@ Nothing. EXECUTED: no `crate-type` in `crates/*/Cargo.toml`; no FFI, no headers.
 
 - Handles the 25 commands (`crates/rondi-server/src/lib.rs`; READ-ONLY for the full list).
 - Unix sockets only. EXECUTED (read): `-l` with a non-Unix address returns `rrdcached network listeners are not enabled; use a Unix socket`, and a second `-l` returns `rrdcached mode supports one listener; give -l only once` (`crates/rondi-cli/src/main.rs`).
-- Parses all 23 upstream options. `-F` and `-g` are accepted and ignored. `-U` and `-G` do not switch accounts: if the requested user or group differs from the current one, startup fails with `rrdcached -U/-G cannot switch accounts in Rondi` (READ-ONLY). No fork and no socket activation (EXECUTED: `grep -rn "LISTEN_FDS\|fork()\|daemonize" crates` is empty).
-- Journal: JSON lines (`serde_json`) in `.rrdcached.journal`, in the `-j` directory or the storage root. A journal is always written, with `sync_data` per accepted update, and is rewritten at each flush interval. It cannot be read by upstream, and upstream's cannot be read by Rondi. Both differ from the decisions above.
+- Parses all 23 upstream options. `-g` is accepted and ignored; `-F` controls the shutdown flush as upstream. `-U` and `-G` do not switch accounts: if the requested user or group differs from the current one, startup fails with `rrdcached -U/-G cannot switch accounts in Rondi` (READ-ONLY). No fork and no socket activation (EXECUTED: `grep -rn "LISTEN_FDS\|fork()\|daemonize" crates` is empty).
+- Journal: upstream format and file layout, written only with `-j`, buffered like stdio with no sync, rotated each flush interval, and replayed at startup. Journals hand over between upstream and Rondi in both directions (`rrdcached_journal_replays_across_upstream_and_rondi`).
 - Client side: Rondi `rrdtool` talks to upstream `rrdcached` over Unix and TCP (tests in `crates/rondi-cli/tests/server_roundtrip.rs`, run in CI). Upstream `rrdtool` talks to Rondi `rrdcached` over Unix only.
 - Pending queue limit of 64 MiB (`DEFAULT_RRDCACHED_QUEUE_BYTES`), a deliberate deviation that rejects updates before journaling them. Under "exact behavior" it needs a decision: match upstream (no limit) or document it as the one allowed exception.
 
 ### Gaps
 
-TCP listeners and several `-l` options; real `-U` and `-G` privilege drop; daemonizing without `-g`; socket activation; `-V` log levels through syslog; journal only with `-j`, in upstream's format, readable at start-up and rotated; no per-update `fsync`; RD-015 enqueue-time versus flush-time validation; error-text parity; the queue-limit decision.
+TCP listeners and several `-l` options; real `-U` and `-G` privilege drop; daemonizing without `-g`; socket activation; `-V` log levels through syslog; journal only with `-j`, in upstream's format, readable at start-up and rotated; no per-update `fsync`; error-text parity; the queue-limit decision.
 
 ### Effort
 
@@ -302,7 +302,7 @@ Effort is for one engineer with IDE support. The total is 58 to 82 engineer-week
 
 **M2: CLI parity (9 to 12 weeks).** Full pipe mode and tokenizer; all non-graph options; `rrdupdate`; `RRDCACHED_STRIPPATH`; local-fallback text; time parser; error corpus. Exit: every upstream `tests/` script that passes with upstream passes with Rondi (graph scripts wait for M5); a golden corpus of at least 2,000 argv cases matches; Cacti poller and maintenance flows pass unchanged in a disposable Kadupul install (closes RD-011 except graphs).
 
-**M3: rrdcached (4 to 7 weeks).** TCP and multiple listeners, `-U`/`-G`, daemonizing, socket activation, upstream journal format behind `-j` only, rotation, error parity, RD-015. Exit: all four client and daemon pairings pass the protocol differential over Unix and TCP; journal handover works both ways; upstream `rrdcached-*` test styles pass.
+**M3: rrdcached (4 to 7 weeks).** TCP and multiple listeners, `-U`/`-G`, daemonizing, socket activation, upstream journal format behind `-j` only, rotation, error parity. Exit: all four client and daemon pairings pass the protocol differential over Unix and TCP; journal handover works both ways; upstream `rrdcached-*` test styles pass.
 
 **M4: librrd ABI (10 to 14 weeks, graph symbols stubbed until M5).** `rondi-ffi`, headers, `.pc`. Prerequisites, in order: (1) argv command implementations move from `rondi-cli` into the library so the CLI and `rrd_*_r` entry points share them; (2) one `rrdc` client module for rrdcached connection, path and escaping rules; (3) a `rondi-graph` crate for graph and xport; (4) RPN parsed once into an expression tree instead of re-tokenized per row; (5) lock down the public Rust API to what the shim needs. The typed `RrdError` layer that emits exact `rrd_set_error` strings is done earlier, with the error-text work. Exit: 97 symbols exported without versions; struct layout checks pass; upstream binding tests pass; pecl `rrd` and collectd suites pass against the shim; `abidiff` reports no incompatible change.
 

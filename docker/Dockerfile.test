@@ -12,6 +12,12 @@ RUN apt-get update \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*
 
+# The suite runs as root; rrdcached -U/-G tests drop to this account, which
+# has a supplementary group so the installed group list can be checked.
+RUN groupadd --system rondi-extra \
+    && useradd --no-create-home --user-group --groups rondi-extra \
+        --shell /usr/sbin/nologin rondi-test
+
 RUN curl --fail --location --silent --show-error \
         https://github.com/oetiker/rrdtool-1.x/releases/download/v1.11.0/rrdtool-1.11.0.tar.gz \
         --output /tmp/rrdtool-1.11.0.tar.gz \
