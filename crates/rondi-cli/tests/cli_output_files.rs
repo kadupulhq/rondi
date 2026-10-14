@@ -176,3 +176,25 @@ fn fetch_resolution_beyond_i64_aligns_like_rrdtool() {
         ]);
     }
 }
+
+#[test]
+fn data_graphs_to_an_unwritable_path_print_the_data() {
+    let Some(sides) = sides() else { return };
+    // rrd_graph_xport keeps the buffer when rrd_fopen fails, so the data
+    // goes to stdout, followed by 0x0 for graph, and the exit status is 0.
+    for command in ["graph", "graphv"] {
+        for format in ["CSV", "TSV", "SSV", "XML", "XMLENUM", "JSON", "JSONTIME"] {
+            let mut args = vec![command, "/nonexistent/x", "--imgformat", format];
+            args.extend(GRAPH);
+            sides.assert_same(&args);
+        }
+    }
+}
+
+#[test]
+fn fetch_align_rejects_a_zero_resolution_like_rrdtool() {
+    let Some(sides) = sides() else { return };
+    for resolution in ["0", "0s", "0m"] {
+        sides.assert_same(&["fetch", "a.rrd", "AVERAGE", "-a", "-r", resolution]);
+    }
+}

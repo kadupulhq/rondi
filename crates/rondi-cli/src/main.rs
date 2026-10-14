@@ -1971,13 +1971,20 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             }
             XportFormat::Separated(separator) => (format_xport_sv(separator, &data), None),
         };
+        // rrd_graph_xport only streams to the file when rrd_fopen worked;
+        // otherwise the buffered data is returned like the "-" image.
+        let mut buffered = to_memory;
         if !to_memory {
-            write_output_file(filename, output.as_bytes())?;
+            match write_output_file(filename, output.as_bytes()) {
+                Err(OutputError::Refused(message)) => return Err(message.into()),
+                Err(OutputError::Open(_)) => buffered = true,
+                Ok(()) | Err(OutputError::Write(_)) => {}
+            }
         }
         if let Some(error) = error {
             return Err(error.into());
         }
-        if to_memory {
+        if buffered {
             image = Some(output.into_bytes());
         }
         match print_calc(&mut im, si_base, &mut info)? {
