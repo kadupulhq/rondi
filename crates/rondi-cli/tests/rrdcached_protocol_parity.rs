@@ -499,3 +499,27 @@ fn tune_parses_options_like_rrd_tune_r() {
     assert!(observed[0][3].ends_with("]\n-1 Got error invalid option -- 'bogus'\n"));
     assert_same(&observed);
 }
+
+/// RD-015: upstream may drop requests sent just before a half-close,
+/// depending on platform and scheduling. Rondi answers them every time.
+#[test]
+fn requests_before_a_half_close_are_answered() {
+    let Some(work) = Work::new() else { return };
+    work.reset();
+    let mut daemon = work.start(true, &["-B"]);
+    for _ in 0..10 {
+        let mut stream = UnixStream::connect(work.root.join("s.sock")).unwrap();
+        stream.set_read_timeout(Some(common::io_timeout())).unwrap();
+        stream.write_all(b"PING\nPENDING a.rrd\n").unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).unwrap();
+        assert_eq!(reply, "0 PONG\n0 updates pending\n");
+    }
+    // SAFETY: the child is still running and owned by this test.
+    assert_eq!(
+        unsafe { libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM) },
+        0
+    );
+    daemon.wait().unwrap();
+}
