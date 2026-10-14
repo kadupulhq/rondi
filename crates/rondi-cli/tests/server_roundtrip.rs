@@ -3950,3 +3950,62 @@ fn json_daemon_stages_private_socket_and_rejects_unsafe_paths() {
     daemon.kill().unwrap();
     daemon.wait().unwrap();
 }
+
+#[test]
+fn json_daemon_socket_is_never_visible_wider_than_0600() {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+    use std::os::unix::process::CommandExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("store");
+    let directory = temp.path().join("run");
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = directory.join("rondi.sock");
+    // A zero umask makes a socket that is bound and chmodded afterwards
+    // appear as 0777, so a poll can catch the window.
+    for attempt in 0..25 {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_rondi"));
+        command
+            .args(["--root", root.to_str().unwrap(), "server", "--listen"])
+            .arg(&socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // SAFETY: umask is async-signal-safe and the closure touches no memory.
+        unsafe {
+            command.pre_exec(|| {
+                libc::umask(0);
+                Ok(())
+            });
+        }
+        let mut daemon = command.spawn().unwrap();
+        let deadline = Instant::now() + common::io_timeout();
+        let mut seen = Vec::new();
+        loop {
+            if let Ok(metadata) = std::fs::symlink_metadata(&socket) {
+                if metadata.file_type().is_socket() {
+                    seen.push(metadata.mode() & 0o777);
+                    if UnixStream::connect(&socket).is_ok() {
+                        break;
+                    }
+                }
+            } else if let Some(status) = daemon.try_wait().unwrap() {
+                panic!("server exited during startup: {status}");
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server did not create its socket"
+            );
+        }
+        daemon.kill().unwrap();
+        daemon.wait().unwrap();
+        assert!(
+            seen.iter().all(|mode| *mode == 0o600),
+            "attempt {attempt}: socket visible with modes {:?}",
+            seen.iter()
+                .map(|mode| format!("{mode:o}"))
+                .collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_file(&socket);
+    }
+}
