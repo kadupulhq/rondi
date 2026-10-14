@@ -1,0 +1,4 @@
+update ROOT/d.rrd 1000000080:1.5:2
+forget ROOT/d.rrd
+update g.rrd 1000000080:5
+upd

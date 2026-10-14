@@ -1,8 +1,6 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use rondi::{
-    RrdXportCdef, RrdXportColumn, RrdXportDefinition, RrdXportOperation, VdefFunction,
-    create_rrd_file, fetch_rrd_file, fetch_xport_with_operations, update_rrd_values,
-};
+use rondi::graph::{GraphImage, XportData};
+use rondi::{create_rrd_file, fetch_rrd_file, update_rrd_values};
 use std::{hint::black_box, path::PathBuf, time::Duration};
 
 struct Fixture {
@@ -11,7 +9,6 @@ struct Fixture {
     start: i64,
     end: i64,
     rows: u64,
-    definitions: Vec<RrdXportDefinition>,
 }
 
 impl Fixture {
@@ -39,39 +36,35 @@ impl Fixture {
         ] {
             update_rrd_values(&path, timestamp, &[Some(value); 4]).unwrap();
         }
-        let definitions = (0..4)
-            .map(|index| RrdXportDefinition {
-                name: format!("x{index}"),
-                file: path.clone(),
-                data_source: format!("x{index}"),
-                consolidation: "AVERAGE".into(),
-            })
-            .collect();
         Self {
             _root: root,
             path,
             start: end - rows as i64,
             end,
             rows,
-            definitions,
         }
     }
 
-    fn calculate(
-        &self,
-        operations: &[RrdXportOperation],
-        columns: &[RrdXportColumn],
-    ) -> rondi::RrdXportResult {
-        fetch_xport_with_operations(
-            &self.definitions,
-            operations,
-            columns,
-            self.start,
-            self.end,
-            1,
-            self.rows,
-        )
-        .unwrap()
+    fn script(&self, expression: &str) -> Vec<String> {
+        let mut script = (0..4)
+            .map(|index| format!("DEF:x{index}={}:x{index}:AVERAGE", self.path.display()))
+            .collect::<Vec<_>>();
+        script.push(format!("CDEF:result={expression}"));
+        script.push("VDEF:maximum=result,MAXIMUM".into());
+        script.push("XPORT:result:Result".into());
+        script
+    }
+
+    /// Runs the graph engine's script parsing, data_fetch, data_calc and
+    /// xport steps, as `rrdtool xport` does after option parsing.
+    fn calculate(&self, script: &[String]) -> (GraphImage, XportData) {
+        let mut image = GraphImage::new(self.start, self.end, 1);
+        let resolve = |_: Option<&str>, _: Option<&str>, start: i64, end: i64| Ok((start, end));
+        image.graph_script(script, &resolve).unwrap();
+        image.data_fetch(&mut |_, _| Ok(())).unwrap();
+        image.data_calc().unwrap();
+        let data = image.xport(false).unwrap();
+        (image, data)
     }
 }
 
@@ -111,10 +104,6 @@ fn rrd_queries(criterion: &mut Criterion) {
     }
     fetches.finish();
 
-    let columns = [RrdXportColumn {
-        variable: "result".into(),
-        legend: "Result".into(),
-    }];
     let mut graphs = criterion.benchmark_group("graph_calc");
     for fixture in &fixtures {
         graphs.throughput(Throughput::Elements(fixture.rows));
@@ -122,26 +111,20 @@ fn rrd_queries(criterion: &mut Criterion) {
             ("arithmetic", "x0,x1,+,x2,+,x3,+,4,/"),
             ("prev", "x0,PREV,ADDNAN"),
         ] {
-            let operations = [
-                RrdXportOperation::Cdef(RrdXportCdef {
-                    name: "result".into(),
-                    expression: expression.into(),
-                }),
-                RrdXportOperation::Vdef {
-                    name: "maximum".into(),
-                    variable: "result".into(),
-                    function: VdefFunction::Maximum,
-                    percentile: None,
-                },
-            ];
-            let result = fixture.calculate(&operations, &columns);
-            assert_eq!(result.rows.len() as u64, fixture.rows);
-            assert!(result.vdef_values["maximum"].value.is_finite());
+            let script = fixture.script(expression);
+            let (image, data) = fixture.calculate(&script);
+            assert_eq!(data.rows.len() as u64, fixture.rows);
+            let maximum = image
+                .gdes
+                .iter()
+                .find(|element| element.vname == "maximum")
+                .unwrap();
+            assert!(maximum.vf.val.is_finite());
             graphs.bench_with_input(
                 BenchmarkId::new(name, fixture.rows),
                 fixture,
                 |bencher, fixture| {
-                    bencher.iter(|| black_box(fixture.calculate(black_box(&operations), &columns)));
+                    bencher.iter(|| black_box(fixture.calculate(black_box(&script))));
                 },
             );
         }

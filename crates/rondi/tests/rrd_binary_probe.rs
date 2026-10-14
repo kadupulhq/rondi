@@ -1,3 +1,6 @@
+#[macro_use]
+mod common;
+
 use rondi::{Store, StoreError, update_rrd_values};
 use std::process::Command;
 
@@ -5,7 +8,7 @@ use std::process::Command;
 fn inspects_disposable_rrdtool_v3_file_without_modifying_it() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool binary probe: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool binary probe: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -60,7 +63,7 @@ fn inspects_disposable_rrdtool_v3_file_without_modifying_it() {
 fn truncated_rrd_is_reported_as_a_format_error() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool binary probe: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool binary probe: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -86,7 +89,8 @@ fn truncated_rrd_is_reported_as_a_format_error() {
     let store = Store::open(temp.path()).unwrap();
     assert!(matches!(
         store.inspect_rrd("bad"),
-        Err(StoreError::RrdFormat(_))
+        Err(StoreError::RrdFile(message))
+            if message == "reached EOF while loading header rrd->stat_head"
     ));
 }
 
@@ -94,7 +98,7 @@ fn truncated_rrd_is_reported_as_a_format_error() {
 fn metadata_inspection_does_not_read_a_large_archive_payload() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool binary probe: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool binary probe: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -140,7 +144,7 @@ fn metadata_inspection_does_not_read_a_large_archive_payload() {
 fn fetch_matches_rrdtool_for_ring_order_and_padded_range() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool differential fetch: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential fetch: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -214,7 +218,7 @@ fn fetch_matches_rrdtool_for_ring_order_and_padded_range() {
 fn fetch_uses_rrdtool_resolution_choice_across_archives() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool differential fetch: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential fetch: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -303,7 +307,7 @@ fn buffered_fetch_matches_rrdtool_across_buffer_and_ring_boundaries() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping buffered fetch differential: rrdtool is not installed");
+        oracle_skip!("skipping buffered fetch differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -388,7 +392,7 @@ fn buffered_fetch_matches_rrdtool_across_buffer_and_ring_boundaries() {
 fn in_place_gauge_update_is_byte_compatible_and_upstream_can_continue() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool differential update: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential update: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -470,7 +474,7 @@ fn multipdp_average_update_matches_rrdtool_in_place() {
         .output()
         .is_ok_and(|o| o.status.success())
     {
-        eprintln!("skipping RRDtool differential update: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential update: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -539,7 +543,7 @@ fn multipdp_min_max_last_updates_match_rrdtool_in_place() {
         .output()
         .is_ok_and(|o| o.status.success())
     {
-        eprintln!("skipping RRDtool differential update: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential update: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -602,7 +606,7 @@ fn multiple_gauge_sources_update_matches_rrdtool_in_place() {
         .output()
         .is_ok_and(|o| o.status.success())
     {
-        eprintln!("skipping RRDtool differential update: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential update: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -663,7 +667,7 @@ fn counter_derive_and_absolute_updates_match_rrdtool_in_place() {
         .output()
         .is_ok_and(|o| o.status.success())
     {
-        eprintln!("skipping RRDtool differential update: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential update: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -739,7 +743,7 @@ fn large_counter_and_derive_inputs_keep_decimal_precision_like_rrdtool() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping large integer differential: rrdtool is not installed");
+        oracle_skip!("skipping large integer differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -796,7 +800,7 @@ fn dcounter_and_dderive_reset_semantics_match_rrdtool_byte_for_byte() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool DCOUNTER differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool DCOUNTER differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -860,7 +864,7 @@ fn bulk_updates_cross_multiple_pdp_boundaries_and_roll_archives_like_rrdtool() {
         .output()
         .is_ok_and(|output| output.status.success())
     {
-        eprintln!("skipping RRDtool bulk update differential: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool bulk update differential: rrdtool is not installed");
         return;
     }
     let temp = tempfile::tempdir().unwrap();
@@ -953,7 +957,7 @@ fn bulk_updates_cross_multiple_pdp_boundaries_and_roll_archives_like_rrdtool() {
 fn in_place_update_matches_irregular_unknown_and_heartbeat_semantics() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool differential update: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential update: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -1045,7 +1049,7 @@ fn in_place_update_matches_irregular_unknown_and_heartbeat_semantics() {
 fn unsupported_in_place_update_is_rejected_without_mutating_the_rrd() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool update probe: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool update probe: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -1078,7 +1082,7 @@ fn unsupported_in_place_update_is_rejected_without_mutating_the_rrd() {
 fn in_place_update_advances_each_basic_base_step_archive() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
-        eprintln!("skipping RRDtool differential update: rrdtool is not installed");
+        oracle_skip!("skipping RRDtool differential update: rrdtool is not installed");
         return;
     };
     assert!(version.status.success());
@@ -1130,4 +1134,413 @@ fn in_place_update_advances_each_basic_base_step_archive() {
             "archive state diverged at {timestamp}"
         );
     }
+}
+
+fn create_single_source(path: &std::path::Path, start: i64, step: u64, ds: &str, rra: &str) {
+    rondi::create_rrd_file(
+        path,
+        start,
+        step,
+        &[ds.to_owned()],
+        &[rra.to_owned()],
+        false,
+    )
+    .unwrap();
+}
+
+fn fetched_value(path: &std::path::Path, cf: &str, timestamp: i64, step: u64) -> Option<f64> {
+    let fetched =
+        rondi::fetch_rrd_file(path, cf, timestamp - step as i64, timestamp - 1, step).unwrap();
+    fetched
+        .rows
+        .iter()
+        .find(|row| row.timestamp == timestamp)
+        .unwrap()
+        .values[0]
+}
+
+// Expected values in the tests below come from RRDtool 1.11.0 `update` and
+// `dump` on the same inputs.
+#[test]
+fn split_open_pdp_is_unknown_when_more_than_half_unknown() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("split.rrd");
+    create_single_source(
+        &path,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:30:U:U",
+        "RRA:AVERAGE:0.5:1:10",
+    );
+    rondi::update_rrd_file(&path, 1_000_000_006, None).unwrap();
+    rondi::update_rrd_file(&path, 1_000_000_008, Some(5.0)).unwrap();
+    rondi::update_rrd_file(&path, 1_000_000_035, Some(7.0)).unwrap();
+    assert_eq!(fetched_value(&path, "AVERAGE", 1_000_000_010, 10), None);
+    assert_eq!(
+        fetched_value(&path, "AVERAGE", 1_000_000_020, 10),
+        Some(7.0)
+    );
+}
+
+#[test]
+fn split_open_pdp_truncates_fractional_seconds_like_rrdtool() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("fraction.rrd");
+    create_single_source(
+        &path,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:100:U:U",
+        "RRA:AVERAGE:0.5:1:10",
+    );
+    rondi::update_rrd_file_precise(&path, 1_000_000_005, 500_000, Some(10.0)).unwrap();
+    rondi::update_rrd_file(&path, 1_000_000_025, Some(20.0)).unwrap();
+    assert_eq!(
+        fetched_value(&path, "AVERAGE", 1_000_000_010, 10),
+        Some(13.5)
+    );
+    assert_eq!(
+        fetched_value(&path, "AVERAGE", 1_000_000_020, 10),
+        Some(21.0)
+    );
+}
+
+#[test]
+fn last_archive_carries_the_pdp_into_the_next_cdp() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("last.rrd");
+    create_single_source(
+        &path,
+        1_000_000_440,
+        10,
+        "DS:x:GAUGE:100:U:U",
+        "RRA:LAST:0.9:5:2",
+    );
+    rondi::update_rrd_file(&path, 1_000_000_470, Some(1057.0)).unwrap();
+    let info = rondi::inspect_rrd_file(&path).unwrap();
+    assert_eq!(info.archives[0].cdp_prep[0].value, 1057.0);
+}
+
+#[test]
+fn verbose_update_reports_rrdtool_row_times() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("verbose.rrd");
+    create_single_source(
+        &path,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:100:U:U",
+        "RRA:AVERAGE:0.5:1:10",
+    );
+    rondi::update_rrd_raw_values_verbose(&path, 1_000_000_005, &[Some("1")]).unwrap();
+    let rows = rondi::update_rrd_raw_values_verbose(&path, 1_000_000_045, &[Some("2")]).unwrap();
+    // write_to_rras derives each row time from a step count it decrements
+    // while writing, so RRDtool reports 40 and 50 rather than 30 and 40.
+    assert_eq!(
+        rows.iter()
+            .map(|row| (row.timestamp, row.values[0]))
+            .collect::<Vec<_>>(),
+        [
+            (1_000_000_010, 1.5),
+            (1_000_000_020, 2.0),
+            (1_000_000_040, 2.0),
+            (1_000_000_050, 2.0)
+        ]
+    );
+}
+
+#[test]
+fn verbose_update_parses_numbers_like_plain_update() {
+    let temp = tempfile::tempdir().unwrap();
+    let plain = temp.path().join("plain.rrd");
+    let verbose = temp.path().join("verbose.rrd");
+    create_single_source(
+        &plain,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:20:U:U",
+        "RRA:LAST:0:1:5",
+    );
+    std::fs::copy(&plain, &verbose).unwrap();
+    // rrd_strtodbl and str::parse round this decimal to different doubles.
+    rondi::update_rrd_raw_values(&plain, 1_000_000_010, &[Some("1234567.891")]).unwrap();
+    rondi::update_rrd_raw_values_verbose(&verbose, 1_000_000_010, &[Some("1234567.891")]).unwrap();
+    assert_eq!(
+        std::fs::read(&plain).unwrap(),
+        std::fs::read(&verbose).unwrap()
+    );
+}
+
+#[test]
+fn infinite_ds_bounds_survive_inspect_dump_and_restore() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("bounds.rrd");
+    create_single_source(
+        &path,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:20:-inf:inf",
+        "RRA:LAST:0:1:5",
+    );
+    let info = rondi::inspect_rrd_file(&path).unwrap();
+    assert_eq!(info.data_sources[0].minimum, Some(f64::NEG_INFINITY));
+    assert_eq!(info.data_sources[0].maximum, Some(f64::INFINITY));
+    let xml = rondi::dump_rrd_file(&path).unwrap();
+    assert!(xml.contains("<min>-inf</min>"), "{xml}");
+    assert!(xml.contains("<max>inf</max>"), "{xml}");
+    let restored = temp.path().join("restored.rrd");
+    rondi::restore_rrd_file(&xml, &restored, false, false).unwrap();
+    let info = rondi::inspect_rrd_file(&restored).unwrap();
+    assert_eq!(info.data_sources[0].minimum, Some(f64::NEG_INFINITY));
+    assert_eq!(info.data_sources[0].maximum, Some(f64::INFINITY));
+}
+
+#[test]
+fn create_parses_ds_bounds_like_rrdtool() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        oracle_skip!("skipping DS bound differential: pinned RRDtool 1.11.0 is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    for bounds in [
+        "U:U",
+        "nan:-nan",
+        "NaN:INF",
+        "-inf:inf",
+        "infinity:U",
+        "U:1e400",
+        "-1e400:0",
+        "5:5",
+        "6:5",
+        "1x:U",
+        "+inf:U",
+    ] {
+        let definition = format!("DS:x:GAUGE:20:{bounds}");
+        let ours = temp.path().join("ours.rrd");
+        let oracle = temp.path().join("oracle.rrd");
+        let _ = std::fs::remove_file(&ours);
+        let _ = std::fs::remove_file(&oracle);
+        let created = rondi::create_rrd_file(
+            &ours,
+            1_000_000_000,
+            10,
+            std::slice::from_ref(&definition),
+            &["RRA:LAST:0:1:5".to_owned()],
+            false,
+        );
+        let upstream = Command::new("rrdtool")
+            .args([
+                "create",
+                oracle.to_str().unwrap(),
+                "--start",
+                "1000000000",
+                "--step",
+                "10",
+                &definition,
+                "RRA:LAST:0:1:5",
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            created.is_ok(),
+            upstream.status.success(),
+            "{bounds}: {created:?} {}",
+            String::from_utf8_lossy(&upstream.stderr)
+        );
+        if created.is_ok() {
+            // The DS definition holds the bounds; cur_row is random upstream.
+            assert_eq!(
+                std::fs::read(&ours).unwrap()[128..248],
+                std::fs::read(&oracle).unwrap()[128..248],
+                "{bounds}"
+            );
+        }
+    }
+}
+
+#[test]
+fn trailing_bytes_after_the_archives_are_accepted_like_rrd_open() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("trailing.rrd");
+    create_single_source(
+        &path,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:20:U:U",
+        "RRA:LAST:0:1:5",
+    );
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.extend_from_slice(b"XXXXXXXX");
+    std::fs::write(&path, &bytes).unwrap();
+    rondi::inspect_rrd_file(&path).unwrap();
+    rondi::update_rrd_file(&path, 1_000_000_010, Some(3.0)).unwrap();
+    assert_eq!(fetched_value(&path, "LAST", 1_000_000_010, 10), Some(3.0));
+    assert!(std::fs::read(&path).unwrap().ends_with(b"XXXXXXXX"));
+}
+
+#[test]
+fn extreme_fetch_ranges_return_errors_instead_of_overflowing() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("range.rrd");
+    create_single_source(
+        &path,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:20:U:U",
+        "RRA:LAST:0:1:5",
+    );
+    for (start, end) in [
+        (-9_000_000_000_000_000_000, 9_000_000_000_000_000_000),
+        (i64::MIN, i64::MIN + 10),
+    ] {
+        let result =
+            std::panic::catch_unwind(|| rondi::fetch_rrd_file(&path, "LAST", start, end, 10));
+        assert!(matches!(result, Ok(Err(_))), "{start}..{end}: {result:?}");
+    }
+}
+
+#[test]
+fn dderive_previous_sample_is_parsed_like_rrdtool() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+        })
+    {
+        oracle_skip!("skipping DDERIVE differential: pinned RRDtool 1.11.0 is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let oracle = temp.path().join("oracle.rrd");
+    let ours = temp.path().join("ours.rrd");
+    let created = Command::new("rrdtool")
+        .args([
+            "create",
+            oracle.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:x:DDERIVE:100:U:U",
+            "RRA:LAST:0:1:5",
+        ])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    std::fs::copy(&oracle, &ours).unwrap();
+    // str::parse and rrd_strtod round "444.636" to neighbouring doubles.
+    for (timestamp, value) in [(1_000_000_005, "444.636"), (1_000_000_010, "43")] {
+        let updated = Command::new("rrdtool")
+            .args([
+                "update",
+                oracle.to_str().unwrap(),
+                &format!("{timestamp}:{value}"),
+            ])
+            .output()
+            .unwrap();
+        assert!(updated.status.success());
+        rondi::update_rrd_raw_values(&ours, timestamp, &[Some(value)]).unwrap();
+    }
+    assert_eq!(
+        std::fs::read(&ours).unwrap(),
+        std::fs::read(&oracle).unwrap()
+    );
+}
+
+// Header offsets for a one-source, one-archive file: the archive definition
+// starts after the 128-byte static head and one 120-byte source definition,
+// and the row pointer follows the live head, one prep area and one CDP prep.
+const RRA_ROWS_OFFSET: u64 = 248 + 24;
+const RRA_PDP_OFFSET: u64 = 248 + 32;
+const RRA_CUR_ROW_OFFSET: u64 = 576;
+
+fn poke_u64(path: &std::path::Path, offset: u64, value: u64) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.write_all(&value.to_le_bytes()).unwrap();
+}
+
+fn create_geometry_probe(path: &std::path::Path) {
+    create_single_source(
+        path,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:20:U:U",
+        "RRA:AVERAGE:0.5:1:8",
+    );
+}
+
+#[test]
+fn update_with_zero_pdp_per_row_is_an_error_instead_of_a_division_panic() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("pdp.rrd");
+    create_geometry_probe(&path);
+    poke_u64(&path, RRA_PDP_OFFSET, 0);
+    let before = std::fs::read(&path).unwrap();
+    let result =
+        std::panic::catch_unwind(|| rondi::update_rrd_file(&path, 1_000_000_010, Some(1.0)));
+    let error = result.expect("update panicked").unwrap_err().to_string();
+    assert!(
+        error.contains("RRD step, pdp_cnt or row_cnt is zero"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+// RRDtool 1.11.0 on the same file: `first` prints 1000000010, and a fetch
+// that ends before the archive pads with NaN rows. A fetch that reaches the
+// archive takes `% row_cnt` with a zero row count, which is undefined in C.
+#[test]
+fn zero_row_archive_first_and_out_of_range_fetch_match_rrdtool() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("rows.rrd");
+    create_geometry_probe(&path);
+    poke_u64(&path, RRA_ROWS_OFFSET, 0);
+    let first = std::panic::catch_unwind(|| rondi::first_rrd_time(&path, 0));
+    assert_eq!(first.expect("first panicked").unwrap(), 1_000_000_010);
+    let fetched = std::panic::catch_unwind(|| {
+        rondi::fetch_rrd_file(&path, "AVERAGE", 999_999_900, 999_999_950, 10)
+    });
+    let rows = fetched
+        .expect("fetch panicked")
+        .unwrap()
+        .rows
+        .iter()
+        .map(|row| (row.timestamp, row.values[0]))
+        .collect::<Vec<_>>();
+    let expected = (999_999_910..=999_999_960)
+        .step_by(10)
+        .map(|timestamp| (timestamp, None))
+        .collect::<Vec<_>>();
+    assert_eq!(rows, expected);
+    let reaching = std::panic::catch_unwind(|| {
+        rondi::fetch_rrd_file(&path, "AVERAGE", 999_999_990, 1_000_000_000, 10)
+    });
+    let error = reaching.expect("fetch panicked").unwrap_err().to_string();
+    assert!(error.contains("row_cnt is zero"), "{error}");
+}
+
+// RRDtool 1.11.0 increments cur_row as an unsigned long, so u64::MAX wraps
+// to 0 and the pointer is stored as 0.
+#[test]
+fn update_wraps_a_maximal_row_pointer_like_rrdtool() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("cur_row.rrd");
+    create_geometry_probe(&path);
+    poke_u64(&path, RRA_CUR_ROW_OFFSET, u64::MAX);
+    let result =
+        std::panic::catch_unwind(|| rondi::update_rrd_file(&path, 1_000_000_010, Some(5.0)));
+    result.expect("update panicked").unwrap();
+    assert_eq!(
+        rondi::inspect_rrd_file(&path).unwrap().archives[0].current_row,
+        0
+    );
 }

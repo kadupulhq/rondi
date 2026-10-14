@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE rrd SYSTEM "https://oss.oetiker.ch/rrdtool/rrdtool.dtd">
+<!-- Round Robin Database Dump -->
+<rrd>
+	<version>0003</version>
+	<step>10</step> <!-- Seconds -->
+	<lastupdate>1000000080</lastupdate> <!-- 2001-09-08 18:48:00 -0700 -->
+
+	<ds>
+		<name> g </name>
+		<type> GAUGE </type>
+		<minimal_heartbeat>30</minimal_heartbeat>
+		<min>NaN</min>
+		<max>NaN</max>
+
+		<!-- PDP Status -->
+		<last_ds>5</last_ds>
+		<value>0.0000000000e+00</value>
+		<unknown_sec> 0 </unknown_sec>
+	</ds>
+
+	<!-- Round Robin Archives -->
+	<rra>
+		<cf>AVERAGE</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>5.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<value>NaN</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-08 18:47:30 -0700 / 1000000050 --> <row><v>5.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:47:40 -0700 / 1000000060 --> <row><v>5.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:47:50 -0700 / 1000000070 --> <row><v>5.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:48:00 -0700 / 1000000080 --> <row><v>5.0000000000e+00</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>HWPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<hw_alpha>1.0000000000e-01</hw_alpha>
+		<hw_beta>3.5000000000e-03</hw_beta>
+		<dependent_rra_idx>2</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>5.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<intercept>5.0000000000e+00</intercept>
+			<last_intercept>5.0000000000e+00</last_intercept>
+			<slope>0.0000000000e+00</slope>
+			<last_slope>0.0000000000e+00</last_slope>
+			<nan_count>1</nan_count>
+			<last_nan_count>1</last_nan_count>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-08 18:47:10 -0700 / 1000000030 --> <row><v>NaN</v></row>
+			<!-- 2001-09-08 18:47:20 -0700 / 1000000040 --> <row><v>5.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:47:30 -0700 / 1000000050 --> <row><v>5.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:47:40 -0700 / 1000000060 --> <row><v>5.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:47:50 -0700 / 1000000070 --> <row><v>5.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:48:00 -0700 / 1000000080 --> <row><v>5.0000000000e+00</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>SEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>1</seasonal_smooth_idx>
+		<dependent_rra_idx>1</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>0.0000000000e+00</seasonal>
+			<last_seasonal>0.0000000000e+00</last_seasonal>
+			<init_flag>4</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-08 18:47:40 -0700 / 1000000060 --> <row><v>0.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:47:50 -0700 / 1000000070 --> <row><v>0.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:48:00 -0700 / 1000000080 --> <row><v>0.0000000000e+00</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVSEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>1</seasonal_smooth_idx>
+		<dependent_rra_idx>1</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>0.0000000000e+00</seasonal>
+			<last_seasonal>0.0000000000e+00</last_seasonal>
+			<init_flag>4</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-08 18:47:40 -0700 / 1000000060 --> <row><v>0.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:47:50 -0700 / 1000000070 --> <row><v>0.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:48:00 -0700 / 1000000080 --> <row><v>0.0000000000e+00</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<dependent_rra_idx>3</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-08 18:47:10 -0700 / 1000000030 --> <row><v>NaN</v></row>
+			<!-- 2001-09-08 18:47:20 -0700 / 1000000040 --> <row><v>NaN</v></row>
+			<!-- 2001-09-08 18:47:30 -0700 / 1000000050 --> <row><v>NaN</v></row>
+			<!-- 2001-09-08 18:47:40 -0700 / 1000000060 --> <row><v>NaN</v></row>
+			<!-- 2001-09-08 18:47:50 -0700 / 1000000070 --> <row><v>0.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:48:00 -0700 / 1000000080 --> <row><v>0.0000000000e+00</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>FAILURES</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<delta_pos>2.0000000000e+00</delta_pos>
+		<delta_neg>2.0000000000e+00</delta_neg>
+		<window_len>9</window_len>
+		<failure_threshold>7</failure_threshold>
+		<dependent_rra_idx>3</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<history>000000000</history>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-08 18:47:40 -0700 / 1000000060 --> <row><v>0.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:47:50 -0700 / 1000000070 --> <row><v>0.0000000000e+00</v></row>
+			<!-- 2001-09-08 18:48:00 -0700 / 1000000080 --> <row><v>0.0000000000e+00</v></row>
+		</database>
+	</rra>
+</rrd>

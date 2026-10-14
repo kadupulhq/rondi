@@ -17,7 +17,7 @@ if [ ! -x "$binary" ]; then
     exit 66
 fi
 mkdir -p "$bindir"
-for name in rrdtool rrdcached rrdtool-proxy rrdproxy; do
+for name in rrdtool rrdcached rrdupdate rrdcreate rrdinfo rrdtool-proxy rrdproxy; do
     link="$bindir/$name"
     if [ -e "$link" ] || [ -L "$link" ]; then
         if [ ! -L "$link" ] || [ "$(readlink "$link")" != "$binary" ]; then
@@ -33,7 +33,7 @@ if [ -e "$launcher" ] || [ -L "$launcher" ]; then
         exit 73
     fi
 fi
-for name in rrdtool rrdcached rrdtool-proxy rrdproxy; do
+for name in rrdtool rrdcached rrdupdate rrdcreate rrdinfo rrdtool-proxy rrdproxy; do
     link="$bindir/$name"
     if [ ! -L "$link" ]; then
         ln -s "$binary" "$link"

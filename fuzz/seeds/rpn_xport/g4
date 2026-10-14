@@ -1,0 +1,4 @@
+CDEF:s=a,b,m,3,SORT,3,REV,POP,POP
+CDEF:r=1,2,3,4,4,1,ROLL,+,+,+,a,+
+XPORT:s
+XPORT:r

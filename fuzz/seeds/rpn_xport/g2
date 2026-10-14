@@ -1,0 +1,3 @@
+CDEF:x=a,b,m,3,AVG,a,b,MAX,MIN
+CDEF:y=x,PREV,x,PREV(a),ADDNAN
+XPORT:y

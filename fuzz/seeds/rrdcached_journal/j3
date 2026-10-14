@@ -1,0 +1,5 @@
+update ROOT/../g.rrd x
+
+WROTE ROOT/g.rrd
+FLUSH g.rrd
+update g\ \\.rrd 1:2

@@ -6,7 +6,7 @@ The workspace has three packages: `rondi` owns data-source semantics and storage
 
 The first format is versioned JSON with the distinct `.rondi` extension. It records the format version, step, heartbeat, retention bound, last update, pending PDP accumulator, and retained AVERAGE points. A write serializes to a temporary file, syncs it, atomically renames it, and syncs the storage directory. This keeps the first format inspectable and easy to validate while semantics are under differential test. It is not an `.rrd` file and must never be named `.rrd`.
 
-The `.rondi` store is an additional native format. It is not a conversion of RRDtool's binary format. Rondi can create, inspect, fetch, and update the common version 0003-0005 RRDtool layout on 64-bit little-endian targets for GAUGE, COUNTER, DERIVE, ABSOLUTE, DCOUNTER, and DDERIVE sources with AVERAGE/MIN/MAX/LAST archives, including multi-PDP consolidation. Counter-family values use the current `f64` update API. These operations use POSIX `fcntl` locks; tests verify byte equality for the supported update subset and upstream continuation. Specialized v4/v5 features and other ABIs remain unverified. Never label a `.rondi` file `.rrd`.
+The `.rondi` store is an additional native format. It is not a conversion of RRDtool's binary format. Rondi can create, inspect, fetch, and update the common version 0003-0005 RRDtool layout on 64-bit little-endian targets for GAUGE, COUNTER, DERIVE, ABSOLUTE, DCOUNTER, and DDERIVE sources with AVERAGE/MIN/MAX/LAST archives, including multi-PDP consolidation. The `rrdtool` alias and rrdcached pass COUNTER and DERIVE readings as decimal text so integers above 2^53 update exactly; the `f64` library API is limited to exactly representable integers. These operations use POSIX `fcntl` locks; tests verify byte equality for the supported update subset and upstream continuation. Specialized v4/v5 features and other ABIs remain unverified. Never label a `.rondi` file `.rrd`.
 
 ## Ownership and processing
 
@@ -14,7 +14,17 @@ Opening a storage root takes an OS advisory exclusive lock on `.rondi.lock`. The
 
 Each GAUGE update is assigned to fixed step intervals. Values are weighted by elapsed seconds. A sample gap greater than heartbeat, or an explicit unknown value, contributes unknown time. A PDP is unknown when less than half of its seconds are known. The last incomplete step is kept as accumulator state and is not returned by fetch until its boundary is complete. Out-of-order and duplicate timestamps are rejected by local update calls.
 
-The daemon uses a bounded write channel. Full queues fail immediately with HTTP 429; clients should retry. Server updates append a journal record and sync it before checkpointing storage. The HTTP success response is sent only after both the journal and storage checkpoint have been synced. Startup replays journal records that are newer than each database checkpoint. The journal currently has no compaction and grows with accepted writes; this is a tracked operational limitation.
+The daemon uses a bounded write channel. Full queues fail immediately with HTTP 429; clients should retry. Server updates append a journal record and sync it before checkpointing storage. The HTTP success response is sent only after both the journal and storage checkpoint have been synced. Startup replays journal records that are newer than each database checkpoint.
+
+## Store limits and journal compaction
+
+These limits apply only to the `.rondi` store and its HTTP API. They do not touch `.rrd` files, the `rrdtool` alias, or the `rrdcached` adapter.
+
+Each `.rondi` update rewrites and syncs the whole JSON file, so update cost grows with retained rows. One optimized local run measured 114.7 updates/s for 300 updates and 120 retained rows on the documented Mac environment. `--max-rows` (default 100000, must be positive) caps `rows` for `create` and snapshot import to bound that cost and the work a long gap can cause.
+
+The journal records each server update with its request ID and acceptance time. After startup recovery, and whenever the journal reaches twice the records kept by the last compaction (at least 1024), the store rewrites it without records that are both applied to their database and older than `--idempotency-window` (default 86400 seconds, must be positive). The rewrite goes to `rondi.journal.compact.tmp`, which is synced, renamed over `rondi.journal`, and followed by a directory sync; a crash leaves the old or the new journal, and a leftover temporary file is ignored and later overwritten. Records not yet applied are always kept for replay.
+
+The trade-off: a retry with the same request ID is deduplicated for at least the window. After the window its record may be gone, and the retry is handled as a new update: the same timestamp is rejected as out of order, and different contents are accepted instead of being reported as a request ID conflict. Journal size and the in-memory request ID index are bounded by the window times the update rate, plus at most one doubling before the next compaction. Records written before this change carry no acceptance time and are dropped by the first compaction once applied.
 
 ## Format migration roadmap
 

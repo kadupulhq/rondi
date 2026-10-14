@@ -1,0 +1,3 @@
+update c.rrd 1000000080:1:2:3
+wrote ROOT/c.rrd
+update c.rrd 1000000090:4:5:6

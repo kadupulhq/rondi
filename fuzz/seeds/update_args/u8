@@ -1,0 +1,8 @@
+--start
+1000000000
+--step
+10
+DS:x:GAUGE:30:0:U
+DS:y:COUNTER:1m:U:U
+RRA:AVERAGE:0.5:1:10
+RRA:MAX:0.5:1h:1d

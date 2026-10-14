@@ -3,6 +3,7 @@
 //! This evaluates the aggregation functions accepted by RRDtool 1.11.0 VDEF
 //! expressions. It does not parse graph scripts or render graphs.
 
+use crate::rrd_binary::rrd_nan;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,20 +66,6 @@ pub enum VdefError {
     InvalidStep,
     #[error("VDEF series timestamps overflow")]
     TimestampOverflow,
-}
-
-// Generated unknowns use the same target-specific DNAN bits as the C
-// graph engine; host printf can expose the sign of an all-unknown VDEF.
-#[inline]
-fn rrd_nan() -> f64 {
-    #[cfg(target_arch = "x86_64")]
-    {
-        f64::from_bits(0xfff8_0000_0000_0000)
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        f64::NAN
-    }
 }
 
 /// Evaluate one RRDtool VDEF aggregate over regularly spaced values.
@@ -168,7 +155,8 @@ pub fn evaluate_vdef(
             if finite.is_empty() {
                 no_time(rrd_nan())
             } else {
-                let sum = finite.iter().sum::<f64>();
+                // vdef_calc starts at +0.0; Rust's f64 sum starts at -0.0.
+                let sum = finite.iter().fold(0.0, |sum, value| sum + value);
                 let average = sum / finite.len() as f64;
                 let value = match function {
                     VdefFunction::Average => average,
@@ -255,20 +243,6 @@ fn interval_timestamp(start: i64, index: usize, step: u64) -> Result<i64, VdefEr
     )
 }
 
-fn rrd_isinf_result(value: f64) -> libc::c_int {
-    // vdef_percent_compar returns isinf's actual integer result. Darwin's
-    // math.h returns 1 for either infinity; glibc preserves its sign.
-    #[cfg(target_vendor = "apple")]
-    {
-        let _ = value;
-        1
-    }
-    #[cfg(not(target_vendor = "apple"))]
-    {
-        if value.is_sign_negative() { -1 } else { 1 }
-    }
-}
-
 fn rrd_qsort_compatible(values: &mut [f64]) {
     // rrd_graph.c passes vdef_percent_compar to the host C library's qsort.
     // In particular, its comparisons involving infinities are not a strict
@@ -288,12 +262,21 @@ fn rrd_qsort_compatible(values: &mut [f64]) {
             return 1;
         }
         if left.is_infinite() {
-            return rrd_isinf_result(left);
+            return c_isinf(left);
         }
         if right.is_infinite() {
-            return rrd_isinf_result(right);
+            return c_isinf(right);
         }
         if left < right { -1 } else { 1 }
+    }
+    // The comparator returns isinf() directly. glibc's isinf() is -1 for
+    // negative infinity; the Apple and BSD libcs return 1 for both signs.
+    fn c_isinf(value: f64) -> libc::c_int {
+        if cfg!(target_env = "gnu") && value.is_sign_negative() {
+            -1
+        } else {
+            1
+        }
     }
     unsafe {
         libc::qsort(
@@ -360,6 +343,16 @@ mod tests {
     }
 
     #[test]
+    fn negative_zero_sums_start_from_positive_zero() {
+        for function in [VdefFunction::Average, VdefFunction::Total] {
+            let value = evaluate_vdef(function, None, &[-0.0, -0.0, f64::NAN], 0, 10)
+                .unwrap()
+                .value;
+            assert!(value == 0.0 && value.is_sign_positive(), "{function:?}");
+        }
+    }
+
+    #[test]
     fn extrema_and_first_last_keep_rrd_interval_timestamp_conventions() {
         let values = [f64::NAN, 2.0, 5.0, 5.0, f64::NAN];
         assert_eq!(
@@ -403,13 +396,14 @@ mod tests {
     }
 
     #[test]
-    fn percentile_comparator_matches_host_isinf_result() {
+    fn percentile_comparator_follows_the_libc_isinf_sign() {
         let mut values = [f64::NEG_INFINITY, 1.0];
         rrd_qsort_compatible(&mut values);
-        #[cfg(target_vendor = "apple")]
-        assert_eq!(values, [1.0, f64::NEG_INFINITY]);
-        #[cfg(not(target_vendor = "apple"))]
-        assert_eq!(values, [f64::NEG_INFINITY, 1.0]);
+        if cfg!(target_env = "gnu") {
+            assert_eq!(values, [f64::NEG_INFINITY, 1.0]);
+        } else {
+            assert_eq!(values, [1.0, f64::NEG_INFINITY]);
+        }
     }
 
     #[test]

@@ -1,12 +1,32 @@
+/// C library conversions RRDtool's command parsers call, either through
+/// libc itself or as ports of RRDtool's own helpers in rrd_strtod.c.
+mod cparse;
+/// Option parsing for `graph`, `graphv` and `xport`, ported from
+/// `rrd_graph_options` (rrd_graph.c:5042) and `rrd_xport` (rrd_xport.c:76).
+/// Options that only affect Cairo/Pango rendering are validated exactly as
+/// upstream validates them and then left unused.
+mod graph_options;
+/// Port of RRDtool 1.11.0 `src/optparse.c`, the option parser every
+/// `rrdtool` command uses. Non-option words are permuted to the end of
+/// `argv`, so after the loop `argv[optind..]` holds the positionals in their
+/// original order.
+mod optparse;
+
+use optparse::{ArgType, LongOpt, OptParse, opt};
+
 use clap::{Parser, Subcommand};
+use rondi::time::{
+    UpdateTimestamp, parse_rrd_update_timestamp, resolve_rrd_range_times, rrd_parsetime,
+    rrd_proc_start_end,
+};
 use rondi::{
-    DatabaseConfig, RrdDataSourceTune, RrdDumpHeader, RrdResizeAction, RrdTuneBound, Store, Update,
-    create_rrd_file, dump_rrd_file_with_header, fetch_rrd_file, first_rrd_time,
-    parse_rrd_scaled_duration, resize_rrd_file, restore_rrd_file, tune_rrd_data_sources,
-    update_rrd_raw_values_precise, update_rrd_raw_values_precise_verbose,
+    DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, DatabaseConfig, RrdDataSourceTune, RrdDumpHeader,
+    RrdResizeAction, RrdTuneBound, Store, StoreOptions, Update, dump_rrd_file_with_header,
+    fetch_rrd_file, first_rrd_time, parse_rrd_scaled_duration, resize_rrd_file, restore_rrd_file,
+    tune_rrd_data_sources, update_rrd_text,
 };
 use std::fmt::Write as FmtWrite;
-use std::io::{BufRead, Read, Seek, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
@@ -18,6 +38,12 @@ struct Args {
     /// Local storage root.
     #[arg(long, global = true, default_value = "./data")]
     root: PathBuf,
+    /// Largest archive row count accepted by create and import.
+    #[arg(long, global = true, default_value_t = DEFAULT_MAX_ROWS)]
+    max_rows: usize,
+    /// Seconds a server update's request ID stays available for retries.
+    #[arg(long, global = true, default_value_t = DEFAULT_IDEMPOTENCY_WINDOW.as_secs())]
+    idempotency_window: u64,
     #[command(subcommand)]
     command: Command,
 }
@@ -53,102 +79,116 @@ enum Command {
     Health,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let invoked_as = std::env::args_os()
+fn invoked_name() -> String {
+    std::env::args_os()
         .next()
         .and_then(|value| {
             PathBuf::from(value)
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
         })
-        .unwrap_or_default();
-    if std::env::args().nth(1).as_deref() == Some("--rrdproxy-launcher") {
-        return rrdproxy_mode(&std::env::args().skip(2).collect::<Vec<_>>());
+        .unwrap_or_default()
+}
+
+/// argv after `skip` entries, with invalid UTF-8 replaced by U+FFFD like the
+/// rrdtool path does, so a path option cannot panic `std::env::args`.
+fn lossy_args(skip: usize) -> Vec<String> {
+    std::env::args_os()
+        .skip(skip)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--rrdproxy-launcher"))
+        && invoked_name() == "rrdcached"
+    {
+        // rrdcached binds its sockets and drops privileges before any runtime
+        // thread exists, so it starts its own runtime afterwards.
+        return rrdcached_mode(&lossy_args(1));
     }
-    if invoked_as == "rrdcached" {
-        let args = std::env::args().skip(1).collect::<Vec<_>>();
-        return rrdcached_mode(&args).await;
+    let native = !matches!(
+        invoked_name().as_str(),
+        "rrdtool"
+            | "rrdupdate"
+            | "rrdcreate"
+            | "rrdinfo"
+            | "rrdtool-proxy"
+            | "rrdtool-proxy.php"
+            | "rrdproxy"
+    ) && std::env::args_os().nth(1).as_deref()
+        != Some(std::ffi::OsStr::new("--rrdproxy-launcher"));
+    let args = native.then(Args::parse);
+    let prepared = match args.as_ref() {
+        Some(args) if args.socket.is_none() => match &args.command {
+            Command::Server {
+                listen,
+                queue_capacity,
+            } => Some(rondi_server::prepare_server(rondi_server::ServerConfig {
+                root: args.root.clone(),
+                socket: listen.clone(),
+                queue_capacity: *queue_capacity,
+                store: StoreOptions {
+                    max_rows: args.max_rows,
+                    idempotency_window: std::time::Duration::from_secs(args.idempotency_window),
+                },
+            })?),
+            _ => None,
+        },
+        _ => None,
+    };
+    async_main(args, prepared)
+}
+
+#[tokio::main]
+async fn async_main(
+    parsed: Option<Args>,
+    prepared: Option<rondi_server::PreparedServer>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let invoked_as = invoked_name();
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--rrdproxy-launcher")) {
+        return rrdproxy_mode(&lossy_args(2));
     }
     if invoked_as == "rrdtool" {
         initialize_rrdtool_locale();
-        let args = std::env::args().collect::<Vec<_>>();
-        if args.get(1).is_some_and(|arg| arg == "-") {
-            return rrdtool_batch();
-        }
-        if args.get(1).is_some_and(|arg| {
-            matches!(
-                arg.as_str(),
-                "create"
-                    | "fetch"
-                    | "update"
-                    | "updatev"
-                    | "last"
-                    | "lastupdate"
-                    | "first"
-                    | "info"
-                    | "dump"
-                    | "restore"
-                    | "tune"
-                    | "list"
-                    | "resize"
-                    | "xport"
-                    | "graph"
-                    | "graphv"
-                    | "flushcached"
-            )
-        }) {
-            let result = match args[1].as_str() {
-                "create" => rrdtool_create(&args[1..]),
-                "fetch" => rrdtool_fetch(&args[1..]),
-                "update" => rrdtool_update(&args[1..]),
-                "updatev" => rrdtool_updatev(&args[1..]),
-                "last" => rrdtool_last(&args[1..]),
-                "lastupdate" => rrdtool_lastupdate(&args[1..]),
-                "first" => rrdtool_first(&args[1..]),
-                "info" => rrdtool_info(&args[1..]),
-                "dump" => rrdtool_dump(&args[1..]),
-                "restore" => rrdtool_restore(&args[1..]),
-                "tune" => rrdtool_tune(&args[1..]),
-                "list" => rrdtool_list(&args[1..]),
-                "resize" => rrdtool_resize(&args[1..]),
-                "xport" => rrdtool_xport(&args[1..]),
-                "graph" => rrdtool_graph(&args[1..], false),
-                "graphv" => rrdtool_graph(&args[1..], true),
-                "flushcached" => rrdtool_flushcached(&args[1..]),
-                _ => unreachable!(),
-            };
-            if let Err(error) = result {
-                eprintln!("ERROR: {error}");
-                std::process::exit(1);
-            }
-            return Ok(());
-        }
-        return Err("rrdtool mode selected, but only numeric-time fetch and a narrow update subset are implemented".into());
+        // RRDtool passes argv bytes through; Rust strings cannot hold
+        // invalid UTF-8, so such bytes become U+FFFD instead of panicking.
+        let args = std::env::args_os()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let status = rrdtool_main(&args);
+        let _ = std::io::stdout().flush();
+        std::process::exit(status);
+    }
+    if matches!(invoked_as.as_str(), "rrdupdate" | "rrdcreate" | "rrdinfo") {
+        let args = std::env::args_os()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let status = rrdupdate_main(&invoked_as, &args);
+        let _ = std::io::stdout().flush();
+        std::process::exit(status);
     }
     if invoked_as == "rrdtool-proxy"
         || invoked_as == "rrdtool-proxy.php"
         || invoked_as == "rrdproxy"
     {
-        return rrdproxy_mode(&std::env::args().skip(1).collect::<Vec<_>>());
+        return rrdproxy_mode(&lossy_args(1));
     }
-    let args = Args::parse();
+    if let Some(prepared) = prepared {
+        return rondi_server::run(prepared).await;
+    }
+    let args = parsed.unwrap_or_else(Args::parse);
     if let Some(socket) = args.socket {
         return server_mode(socket, args.command).await;
     }
-    let store = Store::open(&args.root)?;
+    let options = StoreOptions {
+        max_rows: args.max_rows,
+        idempotency_window: std::time::Duration::from_secs(args.idempotency_window),
+    };
+    let store = Store::open_with(&args.root, options)?;
     match args.command {
-        Command::Server {
-            listen,
-            queue_capacity,
-        } => {
-            drop(store);
-            return rondi_server::run(rondi_server::ServerConfig {
-                root: args.root,
-                socket: listen,
-                queue_capacity,
-            })
-            .await;
+        Command::Server { .. } => {
+            return Err("server must be prepared before starting runtime threads".into());
         }
         Command::Create {
             name,
@@ -246,77 +286,146 @@ fn current_local_year() -> i32 {
     }
 }
 
-async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut root = PathBuf::from("/tmp");
-    let mut socket = PathBuf::from("/tmp/rrdcached.sock");
+fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut root = None;
     let mut journal_directory = None;
+    let mut flush_at_shutdown = false;
     let mut pid_file = None;
     let mut log_file = None;
     let mut no_overwrite = false;
+    let mut base_only = false;
     let mut allow_recursive_mkdir = false;
-    let mut socket_mode = None;
     let mut active_socket_mode = None;
     let mut active_socket_commands = None;
-    let mut socket_commands = None;
     let mut active_socket_group = None;
-    let mut socket_group = None;
-    let mut listen_seen = false;
+    // Each listener takes the -m/-P/-s values in effect when it was named.
+    let mut addresses = Vec::<rondi_server::RrdcachedListenAddress>::new();
+    let mut daemon_user = None;
+    let mut group_given = false;
+    // SAFETY: getegid has no preconditions.
+    let mut daemon_group = unsafe { libc::getegid() };
     let mut write_timeout_seconds = 300;
+    let mut write_jitter_seconds = 0;
     let mut flush_interval_seconds = 3600;
     let mut queue_threads = 4_usize;
     let mut allocation_chunk = 1_usize;
+    // read_options keeps parsing after most errors; the last status wins and a
+    // negative status (an unknown option) still exits successfully.
+    let mut status = 0_i32;
     let mut index = 0;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--help" | "-h" => {
+    let mut offset = 0;
+    while let Some(parsed) = next_rrdcached_option(args, &mut index, &mut offset) {
+        let (option, value) = match parsed {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                eprintln!("{message}");
                 print!("{RRDCACHED_HELP}");
-                std::process::exit(1);
+                status = -1;
+                continue;
             }
-            "-l" | "--listen" => {
-                index += 1;
-                let address = args.get(index).ok_or("rrdcached -l requires an address")?;
-                listen_seen = true;
-                socket_mode = active_socket_mode;
-                socket_commands = active_socket_commands.clone();
-                socket_group = active_socket_group;
-                if let Some(path) = address.strip_prefix("unix:") {
-                    socket = PathBuf::from(path);
-                } else if address.starts_with('/') {
-                    socket = PathBuf::from(address);
-                } else {
-                    return Err(
-                        "rrdcached network listeners are not enabled; use a Unix socket".into(),
+        };
+        let value = value.unwrap_or_default();
+        match option {
+            'h' => {
+                print!("{RRDCACHED_HELP}");
+                status = 1;
+            }
+            'l' | 'L' => {
+                let address = if option == 'L' { String::new() } else { value };
+                addresses.push(rondi_server::RrdcachedListenAddress {
+                    address,
+                    mode: active_socket_mode,
+                    group: active_socket_group,
+                    commands: active_socket_commands.clone(),
+                });
+            }
+            'b' => root = Some(PathBuf::from(value)),
+            'j' => {
+                let strerror = |error: std::io::Error| {
+                    error.raw_os_error().map_or_else(String::new, |errno| {
+                        // SAFETY: strerror returns a valid NUL-terminated string.
+                        unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)) }
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                };
+                let directory = match std::fs::canonicalize(&value) {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        eprintln!(
+                            "Unable to resolve journal path ({value},{})",
+                            strerror(error)
+                        );
+                        std::process::exit(6);
+                    }
+                };
+                if let Err(error) = std::fs::create_dir_all(&directory) {
+                    eprintln!(
+                        "Failed to create journal directory '{}': {}",
+                        directory.display(),
+                        strerror(error)
                     );
+                    std::process::exit(6);
+                }
+                let writable = std::ffi::CString::new(directory.as_os_str().as_encoded_bytes())
+                    .is_ok_and(|path| {
+                        let mode = libc::R_OK | libc::W_OK | libc::X_OK;
+                        // SAFETY: the CString is NUL terminated and outlives the call.
+                        let status = unsafe { libc::access(path.as_ptr(), mode) };
+                        status == 0
+                    });
+                if !writable {
+                    eprintln!(
+                        "Must specify a writable directory with -j! ({})",
+                        strerror(std::io::Error::last_os_error())
+                    );
+                    std::process::exit(6);
+                }
+                journal_directory = Some(directory);
+            }
+            'p' => pid_file = Some(PathBuf::from(value)),
+            'o' => {
+                use std::os::unix::fs::OpenOptionsExt;
+                // O_NOFOLLOW: the file is opened as root, so a symlink planted
+                // at the final component must not redirect appends elsewhere.
+                // O_NONBLOCK keeps a FIFO at the path from hanging startup;
+                // it has no effect on the regular file that is required.
+                let opened = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                    .open(&value);
+                // A hard link at the path could aim root's appends at
+                // another file, so only a singly linked regular file is used.
+                let opened = opened.and_then(|file| {
+                    use std::os::unix::fs::MetadataExt;
+                    let metadata = file.metadata()?;
+                    if !metadata.file_type().is_file() {
+                        Err(std::io::Error::other("not a regular file"))
+                    } else if metadata.nlink() != 1 {
+                        Err(std::io::Error::from_raw_os_error(libc::EMLINK))
+                    } else {
+                        Ok(file)
+                    }
+                });
+                match opened {
+                    Ok(file) => log_file = Some(file),
+                    Err(error) => {
+                        let error = error.to_string();
+                        let detail = error.split(" (os error ").next().unwrap_or_default();
+                        eprintln!("Failed to open log file '{value}': {detail}");
+                        std::process::exit(6);
+                    }
                 }
             }
-            "-b" | "--base-dir" => {
-                index += 1;
-                root = PathBuf::from(args.get(index).ok_or("rrdcached -b requires a directory")?);
-            }
-            "-j" => {
-                index += 1;
-                journal_directory = Some(PathBuf::from(
-                    args.get(index).ok_or("rrdcached -j requires a directory")?,
-                ));
-            }
-            "-p" => {
-                index += 1;
-                pid_file = Some(PathBuf::from(
-                    args.get(index).ok_or("rrdcached -p requires a file")?,
-                ));
-            }
-            "-o" => {
-                index += 1;
-                log_file = Some(PathBuf::from(
-                    args.get(index).ok_or("rrdcached -o requires a file")?,
-                ));
-            }
-            "-O" => no_overwrite = true,
-            "-R" => allow_recursive_mkdir = true,
-            "-m" => {
-                index += 1;
-                let value = args.get(index).ok_or("rrdcached -m requires a mode")?;
-                let mode = u32::from_str_radix(value, 8)
+            'O' => no_overwrite = true,
+            'R' => allow_recursive_mkdir = true,
+            'B' => base_only = true,
+            'F' => flush_at_shutdown = true,
+            // Rondi always stays in the foreground.
+            'g' => {}
+            'm' => {
+                let mode = u32::from_str_radix(&value, 8)
                     .ok()
                     .filter(|mode| *mode <= 0o7777);
                 let Some(mode) = mode else {
@@ -324,99 +433,93 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
                     std::process::exit(5);
                 };
                 active_socket_mode = Some(mode);
-                if !listen_seen {
-                    socket_mode = active_socket_mode;
-                }
             }
-            "-P" => {
-                index += 1;
-                let value = args.get(index).ok_or("rrdcached -P requires permissions")?;
+            'P' => {
                 let commands = value
                     .split([',', ' '])
                     .filter(|command| !command.is_empty())
                     .map(str::to_ascii_uppercase)
                     .collect::<Vec<_>>();
-                const COMMANDS: &[&str] = &[
-                    "UPDATE",
-                    "WROTE",
-                    "TUNE",
-                    "DUMP",
-                    "FLUSH",
-                    "FLUSHALL",
-                    "PENDING",
-                    "FORGET",
-                    "QUEUE",
-                    "STATS",
-                    "HELP",
-                    "PING",
-                    "BATCH",
-                    ".",
-                    "FETCH",
-                    "FETCHBIN",
-                    "INFO",
-                    "FIRST",
-                    "LAST",
-                    "CREATE",
-                    "LIST",
-                    "SUSPEND",
-                    "RESUME",
-                    "SUSPENDALL",
-                    "RESUMEALL",
-                    "QUIT",
-                ];
-                if let Some(invalid) = commands
-                    .iter()
-                    .find(|command| !COMMANDS.contains(&command.as_str()))
-                {
-                    eprintln!(
-                        "read_options: Adding permission \"{invalid}\" to socket failed. Most likely, this permission doesn't exist. Check your command line."
-                    );
-                    std::process::exit(4);
+                let mut valid = Vec::new();
+                for command in commands {
+                    if RRDCACHED_COMMANDS.contains(&command.as_str()) {
+                        valid.push(command);
+                        // Upstream assigns each permission's result to the
+                        // shared status, so a later valid name clears an
+                        // earlier error, including one from another option.
+                        status = 0;
+                    } else {
+                        eprintln!(
+                            "read_options: Adding permission \"{command}\" to socket failed. Most likely, this permission doesn't exist. Check your command line."
+                        );
+                        status = 4;
+                    }
                 }
-                active_socket_commands = if commands.is_empty() {
-                    None
-                } else {
-                    Some(commands)
-                };
-                if !listen_seen {
-                    socket_commands = active_socket_commands.clone();
-                }
+                active_socket_commands = if valid.is_empty() { None } else { Some(valid) };
             }
-            "-s" => {
-                index += 1;
-                let value = args.get(index).ok_or("rrdcached -s requires a group")?;
-                let Some(group) = resolve_rrdcached_group(value) else {
+            's' => {
+                let Some(group) = resolve_rrdcached_group(&value) else {
                     eprintln!("read_options: couldn't map \"{value}\" to a group, Sorry");
                     std::process::exit(5);
                 };
                 active_socket_group = Some(group);
-                if !listen_seen {
-                    socket_group = active_socket_group;
+            }
+            'G' => {
+                let Some(group) = resolve_rrdcached_daemon_group(&value) else {
+                    eprintln!("read_options: couldn't map \"{value}\" to a group, Sorry");
+                    std::process::exit(5);
+                };
+                daemon_group = group;
+                group_given = true;
+            }
+            'U' => {
+                let Some(user) = resolve_rrdcached_daemon_user(&value) else {
+                    eprintln!("read_options: couldn't map \"{value}\" to a user, Sorry");
+                    std::process::exit(5);
+                };
+                daemon_user = Some(user);
+            }
+            'V' => {
+                if !matches!(
+                    value.as_str(),
+                    "LOG_EMERG"
+                        | "LOG_ALERT"
+                        | "LOG_CRIT"
+                        | "LOG_ERR"
+                        | "LOG_WARNING"
+                        | "LOG_NOTICE"
+                        | "LOG_INFO"
+                        | "LOG_DEBUG"
+                ) {
+                    eprintln!("Unrecognized log level '{value}'; falling back to default LOG_ERR.");
                 }
             }
-            // Rondi always stays in the foreground, confines paths to `-b`,
-            // and flushes accepted entries during graceful shutdown. These
-            // upstream switches therefore request behavior already enabled.
-            "-B" | "-F" | "-g" => {}
-            "-w" | "--write-timeout" => {
-                index += 1;
-                write_timeout_seconds = rondi::parse_rrd_scaled_duration(
-                    args.get(index).ok_or("rrdcached -w requires seconds")?,
-                    1,
-                )?;
-            }
-            "-f" | "--flush-interval" => {
-                index += 1;
-                flush_interval_seconds = rondi::parse_rrd_scaled_duration(
-                    args.get(index).ok_or("rrdcached -f requires seconds")?,
-                    1,
-                )?;
-            }
-            "-t" => {
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or("rrdcached -t requires a thread count")?;
+            'w' => match rrdcached_duration(&value) {
+                Ok(seconds) => write_timeout_seconds = seconds,
+                Err(detail) => {
+                    eprintln!("Invalid write interval {value}: {detail}");
+                    status = 2;
+                }
+            },
+            'f' => match rrdcached_duration(&value) {
+                Ok(seconds) => flush_interval_seconds = seconds,
+                Err(detail) => {
+                    eprintln!("Invalid flush interval {value}: {detail}");
+                    status = 3;
+                }
+            },
+            'z' => match rrdcached_duration(&value) {
+                Ok(seconds) => write_jitter_seconds = seconds,
+                Err(detail) => {
+                    eprintln!("Invalid write jitter {value}: {detail}");
+                    status = 2;
+                }
+            },
+            't' => {
+                if value.is_empty() {
+                    eprintln!("Missing argument for -t");
+                    std::process::exit(1);
+                }
                 let parsed = value.parse::<i32>().ok().filter(|threads| *threads > 0);
                 let Some(parsed) = parsed else {
                     eprintln!("Invalid thread count: -t {value}");
@@ -424,12 +527,11 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 };
                 queue_threads = parsed as usize;
             }
-            "-a" => {
-                index += 1;
-                let Some(value) = args.get(index) else {
+            'a' => {
+                if value.is_empty() {
                     eprintln!("Missing argument for -a");
                     std::process::exit(10);
-                };
+                }
                 let parsed = value.parse::<i32>().ok().filter(|size| *size > 0);
                 let Some(parsed) = parsed else {
                     eprintln!("Invalid allocation size: {value}");
@@ -437,35 +539,287 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 };
                 allocation_chunk = parsed as usize;
             }
-            option => {
-                return Err(
-                    format!("rrdcached mode selected; unsupported option: {option}").into(),
-                );
-            }
+            _ => unreachable!("next_rrdcached_option returns only known options"),
         }
-        index += 1;
     }
     if flush_interval_seconds < write_timeout_seconds.saturating_mul(2) {
         eprintln!("WARNING: flush interval (-f) should be at least 2x write interval (-w) !");
     }
-    rondi_server::run_rrdcached(rondi_server::RrdcachedConfig {
+    if write_jitter_seconds > write_timeout_seconds {
+        eprintln!("WARNING: write delay (-z) should NOT be larger than write interval (-w) !");
+    }
+    if base_only && root.is_none() {
+        eprintln!(
+            "WARNING: -B does not make sense without -b!\n  Consult the rrdcached documentation"
+        );
+    }
+    if allow_recursive_mkdir && !base_only {
+        eprintln!(
+            "WARNING: -R does not make sense without -B!\n  Consult the rrdcached documentation"
+        );
+    }
+    if status != 0 {
+        std::process::exit(status.max(0));
+    }
+    // Refuse before publishing any listener, including when -U selects root.
+    // SAFETY: geteuid has no preconditions.
+    let serving_uid = daemon_user
+        .as_ref()
+        .map_or_else(|| unsafe { libc::geteuid() }, |user| user.uid);
+    if unsafe { libc::geteuid() } == 0 && serving_uid == 0 && !(base_only && root.is_some()) {
+        eprintln!("rrdcached refuses to run as root without -B and -b");
+        std::process::exit(1);
+    }
+    rondi_server::block_shutdown_signals();
+    let pid_file = match pid_file.as_deref().map(rondi_server::PidFile::create) {
+        None => None,
+        Some(Ok(pid_file)) => pid_file,
+        Some(Err(rondi_server::PidFileFailed)) => {
+            eprintln!("rrdcached: daemonize failed, exiting.");
+            std::process::exit(1);
+        }
+    };
+    if addresses.is_empty() {
+        addresses.push(rondi_server::RrdcachedListenAddress {
+            address: "unix:/tmp/rrdcached.sock".to_owned(),
+            mode: active_socket_mode,
+            group: active_socket_group,
+            commands: active_socket_commands,
+        });
+    }
+    let mut listeners = Vec::new();
+    let mut all_opened = true;
+    for address in &addresses {
+        // Every listener is attempted so the diagnostics match upstream's.
+        all_opened &= rondi_server::open_rrdcached_listener(address, &mut listeners);
+    }
+    let failure = if listeners.is_empty() {
+        Some("rrdcached: FATAL: cannot open any listen sockets".to_owned())
+    } else if !all_opened {
+        // Upstream serves whatever opened; Rondi will not run with a
+        // configured listener missing. Its error is already printed.
+        Some(String::new())
+    } else {
+        // Upstream keeps the starting egid when only -U is given, so a root
+        // start would run as gid 0; a root Rondi uses the account's primary
+        // group. Unprivileged starts keep upstream's behaviour and text.
+        // SAFETY: geteuid has no preconditions.
+        let privileged = unsafe { libc::geteuid() } == 0;
+        let group = match &daemon_user {
+            Some(user) if privileged && !group_given => user.gid,
+            _ => daemon_group,
+        };
+        rondi_server::drop_rrdcached_privileges(daemon_user.as_ref(), group).err()
+    };
+    if let Some(message) = failure {
+        // Fail closed: nothing has been accepted yet. Exit closes every
+        // listener; the Unix socket names are removed so none is left behind.
+        if !message.is_empty() {
+            eprintln!("{message}");
+        }
+        for listener in &listeners {
+            if let rondi_server::RrdcachedSocket::Unix { path, .. } = &listener.socket
+                && let Err(error) = std::fs::remove_file(path)
+            {
+                eprintln!("rrdcached: unlink({}) failed: {error}", path.display());
+            }
+        }
+        drop(pid_file);
+        eprintln!("rrdcached: daemonize failed, exiting.");
+        std::process::exit(1);
+    }
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(rondi_server::run_rrdcached(rondi_server::RrdcachedConfig {
         root,
-        socket,
+        base_only,
+        listeners,
         journal_directory,
+        flush_at_shutdown,
         pid_file,
         log_file,
         no_overwrite,
         allow_recursive_mkdir,
-        socket_mode,
-        socket_commands,
-        socket_group,
         allocation_chunk,
         write_timeout_seconds,
         flush_interval_seconds,
         queue_threads,
         max_pending_bytes: rondi_server::DEFAULT_RRDCACHED_QUEUE_BYTES,
+    }))
+}
+
+const RRDCACHED_COMMANDS: &[&str] = &[
+    "UPDATE",
+    "WROTE",
+    "TUNE",
+    "DUMP",
+    "FLUSH",
+    "FLUSHALL",
+    "PENDING",
+    "FORGET",
+    "QUEUE",
+    "STATS",
+    "HELP",
+    "PING",
+    "BATCH",
+    ".",
+    "FETCH",
+    "FETCHBIN",
+    "INFO",
+    "FIRST",
+    "LAST",
+    "CREATE",
+    "LIST",
+    "SUSPEND",
+    "RESUME",
+    "SUSPENDALL",
+    "RESUMEALL",
+    "QUIT",
+];
+
+/// One step of RRDtool's bundled optparse for rrdcached: short options may
+/// be clustered (`-gF`) or carry an attached argument (`-w1800`), `--help` is
+/// the only long option, non-option words are skipped, and `--` ends parsing.
+fn next_rrdcached_option(
+    args: &[String],
+    index: &mut usize,
+    offset: &mut usize,
+) -> Option<Result<(char, Option<String>), String>> {
+    const WITH_ARGUMENT: &str = "abfGjlmoPpstUVwz";
+    const WITHOUT_ARGUMENT: &str = "BFghLOR";
+    loop {
+        let arg = args.get(*index)?;
+        if *offset == 0 {
+            if arg == "--" {
+                return None;
+            }
+            if let Some(name) = arg.strip_prefix("--") {
+                *index += 1;
+                return Some(match name.split_once('=') {
+                    None if name == "help" => Ok(('h', None)),
+                    Some(("help", _)) => Err("option takes no arguments -- 'help'".to_owned()),
+                    _ => Err(format!("invalid option -- '{name}'")),
+                });
+            }
+            if !arg.starts_with('-') || arg.len() == 1 {
+                *index += 1;
+                continue;
+            }
+            *offset = 1;
+        }
+        let option = arg[*offset..].chars().next()?;
+        let rest = &arg[*offset + option.len_utf8()..];
+        if WITH_ARGUMENT.contains(option) {
+            *offset = 0;
+            *index += 1;
+            if !rest.is_empty() {
+                return Some(Ok((option, Some(rest.to_owned()))));
+            }
+            let Some(value) = args.get(*index) else {
+                return Some(Err(format!("option requires an argument -- '{option}'")));
+            };
+            *index += 1;
+            return Some(Ok((option, Some(value.clone()))));
+        }
+        if !WITHOUT_ARGUMENT.contains(option) {
+            // optparse abandons the rest of a cluster after an unknown option.
+            *offset = 0;
+            *index += 1;
+            return Some(Err(format!("invalid option -- '{option}'")));
+        }
+        if rest.is_empty() {
+            *offset = 0;
+            *index += 1;
+        } else {
+            *offset += option.len_utf8();
+        }
+        return Some(Ok((option, None)));
+    }
+}
+
+/// `rrd_scaled_duration` with a divisor of one, reporting RRDtool's text.
+fn rrdcached_duration(value: &str) -> Result<u64, &'static str> {
+    if !value.starts_with(|first: char| first.is_ascii_digit()) {
+        return Err("value must be (suffixed) positive number");
+    }
+    if is_rrd_zero_duration(value) {
+        return Err("value must be positive");
+    }
+    parse_rrd_scaled_duration(value, 1).map_err(|_| "value has trailing garbage")
+}
+
+fn resolve_rrdcached_daemon_user(value: &str) -> Option<rondi_server::RrdcachedUser> {
+    use std::ffi::CString;
+    let user = if let Some(uid) = c_strtoul_whole(value) {
+        let uid = uid as libc::uid_t;
+        // SAFETY: getpwuid returns a pointer to libc-owned static data.
+        unsafe { libc::getpwuid(uid) }
+    } else {
+        let name = CString::new(value).ok()?;
+        // SAFETY: name is NUL terminated and remains alive for the call.
+        unsafe { libc::getpwnam(name.as_ptr()) }
+    };
+    if user.is_null() {
+        None
+    } else {
+        // SAFETY: non-null user points to libc-owned passwd data whose name is
+        // NUL terminated; both are copied before the next lookup.
+        let (uid, gid, name) = unsafe {
+            (
+                (*user).pw_uid,
+                (*user).pw_gid,
+                std::ffi::CStr::from_ptr((*user).pw_name),
+            )
+        };
+        Some(rondi_server::RrdcachedUser {
+            uid,
+            gid,
+            name: name.to_owned(),
+        })
+    }
+}
+
+/// `strtoul(value, &ep, 10)` followed by upstream's `0 == *ep` test: the
+/// whole argument, after optional leading space and sign, is decimal digits.
+/// An empty argument converts to zero; overflow saturates and a minus sign
+/// negates modulo 2^64, as C does.
+fn c_strtoul_whole(value: &str) -> Option<u64> {
+    if value.is_empty() {
+        return Some(0);
+    }
+    let unsigned = value.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);
+    let (negative, digits) = match unsigned.as_bytes().first() {
+        Some(b'-') => (true, &unsigned[1..]),
+        Some(b'+') => (false, &unsigned[1..]),
+        _ => (false, unsigned),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let magnitude = digits.parse::<u64>().unwrap_or(u64::MAX);
+    Some(if negative && magnitude != u64::MAX {
+        magnitude.wrapping_neg()
+    } else {
+        magnitude
     })
-    .await
+}
+
+fn resolve_rrdcached_daemon_group(value: &str) -> Option<libc::gid_t> {
+    use std::ffi::CString;
+    let group = if let Some(gid) = c_strtoul_whole(value) {
+        let gid = gid as libc::gid_t;
+        // SAFETY: getgrgid returns a pointer to libc-owned static data.
+        unsafe { libc::getgrgid(gid) }
+    } else {
+        let name = CString::new(value).ok()?;
+        // SAFETY: name is NUL terminated and remains alive for the call.
+        unsafe { libc::getgrnam(name.as_ptr()) }
+    };
+    if group.is_null() {
+        None
+    } else {
+        // SAFETY: non-null group points to libc-owned group data.
+        Some(unsafe { (*group).gr_gid })
+    }
 }
 
 fn resolve_rrdcached_group(value: &str) -> Option<u32> {
@@ -528,59 +882,465 @@ const RRDCACHED_HELP: &str = concat!(
     "to the rrdcached(1) manual page.\n",
 );
 
-/// RRDtool's `-` mode accepts one command per input line and flushes a result
-/// marker after every successful command. Cacti keeps this process open while
-/// polling, so commands must be handled without terminating the process.
-fn rrdtool_batch() -> Result<(), Box<dyn std::error::Error>> {
-    let started = std::time::Instant::now();
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout().lock();
-    for line in stdin.lock().lines() {
-        let line = line?;
-        let arguments = match shell_words::split(&line) {
-            Ok(arguments) if !arguments.is_empty() => arguments,
-            Ok(_) => {
-                writeln!(stdout, "ERROR: not enough arguments")?;
-                stdout.flush()?;
-                continue;
+const RRDTOOL_COMMANDS: &[&str] = &[
+    "create",
+    "fetch",
+    "update",
+    "updatev",
+    "last",
+    "lastupdate",
+    "first",
+    "info",
+    "dump",
+    "restore",
+    "tune",
+    "list",
+    "resize",
+    "xport",
+    "graph",
+    "graphv",
+    "flushcached",
+];
+
+const RRDTOOL_USAGE_HEADER: &str = concat!(
+    "RRDtool 1.11.0  Copyright by Tobias Oetiker <tobi@oetiker.ch>\n",
+    "               Compiled \n\n",
+    "Usage: rrdtool [options] command command_options\n",
+);
+
+const RRDTOOL_USAGE_FOOTER: &str = concat!(
+    "RRDtool is distributed under the Terms of the GNU General\n",
+    "Public License Version 2. (www.gnu.org/copyleft/gpl.html)\n\n",
+    "For more information read the RRD manpages\n\n",
+);
+
+fn rrdtool_usage(remote: bool) -> String {
+    let mut text = String::from(RRDTOOL_USAGE_HEADER);
+    text.push_str(concat!(
+        "Valid commands: create, update, updatev, graph, graphv,  dump, restore,\n",
+        "\t\tlast, lastupdate, first, info, list, fetch, tune,\n",
+        "\t\tresize, xport, flushcached\n\n",
+    ));
+    if remote {
+        text.push_str("Valid remote commands: quit, ls, cd, mkdir, pwd\n\n");
+    }
+    text.push_str(RRDTOOL_USAGE_FOOTER);
+    text
+}
+
+/// `PrintUsage` (rrd_tool.c:43). Kadupul reads the version from this
+/// banner, so `-v` and unknown words print it and succeed.
+fn print_usage(command: &str, remote: bool) {
+    if RRDTOOL_COMMANDS.contains(&command) {
+        // Each command prints its own usage when given no arguments.
+        let _ = rrdtool_dispatch(&[command.to_owned()]);
+        return;
+    }
+    let body = match command {
+        "quit" => " * quit - closing a session in remote mode\n\n\trrdtool quit\n",
+        "ls" => " * ls - lists all *.rrd files in current directory\n\n\trrdtool ls\n",
+        "cd" => " * cd - changes the current directory\n\n\trrdtool cd new directory\n",
+        "mkdir" => " * mkdir - creates a new directory\n\n\trrdtool mkdir newdirectoryname\n",
+        "pwd" => " * pwd - returns the current working directory\n\n\trrdtool pwd\n",
+        _ => {
+            print!("{}", rrdtool_usage(remote));
+            return;
+        }
+    };
+    print!("{RRDTOOL_USAGE_HEADER}{body}\n{RRDTOOL_USAGE_FOOTER}");
+}
+
+/// rrd_tool.c:447 `main` after `setlocale`. Returns the exit status.
+fn rrdtool_main(argv: &[String]) -> i32 {
+    match argv.len() {
+        1 => {
+            print_usage("", false);
+            0
+        }
+        2 | 3 if argv[1] == "-" => rrdtool_batch(argv),
+        2 => {
+            print_usage(&argv[1], false);
+            0
+        }
+        3 if argv[1] == "help" => {
+            print_usage(&argv[2], false);
+            0
+        }
+        _ => handle_input_line(argv, false),
+    }
+}
+
+/// `rrdupdate.c`: the one executable installed as rrdupdate, rrdcreate and
+/// rrdinfo. `argv[0]` stands where `rrdtool` puts the command name, and
+/// errors go to stdout after the program's usage text.
+fn rrdupdate_main(name: &str, argv: &[String]) -> i32 {
+    // The library parsers fail on a lone argv[0]; Rondi's command functions
+    // print their help there instead.
+    let result = match (name, argv.len()) {
+        ("rrdcreate", 1) => Err("need name of an rrd file to create".into()),
+        ("rrdcreate", _) => rrdtool_create(argv),
+        ("rrdinfo", 1) => Err(format!(
+            "Usage: rrdtool {} [--daemon |-d <addr> [--noflush|-F]] <file>",
+            argv[0]
+        )
+        .into()),
+        ("rrdinfo", _) => rrdtool_info(argv),
+        (_, 1) => Err("Not enough arguments".into()),
+        _ => rrdtool_update(argv),
+    };
+    let Err(error) = result else {
+        return 0;
+    };
+    if error.downcast_ref::<RrdcachedPathUnavailable>().is_some() {
+        return 0;
+    }
+    print!("RRDtool 1.11.0  Copyright by Tobi Oetiker\n\n");
+    match name {
+        "rrdcreate" => print!(
+            "Usage: rrdcreate <filename>\n\t\t\t[--start|-b start time]\n\t\t\t[--step|-s step]\n\t\t\t[--no-overwrite]\n\t\t\t[DS:ds-name:DST:dst arguments]\n\t\t\t[RRA:CF:cf arguments]\n\n"
+        ),
+        "rrdinfo" => println!("Usage: rrdinfo <filename>"),
+        _ => print!(
+            "Usage: rrdupdate <filename>\n\t\t\t[--locking|-L <try|block|none>]\n\t\t\t[--template|-t ds-name[:ds-name]...]\n\t\t\t[--skip-past-updates]\n\t\t\ttime|N:value[:value...]\n\n\t\t\tat-time@value[:value...]\n\n\t\t\t[ time:value[:value...] ..]\n\n"
+        ),
+    }
+    println!("ERROR: {error}");
+    1
+}
+
+/// The command switch in `HandleInputLine` (rrd_tool.c:713), shared by
+/// argv and pipe mode. `args[0]` is the command name.
+fn rrdtool_dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let result: Result<(), Box<dyn std::error::Error>> = match args[0].as_str() {
+        "create" => rrdtool_create(args),
+        "dump" => rrdtool_dump(args),
+        "info" => rrdtool_info(args),
+        "updatev" => rrdtool_updatev(args),
+        "list" => rrdtool_list(args),
+        "restore" => rrdtool_restore(args),
+        "resize" => rrdtool_resize(args),
+        "last" => print_minus_one_on_error(rrdtool_last(args)),
+        "lastupdate" => rrdtool_lastupdate(args),
+        "first" => print_minus_one_on_error(rrdtool_first(args)),
+        "update" => rrdtool_update(args),
+        "fetch" => rrdtool_fetch(args),
+        "xport" => rrdtool_xport(args),
+        "graph" => rrdtool_graph(args, false),
+        "graphv" => rrdtool_graph(args, true),
+        "tune" => rrdtool_tune(args),
+        "flushcached" => rrdtool_flushcached(args),
+        command => Err(format!("unknown function '{command}'").into()),
+    };
+    // HandleInputLine checks rrd_test_error, not the command's return code.
+    // get_path's silent refusals therefore end the command with status 0.
+    match result {
+        Err(error) if error.downcast_ref::<RrdcachedPathUnavailable>().is_some() => Ok(()),
+        result => result,
+    }
+}
+
+fn rrd_strerror(errno: libc::c_int) -> String {
+    // SAFETY: strerror returns a pointer to a NUL-terminated message.
+    unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn last_errno() -> libc::c_int {
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(libc::EIO)
+}
+
+/// `HandleInputLine` (rrd_tool.c:579). `argv[0]` is the program name.
+fn handle_input_line(argv: &[String], remote: bool) -> i32 {
+    let argc = argv.len();
+    let word = |index: usize| argv.get(index).map(String::as_str);
+    if remote {
+        match word(1) {
+            Some("quit") => {
+                if argc != 2 {
+                    println!("ERROR: invalid parameter count for quit");
+                    return 1;
+                }
+                let _ = std::io::stdout().flush();
+                std::process::exit(0);
             }
-            Err(error) => {
-                writeln!(stdout, "ERROR: creating arguments: {error}")?;
-                stdout.flush()?;
-                continue;
+            Some("cd") => {
+                if argc != 3 {
+                    println!("ERROR: invalid parameter count for cd");
+                    return 1;
+                }
+                if let Err(errno) = c_path_call(&argv[2], |path| unsafe { libc::chdir(path) }) {
+                    println!("ERROR: chdir {} {}", argv[2], rrd_strerror(errno));
+                    return 1;
+                }
+                return 0;
             }
-        };
-        if arguments[0] == "quit" {
-            if arguments.len() == 1 {
+            Some("pwd") => {
+                if argc != 2 {
+                    println!("ERROR: invalid parameter count for pwd");
+                    return 1;
+                }
+                match std::env::current_dir() {
+                    Ok(cwd) => {
+                        let mut stdout = std::io::stdout().lock();
+                        let _ = stdout.write_all(cwd.as_os_str().as_encoded_bytes());
+                        let _ = stdout.write_all(b"\n");
+                    }
+                    Err(error) => {
+                        let errno = error.raw_os_error().unwrap_or(libc::EIO);
+                        println!("ERROR: getcwd {}", rrd_strerror(errno));
+                        return 1;
+                    }
+                }
+                return 0;
+            }
+            Some("mkdir") => {
+                if argc != 3 {
+                    println!("ERROR: invalid parameter count for mkdir");
+                    return 1;
+                }
+                if let Err(errno) =
+                    c_path_call(&argv[2], |path| unsafe { libc::mkdir(path, 0o777) })
+                {
+                    println!("ERROR: mkdir {}: {}", argv[2], rrd_strerror(errno));
+                    return 1;
+                }
+                return 0;
+            }
+            Some("ls") => {
+                if argc != 2 {
+                    println!("ERROR: invalid parameter count for ls");
+                    return 1;
+                }
+                return remote_ls();
+            }
+            _ => {}
+        }
+    }
+    if argc < 3 || matches!(word(1), Some("help" | "--help" | "-help" | "-?" | "-h")) {
+        print_usage("", remote);
+        return 0;
+    }
+    let result = if matches!(
+        word(1),
+        Some("--version" | "version" | "v" | "-v" | "-version")
+    ) {
+        println!("RRDtool 1.11.0  Copyright by Tobi Oetiker (1.011000)");
+        Ok(())
+    } else {
+        rrdtool_dispatch(&argv[1..])
+    };
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            if remote {
+                println!("ERROR: {error}");
+            } else {
+                eprintln!("ERROR: {error}");
+            }
+            1
+        }
+    }
+}
+
+/// Runs a libc call that takes one path and reports `errno` on failure.
+fn c_path_call(
+    path: &str,
+    call: impl FnOnce(*const libc::c_char) -> libc::c_int,
+) -> Result<(), libc::c_int> {
+    let Ok(path) = std::ffi::CString::new(path) else {
+        return Err(libc::ENOENT);
+    };
+    if call(path.as_ptr()) == 0 {
+        Ok(())
+    } else {
+        Err(last_errno())
+    }
+}
+
+/// The remote `ls` command (rrd_tool.c:669), in readdir order with `.`
+/// and `..`.
+fn remote_ls() -> i32 {
+    // SAFETY: opendir/readdir/stat/closedir are used on a directory handle
+    // owned by this function; each entry name is NUL-terminated.
+    unsafe {
+        let directory = libc::opendir(c".".as_ptr());
+        if directory.is_null() {
+            let errno = last_errno();
+            println!("ERROR: opendir .: {}", rrd_strerror(errno));
+            return errno;
+        }
+        let mut stdout = std::io::stdout().lock();
+        loop {
+            let entry = libc::readdir(directory);
+            if entry.is_null() {
                 break;
             }
-            writeln!(stdout, "ERROR: invalid parameter count for quit")?;
-            stdout.flush()?;
+            let name = std::ffi::CStr::from_ptr((*entry).d_name.as_ptr());
+            let mut status = std::mem::zeroed::<libc::stat>();
+            if libc::stat(name.as_ptr(), &mut status) != 0 {
+                continue;
+            }
+            let bytes = name.to_bytes();
+            let kind = status.st_mode & libc::S_IFMT;
+            if kind == libc::S_IFDIR {
+                let _ = stdout.write_all(b"d ");
+                let _ = stdout.write_all(bytes);
+                let _ = stdout.write_all(b"\n");
+            }
+            if bytes.len() > 4
+                && kind == libc::S_IFREG
+                && matches!(&bytes[bytes.len() - 4..], b".rrd" | b".RRD")
+            {
+                let _ = stdout.write_all(b"- ");
+                let _ = stdout.write_all(bytes);
+                let _ = stdout.write_all(b"\n");
+            }
+        }
+        libc::closedir(directory);
+    }
+    0
+}
+
+const MAX_LENGTH: u64 = 10000;
+
+/// `fgetslong` (rrd_tool.c:414): one line of raw bytes. Text after an
+/// embedded NUL is lost and the next `fgets` chunk is appended, as in C.
+fn fgetslong(input: &mut impl BufRead) -> Option<Vec<u8>> {
+    let mut line = Vec::new();
+    loop {
+        let mut chunk = Vec::new();
+        match input.take(MAX_LENGTH - 1).read_until(b'\n', &mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let text = chunk.split(|byte| *byte == 0).next().unwrap_or_default();
+        line.extend_from_slice(text);
+        if line.last() == Some(&b'\n') {
+            return Some(line);
+        }
+    }
+    (!line.is_empty()).then_some(line)
+}
+
+/// `CountArgs` (rrd_tool.c:880): words separated by spaces only.
+fn count_args(line: &[u8]) -> usize {
+    let mut count = 0;
+    let mut in_arg = false;
+    let start = line
+        .iter()
+        .position(|byte| *byte != b' ')
+        .unwrap_or(line.len());
+    for byte in &line[start..] {
+        if *byte == b' ' && in_arg {
+            in_arg = false;
+        }
+        if *byte != b' ' && !in_arg {
+            in_arg = true;
+            count += 1;
+        }
+    }
+    count
+}
+
+/// `CreateArgs` (rrd_tool.c:905): split on spaces, single and double quotes
+/// group (the other kind is literal inside), backslash is literal. `None`
+/// for an unterminated quote.
+fn create_args(line: &[u8]) -> Option<Vec<String>> {
+    // The comparisons use the platform's `char`, so bytes from 0x80 count
+    // as blanks where `char` is signed.
+    let blank = |byte: u8| byte as libc::c_char <= b' ' as libc::c_char;
+    let mut end = line.len();
+    // The trailing-blank loop stops before index 0.
+    while end > 1 && blank(line[end - 1]) {
+        end -= 1;
+    }
+    let mut start = 0;
+    while start < end && blank(line[start]) {
+        start += 1;
+    }
+    let mut args = Vec::<Vec<u8>>::new();
+    let mut quote = 0_u8;
+    let mut in_arg = false;
+    for &byte in &line[start..end] {
+        match byte {
+            b' ' => {
+                if quote != 0 {
+                    args.last_mut()?.push(byte);
+                } else {
+                    in_arg = false;
+                }
+            }
+            b'"' | b'\'' => {
+                if quote != 0 {
+                    if quote == byte {
+                        quote = 0;
+                    } else {
+                        args.last_mut()?.push(byte);
+                    }
+                } else {
+                    if !in_arg {
+                        args.push(Vec::new());
+                        in_arg = true;
+                    }
+                    quote = byte;
+                }
+            }
+            _ => {
+                if !in_arg {
+                    args.push(Vec::new());
+                    in_arg = true;
+                }
+                args.last_mut()?.push(byte);
+            }
+        }
+    }
+    if quote != 0 {
+        return None;
+    }
+    Some(
+        args.iter()
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect(),
+    )
+}
+
+/// The `rrdtool -` loop in rrd_tool.c `main` (rrd_tool.c:473). Cacti and
+/// Kadupul keep this process open while polling.
+fn rrdtool_batch(argv: &[String]) -> i32 {
+    let started = std::time::Instant::now();
+    // rrd_tool.c:491 chroots only under HAVE_GETEUID, which configure.ac
+    // never checks for (it tests getuid), so every build takes the chdir
+    // path, root included.
+    let firstdir = argv.get(2).map_or("", String::as_str);
+    if !firstdir.is_empty()
+        && let Err(errno) = c_path_call(firstdir, |path| unsafe { libc::chdir(path) })
+    {
+        eprintln!("ERROR: chdir {firstdir} {}", rrd_strerror(errno));
+        std::process::exit(errno);
+    }
+    let mut stdin = std::io::stdin().lock();
+    while let Some(line) = fgetslong(&mut stdin) {
+        if count_args(&line) == 0 {
+            println!("ERROR: not enough arguments");
             continue;
         }
-        let result = match arguments[0].as_str() {
-            "create" => rrdtool_create(&arguments),
-            "fetch" => rrdtool_fetch(&arguments),
-            "update" => rrdtool_update(&arguments),
-            "updatev" => rrdtool_updatev(&arguments),
-            "last" => rrdtool_last(&arguments),
-            "lastupdate" => rrdtool_lastupdate(&arguments),
-            "first" => rrdtool_first(&arguments),
-            "info" => rrdtool_info(&arguments),
-            "dump" => rrdtool_dump(&arguments),
-            "restore" => rrdtool_restore(&arguments),
-            "tune" => rrdtool_tune(&arguments),
-            "list" => rrdtool_list(&arguments),
-            "resize" => rrdtool_resize(&arguments),
-            command => Err(format!("unknown command '{command}'").into()),
-        };
-        match result {
-            Ok(()) => writeln!(stdout, "{}", rrdtool_batch_ack(started))?,
-            Err(error) => writeln!(stdout, "ERROR: {error}")?,
+        match create_args(&line) {
+            None => println!("ERROR: creating arguments"),
+            Some(words) => {
+                let mut args = Vec::with_capacity(words.len() + 1);
+                args.push(argv[0].clone());
+                args.extend(words);
+                if handle_input_line(&args, true) == 0 {
+                    println!("{}", rrdtool_batch_ack(started));
+                }
+            }
         }
-        stdout.flush()?;
+        let _ = std::io::stdout().flush();
     }
-    Ok(())
+    0
 }
 
 #[cfg(unix)]
@@ -623,77 +1383,85 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut template_file = None::<String>;
     let mut source_files = Vec::<String>::new();
     let mut daemon_address = None::<String>;
-    let mut positional = Vec::new();
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--start" | "-b" => {
-                index += 1;
-                let value = args.get(index).ok_or("create --start requires a time")?;
-                start = parse_rrd_time(value, now).map_err(|error| {
-                    if error
-                        .to_string()
-                        .starts_with("unsupported RRDtool time specification:")
-                    {
-                        std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            format!("start time: unparsable time: {value}"),
-                        )
-                        .into()
-                    } else {
-                        error
-                    }
-                })?;
+    // rrd_create.c:81.
+    const LONGOPTS: &[LongOpt] = &[
+        opt("start", b'b' as i32, ArgType::Required),
+        opt("step", b's' as i32, ArgType::Required),
+        opt("daemon", b'd' as i32, ArgType::Required),
+        opt("source", b'r' as i32, ArgType::Required),
+        opt("template", b't' as i32, ArgType::Required),
+        opt("no-overwrite", b'O' as i32, ArgType::None),
+    ];
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        let option = options.long(LONGOPTS);
+        let value = options.value().to_owned();
+        match u8::try_from(option).map(char::from) {
+            _ if option == optparse::DONE => break,
+            Ok('d') => daemon_address = Some(value),
+            Ok('b') => {
+                start = rrd_parsetime(&value, now)
+                    .map_err(|error| format!("start time: {error}"))?
+                    .absolute()
+                    .ok_or(
+                        "specifying time relative to the 'start' or 'end' makes no sense here",
+                    )?;
+                if start < 315_360_000 {
+                    return Err("the first entry to the RRD should be after 1980".into());
+                }
                 start_was_set = true;
             }
-            "--step" | "-s" => {
-                index += 1;
-                step = parse_rrd_scaled_duration(
-                    args.get(index).ok_or("create --step requires a duration")?,
-                    1,
-                )?;
+            Ok('s') => {
+                step = parse_scaled_duration_option(&value, "step size")?;
                 step_was_set = true;
             }
-            "--template" | "-t" => {
-                index += 1;
-                template_file = Some(
-                    args.get(index)
-                        .ok_or("create --template requires a template file")?
-                        .clone(),
-                );
+            Ok('O') => no_overwrite = true,
+            Ok('r') => {
+                match std::fs::metadata(&value) {
+                    Err(error) => {
+                        let errno = error.raw_os_error().unwrap_or(libc::EIO);
+                        return Err(format!(
+                            "error checking for source RRD {value}: {}",
+                            rrd_strerror(errno)
+                        )
+                        .into());
+                    }
+                    Ok(metadata) if !metadata.is_file() => {
+                        return Err(format!("Not a regular file: {value}").into());
+                    }
+                    Ok(_) => {}
+                }
+                source_files.push(value);
             }
-            "--source" | "-r" => {
-                index += 1;
-                source_files.push(
-                    args.get(index)
-                        .ok_or("create --source requires a source file")?
-                        .clone(),
-                );
+            Ok('t') => {
+                if template_file.is_some() {
+                    return Err("template already set".into());
+                }
+                template_file = Some(value);
             }
-            "--no-overwrite" | "-O" => no_overwrite = true,
-            "--daemon" | "-d" => {
-                index += 1;
-                let address = args
-                    .get(index)
-                    .ok_or("create --daemon requires an address")?;
-                daemon_address = Some(address.clone());
-            }
-            value if value.starts_with("--daemon=") => {
-                daemon_address = Some(value["--daemon=".len()..].to_owned());
-            }
-            value if value.starts_with('-') => {
-                return Err(format!("unsupported rrdtool create option: {value}").into());
-            }
-            value => positional.push(value.to_owned()),
+            Ok('?') => return Err(options.errmsg.into()),
+            _ => {}
         }
-        index += 1;
     }
+    let mut positional = options.positionals().to_vec();
     if positional.is_empty() {
-        return Err(
-            "Usage: rrdtool create file.rrd [--start epoch] [--step seconds] DS:... RRA:...".into(),
-        );
+        return Err("need name of an rrd file to create".into());
     }
     let filename = positional.remove(0);
+    let daemon_address = daemon_address
+        .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
+        .filter(|address| !address.is_empty());
+    if source_files.is_empty() && daemon_address.is_none() {
+        rondi::rrd_create_r2(
+            &filename,
+            if step_was_set { step } else { 0 },
+            if start_was_set { start } else { -1 },
+            no_overwrite,
+            template_file.as_deref(),
+            &positional,
+        )?;
+        return Ok(());
+    }
     let extra_data_sources = positional
         .iter()
         .filter(|value| value.starts_with("DS:"))
@@ -772,9 +1540,6 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    if start < 315_360_000 {
-        return Err("the first entry to the RRD should be after 1980".into());
-    }
     if archives.is_empty() {
         return Err("you must define at least one Round Robin Archive".into());
     }
@@ -787,35 +1552,8 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 "create --source currently supports one source file and cannot be combined with --template".into(),
             );
         }
-        if daemon_address
-            .as_ref()
-            .is_some_and(|address| !address.is_empty())
-            || std::env::var("RRDCACHED_ADDRESS").is_ok_and(|address| !address.is_empty())
-        {
+        if daemon_address.is_some() {
             return Err("create --source with --daemon is unsupported".into());
-        }
-        let source_path = std::path::Path::new(&source_files[0]);
-        match std::fs::metadata(source_path) {
-            Ok(metadata) if !metadata.is_file() => {
-                return Err(format!("Not a regular file: {}", source_files[0]).into());
-            }
-            Ok(_) => {}
-            Err(error) => {
-                let detail = match error.kind() {
-                    std::io::ErrorKind::NotFound => "No such file or directory".to_owned(),
-                    _ => error
-                        .to_string()
-                        .split(" (os error ")
-                        .next()
-                        .unwrap_or("I/O error")
-                        .to_owned(),
-                };
-                return Err(format!(
-                    "error checking for source RRD {}: {}",
-                    source_files[0], detail
-                )
-                .into());
-            }
         }
         if no_overwrite && std::fs::metadata(&filename).is_ok() {
             return Err(format!("creating '{}': File exists", filename).into());
@@ -874,39 +1612,28 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         restore_rrd_file(&xml, &filename, !no_overwrite, false)?;
         return Ok(());
     }
-    if let Some(address) = daemon_address
-        .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
-        .filter(|address| !address.is_empty())
-    {
-        let mut fields = vec![
-            "CREATE".to_owned(),
-            filename.clone(),
-            "-b".to_owned(),
-            start.to_string(),
-            "-s".to_owned(),
-            step.to_string(),
-        ];
-        if no_overwrite {
-            fields.push("-O".to_owned());
-        }
-        fields.extend(data_sources);
-        fields.extend(archives);
-        let command = fields
-            .iter()
-            .map(|field| field.replace('\\', "\\\\").replace(' ', "\\ "))
-            .collect::<Vec<_>>()
-            .join(" ");
-        send_rrdcached_command(&address, &command)?;
-    } else {
-        create_rrd_file(
-            filename,
-            start,
-            step,
-            &data_sources,
-            &archives,
-            no_overwrite,
-        )?;
+    let Some(address) = daemon_address else {
+        unreachable!("a local create without --source returned above");
+    };
+    let mut fields = vec![
+        "CREATE".to_owned(),
+        filename.clone(),
+        "-b".to_owned(),
+        start.to_string(),
+        "-s".to_owned(),
+        step.to_string(),
+    ];
+    if no_overwrite {
+        fields.push("-O".to_owned());
     }
+    fields.extend(data_sources);
+    fields.extend(archives);
+    let command = fields
+        .iter()
+        .map(|field| field.replace('\\', "\\\\").replace(' ', "\\ "))
+        .collect::<Vec<_>>()
+        .join(" ");
+    send_rrdcached_command(&address, &command)?;
     Ok(())
 }
 
@@ -919,14 +1646,60 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/fetch.txt"));
         return Ok(());
     }
-    if args.len() < 3 {
-        return Err(
-            "Usage: rrdtool fetch <file> <CF> [--resolution seconds] [--start epoch] [--end epoch]"
-                .into(),
-        );
+    // rrd_fetch.c:83.
+    const LONGOPTS: &[LongOpt] = &[
+        opt("resolution", b'r' as i32, ArgType::Required),
+        opt("start", b's' as i32, ArgType::Required),
+        opt("end", b'e' as i32, ArgType::Required),
+        opt("align-start", b'a' as i32, ArgType::None),
+        opt("daemon", b'd' as i32, ArgType::Required),
+    ];
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let mut start_tv = rrd_parsetime("end-24h", now)?;
+    let mut end_tv = rrd_parsetime("now", now)?;
+    let mut resolution = 1_u64;
+    let mut align_start = false;
+    let mut daemon_address = None::<String>;
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        let option = options.long(LONGOPTS);
+        match u8::try_from(option).map(char::from) {
+            _ if option == optparse::DONE => break,
+            Ok('s') => {
+                start_tv = rrd_parsetime(options.value(), now)
+                    .map_err(|error| format!("start time: {error}"))?;
+            }
+            Ok('e') => {
+                end_tv = rrd_parsetime(options.value(), now)
+                    .map_err(|error| format!("end time: {error}"))?;
+            }
+            Ok('a') => align_start = true,
+            Ok('r') => resolution = parse_rrd_resolution(options.value())?,
+            Ok('d') => daemon_address = Some(options.value().to_owned()),
+            Ok('?') => return Err(options.errmsg.into()),
+            _ => {}
+        }
     }
-    let filename = PathBuf::from(&args[1]);
-    let cf = &args[2];
+    let (mut start, mut end) = rrd_proc_start_end(&mut start_tv, &mut end_tv)?;
+    if start < 315_360_000 {
+        return Err("the first entry to fetch should be after 1980".into());
+    }
+    if align_start {
+        // rrd_fetch.c takes start % step in unsigned long, so a step above
+        // i64::MAX is valid and leaves delta equal to start.
+        let delta = (start as u64) % resolution;
+        start = start.wrapping_sub(delta as i64);
+        end = end.wrapping_sub(delta as i64);
+    }
+    if end < start {
+        return Err(format!("start ({start}) should be less than end ({end})").into());
+    }
+    let [filename, cf, ..] = options.positionals() else {
+        return Err("Usage: rrdtool fetch <file> <CF> [options]".into());
+    };
+    let filename = PathBuf::from(filename);
     if !matches!(
         cf.as_str(),
         "AVERAGE"
@@ -942,122 +1715,10 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     ) {
         return Err(format!("unknown consolidation function '{cf}'").into());
     }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64;
-    let mut start_spec = None::<String>;
-    let mut end_spec = None::<String>;
-    let mut start = now - 24 * 60 * 60;
-    let mut end = now;
-    let mut resolution = 1_u64;
-    let mut align_start = false;
-    let mut daemon_address = None::<String>;
-    let mut index = 3;
-    while index < args.len() {
-        let argument = &args[index];
-        match argument.as_str() {
-            "--start" | "-s" | "--end" | "-e" | "--resolution" | "-r" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| format!("option {argument} requires a value"))?;
-                match argument.as_str() {
-                    "--start" | "-s" => start_spec = Some(value.clone()),
-                    "--end" | "-e" => end_spec = Some(value.clone()),
-                    _ => resolution = parse_rrd_resolution(value)?,
-                }
-                index += 2;
-            }
-            "--align-start" | "-a" => {
-                align_start = true;
-                index += 1;
-            }
-            "--daemon" | "-d" => {
-                index += 1;
-                daemon_address = Some(
-                    args.get(index)
-                        .ok_or("fetch --daemon requires an address")?
-                        .clone(),
-                );
-                index += 1;
-            }
-            option if option.starts_with("--daemon=") => {
-                daemon_address = Some(option["--daemon=".len()..].to_owned());
-                index += 1;
-            }
-            unsupported if unsupported.starts_with('-') => {
-                return Err(format!("unsupported fetch option: {unsupported}").into());
-            }
-            positional => return Err(format!("unexpected fetch argument: {positional}").into()),
-        }
-    }
-    (start, end) =
-        resolve_rrd_range_times(start_spec.as_deref(), end_spec.as_deref(), start, end, now)?;
-    if start < 315_360_000 {
-        return Err("the first entry to fetch should be after 1980".into());
-    }
-    if align_start {
-        if resolution == 0 {
-            return Err("resolution must be positive".into());
-        }
-        let delta = start.rem_euclid(i64::try_from(resolution)?);
-        start = start.checked_sub(delta).ok_or("start time overflows")?;
-        end = end.checked_sub(delta).ok_or("end time overflows")?;
-    }
 
     let daemon_address = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty());
-    let from_daemon = daemon_address.is_some();
-    if !from_daemon {
-        ensure_rrd_file_exists(&filename)?;
-        let metadata = std::fs::metadata(&filename)?;
-        if !metadata.is_file() || metadata.len() == 0 {
-            let error = if metadata.len() == 0 {
-                std::io::Error::from_raw_os_error(libc::EINVAL)
-            } else {
-                let file = std::fs::File::open(&filename)?;
-                let length = usize::try_from(metadata.len()).unwrap_or(1).max(1);
-                let mapped = unsafe {
-                    libc::mmap(
-                        std::ptr::null_mut(),
-                        length,
-                        libc::PROT_READ,
-                        libc::MAP_PRIVATE,
-                        std::os::fd::AsRawFd::as_raw_fd(&file),
-                        0,
-                    )
-                };
-                if mapped == libc::MAP_FAILED {
-                    std::io::Error::last_os_error()
-                } else {
-                    unsafe { libc::munmap(mapped, length) };
-                    std::io::Error::from_raw_os_error(libc::EINVAL)
-                }
-            };
-            let errno = error.raw_os_error().unwrap_or(libc::EINVAL);
-            let message =
-                unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)).to_string_lossy() };
-            return Err(format!("mmaping file '{}': {message}", filename.display()).into());
-        }
-        if metadata.len() < 128 {
-            return Err("reached EOF while loading header rrd->stat_head".into());
-        }
-        let mut file = std::fs::File::open(&filename)?;
-        let mut cookie = [0_u8; 4];
-        file.read_exact(&mut cookie)?;
-        if cookie != *b"RRD\0" {
-            return Err(format!("'{}' is not an RRD file", filename.display()).into());
-        }
-        let mut version_bytes = [0_u8; 4];
-        file.seek(std::io::SeekFrom::Start(4))?;
-        file.read_exact(&mut version_bytes)?;
-        if version_bytes.iter().all(u8::is_ascii_digit) {
-            let version = std::str::from_utf8(&version_bytes)?.parse::<u32>()?;
-            if version > 5 {
-                return Err(format!("can't handle RRD file version {version:04}").into());
-            }
-        }
-    }
     let result = if let Some(address) = daemon_address {
         let escaped = escape_rrdcached_field(&filename.to_string_lossy());
         let command = format!("FETCH {escaped} {cf} {start} {end}");
@@ -1065,22 +1726,24 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         fetch_rrd_file(&filename, cf, start, end, resolution)?
     };
-    print!("           ");
+    // stdout is line buffered; one write per row dominates large fetches.
+    let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+    write!(out, "           ")?;
     for data_source in &result.data_sources {
-        print!("{data_source:>20}");
+        write!(out, "{data_source:>20}")?;
     }
-    println!("\n");
+    writeln!(out, "\n")?;
     for row in result.rows {
-        print!("{:>10}:", row.timestamp);
+        write!(out, "{:>10}:", row.timestamp)?;
         for value in row.values {
             match value {
-                Some(value) if from_daemon => print!(" {}", format_rrdcached_fetch_value(value)),
-                Some(value) => print!(" {}", format_rrd_float(value)),
-                None => print!(" {}", rrd_unknown_text()),
+                Some(value) => write!(out, " {}", format_fetch_value(value))?,
+                None => write!(out, " {}", rrd_unknown_text())?,
             }
         }
-        println!();
+        writeln!(out)?;
     }
+    out.flush()?;
     Ok(())
 }
 
@@ -1096,43 +1759,14 @@ fn rrd_nan() -> f64 {
     }
 }
 
+// RRDtool prints unknowns with printf. glibc spells a NaN with its sign bit
+// set as `-nan`; the Apple and BSD libcs print `nan` for every NaN. Which
+// path carries the sign bit depends on the CPU's default NaN.
 fn rrd_unknown_text() -> &'static str {
-    if cfg!(target_arch = "x86_64") {
+    if cfg!(all(target_env = "gnu", target_arch = "x86_64")) {
         "-nan"
     } else {
         "nan"
-    }
-}
-
-fn format_rrdcached_fetch_value(value: f64) -> String {
-    // rrd_tool.c prints FETCH values with the host C printf. In particular,
-    // Darwin prints both NaN signs as "nan", unlike Rust's formatter.
-    let mut buffer = [0 as libc::c_char; 128];
-    let length =
-        unsafe { libc::snprintf(buffer.as_mut_ptr(), buffer.len(), c"%0.10e".as_ptr(), value) };
-    assert!(length >= 0 && (length as usize) < buffer.len());
-    let bytes =
-        unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), length as usize) };
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
-// rrd_client.c::parse_value_array_header calls rrd_strtodbl, retaining
-// non-finite values rather than collapsing them to the storage unknown type.
-fn parse_rrdcached_fetch_value(value: &str) -> Result<f64, Box<dyn std::error::Error>> {
-    if let Some(number) = rondi::parse_rrd_number(value) {
-        return Ok(number);
-    }
-    let special = value.to_ascii_lowercase();
-    if special.starts_with("-nan") {
-        Ok(rrd_nan())
-    } else if special.starts_with("nan") {
-        Ok(-rrd_nan())
-    } else if special.starts_with("-inf") {
-        Ok(f64::NEG_INFINITY)
-    } else if special.starts_with("inf") {
-        Ok(f64::INFINITY)
-    } else {
-        Err(format!("invalid rrdcached FETCH value: {value}").into())
     }
 }
 
@@ -1191,7 +1825,14 @@ fn parse_rrdcached_fetch(
             .ok_or("invalid rrdcached FETCH data row")?;
         let values = values
             .split_whitespace()
-            .map(|value| parse_rrdcached_fetch_value(value).map(Some))
+            .map(|value| {
+                // rrd_client.c:345 uses rrd_strtodbl, whose NaN conversion
+                // differs from Rust's parser. Reuse the existing C port and
+                // retain the converted value for printf-compatible output.
+                rondi::parse_rrd_number(value)
+                    .map(Some)
+                    .ok_or("invalid rrdcached FETCH value")
+            })
             .collect::<Result<Vec<_>, _>>()?;
         if values.len() != ds_count {
             return Err("rrdcached FETCH row has an invalid data-source count".into());
@@ -1210,6 +1851,27 @@ fn parse_rrdcached_fetch(
     })
 }
 
+#[test]
+fn daemon_fetch_uses_rrd_numeric_conversion() {
+    let result = parse_rrdcached_fetch(
+        "FlushVersion: 1\nStart: 1000000000\nEnd: 1000000010\nStep: 10\nDSCount: 4\nDSName: a b c d\n1000000010: nan -nan inf -inf\n",
+    )
+    .unwrap();
+    let values = &result.rows[0].values;
+    assert!(values[0].unwrap().is_nan());
+    assert_eq!(
+        values[0].unwrap().is_sign_negative(),
+        !cfg!(target_arch = "x86_64")
+    );
+    assert!(values[1].unwrap().is_nan());
+    assert_eq!(
+        values[1].unwrap().is_sign_negative(),
+        cfg!(target_arch = "x86_64")
+    );
+    assert_eq!(values[2], Some(f64::INFINITY));
+    assert_eq!(values[3], Some(f64::NEG_INFINITY));
+}
+
 fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
         if verbose {
@@ -1219,828 +1881,970 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         }
         return Ok(());
     }
-    let filename = args.get(1).ok_or("graph requires an output filename")?;
-    let mut format = String::from("PNG");
-    let mut xport_args = vec![String::from("xport")];
-    let mut definitions = Vec::new();
-    let mut graph_gprints = Vec::<(String, String)>::new();
-    let mut graph_series = Vec::<GraphSeries>::new();
-    let mut graph_prints = Vec::<GraphPrint>::new();
-    let mut image_width = 400_u32;
-    let mut image_height = 100_u32;
-    let mut graph_title = None::<String>;
-    let mut vertical_label = None::<String>;
-    let mut vertical_label_angle = 90.0_f64;
-    let mut imginfo = None::<String>;
-    let mut print_options = GraphPrintOptions::default();
-    let mut lower_limit = None::<f64>;
-    let mut upper_limit = None::<f64>;
-    let mut no_legend = false;
-    let mut rigid_scale = false;
-    let mut allow_shrink = false;
-    let mut alt_autoscale = false;
-    let mut alt_autoscale_min = false;
-    let mut alt_autoscale_max = false;
-    let mut only_graph = false;
-    let mut full_size_mode = false;
-    let mut force_rules_legend = false;
-    let mut legend_direction = LegendDirection::TopDown;
-    let mut graph_colors = GraphColors::default();
-    let mut grid_dash = Vec::<f64>::new();
-    let mut border_width = 2_u32;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
-    let mut graph_start_spec = None::<String>;
-    let mut graph_end_spec = None::<String>;
-    let mut index = 2;
-    while index < args.len() {
-        let argument = &args[index];
-        if let Some(value) = argument.strip_prefix("--imgformat=") {
-            format = value.to_ascii_uppercase();
-            index += 1;
-            continue;
-        }
-        if let Some(value) = argument.strip_prefix("--base=") {
-            print_options.base = parse_graph_base(value)?;
-            index += 1;
-            continue;
-        }
-        if let Some(value) = argument.strip_prefix("--color=") {
-            graph_colors.parse_override(value)?;
-            index += 1;
-            continue;
-        }
-        if let Some(value) = argument.strip_prefix("--imginfo=") {
-            imginfo = Some(value.to_owned());
-            index += 1;
-            continue;
-        }
-        if let Some(address) = argument.strip_prefix("--daemon=") {
-            xport_args.push(String::from("--daemon"));
-            xport_args.push(address.to_owned());
-            index += 1;
-            continue;
-        }
-        match argument.as_str() {
-            "--base" | "-b" => {
-                print_options.base =
-                    parse_graph_base(args.get(index + 1).ok_or("--base requires a value")?)?;
-                index += 2;
-            }
-            "--utc" => {
-                print_options.utc = true;
-                index += 1;
-            }
-            "--imgformat" | "-a" => {
-                format = args
-                    .get(index + 1)
-                    .ok_or("--imgformat requires a value")?
-                    .to_ascii_uppercase();
-                index += 2;
-            }
-            "--start" | "-s" | "--end" | "-e" | "--step" | "-S" | "--maxrows" | "-m" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| format!("{argument} requires a value"))?;
-                match argument.as_str() {
-                    "--start" | "-s" => graph_start_spec = Some(value.clone()),
-                    "--end" | "-e" => graph_end_spec = Some(value.clone()),
-                    _ => {}
-                }
-                xport_args.push(argument.clone());
-                xport_args.push(value.clone());
-                index += 2;
-            }
-            "--width" | "-w" | "--height" | "-h" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| format!("{argument} requires a value"))?
-                    .parse::<u32>()?;
-                match argument.as_str() {
-                    "--width" | "-w" => image_width = value,
-                    _ => image_height = value,
-                }
-                index += 2;
-            }
-            "--title" | "-t" | "--vertical-label" | "-v" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| format!("{argument} requires a value"))?
-                    .clone();
-                if matches!(argument.as_str(), "--title" | "-t") {
-                    graph_title = Some(value);
-                } else {
-                    vertical_label = Some(value);
-                }
-                index += 2;
-            }
-            "--vertical-label-angle" => {
-                vertical_label_angle = args
-                    .get(index + 1)
-                    .ok_or("--vertical-label-angle requires a value")?
-                    .parse()?;
-                if !vertical_label_angle.is_finite() {
-                    return Err("--vertical-label-angle must be finite".into());
-                }
-                index += 2;
-            }
-            "--imginfo" | "-f" => {
-                imginfo = Some(
-                    args.get(index + 1)
-                        .ok_or("--imginfo requires a value")?
-                        .clone(),
-                );
-                index += 2;
-            }
-            "--lower-limit" | "-l" | "--upper-limit" | "-u" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| format!("{argument} requires a value"))?
-                    .parse::<f64>()?;
-                if !value.is_finite() {
-                    return Err(format!("{argument} must be finite").into());
-                }
-                if matches!(argument.as_str(), "--lower-limit" | "-l") {
-                    lower_limit = Some(value);
-                } else {
-                    upper_limit = Some(value);
-                }
-                index += 2;
-            }
-            "--no-legend" | "-g" => {
-                no_legend = true;
-                index += 1;
-            }
-            "--only-graph" | "-j" => {
-                only_graph = true;
-                index += 1;
-            }
-            "--full-size-mode" | "-D" => {
-                full_size_mode = true;
-                index += 1;
-            }
-            "--force-rules-legend" | "-F" => {
-                force_rules_legend = true;
-                index += 1;
-            }
-            "--color" | "-c" => {
-                graph_colors
-                    .parse_override(args.get(index + 1).ok_or("--color requires a value")?)?;
-                index += 2;
-            }
-            "--grid-dash" => {
-                let value = args.get(index + 1).ok_or("--grid-dash requires a value")?;
-                let (on, off) = value.split_once(':').ok_or("--grid-dash expects on:off")?;
-                let on = on.parse::<f64>()?;
-                let off = off.parse::<f64>()?;
-                if !on.is_finite() || !off.is_finite() || on <= 0.0 || off < 0.0 {
-                    return Err(
-                        "--grid-dash requires a positive on length and nonnegative off length"
-                            .into(),
-                    );
-                }
-                grid_dash = vec![on, off];
-                index += 2;
-            }
-            "--border" => {
-                border_width = args
-                    .get(index + 1)
-                    .ok_or("--border requires a value")?
-                    .parse()?;
-                if border_width > 64 {
-                    return Err("--border width exceeds 64 pixels".into());
-                }
-                index += 2;
-            }
-            "--legend-direction" => {
-                let direction = args
-                    .get(index + 1)
-                    .ok_or("--legend-direction requires a value")?;
-                legend_direction = parse_legend_direction(direction)?;
-                index += 2;
-            }
-            value if value.starts_with("--legend-direction=") => {
-                legend_direction = parse_legend_direction(&value["--legend-direction=".len()..])?;
-                index += 1;
-            }
-            "--rigid" | "-r" => {
-                rigid_scale = true;
-                index += 1;
-            }
-            "--allow-shrink" => {
-                allow_shrink = true;
-                index += 1;
-            }
-            "--alt-autoscale" | "-A" => {
-                alt_autoscale = true;
-                index += 1;
-            }
-            "--alt-autoscale-min" | "-J" => {
-                alt_autoscale_min = true;
-                index += 1;
-            }
-            "--alt-autoscale-max" | "-M" => {
-                alt_autoscale_max = true;
-                index += 1;
-            }
-            "--daemon" | "-d" => {
-                let address = args
-                    .get(index + 1)
-                    .ok_or("graph --daemon requires an address")?;
-                xport_args.push(String::from("--daemon"));
-                xport_args.push(address.clone());
-                index += 2;
-            }
-            option if option.starts_with("--daemon=") => {
-                xport_args.push(String::from("--daemon"));
-                xport_args.push(option["--daemon=".len()..].to_owned());
-                index += 1;
-            }
-            value
-                if value.starts_with("DEF:")
-                    || value.starts_with("CDEF:")
-                    || value.starts_with("XPORT:")
-                    || value.starts_with("VDEF:")
-                    || value.starts_with("SHIFT:") =>
-            {
-                definitions.push(value.to_owned());
-                index += 1;
-            }
-            value if value.starts_with("PRINT:") || value.starts_with("GPRINT:") => {
-                let print = parse_graph_print(value, &definitions)?;
-                if print.kind == "gprint" {
-                    let reference = graph_prints.len().to_string();
-                    graph_gprints.push((String::from("__gprint"), reference.clone()));
-                    let mut legend = GraphSeries::legend_element("gprint", String::new());
-                    legend.variable = reference;
-                    graph_series.push(legend);
-                }
-                graph_prints.push(print);
-                index += 1;
-            }
-            value if value.starts_with("COMMENT:") => {
-                let text = parse_graph_comment(value)?;
-                graph_gprints.push((String::from("comment"), text.clone()));
-                graph_series.push(GraphSeries::legend_element("comment", text));
-                index += 1;
-            }
-            value if value.starts_with("TEXTALIGN:") => {
-                let alignment = parse_graph_textalign(value)?;
-                graph_gprints.push((String::from("align"), alignment.clone()));
-                graph_series.push(GraphSeries::legend_element("textalign", alignment));
-                index += 1;
-            }
-            value if value.starts_with("TICK:") => {
-                let (series, legend) = parse_graph_tick(value)?;
-                definitions.push(format!("XPORT:{}:{legend}", series.variable));
-                graph_series.push(series);
-                index += 1;
-            }
-            value if value.starts_with("HRULE:") => {
-                let rule = parse_graph_hrule(value)?;
-                validate_graph_rule_reference(&rule, &definitions, value)?;
-                graph_series.push(rule);
-                index += 1;
-            }
-            value if value.starts_with("VRULE:") => {
-                let rule = parse_graph_vrule(value, now)?;
-                validate_graph_rule_reference(&rule, &definitions, value)?;
-                graph_series.push(rule);
-                index += 1;
-            }
-            value if value.starts_with("LINE") || value.starts_with("AREA:") => {
-                let (series, legend) = parse_graph_series(value)?;
-                if series.stack
-                    && !graph_series
-                        .iter()
-                        .any(|previous| matches!(previous.style, "line" | "area"))
-                {
-                    return Err(format!("STACK has no preceding LINE or AREA in {value}").into());
-                }
-                definitions.push(format!("XPORT:{}:{legend}", series.variable));
-                let label = if series.style == "area" {
-                    format!("  {legend}")
-                } else {
-                    legend
-                };
-                graph_gprints.push((series.style.to_owned(), label));
-                graph_series.push(series);
-                index += 1;
-            }
-            value if value.starts_with('-') => {
-                return Err(format!("unsupported graph option: {value}").into());
-            }
-            value => return Err(format!("unsupported graph element: {value}").into()),
-        }
-    }
+    let options = graph_options::rrd_graph_options(args, now)?;
+    let Some((filename, elements)) = options.positionals.split_first() else {
+        return Err("missing filename".into());
+    };
+    let format = options.imgformat;
+    let image_width = options.width;
+    let image_height = options.height;
+    let graph_title = options.title;
+    let vertical_label = options.vertical_label;
+    let vertical_label_angle = options.vertical_label_angle;
+    let imginfo = options.imginfo;
+    let lower_limit = options.lower_limit;
+    let upper_limit = options.upper_limit;
+    let no_legend = options.no_legend;
+    let rigid_scale = options.rigid;
+    let allow_shrink = options.allow_shrink;
+    let alt_autoscale = options.alt_autoscale;
+    let alt_autoscale_min = options.alt_autoscale_min;
+    let alt_autoscale_max = options.alt_autoscale_max;
+    let only_graph = options.only_graph;
+    let full_size_mode = options.full_size_mode;
+    let force_rules_legend = options.force_rules_legend;
+    let legend_direction = options.legend_direction;
+    let graph_colors = options.colors;
+    let grid_dash = options.grid_dash;
+    let border_width = options.border;
+    let si_base = options.base;
+    let force_utc = options.utc;
+    let daemon_address = options.daemon;
+    let requested_step = i64::from(options.step.unwrap_or(0));
     if !matches!(
         format.as_str(),
-        "XML" | "JSON" | "XMLENUM" | "JSONTIME" | "PNG"
+        "XML" | "JSON" | "XMLENUM" | "JSONTIME" | "CSV" | "TSV" | "SSV" | "PNG"
     ) {
         return Err(format!("RRDtool graph format {format} is unsupported").into());
     }
-    for print in &mut graph_prints {
-        // rrd_xport.c ignores vformatter in exported metadata, while console
-        // PRINT output still passes through rrd_graph.c::print_calc.
-        if format != "PNG"
-            && matches!(
-                print.formatter,
-                GraphPrintFormatter::Timestamp | GraphPrintFormatter::Duration
-            )
-        {
-            print.export_numeric = true;
-        }
-        if (print.formatter == GraphPrintFormatter::Numeric || print.export_numeric)
-            && parse_graph_numeric_format(&print.format).is_err()
-        {
-            return Err(format!("bad format for PRINT in \"{}'", print.format).into());
-        }
-    }
-    match format.as_str() {
-        "JSON" => xport_args.push(String::from("--json")),
-        "JSONTIME" => {
-            xport_args.push(String::from("--json"));
-            xport_args.push(String::from("--showtime"));
-        }
-        "XMLENUM" => xport_args.push(String::from("--enumds")),
-        _ => {}
-    }
-    if format == "XML" || format == "XMLENUM" {
-        xport_args.push(String::from("--showtime"));
-    }
-    // RRDtool permits a graph made only from rules. Its graph engine still
-    // builds a time axis; the XPORT-backed Rondi renderer needs a private
-    // constant series to provide that timeline in PNG mode.
+    let (mut im, _) = prepare_graph_image(GraphImageRequest {
+        start: options.start,
+        end: options.end,
+        step: requested_step,
+        xsize: i64::from(image_width),
+        daemon: daemon_address,
+        elements,
+    })?;
+    options.layout.apply(&mut im);
+    // The renderer enforces the same limit on the final canvas, but only after
+    // data_proc has allocated per-pixel buffers sized by --width. Print-only
+    // graphs draw nothing and keep the unbounded behavior of rrdtool.
     if format == "PNG"
-        && !definitions
-            .iter()
-            .any(|definition| definition.starts_with("XPORT:"))
+        && (10..).contains(&image_width)
+        && (10..).contains(&image_height)
+        && (image_width > PNG_MAX_DIMENSION || image_height > PNG_MAX_DIMENSION)
+        && im.gdes.iter().any(|element| {
+            use rondi::graph::Gf;
+            matches!(
+                element.gf,
+                Gf::Gprint | Gf::Line | Gf::Area | Gf::Tick | Gf::Hrule | Gf::Vrule | Gf::Stack
+            )
+        })
     {
-        definitions.push(String::from("CDEF:__rondi_rule_anchor=0"));
-        definitions.push(String::from("XPORT:__rondi_rule_anchor:"));
+        return Err(PNG_DIMENSION_LIMIT_MESSAGE.into());
     }
-    xport_args.extend(definitions);
-    print_options.export = format != "PNG";
-    let rendered = render_xport_with_graph_prints(
-        &xport_args,
-        Some(&graph_gprints),
-        &graph_prints,
-        print_options,
-    )?;
-    for rule in &mut graph_series {
-        if rule.style == "gprint" {
-            let reference = rule.variable.parse::<usize>()?;
-            rule.legend = rendered
-                .gprint_values
-                .get(&reference)
-                .ok_or("GPRINT legend is unavailable")?
-                .clone();
+    // rrd_graph_v: graph_paint, then image_info and the image itself.
+    let mut info = GraphInfo::default();
+    let to_memory = filename == "-";
+    let mut image = None::<Vec<u8>>;
+    let mut save_error = None::<String>;
+    if format != "PNG" {
+        let xport_format = match format.as_str() {
+            "XML" => XportFormat::Xml { flags: 2 },
+            "XMLENUM" => XportFormat::Xml { flags: 6 },
+            "JSON" => XportFormat::Xml { flags: 1 },
+            "JSONTIME" => XportFormat::Xml { flags: 3 },
+            "CSV" => XportFormat::Separated(','),
+            "TSV" => XportFormat::Separated('\t'),
+            _ => XportFormat::Separated(';'),
+        };
+        flush_and_prepare_data(&mut im)?;
+        let data = im.xport(true)?;
+        info.push("graph_start", InfoValue::Count(data.start));
+        info.push("graph_end", InfoValue::Count(data.end));
+        info.push("graph_step", InfoValue::Count(data.step as i64));
+        let (output, error) = match xport_format {
+            XportFormat::Xml { flags } => {
+                format_xport_xmljson(flags, &mut im, &data, si_base, to_memory)
+            }
+            XportFormat::Separated(separator) => (format_xport_sv(separator, &data), None),
+        };
+        // rrd_graph_xport only streams to the file when rrd_fopen worked;
+        // otherwise the buffered data is returned like the "-" image.
+        let mut buffered = to_memory;
+        if !to_memory {
+            match write_output_file(filename, output.as_bytes()) {
+                Err(OutputError::Refused(message)) => return Err(message.into()),
+                Err(OutputError::Open(_)) => buffered = true,
+                Ok(()) | Err(OutputError::Write(_)) => {}
+            }
         }
-        if matches!(rule.style, "hrule" | "vrule") && !rule.variable.is_empty() {
-            let value = rendered
-                .vdef_values
-                .get(&rule.variable)
-                .ok_or_else(|| format!("VDEF {} is unavailable", rule.variable))?;
-            if rule.style == "hrule" {
-                rule.rule_value = Some(value.value);
-            } else {
-                rule.rule_time = Some(value.timestamp.unwrap_or(0));
+        if let Some(error) = error {
+            return Err(error.into());
+        }
+        if buffered {
+            image = Some(output.into_bytes());
+        }
+        match print_calc(&mut im, si_base, force_utc, &mut info)? {
+            PrintCalc::Done(_) => {}
+            PrintCalc::Silent => return Ok(()),
+        }
+    } else {
+        flush_and_prepare_data(&mut im)?;
+        let graph_elements = match print_calc(&mut im, si_base, force_utc, &mut info)? {
+            PrintCalc::Done(count) => count,
+            PrintCalc::Silent => return Ok(()),
+        };
+        // graph_paint stops after print_calc when nothing is drawn.
+        if graph_elements {
+            use rondi::graph_layout::{
+                ALTAUTOSCALE, ALTAUTOSCALE_MAX, ALTAUTOSCALE_MIN, FORCE_RULES_LEGEND,
+                FULL_SIZE_MODE, NOLEGEND, ONLY_GRAPH, TEXT_PROP_LEGEND, text_height,
+            };
+            if image_width < 10 {
+                return Err("width below 10 pixels".into());
+            }
+            if image_height < 10 {
+                return Err("height below 10 pixels".into());
+            }
+            im.xsize = i64::from(image_width);
+            im.ysize = i64::from(image_height);
+            im.title.clone_from(&graph_title);
+            im.ylegend.clone_from(&vertical_label);
+            im.minval = lower_limit.unwrap_or_else(rrd_nan);
+            im.maxval = upper_limit.unwrap_or_else(rrd_nan);
+            im.rigid = rigid_scale;
+            im.allow_shrink = allow_shrink;
+            im.base = i64::from(si_base);
+            im.legenddirection = legend_direction;
+            for (set, flag) in [
+                (alt_autoscale, ALTAUTOSCALE),
+                (alt_autoscale_min, ALTAUTOSCALE_MIN),
+                (alt_autoscale_max, ALTAUTOSCALE_MAX),
+                (no_legend, NOLEGEND),
+                (only_graph, ONLY_GRAPH),
+                (force_rules_legend, FORCE_RULES_LEGEND),
+                (full_size_mode, FULL_SIZE_MODE),
+            ] {
+                if set {
+                    im.extra_flags |= flag;
+                }
+            }
+            // graph_paint_timestring.
+            im.graph_size_location(true)?;
+            for (key, value) in [
+                ("graph_left", im.xorigin),
+                ("graph_top", im.yorigin - im.ysize),
+                ("graph_width", im.xsize),
+                ("graph_height", im.ysize),
+                ("image_width", im.ximg),
+                ("image_height", im.yimg),
+                ("graph_start", im.start),
+                ("graph_end", im.end),
+            ] {
+                info.push(key, InfoValue::Count(value));
+            }
+            im.data_proc()?;
+            if !im.logarithmic {
+                im.si_unit();
+            }
+            if (!im.rigid || im.allow_shrink) && !im.logarithmic {
+                im.expand_range();
+            }
+            info.push("value_min", InfoValue::Val(im.minval));
+            info.push("value_max", InfoValue::Val(im.maxval));
+            let legend_size = im.text_prop[TEXT_PROP_LEGEND];
+            let mut legends = Vec::new();
+            for (index, x0, y0) in im.legend_origins() {
+                let legend = im.gdes[index].legend.clone();
+                let width = im.legend_text_width(&legend);
+                let height = text_height(legend_size);
+                let count = legends.len();
+                info.push(format!("legend[{count}]"), InfoValue::Str(legend.clone()));
+                info.push(
+                    format!("coords[{count}]"),
+                    InfoValue::Str(format!(
+                        "{},{},{},{}",
+                        c_printf_double("%.0f", x0),
+                        c_printf_double("%.0f", y0 - height),
+                        c_printf_double("%.0f", x0 + width),
+                        c_printf_double("%.0f", y0)
+                    )),
+                );
+                legends.push(GraphLegend {
+                    x: x0,
+                    y: y0,
+                    text: legend,
+                    gdes_index: index,
+                });
+            }
+            let (rendered, series) = graph_render_input(&im);
+            let png = render_graph_png(
+                &rendered,
+                &series,
+                GraphPngOptions {
+                    canvas: GraphCanvas {
+                        width: u32::try_from(im.ximg)?,
+                        height: u32::try_from(im.yimg)?,
+                        left: u32::try_from(im.xorigin)?,
+                        top: u32::try_from(im.yorigin - im.ysize)?,
+                        plot_width: u32::try_from(im.xsize)?,
+                        plot_height: u32::try_from(im.ysize)?,
+                        minimum: im.minval,
+                        maximum: im.maxval,
+                    },
+                    legends: &legends,
+                    title: graph_title.as_deref(),
+                    vertical_label: vertical_label.as_deref(),
+                    vertical_label_angle,
+                    only_graph,
+                    colors: graph_colors,
+                    grid_dash,
+                    border_width,
+                },
+            )?;
+            let (width, height) = png_dimensions(&png)?;
+            if !to_memory {
+                // rrd_graph_v keeps building the result after a failed save
+                // and rrdtool reports the error once it has printed it.
+                match write_output_file(filename, &png) {
+                    Ok(()) => {}
+                    Err(OutputError::Refused(message)) => return Err(message.into()),
+                    Err(_) => save_error = Some(format!("Could not save png to '{filename}'")),
+                }
+            }
+            if let Some(format) = imginfo.as_deref().filter(|format| !format.is_empty()) {
+                let basename = if to_memory {
+                    "memory"
+                } else {
+                    Path::new(filename)
+                        .file_name()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or(filename)
+                };
+                info.push(
+                    "image_info",
+                    InfoValue::Str(format_imginfo(format, basename, width, height)?),
+                );
+            }
+            if to_memory {
+                image = Some(png);
             }
         }
     }
-    let graph_image = if format == "PNG" {
-        Some(render_graph_png(
-            &rendered,
-            &graph_series,
-            GraphPngOptions {
-                width: image_width,
-                height: image_height,
-                title: graph_title.as_deref(),
-                vertical_label: vertical_label.as_deref(),
-                vertical_label_angle,
-                lower_limit,
-                upper_limit,
-                show_legend: !no_legend,
-                rigid_scale,
-                allow_shrink,
-                alt_autoscale,
-                alt_autoscale_min,
-                alt_autoscale_max,
-                only_graph,
-                full_size_mode,
-                force_rules_legend,
-                legend_direction,
-                colors: graph_colors,
-                grid_dash,
-                border_width,
-            },
-        )?)
+    if let Some(image) = image {
+        info.push("image", InfoValue::Blob(image));
+    }
+    let mut stdout = std::io::stdout().lock();
+    if verbose {
+        info.print(&mut stdout)?;
     } else {
-        None
-    };
-    let (output, xport_start, xport_end, step, prints) = (
-        rendered.output,
-        rendered.start,
-        rendered.end,
-        rendered.step,
-        rendered.prints,
-    );
-    let (start, end) = if graph_start_spec.is_none() && graph_end_spec.is_none() {
-        (xport_start, xport_end)
-    } else {
+        // rrd_tool.c only recognizes the separate `--imginfo`/`-f` spelling
+        // when deciding whether to print the canvas size.
+        let imginfo_flag = args[2..]
+            .iter()
+            .any(|argument| argument == "--imginfo" || argument == "-f");
+        info.print_graph(&mut stdout, to_memory, imginfo_flag)?;
+    }
+    match save_error {
+        Some(message) => Err(message.into()),
+        None => Ok(()),
+    }
+}
+
+enum XportFormat {
+    Xml { flags: u8 },
+    Separated(char),
+}
+
+#[derive(Debug)]
+enum InfoValue {
+    Val(f64),
+    Count(i64),
+    Str(String),
+    Blob(Vec<u8>),
+}
+
+/// The ordered `rrd_info_t` list `grinfo_push` builds.
+#[derive(Default)]
+struct GraphInfo {
+    entries: Vec<(String, InfoValue)>,
+}
+
+impl GraphInfo {
+    fn push(&mut self, key: impl Into<String>, value: InfoValue) {
+        self.entries.push((key.into(), value));
+    }
+
+    /// `rrd_info_print`.
+    fn print(&self, out: &mut impl Write) -> std::io::Result<()> {
+        for (key, value) in &self.entries {
+            write!(out, "{key} = ")?;
+            match value {
+                InfoValue::Val(value) if value.is_nan() => writeln!(out, "NaN")?,
+                InfoValue::Val(value) => writeln!(out, "{}", c_printf_double("%0.10e", *value))?,
+                InfoValue::Count(value) => writeln!(out, "{value}")?,
+                InfoValue::Str(value) => writeln!(out, "\"{value}\"")?,
+                InfoValue::Blob(value) => {
+                    writeln!(out, "BLOB_SIZE:{}", value.len())?;
+                    out.write_all(value)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `rrd_graph` plus the `graph` branch of rrd_tool.c: the WxH line,
+    /// image_info and PRINT lines, or the image itself for `-`.
+    fn print_graph(
+        &self,
+        out: &mut impl Write,
+        to_memory: bool,
+        imginfo_flag: bool,
+    ) -> std::io::Result<()> {
+        let count = |key: &str| {
+            self.entries.iter().find_map(|(name, value)| match value {
+                InfoValue::Count(value) if name == key => Some(*value),
+                _ => None,
+            })
+        };
+        let mut lines = Vec::new();
+        for (key, value) in &self.entries {
+            if let (true, InfoValue::Str(text)) = (key == "image_info", value) {
+                lines.push(text.as_str());
+            }
+        }
+        for (key, value) in &self.entries {
+            match value {
+                InfoValue::Str(text) if key.starts_with("print") => lines.push(text.as_str()),
+                InfoValue::Blob(bytes) if key == "image" => out.write_all(bytes)?,
+                _ => {}
+            }
+        }
+        if !to_memory && !imginfo_flag {
+            writeln!(
+                out,
+                "{}x{}",
+                count("image_width").unwrap_or(0),
+                count("image_height").unwrap_or(0)
+            )?;
+        }
+        if !to_memory {
+            for line in lines {
+                writeln!(out, "{line}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
+struct GraphImageRequest<'a> {
+    start: i64,
+    end: i64,
+    step: i64,
+    xsize: i64,
+    daemon: Option<String>,
+    elements: &'a [String],
+}
+
+/// The image step and `rrd_graph_script`, after the option parser checked
+/// the time range. The flag reports a parser that stopped
+/// without an error, after which RRDtool keeps the elements read so far.
+fn prepare_graph_image(
+    request: GraphImageRequest<'_>,
+) -> Result<(rondi::graph::GraphImage, bool), Box<dyn std::error::Error>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let (start, end) = (request.start, request.end);
+    let step = request.step.max((end - start) / request.xsize.max(1));
+    let mut im = rondi::graph::GraphImage::new(start, end, step.max(0) as u64);
+    im.daemon_addr = request
+        .daemon
+        .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok());
+    // newGraphDescription starts each DEF window as absolute times at the
+    // image window and parses only the given `start=`/`end=`.
+    let resolve = |start_spec: Option<&str>, end_spec: Option<&str>, start: i64, end: i64| {
+        let start_text = start.to_string();
+        let end_text = end.to_string();
         resolve_rrd_range_times(
-            graph_start_spec.as_deref(),
-            graph_end_spec.as_deref(),
-            now - 24 * 60 * 60,
+            Some(start_spec.unwrap_or(&start_text)),
+            Some(end_spec.unwrap_or(&end_text)),
             now,
-            now,
-        )?
+        )
+        .map_err(|error| error.to_string())
     };
-    if filename == "-" {
-        if verbose {
-            print!("graph_start = {start}\ngraph_end = {end}\ngraph_step = {step}\n");
-            for (index, value) in prints.iter().enumerate() {
-                println!("print[{index}] = {}", serde_json::to_string(value)?);
-            }
-            println!(
-                "image = BLOB_SIZE:{}",
-                graph_image.as_ref().map_or(output.len(), Vec::len)
-            );
-        }
-        if let Some(image) = graph_image.as_deref() {
-            if let Some(format) = imginfo.as_deref() {
-                let (width, height) = png_dimensions(image)?;
-                println!("{}", format_imginfo(format, "memory", width, height)?);
-            }
-            std::io::stdout().write_all(image)?;
-        } else {
-            print!("{output}");
-        }
-    } else {
-        if let Some(image) = graph_image.as_deref() {
-            std::fs::write(filename, image)?;
-            if let Some(format) = imginfo.as_deref() {
-                let basename = Path::new(filename)
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .unwrap_or(filename);
-                let (width, height) = png_dimensions(image)?;
-                println!("{}", format_imginfo(format, basename, width, height)?);
-            }
-        } else {
-            std::fs::write(filename, output.as_bytes())?;
-        }
-        if verbose {
-            print!("graph_start = {start}\ngraph_end = {end}\ngraph_step = {step}\n");
-            for (index, value) in prints.iter().enumerate() {
-                println!("print[{index}] = {}", serde_json::to_string(value)?);
-            }
-        }
+    match im.graph_script(request.elements, &resolve) {
+        Ok(()) => Ok((im, false)),
+        Err(rondi::graph::ScriptError::Silent) => Ok((im, true)),
+        Err(rondi::graph::ScriptError::Error(message)) => Err(message.into()),
     }
+}
+
+/// `data_fetch` (flushing each DEF's file through its rrdcached first) and
+/// `data_calc`.
+fn flush_and_prepare_data(
+    im: &mut rondi::graph::GraphImage,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut flushed = std::collections::HashSet::new();
+    let mut flush_error = None::<Box<dyn std::error::Error>>;
+    let mut hook = |address: &str, filename: &str| {
+        if flushed.insert((address.to_owned(), filename.to_owned()))
+            && let Err(error) = send_rrdcached_flush(address, filename)
+        {
+            let message = error.to_string();
+            flush_error = Some(error);
+            return Err(rondi::StoreError::RrdExpression(message));
+        }
+        Ok(())
+    };
+    let fetched = im.data_fetch(&mut hook);
+    if let Some(error) = flush_error {
+        return Err(error);
+    }
+    fetched?;
+    im.data_calc()?;
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LegendDirection {
-    TopDown,
-    BottomUp,
-    BottomUp2,
+/// Why an output file could not be written. `Refused` is Rondi's own
+/// safety check; the others carry the errno RRDtool would report through
+/// `rrd_strerror`.
+#[derive(Debug)]
+enum OutputError {
+    Refused(String),
+    Open(libc::c_int),
+    Write(libc::c_int),
 }
 
-fn parse_legend_direction(direction: &str) -> Result<LegendDirection, Box<dyn std::error::Error>> {
-    match direction {
-        "topdown" => Ok(LegendDirection::TopDown),
-        "bottomup" => Ok(LegendDirection::BottomUp),
-        "bottomup2" => Ok(LegendDirection::BottomUp2),
-        _ => Err(format!("unknown legend-position '{direction}'").into()),
-    }
-}
-
-fn parse_graph_base(value: &str) -> Result<u32, Box<dyn std::error::Error>> {
-    let value = std::ffi::CString::new(value)?;
-    // SAFETY: atol reads a valid NUL-terminated string and retains no pointer.
-    match unsafe { libc::atol(value.as_ptr()) } {
-        1000 => Ok(1000),
-        1024 => Ok(1024),
-        _ => Err("the only sensible value for base apart from 1000 is 1024".into()),
-    }
-}
-
-fn parse_graph_series(
-    definition: &str,
-) -> Result<(GraphSeries, String), Box<dyn std::error::Error>> {
-    let (directive, source_and_legend) = definition
-        .split_once(':')
-        .ok_or_else(|| format!("invalid graph element: {definition}"))?;
-    let (style, line_width) = if directive == "AREA" {
-        ("area", 0.0)
-    } else if let Some(width) = directive.strip_prefix("LINE") {
-        let parsed = if width.is_empty() {
-            1.0
-        } else {
-            width.parse::<f64>()?
-        };
-        if !parsed.is_finite() || parsed < 0.0 {
-            return Err(format!("invalid line width in {definition}").into());
-        }
-        ("line", parsed)
-    } else {
-        return Err(format!("unsupported graph element: {definition}").into());
-    };
-    let (source, legend_and_flags) = source_and_legend
-        .split_once(':')
-        .unwrap_or((source_and_legend, ""));
-    let mut legend_parts = legend_and_flags.split(':').collect::<Vec<_>>();
-    let mut stack = false;
-    let mut skip_scale = false;
-    let mut grad_height = if style == "area" { 50.0 } else { 0.0 };
-    let mut dash_pattern = Vec::new();
-    let mut dash_offset = 0.0;
-    loop {
-        match legend_parts.last().copied() {
-            Some("STACK") => {
-                stack = true;
-                legend_parts.pop();
-            }
-            Some("skipscale") => {
-                skip_scale = true;
-                legend_parts.pop();
-            }
-            Some(flag) if flag.starts_with("gradheight=") => {
-                grad_height = flag["gradheight=".len()..].parse::<f64>()?;
-                if !grad_height.is_finite() {
-                    return Err(format!("invalid gradheight in {definition}").into());
-                }
-                legend_parts.pop();
-            }
-            Some("dashes") if style == "line" => {
-                dash_pattern = vec![5.0, 5.0];
-                legend_parts.pop();
-            }
-            Some(flag) if style == "line" && flag.starts_with("dashes=") => {
-                dash_pattern = parse_dash_pattern(&flag[7..], definition)?;
-                legend_parts.pop();
-            }
-            Some(flag) if style == "line" && flag.starts_with("dash-offset=") => {
-                dash_offset = flag[12..].parse::<f64>()?;
-                if !dash_offset.is_finite() {
-                    return Err(format!("invalid dash offset in {definition}").into());
-                }
-                legend_parts.pop();
-            }
-            _ => break,
+impl std::fmt::Display for OutputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(message) => f.write_str(message),
+            Self::Open(errno) | Self::Write(errno) => f.write_str(&rrd_strerror(*errno)),
         }
     }
-    let legend = legend_parts.join(":");
-    let mut source_parts = source.split('#');
-    let variable = source_parts.next().unwrap_or_default();
-    let color = source_parts
-        .next()
-        .map(|value| parse_graph_color(value, definition))
-        .transpose()?;
-    let color2 = source_parts
-        .next()
-        .map(|value| parse_graph_color(value, definition))
-        .transpose()?;
-    if source_parts.next().is_some() || (color2.is_some() && style != "area") {
-        return Err(format!("invalid graph color in {definition}").into());
-    }
-    if variable.is_empty() || variable.contains(':') {
-        return Err(format!("invalid data variable in graph element: {definition}").into());
-    }
-    if color.is_none() && !legend.is_empty() {
-        return Err("cannot specify a legend without a color".into());
-    }
-    Ok((
-        GraphSeries {
-            variable: variable.to_owned(),
-            style,
-            line_width,
-            stack,
-            skip_scale,
-            color,
-            color2,
-            grad_height,
-            tick_fraction: 0.0,
-            rule_value: None,
-            rule_time: None,
-            legend: legend.clone(),
-            dash_pattern,
-            dash_offset,
-        },
-        legend.to_owned(),
-    ))
 }
 
-fn parse_graph_tick(definition: &str) -> Result<(GraphSeries, String), Box<dyn std::error::Error>> {
-    let value = definition
-        .strip_prefix("TICK:")
-        .ok_or_else(|| format!("invalid TICK element: {definition}"))?;
-    let (source, options) = value.split_once(':').unwrap_or((value, ""));
-    let (variable, color) = source
-        .split_once('#')
-        .ok_or_else(|| format!("TICK color is required in {definition}"))?;
-    let color = parse_graph_color(color, definition)?;
-    let mut options = options.split(':');
-    let first = options.next().unwrap_or_default();
-    let (fraction, legend) = match first.parse::<f64>() {
-        Ok(fraction) => (fraction, options.collect::<Vec<_>>().join(":")),
-        Err(_) if first.is_empty() => (0.1, options.collect::<Vec<_>>().join(":")),
-        Err(_) => (
-            0.1,
-            std::iter::once(first)
-                .chain(options)
-                .collect::<Vec<_>>()
-                .join(":"),
-        ),
-    };
-    if variable.is_empty() || !fraction.is_finite() {
-        return Err(format!("invalid TICK element: {definition}").into());
+impl std::error::Error for OutputError {}
+
+fn errno_of(error: &std::io::Error) -> libc::c_int {
+    error.raw_os_error().unwrap_or(libc::EIO)
+}
+
+/// Write only an owned, singly linked regular file.
+fn write_output_file(path: &str, bytes: &[u8]) -> Result<(), OutputError> {
+    // Errors without an errno are the refusals open_output_file raises.
+    let mut file = rondi::open_output_file(std::path::Path::new(path), false).map_err(|error| {
+        error.raw_os_error().map_or_else(
+            || OutputError::Refused(error.to_string()),
+            OutputError::Open,
+        )
+    })?;
+    // ftruncate fails on a device such as /dev/null.
+    if file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        file.set_len(0)
+            .map_err(|error| OutputError::Write(errno_of(&error)))?;
     }
-    Ok((
-        GraphSeries {
-            variable: variable.to_owned(),
-            style: "tick",
-            line_width: 1.0,
-            stack: false,
-            skip_scale: true,
-            color: Some(color),
-            color2: None,
-            grad_height: 0.0,
-            tick_fraction: fraction,
-            rule_value: None,
-            rule_time: None,
-            legend: legend.clone(),
-            dash_pattern: Vec::new(),
-            dash_offset: 0.0,
-        },
-        legend,
-    ))
+    file.write_all(bytes)
+        .map_err(|error| OutputError::Write(errno_of(&error)))
 }
 
-fn parse_graph_hrule(definition: &str) -> Result<GraphSeries, Box<dyn std::error::Error>> {
-    let value = definition
-        .strip_prefix("HRULE:")
-        .ok_or_else(|| format!("invalid HRULE element: {definition}"))?;
-    let (value_and_color, legend_and_flags) = value.split_once(':').unwrap_or((value, ""));
-    let (legend, dash_pattern, dash_offset) = parse_rule_legend(legend_and_flags, definition)?;
-    let (value, color) = value_and_color
-        .split_once('#')
-        .ok_or_else(|| format!("HRULE color is required in {definition}"))?;
-    let number = rondi::parse_rrd_number(value);
-    if number.is_some_and(|value| !value.is_finite())
-        || value.parse::<f64>().is_ok_and(|v| !v.is_finite())
-    {
-        return Err(format!("invalid HRULE value in {definition}").into());
-    }
-    Ok(GraphSeries {
-        variable: if number.is_some() {
-            String::new()
-        } else {
-            value.to_owned()
-        },
-        style: "hrule",
-        line_width: 1.0,
-        stack: false,
-        skip_scale: false,
-        color: Some(parse_graph_color(color, definition)?),
-        color2: None,
-        grad_height: 0.0,
-        tick_fraction: 0.0,
-        rule_value: number,
-        rule_time: None,
-        legend,
-        dash_pattern,
-        dash_offset,
-    })
-}
-
-fn parse_graph_vrule(
-    definition: &str,
-    now: i64,
-) -> Result<GraphSeries, Box<dyn std::error::Error>> {
-    let value = definition
-        .strip_prefix("VRULE:")
-        .ok_or_else(|| format!("invalid VRULE element: {definition}"))?;
-    let (time_and_color, legend_and_flags) = value.split_once(':').unwrap_or((value, ""));
-    let (legend, dash_pattern, dash_offset) = parse_rule_legend(legend_and_flags, definition)?;
-    let (time, color) = time_and_color
-        .split_once('#')
-        .ok_or_else(|| format!("VRULE color is required in {definition}"))?;
-    let timestamp = parse_rrd_time(time, now).ok();
-    Ok(GraphSeries {
-        variable: if timestamp.is_some() {
-            String::new()
-        } else {
-            time.to_owned()
-        },
-        style: "vrule",
-        line_width: 1.0,
-        stack: false,
-        skip_scale: true,
-        color: Some(parse_graph_color(color, definition)?),
-        color2: None,
-        grad_height: 0.0,
-        tick_fraction: 0.0,
-        rule_value: None,
-        rule_time: timestamp,
-        legend,
-        dash_pattern,
-        dash_offset,
-    })
-}
-
-fn validate_graph_rule_reference(
-    rule: &GraphSeries,
-    definitions: &[String],
-    original: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if rule.variable.is_empty() {
+fn rrdtool_xport(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.len() == 1 {
+        print!("{}", include_str!("help/xport.txt"));
         return Ok(());
     }
-    // parse_hvrule resolves only an already-defined VDEF, never a DEF/CDEF.
-    let name = format!("{}=", rule.variable);
-    if let Some(definition) = definitions.iter().find(|definition| {
-        definition
-            .split_once(':')
-            .is_some_and(|(_, rest)| rest.starts_with(&name))
-    }) {
-        if definition.starts_with("VDEF:") {
-            return Ok(());
+    let (output, error) = render_xport(args)?;
+    print!("{output}");
+    match error {
+        Some(error) => Err(error.into()),
+        None => Ok(()),
+    }
+}
+
+/// The xport document and, when formatting a PRINT failed part way, the
+/// error RRDtool reports after writing the head of the document.
+fn render_xport(args: &[String]) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let xport = graph_options::rrd_xport_options(args, now)?;
+    let (json, show_time, enum_ds) = (xport.json, xport.showtime, xport.enumds);
+    let (mut im, _) = prepare_graph_image(GraphImageRequest {
+        start: xport.start,
+        end: xport.end,
+        step: i64::from(xport.step),
+        xsize: xport.maxrows,
+        daemon: xport.daemon,
+        elements: &xport.positionals,
+    })?;
+    if im.gdes.is_empty() {
+        return Err("can't make an xport without contents".into());
+    }
+    flush_and_prepare_data(&mut im)?;
+    let data = im.xport(false)?;
+    let flags = u8::from(json) | (u8::from(show_time) << 1) | (u8::from(enum_ds) << 2);
+    Ok(format_xport_xmljson(flags, &mut im, &data, 1000, false))
+}
+
+/// Turns graph elements into the native renderer's series, with one column
+/// per drawn element on the common xport grid.
+fn graph_render_input(im: &rondi::graph::GraphImage) -> (RenderedGraphXport, Vec<GraphSeries>) {
+    use rondi::graph::Gf;
+    let mut series = Vec::new();
+    let mut sources = Vec::new();
+    for (index, element) in im.gdes.iter().enumerate() {
+        let style = match element.gf {
+            Gf::Line => "line",
+            Gf::Area => "area",
+            Gf::Tick => "tick",
+            Gf::Hrule => "hrule",
+            Gf::Vrule => "vrule",
+            _ => continue,
+        };
+        let (rule_value, rule_time) = match element.gf {
+            Gf::Hrule => (Some(element.yrule), None),
+            Gf::Vrule => (None, Some(element.xrule)),
+            _ => (None, None),
+        };
+        let variable = format!("#{index}");
+        if matches!(element.gf, Gf::Line | Gf::Area | Gf::Tick) {
+            sources.push((variable.clone(), element.vidx, element.yrule));
         }
-        return Err(format!(
-            "Using vname {} of wrong type in line {original}\n",
-            rule.variable
-        )
-        .into());
+        series.push(GraphSeries {
+            variable,
+            style,
+            line_width: match element.gf {
+                Gf::Line => element.linewidth,
+                Gf::Area => 0.0,
+                _ => 1.0,
+            },
+            stack: element.stack,
+            color: element.color,
+            color2: element.color2,
+            grad_height: if element.gf == Gf::Area {
+                element.gradheight
+            } else {
+                0.0
+            },
+            tick_fraction: if element.gf == Gf::Tick {
+                element.yrule
+            } else {
+                0.0
+            },
+            rule_value,
+            rule_time,
+            dash_pattern: element.dashes.clone(),
+            dash_offset: element.dash_offset,
+        });
     }
-    Err(format!("{} is not a vname nor a number", rule.variable).into())
-}
-
-fn parse_dash_pattern(
-    value: &str,
-    definition: &str,
-) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
-    let values = value
-        .split(',')
-        .map(str::parse::<f64>)
-        .collect::<Result<Vec<_>, _>>()?;
-    if values.is_empty()
-        || (values.len() != 1 && values.len() % 2 != 0)
-        || values
-            .iter()
-            .any(|value| !value.is_finite() || *value <= 0.0)
-    {
-        return Err(format!("invalid dash pattern in {definition}").into());
+    let step = sources
+        .iter()
+        .filter_map(|(_, vidx, _)| vidx.map(|vidx| im.gdes[vidx].step))
+        .fold(
+            0,
+            |step, next| if step == 0 { next } else { gcd_u64(step, next) },
+        );
+    let step = if step == 0 { im.step.max(1) } else { step };
+    let step_i64 = step as i64;
+    let start = im.start - im.start.rem_euclid(step_i64);
+    let mut end = im.end - im.end.rem_euclid(step_i64);
+    if im.end > end {
+        end += step_i64;
     }
-    Ok(values)
-}
-
-fn parse_rule_legend(
-    value: &str,
-    definition: &str,
-) -> Result<(String, Vec<f64>, f64), Box<dyn std::error::Error>> {
-    let mut parts = value.split(':').collect::<Vec<_>>();
-    let mut pattern = Vec::new();
-    let mut offset = 0.0;
-    loop {
-        match parts.last().copied() {
-            Some("dashes") => {
-                pattern = vec![5.0, 5.0];
-                parts.pop();
-            }
-            Some(flag) if flag.starts_with("dashes=") => {
-                pattern = parse_dash_pattern(&flag[7..], definition)?;
-                parts.pop();
-            }
-            Some(flag) if flag.starts_with("dash-offset=") => {
-                offset = flag[12..].parse::<f64>()?;
-                if !offset.is_finite() {
-                    return Err(format!("invalid dash offset in {definition}").into());
-                }
-                parts.pop();
-            }
-            _ => break,
-        }
-    }
-    Ok((parts.join(":"), pattern, offset))
-}
-
-fn parse_graph_color(value: &str, definition: &str) -> Result<[u8; 4], Box<dyn std::error::Error>> {
-    if !matches!(value.len(), 6 | 8) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(format!("invalid graph color in {definition}").into());
-    }
-    Ok([
-        u8::from_str_radix(&value[0..2], 16)?,
-        u8::from_str_radix(&value[2..4], 16)?,
-        u8::from_str_radix(&value[4..6], 16)?,
-        if value.len() == 8 {
-            u8::from_str_radix(&value[6..8], 16)?
-        } else {
-            255
+    let row_count = usize::try_from((end - start) / step_i64).unwrap_or(0);
+    let rows = (0..row_count)
+        .map(|row| {
+            let now = start + row as i64 * step_i64;
+            sources
+                .iter()
+                .map(|(_, vidx, yrule)| {
+                    let value = match vidx {
+                        Some(vidx) => im.value_at(*vidx, now),
+                        None => *yrule,
+                    };
+                    (!value.is_nan()).then_some(value)
+                })
+                .collect()
+        })
+        .collect();
+    (
+        RenderedGraphXport {
+            start,
+            end,
+            variables: sources.into_iter().map(|(name, _, _)| name).collect(),
+            rows,
         },
-    ])
+        series,
+    )
+}
+
+fn gcd_u64(mut left: u64, mut right: u64) -> u64 {
+    while right != 0 {
+        (left, right) = (right, left % right);
+    }
+    left
+}
+
+struct RenderedGraphXport {
+    start: i64,
+    end: i64,
+    variables: Vec<String>,
+    rows: Vec<Vec<Option<f64>>>,
+}
+
+enum PrintCalc {
+    /// Whether any element draws on the canvas.
+    Done(bool),
+    /// A formatter failed without setting an error; RRDtool returns from
+    /// the command with no output and status 0.
+    Silent,
+}
+
+/// `LOCALTIME_R(..., FORCE_UTC_TIME)` without `--utc`.
+fn local_tm(timestamp: i64) -> libc::tm {
+    let timestamp = timestamp as libc::time_t;
+    let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
+    unsafe { libc::localtime_r(&timestamp, &mut tm) };
+    tm
+}
+
+/// `LOCALTIME_R(..., FORCE_UTC_TIME)` with `--utc`.
+fn utc_tm(timestamp: i64) -> libc::tm {
+    let timestamp = timestamp as libc::time_t;
+    let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
+    unsafe { libc::gmtime_r(&timestamp, &mut tm) };
+    tm
+}
+
+fn c_strftime(format: &str, tm: &libc::tm, max: usize) -> Option<String> {
+    let format = std::ffi::CString::new(format).ok()?;
+    let mut buffer = vec![0_u8; max];
+    let length = unsafe { libc::strftime(buffer.as_mut_ptr().cast(), max, format.as_ptr(), tm) };
+    Some(String::from_utf8_lossy(&buffer[..length]).into_owned())
+}
+
+/// Port of `print_calc`: pushes `print[n]` info entries, writes GPRINT
+/// legends back into the elements, and resolves rule values.
+fn print_calc(
+    im: &mut rondi::graph::GraphImage,
+    si_base: u32,
+    force_utc: bool,
+    info: &mut GraphInfo,
+) -> Result<PrintCalc, Box<dyn std::error::Error>> {
+    use rondi::graph::{FMT_LEG_LEN, Gf, ValueFormatter};
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let breakdown = if force_utc { utc_tm } else { local_tm };
+    let mut tmvdef = breakdown(now);
+    let mut graphelement = false;
+    let mut si_scale = GraphSiScale::new(si_base);
+    let mut prline_cnt = 0;
+    for i in 0..im.gdes.len() {
+        let vidx = im.gdes[i].vidx;
+        match im.gdes[i].gf {
+            Gf::Print | Gf::Gprint => {
+                let source = vidx.map(|vidx| &im.gdes[vidx]);
+                if let Some(source) = source.filter(|source| source.gf == Gf::Vdef) {
+                    tmvdef = breakdown(source.vf.when);
+                }
+                let printval = im.print_value(i);
+                let never = source.is_some_and(|source| source.vf.never);
+                let mut format = im.gdes[i].format.clone();
+                let element = &im.gdes[i];
+                // GPRINT writes into the FMT_LEG_LEN legend buffer: numeric
+                // formats through snprintf(FMT_LEG_LEN - 2), the `%.0f`
+                // timestamp fallback through snprintf(FMT_LEG_LEN).
+                let legend_limit = match (element.strftm, element.vformatter) {
+                    (false, ValueFormatter::Numeric) => FMT_LEG_LEN - 2,
+                    _ => FMT_LEG_LEN,
+                };
+                let text = if element.strftm {
+                    if never {
+                        Some(time_clean(&element.format))
+                    } else {
+                        // A result longer than the buffer leaves its
+                        // contents undefined; treat it as empty.
+                        Some(c_strftime(&element.format, &tmvdef, FMT_LEG_LEN).unwrap_or_default())
+                    }
+                } else {
+                    match element.vformatter {
+                        ValueFormatter::Numeric => {
+                            match format_graph_numeric(
+                                printval,
+                                &mut format,
+                                &mut si_scale,
+                                GraphPrintf::Libc,
+                            ) {
+                                Ok(text) => Some(text),
+                                Err(_) => {
+                                    return Err(format!(
+                                        "invalid format string '{format}' (should match '{BAD_FORMAT_PRINT_PATTERN}')"
+                                    )
+                                    .into());
+                                }
+                            }
+                        }
+                        ValueFormatter::Timestamp => {
+                            format_value_timestamp(printval, &element.format)
+                        }
+                        ValueFormatter::Duration => {
+                            format_value_duration(printval, &element.format)?
+                        }
+                    }
+                };
+                im.gdes[i].format = format;
+                let Some(text) = text else {
+                    return Ok(PrintCalc::Silent);
+                };
+                if im.gdes[i].gf == Gf::Print {
+                    info.push(format!("print[{prline_cnt}]"), InfoValue::Str(text));
+                    prline_cnt += 1;
+                } else {
+                    im.gdes[i].legend = truncate_c_buffer(text, legend_limit);
+                    graphelement = true;
+                }
+            }
+            Gf::Line | Gf::Area | Gf::Tick => graphelement = true,
+            Gf::Hrule => {
+                if im.gdes[i].yrule.is_nan() {
+                    im.gdes[i].yrule = vidx.map_or_else(rrd_nan, |vidx| im.gdes[vidx].vf.val);
+                }
+                graphelement = true;
+            }
+            Gf::Vrule => {
+                if im.gdes[i].xrule == 0 {
+                    im.gdes[i].xrule = vidx.map_or(0, |vidx| im.gdes[vidx].vf.when);
+                }
+                graphelement = true;
+            }
+            Gf::Stack => {
+                return Err("STACK should already be turned into LINE or AREA here".into());
+            }
+            _ => {}
+        }
+    }
+    Ok(PrintCalc::Done(graphelement))
+}
+
+const BAD_FORMAT_PRINT_PATTERN: &str =
+    "^(?:[^%]+|%%)*%[-+ 0#]?[0-9]*(?:[.][0-9]+)?l[eEfFgG](?:[^%]+|%%)*(?:%[sS])?(?:[^%]+|%%)*$";
+
+/// `VALUE_FORMATTER_TIMESTAMP` in print_calc: gmtime of the value truncated
+/// to whole seconds, or `%.0f` outside the `long long` range. `None` is a
+/// strftime failure, which RRDtool reports without an error message.
+fn format_value_timestamp(value: f64, format: &str) -> Option<String> {
+    // timestamp_to_tm (rrd_graph.c:1810) compares the truncated value with
+    // itself, so only the range check can reject a finite value.
+    if !value.is_finite() || value < i64::MIN as f64 || value > i64::MAX as f64 {
+        return Some(c_printf_double("%.0f", value));
+    }
+    let timestamp = value as i64 as libc::time_t;
+    let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
+    unsafe { libc::gmtime_r(&timestamp, &mut tm) };
+    let format = if format.is_empty() {
+        "%Y-%m-%d %H:%M:%S"
+    } else {
+        format
+    };
+    let text = c_strftime(format, &tm, rondi::graph::FMT_LEG_LEN)?;
+    (!text.is_empty()).then_some(text)
+}
+
+/// `VALUE_FORMATTER_DURATION` in print_calc.
+fn format_value_duration(
+    value: f64,
+    format: &str,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if !value.is_finite() {
+        return Ok(Some(c_printf_double("%f", value)));
+    }
+    let format = if format.is_empty() {
+        "%H:%02m:%02s"
+    } else {
+        format
+    };
+    strfduration(format, value)
+        .map(|text| Some(truncate_c_buffer(text, rondi::graph::FMT_LEG_LEN)))
+        .map_err(Into::into)
+}
+
+fn truncate_c_buffer(mut text: String, size: usize) -> String {
+    if text.len() >= size {
+        let mut cut = size - 1;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+    }
+    text
+}
+
+fn c_printf_double(format: &str, value: f64) -> String {
+    let format = std::ffi::CString::new(format).unwrap_or_default();
+    let mut buffer = [0 as libc::c_char; 512];
+    let length =
+        unsafe { libc::snprintf(buffer.as_mut_ptr(), buffer.len(), format.as_ptr(), value) };
+    let length = usize::try_from(length).unwrap_or(0).min(buffer.len() - 1);
+    let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), length) };
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+/// Port of `strfduration` (rrd_graph.c): `duration` is in milliseconds.
+fn strfduration(format: &str, duration: f64) -> Result<String, String> {
+    let seconds = duration.abs() / 1000.0;
+    let minutes = seconds / 60.0;
+    let hours = minutes / 60.0;
+    let days = hours / 24.0;
+    let weeks = days / 7.0;
+    let mut output = String::new();
+    if duration < 0.0 {
+        output.push('-');
+    }
+    let bytes = format.as_bytes();
+    let mut f = 0;
+    while f < bytes.len() {
+        if bytes[f] != b'%' {
+            let ch = format[f..].chars().next().unwrap_or('?');
+            output.push(ch);
+            f += ch.len_utf8();
+            continue;
+        }
+        f += 1;
+        let zpad = bytes.get(f) == Some(&b'0');
+        if zpad {
+            f += 1;
+        }
+        let mut width = 0_i32;
+        if bytes.get(f).is_some_and(u8::is_ascii_digit) {
+            let digits = bytes[f..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit())
+                .count();
+            width = format[f..f + digits].parse().unwrap_or(i32::MAX);
+            f += digits;
+        }
+        let mut precision = 0_i32;
+        if bytes.get(f) == Some(&b'.') {
+            f += 1;
+            let negative = bytes.get(f) == Some(&b'-');
+            let start = f + usize::from(negative || bytes.get(f) == Some(&b'+'));
+            let digits = bytes[start.min(bytes.len())..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_digit())
+                .count();
+            if digits > 0 {
+                let value: i32 = format[start..start + digits].parse().unwrap_or(i32::MAX);
+                precision = if negative { -value } else { value };
+                if precision < 0 {
+                    return Err("Wrong duration format".into());
+                }
+                f = start + digits;
+            }
+        }
+        let value = match bytes.get(f) {
+            Some(b'%') => {
+                output.push('%');
+                f += 1;
+                continue;
+            }
+            Some(b'W') => weeks,
+            Some(b'd') => days - weeks.trunc() * 7.0,
+            Some(b'D') => days,
+            Some(b'h') => hours - days.trunc() * 24.0,
+            Some(b'H') => hours,
+            Some(b'm') => minutes - hours.trunc() * 60.0,
+            Some(b'M') => minutes,
+            Some(b's') => seconds - minutes.trunc() * 60.0,
+            Some(b'S') => seconds,
+            Some(b'f') => duration.abs() - seconds.trunc() * 1000.0,
+            _ => return Err("Wrong duration format".into()),
+        };
+        f += 1;
+        let scale = 10_f64.powi(precision);
+        let pval = (value * scale).trunc() / scale;
+        let spec = format!("%{}{width}.{precision}f", if zpad { "0" } else { "" });
+        output.push_str(&c_printf_double(&spec, pval));
+    }
+    Ok(output)
+}
+
+/// Port of `time_clean`: the strftime format with every conversion
+/// replaced by dashes of the expected width.
+fn time_clean(format: &str) -> String {
+    let bytes = format.as_bytes();
+    let mut result = Vec::with_capacity(bytes.len());
+    let mut j = 0;
+    while j < bytes.len() && j < rondi::graph::FMT_LEG_LEN - 1 {
+        if bytes[j] != b'%' {
+            result.push(bytes[j]);
+            j += 1;
+            continue;
+        }
+        let next = bytes.get(j + 1).copied().unwrap_or(0);
+        match next {
+            b'E' | b'O' => {
+                result.push(b'-');
+                j += 2;
+            }
+            b'C' | b'd' | b'g' | b'H' | b'I' | b'm' | b'M' | b'S' | b'U' | b'V' | b'W' | b'y' => {
+                result.extend_from_slice(b"--");
+                j += 1;
+            }
+            b'j' => {
+                result.extend_from_slice(b"---");
+                j += 1;
+            }
+            b'G' | b'Y' => {
+                result.extend_from_slice(b"----");
+                j += 1;
+            }
+            b'R' => {
+                result.extend_from_slice(b"--:--");
+                j += 1;
+            }
+            b'T' => {
+                result.extend_from_slice(b"--:--:--");
+                j += 1;
+            }
+            b'F' => {
+                result.extend_from_slice(b"----------");
+                j += 1;
+            }
+            b'D' => {
+                result.extend_from_slice(b"--/--/--");
+                j += 1;
+            }
+            b'n' => {
+                result.extend_from_slice(b"\r\n");
+                j += 1;
+            }
+            b't' => {
+                result.push(b'\t');
+                j += 1;
+            }
+            b'%' => {
+                result.push(b'%');
+                j += 1;
+            }
+            b' ' | b'.' | b'@' => {
+                result.push(b'%');
+                result.push(next);
+                j += 1;
+            }
+            _ => {
+                result.push(b'-');
+                j += 1;
+            }
+        }
+        j += 1;
+    }
+    String::from_utf8_lossy(&result).into_owned()
 }
 
 #[derive(Clone)]
@@ -2049,148 +2853,44 @@ struct GraphSeries {
     style: &'static str,
     line_width: f64,
     stack: bool,
-    skip_scale: bool,
     color: Option<[u8; 4]>,
     color2: Option<[u8; 4]>,
     grad_height: f64,
     tick_fraction: f64,
     rule_value: Option<f64>,
     rule_time: Option<i64>,
-    legend: String,
     dash_pattern: Vec<f64>,
     dash_offset: f64,
 }
 
-impl GraphSeries {
-    fn legend_element(style: &'static str, legend: String) -> Self {
-        Self {
-            variable: String::new(),
-            style,
-            legend,
-            line_width: 0.0,
-            stack: false,
-            skip_scale: true,
-            color: None,
-            color2: None,
-            grad_height: 0.0,
-            tick_fraction: 0.0,
-            rule_value: None,
-            rule_time: None,
-            dash_pattern: Vec::new(),
-            dash_offset: 0.0,
-        }
-    }
+/// The canvas, graph area and value range `graph_size_location`,
+/// `data_proc` and `expand_range` computed.
+struct GraphCanvas {
+    width: u32,
+    height: u32,
+    left: u32,
+    top: u32,
+    plot_width: u32,
+    plot_height: u32,
+    minimum: f64,
+    maximum: f64,
 }
 
-fn graph_text_fields(value: &str) -> Vec<String> {
-    let mut fields = vec![String::new()];
-    let mut chars = value.chars().peekable();
-    while let Some(character) = chars.next() {
-        match character {
-            '\\' if chars.peek() == Some(&':') => {
-                chars.next();
-                fields.last_mut().unwrap().push(':');
-            }
-            ':' => fields.push(String::new()),
-            _ => fields.last_mut().unwrap().push(character),
-        }
-    }
-    fields
-}
-
-fn graph_text_argument(
-    definition: &str,
-    prefix: &str,
-    key: &str,
-    missing: &str,
-    empty_named_fallback: bool,
-) -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
-    let value = definition.strip_prefix(prefix).ok_or(missing)?;
-    let mut fields = graph_text_fields(value);
-    let named_prefix = format!("{key}=");
-    let named = fields
-        .iter()
-        .position(|field| field.starts_with(&named_prefix));
-    let value = if let Some(index) = named {
-        let value = fields.remove(index)[named_prefix.len()..].to_owned();
-        if empty_named_fallback && value.is_empty() {
-            if fields.is_empty() {
-                return Err(missing.into());
-            }
-            fields.remove(0)
-        } else {
-            value
-        }
-    } else {
-        fields.remove(0)
-    };
-    Ok((value, fields))
-}
-
-fn reject_unused_graph_text(
-    definition: &str,
-    unused: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
-    if !unused.is_empty() {
-        return Err(format!(
-            "Unused Arguments \"{}\" in command : {definition}",
-            unused.join(":")
-        )
-        .into());
-    }
-    Ok(())
-}
-
-fn parse_graph_comment(definition: &str) -> Result<String, Box<dyn std::error::Error>> {
-    // parse_comment accepts an empty positional legend and removes only the
-    // colon escape. Legend controls remain intact in exported metadata.
-    let (text, unused) = graph_text_argument(
-        definition,
-        "COMMENT:",
-        "legend",
-        "No positional CF/FORMAT",
-        true,
-    )?;
-    reject_unused_graph_text(definition, &unused)?;
-    Ok(text)
-}
-
-fn parse_graph_textalign(definition: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let (alignment, unused) = graph_text_argument(
-        definition,
-        "TEXTALIGN:",
-        "align",
-        "No alignment given",
-        false,
-    )?;
-    if !matches!(
-        alignment.as_str(),
-        "left" | "right" | "center" | "justified"
-    ) {
-        return Err(format!("Unknown alignment type '{alignment}'").into());
-    }
-    reject_unused_graph_text(definition, &unused)?;
-    Ok(alignment)
+/// A legend placed by `leg_place`: the bottom-left pen position of its text.
+struct GraphLegend {
+    x: f64,
+    y: f64,
+    text: String,
+    gdes_index: usize,
 }
 
 struct GraphPngOptions<'a> {
-    width: u32,
-    height: u32,
+    canvas: GraphCanvas,
+    legends: &'a [GraphLegend],
     title: Option<&'a str>,
     vertical_label: Option<&'a str>,
     vertical_label_angle: f64,
-    lower_limit: Option<f64>,
-    upper_limit: Option<f64>,
-    show_legend: bool,
-    rigid_scale: bool,
-    allow_shrink: bool,
-    alt_autoscale: bool,
-    alt_autoscale_min: bool,
-    alt_autoscale_max: bool,
     only_graph: bool,
-    full_size_mode: bool,
-    force_rules_legend: bool,
-    legend_direction: LegendDirection,
     colors: GraphColors,
     grid_dash: Vec<f64>,
     border_width: u32,
@@ -2227,772 +2927,8 @@ impl Default for GraphColors {
     }
 }
 
-impl GraphColors {
-    fn parse_override(&mut self, value: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let (tag, color) = value
-            .split_once('#')
-            .ok_or("--color expects TAG#rrggbb[aa]")?;
-        let color = parse_graph_color(color, value)?;
-        let target = match tag {
-            "BACK" => &mut self.back,
-            "CANVAS" => &mut self.canvas,
-            "SHADEA" => &mut self.shade_a,
-            "SHADEB" => &mut self.shade_b,
-            "GRID" => &mut self.grid,
-            "MGRID" => &mut self.mgrid,
-            "FONT" => &mut self.font,
-            "AXIS" => &mut self.axis,
-            "FRAME" => &mut self.frame,
-            "ARROW" => &mut self.arrow,
-            _ => return Err(format!("unknown graph color tag: {tag}").into()),
-        };
-        *target = color;
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-struct GraphPrint {
-    kind: &'static str,
-    variable: String,
-    consolidation: Option<String>,
-    format: String,
-    formatter: GraphPrintFormatter,
-    export_numeric: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GraphPrintFormatter {
-    Numeric,
-    Strftime,
-    Timestamp,
-    Duration,
-}
-
-struct GraphVdef {
-    name: String,
-    variable: String,
-    function: rondi::VdefFunction,
-    percentile: Option<f64>,
-}
-
-fn parse_graph_vdef(definition: &str) -> Result<GraphVdef, Box<dyn std::error::Error>> {
-    let (name, expression) = definition
-        .strip_prefix("VDEF:")
-        .and_then(|value| value.split_once('='))
-        .ok_or_else(|| format!("invalid VDEF: {definition}"))?;
-    let fields = expression.split(',').collect::<Vec<_>>();
-    if name.is_empty() || fields.len() < 2 || fields.len() > 3 || fields[0].is_empty() {
-        return Err(format!("invalid VDEF: {definition}").into());
-    }
-    let (function_name, percentile) = if fields.len() == 3 {
-        (fields[2], Some(fields[1].parse::<f64>()?))
-    } else {
-        (fields[1], None)
-    };
-    let function = rondi::VdefFunction::parse(function_name)
-        .ok_or_else(|| format!("unsupported VDEF function: {function_name}"))?;
-    Ok(GraphVdef {
-        name: name.to_owned(),
-        variable: fields[0].to_owned(),
-        function,
-        percentile,
-    })
-}
-
-fn parse_graph_print(
-    definition: &str,
-    definitions: &[String],
-) -> Result<GraphPrint, Box<dyn std::error::Error>> {
-    let (directive, body) = definition
-        .split_once(':')
-        .ok_or("invalid graph print element")?;
-    let mut fields = graph_text_fields(body);
-    let mut formatter = GraphPrintFormatter::Numeric;
-    let strftime = fields
-        .iter()
-        .rposition(|field| field == "strftime" || field.starts_with("strftime="));
-    if let Some(index) = strftime {
-        fields.remove(index);
-    }
-    let formatter_index = fields.iter().rposition(|field| {
-        matches!(field.as_str(), "valstrftime" | "valstrfduration")
-            || field.starts_with("vformatter=")
-    });
-    if let Some(index) = formatter_index {
-        let field = fields.remove(index);
-        let value = match field.as_str() {
-            "valstrftime" => "timestamp",
-            "valstrfduration" => "duration",
-            _ => field.strip_prefix("vformatter=").unwrap(),
-        };
-        formatter = match value {
-            "timestamp" => GraphPrintFormatter::Timestamp,
-            "duration" => GraphPrintFormatter::Duration,
-            other => return Err(format!("Unsupported vformatter: {other}").into()),
-        };
-    }
-    let mut remaining = fields;
-    if strftime.is_some() {
-        formatter = GraphPrintFormatter::Strftime;
-    }
-    // newGraphDescription consumes named arguments before parse_gprint
-    // fills missing fields from the remaining positional arguments.
-    let take_named = |fields: &mut Vec<String>, prefix: &str| {
-        fields
-            .iter()
-            .rposition(|field| field.starts_with(prefix))
-            .map(|index| fields.remove(index)[prefix.len()..].to_owned())
-    };
-    let named_variable = remaining.iter().any(|field| field.starts_with("vname="));
-    let variable = take_named(&mut remaining, "vname=")
-        .or_else(|| (!remaining.is_empty()).then(|| remaining.remove(0)))
-        .ok_or("No positional VNAME")?;
-    let is_vdef = definitions
-        .iter()
-        .find_map(|definition| {
-            ["DEF:", "CDEF:", "VDEF:"].iter().find_map(|prefix| {
-                definition
-                    .strip_prefix(prefix)
-                    .and_then(|body| body.split_once('='))
-                    .filter(|(name, _)| *name == variable)
-                    .map(|_| *prefix == "VDEF:")
-            })
-        })
-        .ok_or_else(|| {
-            if named_variable {
-                format!("vname {variable} not found")
-            } else {
-                format!("undefined vname {variable}")
-            }
-        })?;
-    let mut consolidation = take_named(&mut remaining, "cf=");
-    if let Some(cf) = &consolidation {
-        if !matches!(cf.as_str(), "AVERAGE" | "MIN" | "MAX" | "LAST") {
-            return Err(format!("bad CF: {cf}").into());
-        }
-    } else if !is_vdef {
-        let cf = if remaining.is_empty() {
-            return Err("No positional CDEF".into());
-        } else {
-            remaining.remove(0)
-        };
-        if !matches!(cf.as_str(), "AVERAGE" | "MIN" | "MAX" | "LAST") {
-            return Err(format!("bad CF for DEF/CDEF: {cf}").into());
-        }
-        consolidation = Some(cf);
-    }
-    let format = take_named(&mut remaining, "format=")
-        .filter(|value| !value.is_empty())
-        .or_else(|| (!remaining.is_empty()).then(|| remaining.remove(0)))
-        .ok_or("No positional CF/FORMAT")?;
-    reject_unused_graph_text(definition, &remaining)?;
-    let kind = match directive {
-        "PRINT" => "print",
-        "GPRINT" => "gprint",
-        _ => return Err(format!("invalid graph print element: {definition}").into()),
-    };
-    if formatter == GraphPrintFormatter::Numeric && parse_graph_numeric_format(&format).is_err() {
-        return Err(format!("bad format for PRINT in \"{format}'").into());
-    }
-    Ok(GraphPrint {
-        kind,
-        variable: variable.to_owned(),
-        consolidation,
-        format: format.to_owned(),
-        formatter,
-        export_numeric: false,
-    })
-}
-
-fn rrdtool_xport(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    if args.len() == 1 {
-        print!("{}", include_str!("help/xport.txt"));
-        return Ok(());
-    }
-    let (output, _, _, _) = render_xport(args)?;
-    print!("{output}");
-    Ok(())
-}
-
-fn render_xport(args: &[String]) -> Result<(String, i64, i64, u64), Box<dyn std::error::Error>> {
-    render_xport_with_gprints(args, None)
-}
-
-fn render_xport_with_gprints(
-    args: &[String],
-    graph_gprints: Option<&[(String, String)]>,
-) -> Result<(String, i64, i64, u64), Box<dyn std::error::Error>> {
-    let rendered =
-        render_xport_with_graph_prints(args, graph_gprints, &[], GraphPrintOptions::default())?;
-    Ok((rendered.output, rendered.start, rendered.end, rendered.step))
-}
-
-struct RenderedGraphXport {
-    output: String,
-    start: i64,
-    end: i64,
-    step: u64,
-    prints: Vec<String>,
-    gprint_values: std::collections::HashMap<usize, String>,
-    vdef_values: std::collections::HashMap<String, rondi::VdefResult>,
-    variables: Vec<String>,
-    rows: Vec<Vec<Option<f64>>>,
-}
-
-fn render_xport_with_graph_prints(
-    args: &[String],
-    graph_gprints: Option<&[(String, String)]>,
-    graph_prints: &[GraphPrint],
-    print_options: GraphPrintOptions,
-) -> Result<RenderedGraphXport, Box<dyn std::error::Error>> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64;
-    let mut start = None::<String>;
-    let mut end = None::<String>;
-    let mut max_rows = 400_i64;
-    let mut requested_step = 0_i64;
-    let mut daemon_address = None::<String>;
-    let mut json = false;
-    let mut show_time = false;
-    let mut enum_ds = false;
-    let mut definitions = Vec::<rondi::RrdXportDefinition>::new();
-    let mut cdefs = Vec::<rondi::RrdXportCdef>::new();
-    let mut operations = Vec::<rondi::RrdXportOperation>::new();
-    let mut vdefs = Vec::<GraphVdef>::new();
-    let mut exports = Vec::<rondi::RrdXportColumn>::new();
-    let mut index = 1;
-    while index < args.len() {
-        let argument = &args[index];
-        match argument.as_str() {
-            "--start" | "-s" | "--end" | "-e" | "--maxrows" | "-m" | "--step" | "-S" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| format!("option {argument} requires a value"))?;
-                match argument.as_str() {
-                    "--start" | "-s" => start = Some(value.clone()),
-                    "--end" | "-e" => end = Some(value.clone()),
-                    "--maxrows" | "-m" => max_rows = value.parse()?,
-                    _ => requested_step = value.parse()?,
-                }
-                index += 2;
-            }
-            "--json" => {
-                json = true;
-                index += 1;
-            }
-            "--showtime" | "-t" => {
-                show_time = true;
-                index += 1;
-            }
-            "--enumds" => {
-                enum_ds = true;
-                index += 1;
-            }
-            "--daemon" | "-d" => {
-                let address = args
-                    .get(index + 1)
-                    .ok_or("xport --daemon requires an address")?;
-                if daemon_address.is_some() {
-                    return Err("You cannot specify --daemon more than once.".into());
-                }
-                daemon_address = Some(address.clone());
-                index += 2;
-            }
-            option if option.starts_with("--daemon=") => {
-                if daemon_address.is_some() {
-                    return Err("You cannot specify --daemon more than once.".into());
-                }
-                daemon_address = Some(option["--daemon=".len()..].to_owned());
-                index += 1;
-            }
-            value if value.starts_with("DEF:") => {
-                let definition = &value[4..];
-                let (name, source) = definition
-                    .split_once('=')
-                    .ok_or_else(|| format!("invalid DEF: {value}"))?;
-                let mut fields = source.rsplitn(3, ':');
-                let consolidation = fields.next().unwrap_or_default();
-                let data_source = fields.next().unwrap_or_default();
-                let file = fields.next().unwrap_or_default();
-                if name.is_empty()
-                    || file.is_empty()
-                    || data_source.is_empty()
-                    || consolidation.is_empty()
-                {
-                    return Err(format!("invalid DEF: {value}").into());
-                }
-                definitions.push(rondi::RrdXportDefinition {
-                    name: name.to_owned(),
-                    file: PathBuf::from(file),
-                    data_source: data_source.to_owned(),
-                    consolidation: consolidation.to_ascii_uppercase(),
-                });
-                index += 1;
-            }
-            value if value.starts_with("XPORT:") => {
-                let mut fields = value[6..].splitn(2, ':');
-                let name = fields.next().unwrap_or_default();
-                let legend = fields.next().unwrap_or_default();
-                exports.push(rondi::RrdXportColumn {
-                    variable: name.to_owned(),
-                    legend: legend.trim_matches('"').to_owned(),
-                });
-                index += 1;
-            }
-            value if value.starts_with("CDEF:") => {
-                let (name, expression) = value[5..]
-                    .split_once('=')
-                    .ok_or_else(|| format!("invalid CDEF: {value}"))?;
-                if name.is_empty() || expression.is_empty() {
-                    return Err(format!("invalid CDEF: {value}").into());
-                }
-                let input_names: Vec<_> = expression
-                    .split(',')
-                    .map(|token| {
-                        token
-                            .strip_prefix("PREV(")
-                            .and_then(|name| name.strip_suffix(')'))
-                            .unwrap_or(token)
-                    })
-                    .collect();
-                if input_names
-                    .iter()
-                    .any(|name| vdefs.iter().any(|vdef| vdef.name == *name))
-                    && !input_names.iter().any(|name| {
-                        definitions.iter().any(|def| def.name == *name)
-                            || cdefs.iter().any(|cdef| cdef.name == *name)
-                    })
-                {
-                    return Err(
-                        "rpn expressions without DEF or CDEF variables are not supported".into(),
-                    );
-                }
-                let cdef = rondi::RrdXportCdef {
-                    name: name.to_owned(),
-                    expression: expression.to_owned(),
-                };
-                operations.push(rondi::RrdXportOperation::Cdef(cdef.clone()));
-                cdefs.push(cdef);
-                index += 1;
-            }
-            value if value.starts_with("SHIFT:") => {
-                let (variable, offset) = value[6..].split_once(':').ok_or("No shift given")?;
-                if vdefs.iter().any(|definition| definition.name == variable) {
-                    return Err(
-                        format!("Cannot shift a VDEF: '{variable}' in line '{value}'\n").into(),
-                    );
-                }
-                if !definitions
-                    .iter()
-                    .any(|definition| definition.name == variable)
-                    && !cdefs.iter().any(|definition| definition.name == variable)
-                {
-                    return Err(format!("vname {variable} not found").into());
-                }
-                let offset = offset.strip_prefix("shift=").unwrap_or(offset);
-                let offset = if vdefs.iter().any(|definition| definition.name == offset) {
-                    rondi::RrdXportShift::Vdef(offset.to_owned())
-                } else if definitions
-                    .iter()
-                    .any(|definition| definition.name == offset)
-                    || cdefs.iter().any(|definition| definition.name == offset)
-                {
-                    return Err(format!(
-                        "Offset cannot be a (C)DEF: '{offset}' in line '{value}'\n"
-                    )
-                    .into());
-                } else {
-                    let number = std::ffi::CString::new(offset)?;
-                    let mut end = std::ptr::null_mut();
-                    // SAFETY: number is NUL-terminated and strtol writes its
-                    // end pointer into valid storage without retaining it.
-                    let seconds = unsafe { libc::strtol(number.as_ptr(), &mut end, 10) };
-                    let terminator = number.as_ptr().wrapping_add(number.as_bytes().len());
-                    if end == number.as_ptr().cast_mut() || end != terminator.cast_mut() {
-                        return Err(format!("error parsing number {offset}").into());
-                    }
-                    rondi::RrdXportShift::Seconds(seconds as i64)
-                };
-                operations.push(rondi::RrdXportOperation::Shift {
-                    variable: variable.to_owned(),
-                    offset,
-                });
-                index += 1;
-            }
-            value if value.starts_with("VDEF:") => {
-                let vdef = parse_graph_vdef(value)?;
-                operations.push(rondi::RrdXportOperation::Vdef {
-                    name: vdef.name.clone(),
-                    variable: vdef.variable.clone(),
-                    function: vdef.function,
-                    percentile: vdef.percentile,
-                });
-                vdefs.push(vdef);
-                index += 1;
-            }
-            value if value.starts_with('-') => {
-                return Err(format!("unsupported xport option: {value}").into());
-            }
-            value => return Err(format!("unexpected xport argument: {value}").into()),
-        }
-    }
-    if exports.is_empty() {
-        return Err("no XPORT found, nothing to do".into());
-    }
-    if definitions.is_empty() {
-        return Err("xport requires at least one DEF".into());
-    }
-    let (start, end) = resolve_rrd_range_times(
-        start.as_deref(),
-        end.as_deref(),
-        now - 24 * 60 * 60,
-        now,
-        now,
-    )?;
-    if start < 315_360_000 {
-        return Err(format!("the first entry to fetch should be after 1980 ({start})").into());
-    }
-    let visible_export_count = exports.len();
-    if let Some(address) = daemon_address
-        .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
-        .filter(|address| !address.is_empty())
-    {
-        let mut flushed = std::collections::HashSet::new();
-        for definition in &definitions {
-            let filename = definition.file.to_string_lossy().into_owned();
-            if flushed.insert(filename.clone()) {
-                send_rrdcached_flush(&address, &filename)?;
-            }
-        }
-    }
-    for variable in vdefs.iter().map(|vdef| vdef.variable.as_str()).chain(
-        graph_prints
-            .iter()
-            .filter(|print| !vdefs.iter().any(|vdef| vdef.name == print.variable))
-            .map(|print| print.variable.as_str()),
-    ) {
-        if !exports.iter().any(|export| export.variable == variable) {
-            exports.push(rondi::RrdXportColumn {
-                variable: variable.to_owned(),
-                legend: String::new(),
-            });
-        }
-    }
-    let mut result = rondi::fetch_xport_with_operations(
-        &definitions,
-        &operations,
-        &exports,
-        start,
-        end,
-        requested_step.max(0) as u64,
-        max_rows.max(0) as u64,
-    )?;
-    let vdef_values = std::mem::take(&mut result.vdef_values);
-    let mut graph_gprints_out = graph_gprints.unwrap_or_default().to_vec();
-    let mut print_values = Vec::new();
-    let mut gprint_values = std::collections::HashMap::new();
-    let mut metadata_print_values = Vec::new();
-    let mut console_si = GraphSiState::default();
-    let mut metadata_si = GraphSiState::default();
-    for (print_index, graph_print) in graph_prints.iter().enumerate() {
-        let (value, timestamp) = if let Some(value) = vdef_values.get(&graph_print.variable) {
-            (value.value, value.timestamp)
-        } else {
-            if graph_print.formatter == GraphPrintFormatter::Strftime {
-                return Err(
-                    "strftime graph printing requires a VDEF in this implementation".into(),
-                );
-            }
-            let consolidation = graph_print.consolidation.as_deref().ok_or_else(|| {
-                format!(
-                    "PRINT/GPRINT variable {} is not a VDEF",
-                    graph_print.variable
-                )
-            })?;
-            // rrd_graph.c/rrd_xport.c reduce the complete native buffer,
-            // including its right-edge calculation, before export truncation.
-            let summary = result
-                .summaries
-                .get(&graph_print.variable)
-                .ok_or_else(|| format!("unknown graph print variable {}", graph_print.variable))?;
-            let value = match consolidation {
-                "AVERAGE" => summary.average,
-                "MIN" => summary.minimum,
-                "MAX" => summary.maximum,
-                "LAST" => summary.last,
-                _ => unreachable!(),
-            }
-            .unwrap_or_else(rrd_nan);
-            (value, None)
-        };
-        let metadata = if graph_print.formatter == GraphPrintFormatter::Numeric
-            || graph_print.export_numeric
-        {
-            format_graph_numeric_impl(
-                value,
-                &graph_print.format,
-                true,
-                print_options.base,
-                &mut metadata_si,
-            )?
-        } else {
-            format_graph_print(
-                value,
-                timestamp,
-                graph_print.formatter,
-                &graph_print.format,
-                GraphPrintOptions {
-                    utc: false,
-                    ..print_options
-                },
-                &mut metadata_si,
-            )?
-        };
-        // Export formatting mutates %S into %s before console print_calc runs.
-        let console_format = if print_options.export
-            && (graph_print.formatter == GraphPrintFormatter::Numeric || graph_print.export_numeric)
-        {
-            graph_print.format.replacen("%S", "%s", 1)
-        } else {
-            graph_print.format.clone()
-        };
-        let formatted = format_graph_print(
-            value,
-            timestamp,
-            graph_print.formatter,
-            &console_format,
-            print_options,
-            &mut console_si,
-        )?;
-        if graph_print.kind == "gprint" {
-            gprint_values.insert(print_index, formatted);
-            if let Some(entry) = graph_gprints_out
-                .iter_mut()
-                .find(|(kind, index)| kind == "__gprint" && index == &print_index.to_string())
-            {
-                *entry = (String::from("gprint"), metadata);
-            } else {
-                graph_gprints_out.push((String::from("gprint"), metadata));
-            }
-        } else {
-            print_values.push(formatted);
-            metadata_print_values.push(metadata);
-        }
-    }
-    exports.truncate(visible_export_count);
-    for row in &mut result.rows {
-        row.truncate(visible_export_count);
-    }
-    let output = if json {
-        format_xport_json(
-            result.start,
-            result.end,
-            result.step,
-            &exports,
-            &result.rows,
-            XportFormatOptions {
-                show_time,
-                enum_ds: false,
-                graph_gprints: Some(&graph_gprints_out),
-                graph_prints: Some(&metadata_print_values),
-            },
-        )
-    } else {
-        format_xport_xml(
-            result.start,
-            result.end,
-            result.step,
-            &exports,
-            &result.rows,
-            XportFormatOptions {
-                show_time,
-                enum_ds,
-                graph_gprints: Some(&graph_gprints_out),
-                graph_prints: Some(&metadata_print_values),
-            },
-        )
-    };
-    Ok(RenderedGraphXport {
-        output,
-        start: result.start,
-        end: result.end,
-        step: result.step,
-        prints: print_values,
-        gprint_values,
-        vdef_values,
-        variables: exports
-            .iter()
-            .map(|export| export.variable.clone())
-            .collect(),
-        rows: result.rows,
-    })
-}
-
-struct LegendEntry {
-    series_index: usize,
-    text: String,
-    width: u32,
-}
-
-struct LegendRow {
-    entries: Vec<LegendEntry>,
-    alignment: &'static str,
-    offset: i64,
-}
-
-fn prepare_legend_rows(
-    series: &[GraphSeries],
-    minimum: f64,
-    maximum: f64,
-    start: i64,
-    end: i64,
-    force_rules: bool,
-) -> Result<Vec<LegendRow>, Box<dyn std::error::Error>> {
-    let mut rows = Vec::new();
-    let mut entries = Vec::new();
-    let mut default_alignment = "left";
-    let mut offset = 0_i64;
-    for (series_index, item) in series.iter().enumerate() {
-        if item.style == "textalign" {
-            default_alignment = match item.legend.as_str() {
-                "right" => "right",
-                "center" => "center",
-                "justified" => "justified",
-                _ => "left",
-            };
-            continue;
-        }
-        if item.color.is_none() && !matches!(item.style, "comment" | "gprint") {
-            continue;
-        }
-        if !force_rules
-            && matches!(item.style, "hrule" | "vrule")
-            && !item
-                .rule_value
-                .is_some_and(|value| (minimum..=maximum).contains(&value))
-            && !item
-                .rule_time
-                .is_some_and(|time| (start..=end).contains(&time))
-        {
-            continue;
-        }
-        let mut text = item.legend.replace("\\t", "    ");
-        let control = if text.len() >= 2 && text.as_bytes()[text.len() - 2] == b'\\' {
-            let code = text.chars().last().unwrap();
-            text.truncate(text.len() - 2);
-            match code {
-                'l' | 'n' | 'r' | 'c' | 'j' | 'g' | '.' | 's' | 'u' => code,
-                _ => {
-                    return Err(
-                        format!("Unknown control code at the end of '{text}\\{code}'").into(),
-                    );
-                }
-            }
-        } else {
-            '\0'
-        };
-        if control == 'g' {
-            text.truncate(text.trim_end_matches(' ').len());
-        }
-        let text = ascii_text(&text);
-        if !text.is_empty() {
-            let text_width = u32::try_from(text.len())
-                .ok()
-                .and_then(|length| length.checked_mul(8))
-                .ok_or("PNG legend text width overflows")?;
-            let width = text_width
-                .checked_add(if item.color.is_some() {
-                    if control == 'g' { 13 } else { 27 }
-                } else {
-                    0
-                })
-                .ok_or("PNG legend entry width overflows")?;
-            entries.push(LegendEntry {
-                series_index,
-                text,
-                width,
-            });
-        }
-        let alignment = match control {
-            'l' | 'n' => Some("left"),
-            'r' => Some("right"),
-            'c' => Some("center"),
-            'j' => Some("justified"),
-            's' | 'u' => Some(default_alignment),
-            _ => None,
-        };
-        if let Some(alignment) = alignment {
-            let has_text = !entries.is_empty();
-            rows.push(LegendRow {
-                entries: std::mem::take(&mut entries),
-                alignment,
-                offset,
-            });
-            // leg_place advances only for nonempty text, except that \s
-            // also advances an empty row. Use the bitmap font's 12px line
-            // advance and 7px font size; Pango measurements remain separate.
-            if has_text || control == 's' {
-                offset += 12;
-            }
-            if control == 's' {
-                offset -= 7;
-            }
-            if control == 'u' {
-                offset -= 12;
-            }
-        }
-    }
-    if !entries.is_empty() {
-        rows.push(LegendRow {
-            entries,
-            alignment: default_alignment,
-            offset,
-        });
-    }
-    Ok(rows)
-}
-
-fn legend_reversal_bounds(
-    rows: &[LegendRow],
-    series: &[GraphSeries],
-    direction: LegendDirection,
-) -> Option<(i64, i64, usize, usize)> {
-    if direction == LegendDirection::TopDown {
-        return None;
-    }
-    // grid_paint locates the first/last nonempty legend by script index.
-    // bottomup2 excludes comments before the first and after the last
-    // non-comment element; comments between those endpoints also reverse.
-    let entries: Vec<_> = rows
-        .iter()
-        .flat_map(|row| {
-            row.entries
-                .iter()
-                .map(move |entry| (row.offset, entry.series_index))
-        })
-        .filter(|(_, index)| {
-            direction != LegendDirection::BottomUp2 || series[*index].style != "comment"
-        })
-        .collect();
-    let first = entries.iter().min_by_key(|(_, index)| *index)?;
-    let last = entries.iter().max_by_key(|(_, index)| *index)?;
-    Some((
-        first.0,
-        last.0,
-        if direction == LegendDirection::BottomUp {
-            0
-        } else {
-            first.1
-        },
-        if direction == LegendDirection::BottomUp {
-            usize::MAX
-        } else {
-            last.1
-        },
-    ))
-}
+const PNG_MAX_DIMENSION: u32 = 4096;
+const PNG_DIMENSION_LIMIT_MESSAGE: &str = "PNG graph dimensions exceed the 4096 pixel safety limit";
 
 fn render_graph_png(
     graph: &RenderedGraphXport,
@@ -3000,110 +2936,29 @@ fn render_graph_png(
     options: GraphPngOptions<'_>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let GraphPngOptions {
-        width,
-        height,
+        canvas,
+        legends,
         title,
         vertical_label,
         vertical_label_angle,
-        lower_limit,
-        upper_limit,
-        show_legend,
-        rigid_scale,
-        allow_shrink,
-        alt_autoscale,
-        alt_autoscale_min,
-        alt_autoscale_max,
         only_graph,
-        full_size_mode,
-        force_rules_legend,
-        legend_direction,
         colors,
         grid_dash,
         border_width,
     } = options;
-    if width < 10 {
-        return Err("width below 10 pixels".into());
+    let GraphCanvas {
+        width: canvas_width,
+        height: canvas_height,
+        left: plot_left,
+        top: plot_top,
+        plot_width: width,
+        plot_height: height,
+        minimum,
+        maximum,
+    } = canvas;
+    if canvas_width > PNG_MAX_DIMENSION || canvas_height > PNG_MAX_DIMENSION {
+        return Err(PNG_DIMENSION_LIMIT_MESSAGE.into());
     }
-    if height < 10 {
-        return Err("height below 10 pixels".into());
-    }
-    if width > 4096 || height > 4096 {
-        return Err("PNG graph dimensions exceed the 4096 pixel safety limit".into());
-    }
-    let (minimum, maximum) = graph_scale_bounds(
-        graph_value_bounds(graph, series),
-        GraphScaleOptions {
-            lower_limit,
-            upper_limit,
-            rigid: rigid_scale,
-            allow_shrink,
-            alternate: alt_autoscale,
-            alternate_min: alt_autoscale_min,
-            alternate_max: alt_autoscale_max,
-        },
-    )?;
-    // RRDtool treats these as plot dimensions unless full-size mode is set.
-    // only-graph suppresses every margin and label around the plot.
-    let legend_rows = if !only_graph && show_legend {
-        prepare_legend_rows(
-            series,
-            minimum,
-            maximum,
-            graph.start,
-            graph.end,
-            force_rules_legend,
-        )?
-    } else {
-        Vec::new()
-    };
-    if legend_rows.len() > 256 {
-        return Err("PNG legend exceeds the 256 row safety limit".into());
-    }
-    let has_legend = !legend_rows.is_empty();
-    let horizontal_margin = if only_graph {
-        0
-    } else {
-        81 + if vertical_label.is_some() { 16 } else { 0 }
-    };
-    let vertical_margin = if only_graph {
-        0
-    } else {
-        (if has_legend {
-            55 + legend_rows
-                .iter()
-                .map(|row| row.offset.max(0) as u32)
-                .max()
-                .unwrap_or(0)
-        } else {
-            39
-        }) + if title.is_some() { 13 } else { 0 }
-    };
-    let (width, height) = if full_size_mode {
-        let plot_width = width
-            .checked_sub(horizontal_margin)
-            .ok_or("full-size width leaves no graph area")?;
-        let plot_height = height
-            .checked_sub(vertical_margin)
-            .ok_or("full-size height leaves no graph area")?;
-        if plot_width < 10 || plot_height < 10 {
-            return Err("full-size dimensions leave less than 10 pixels for the graph".into());
-        }
-        (plot_width, plot_height)
-    } else {
-        (width, height)
-    };
-    let plot_left = if only_graph {
-        0
-    } else {
-        51 + if vertical_label.is_some() { 16 } else { 0 }
-    };
-    let plot_top = if only_graph {
-        0
-    } else {
-        15 + if title.is_some() { 13 } else { 0 }
-    };
-    let canvas_width = width + horizontal_margin;
-    let canvas_height = height + vertical_margin;
     let pixel_count = usize::try_from(canvas_width)
         .ok()
         .and_then(|width| {
@@ -3244,24 +3099,19 @@ fn render_graph_png(
         }
     }
     let prepared_series = prepare_graph_series(graph, series);
-    // rrd_graph.c paints rules after every LINE/AREA/TICK, irrespective of
-    // their position in the script. Keep the original order within each pass.
-    let drawing_order = series
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| !matches!(item.style, "hrule" | "vrule"))
-        .chain(
-            series
-                .iter()
-                .enumerate()
-                .filter(|(_, item)| matches!(item.style, "hrule" | "vrule")),
-        );
-    for (series_index, item) in drawing_order {
+    // graph_paint_timestring paints every HRULE and VRULE after the data, so
+    // a rule defined before a LINE still covers it.
+    let is_rule = |item: &GraphSeries| matches!(item.style, "hrule" | "vrule");
+    let paint_order = (0..series.len())
+        .filter(|&index| !is_rule(&series[index]))
+        .chain((0..series.len()).filter(|&index| is_rule(&series[index])));
+    for series_index in paint_order {
+        let item = &series[series_index];
         let prepared = &prepared_series[series_index];
         let color = item.color.unwrap_or([0, 0, 0, 0]);
         if item.style == "hrule" {
             let value = item.rule_value.expect("HRULE carries a numeric value");
-            if !value.is_finite() || value < minimum || value > maximum {
+            if value < minimum || value > maximum {
                 continue;
             }
             let y = y_for(value);
@@ -3443,98 +3293,40 @@ fn render_graph_png(
             }
         }
     }
-    if has_legend {
-        let reversal = legend_reversal_bounds(&legend_rows, series, legend_direction);
-        for row in &legend_rows {
-            let fill: u32 = row.entries.iter().map(|entry| entry.width).sum();
-            let spare = width.saturating_sub(fill);
-            let glue = if row.alignment == "justified" && row.entries.len() > 1 {
-                spare / (row.entries.len() as u32 - 1)
-            } else {
-                0
-            };
-            let mut x = match row.alignment {
-                "right" => left + spare,
-                "center" => left + spare / 2,
-                _ => left,
-            };
-            for entry in &row.entries {
-                let offset = if let Some((minimum, maximum, first, last)) = reversal {
-                    if (first..=last).contains(&entry.series_index) {
-                        minimum + maximum - row.offset
-                    } else {
-                        row.offset
-                    }
-                } else {
-                    row.offset
-                };
-                let y = (i64::from(bottom) + 26 + offset).max(0) as u32;
-                let item = &series[entry.series_index];
-                let sample_x = x;
-                let text_x = if let Some(color) = item.color {
-                    draw_styled_line(
-                        &mut pixels,
-                        canvas_width,
-                        canvas_height,
-                        (x, y.saturating_sub(3)),
-                        (x + 10, y.saturating_sub(3)),
-                        DashStroke {
-                            color,
-                            pattern: &item.dash_pattern,
-                            offset: item.dash_offset,
-                            width: item.line_width,
-                        },
-                    );
-                    if item.style == "tick" && colors.frame[3] > 0 {
-                        draw_line(
-                            &mut pixels,
-                            canvas_width,
-                            canvas_height,
-                            (sample_x.saturating_sub(1), y.saturating_sub(5)),
-                            (sample_x + 11, y.saturating_sub(5)),
-                            colors.frame,
-                        );
-                        draw_line(
-                            &mut pixels,
-                            canvas_width,
-                            canvas_height,
-                            (sample_x.saturating_sub(1), y + 1),
-                            (sample_x + 11, y + 1),
-                            colors.frame,
-                        );
-                        draw_line(
-                            &mut pixels,
-                            canvas_width,
-                            canvas_height,
-                            (sample_x.saturating_sub(1), y.saturating_sub(5)),
-                            (sample_x.saturating_sub(1), y + 1),
-                            colors.frame,
-                        );
-                        draw_line(
-                            &mut pixels,
-                            canvas_width,
-                            canvas_height,
-                            (sample_x + 11, y.saturating_sub(5)),
-                            (sample_x + 11, y + 1),
-                            colors.frame,
-                        );
-                    }
-                    x + 13
-                } else {
-                    x
-                };
-                draw_text(
+    for legend in legends {
+        let x = legend.x.max(0.0) as u32;
+        let y = legend.y.max(0.0) as u32;
+        let item = series
+            .iter()
+            .find(|item| item.variable == format!("#{}", legend.gdes_index));
+        let text_x = match item.and_then(|item| item.color.map(|color| (item, color))) {
+            Some((item, color)) => {
+                draw_styled_line(
                     &mut pixels,
                     canvas_width,
                     canvas_height,
-                    text_x,
-                    y.saturating_sub(7),
-                    &entry.text,
-                    colors.font,
+                    (x, y.saturating_sub(4)),
+                    (x + 10, y.saturating_sub(4)),
+                    DashStroke {
+                        color,
+                        pattern: &item.dash_pattern,
+                        offset: item.dash_offset,
+                        width: item.line_width.max(1.0),
+                    },
                 );
-                x = x.saturating_add(entry.width).saturating_add(glue);
+                x + 13
             }
-        }
+            None => x,
+        };
+        draw_text(
+            &mut pixels,
+            canvas_width,
+            canvas_height,
+            text_x,
+            y.saturating_sub(9),
+            &ascii_text(legend.text.trim_start_matches(' ')),
+            colors.font,
+        );
     }
     if border_width > 0 && !only_graph {
         for border in 0..border_width.min(canvas_width.min(canvas_height) / 2) {
@@ -3645,6 +3437,13 @@ fn format_imginfo(
     width: u32,
     height: u32,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    // bad_format_imginfo (rrd_graph.c:5880).
+    let bad_format = || -> Box<dyn std::error::Error> {
+        format!(
+            "invalid format string '{format}' (should match '^(?:[^%]+|%%)*%s(?:[^%]+|%%)*%lu(?:[^%]+|%%)*%lu(?:[^%]+|%%)*$')"
+        )
+        .into()
+    };
     let mut output = String::new();
     let mut chars = format.chars().peekable();
     let mut argument = 0;
@@ -3653,7 +3452,7 @@ fn format_imginfo(
             output.push(character);
             continue;
         }
-        let conversion = chars.next().ok_or("invalid --imginfo format")?;
+        let conversion = chars.next().ok_or_else(bad_format)?;
         if conversion == '%' {
             output.push('%');
             continue;
@@ -3662,13 +3461,13 @@ fn format_imginfo(
             (0, 's') => filename.to_owned(),
             (1, 'l') if chars.next() == Some('u') => width.to_string(),
             (2, 'l') if chars.next() == Some('u') => height.to_string(),
-            _ => return Err("--imginfo format must use %s, %lu, and %lu in that order".into()),
+            _ => return Err(bad_format()),
         };
         output.push_str(&value);
         argument += 1;
     }
     if argument != 3 {
-        return Err("--imginfo format must use %s, %lu, and %lu in that order".into());
+        return Err(bad_format());
     }
     Ok(output)
 }
@@ -3680,99 +3479,6 @@ fn tick_mark_range(top: u32, bottom: u32, height: u32, fraction: f64) -> (u32, u
     } else {
         (bottom - height, bottom)
     }
-}
-
-fn graph_value_bounds(graph: &RenderedGraphXport, series: &[GraphSeries]) -> (f64, f64) {
-    let prepared = prepare_graph_series(graph, series);
-    let (mut minimum, mut maximum) = (f64::INFINITY, f64::NEG_INFINITY);
-    for (item, prepared_series) in series.iter().zip(&prepared) {
-        if item.skip_scale || item.style == "tick" {
-            continue;
-        }
-        if item.rule_value.is_some() || item.rule_time.is_some() {
-            continue;
-        }
-        for value in prepared_series.values.iter().flatten().copied() {
-            minimum = minimum.min(value);
-            maximum = maximum.max(value);
-        }
-    }
-    if minimum.is_finite() && maximum.is_finite() {
-        (minimum, maximum)
-    } else {
-        (0.0, 1.0)
-    }
-}
-
-struct GraphScaleOptions {
-    lower_limit: Option<f64>,
-    upper_limit: Option<f64>,
-    rigid: bool,
-    allow_shrink: bool,
-    alternate: bool,
-    alternate_min: bool,
-    alternate_max: bool,
-}
-
-fn graph_scale_bounds(
-    (data_minimum, data_maximum): (f64, f64),
-    options: GraphScaleOptions,
-) -> Result<(f64, f64), &'static str> {
-    let GraphScaleOptions {
-        lower_limit,
-        upper_limit,
-        rigid,
-        allow_shrink,
-        alternate,
-        alternate_min,
-        alternate_max,
-    } = options;
-    let mut minimum = lower_limit.map_or(data_minimum, |lower| {
-        if !rigid && lower > data_minimum {
-            data_minimum
-        } else {
-            lower
-        }
-    });
-    let mut maximum = upper_limit.map_or(data_maximum, |upper| {
-        if !rigid && upper < data_maximum {
-            data_maximum
-        } else {
-            upper
-        }
-    });
-    if rigid && allow_shrink {
-        if lower_limit.is_some_and(|lower| lower < data_minimum) {
-            minimum = data_minimum;
-        }
-        if upper_limit.is_some_and(|upper| upper > data_maximum) {
-            maximum = data_maximum;
-        }
-    }
-    if minimum > maximum || (lower_limit.is_some() && upper_limit.is_some() && minimum == maximum) {
-        return Err("graph lower limit must be less than upper limit");
-    }
-    if minimum == maximum {
-        let padding = minimum.abs().max(1.0) * 0.05;
-        if lower_limit.is_some() {
-            maximum += padding;
-        } else if upper_limit.is_some() {
-            minimum -= padding;
-        } else {
-            minimum -= padding;
-            maximum += padding;
-        }
-    }
-    let span = maximum - minimum;
-    if alternate {
-        minimum -= span * 0.1;
-        maximum += span * 0.1;
-    } else if alternate_min {
-        minimum -= span * 0.1;
-    } else if alternate_max {
-        maximum += span * 0.1;
-    }
-    Ok((minimum, maximum))
 }
 
 struct PreparedGraphSeries {
@@ -3788,15 +3494,6 @@ fn prepare_graph_series(
     let mut previous_values = vec![Some(0.0); graph.rows.len()];
     let mut has_previous_graph = false;
     for item in series {
-        // Legend/rule elements have no sampled values and must not allocate
-        // row-sized buffers for each COMMENT/GPRINT in a large export.
-        if !matches!(item.style, "line" | "area" | "tick") {
-            prepared.push(PreparedGraphSeries {
-                values: Vec::new(),
-                baseline: Vec::new(),
-            });
-            continue;
-        }
         let mut values = vec![None; graph.rows.len()];
         let mut baseline = vec![None; graph.rows.len()];
         let column = graph
@@ -4000,6 +3697,17 @@ fn draw_line_with_width(
         draw_line(pixels, width, height, start, end, color);
         return;
     }
+    // rrd_graph_helper.c only rejects negative widths and leaves the rest to
+    // cairo_set_line_width. A stroke whose half width reaches past every
+    // corner covers the whole surface, which is what Cairo paints.
+    if stroke_width / 2.0 >= f64::from(width).hypot(f64::from(height)) {
+        for py in 0..height {
+            for px in 0..width {
+                set_pixel(pixels, width, height, px, py, color);
+            }
+        }
+        return;
+    }
     let radius = (stroke_width / 2.0).ceil() as i32;
     let mut x = start.0 as i32;
     let mut y = start.1 as i32;
@@ -4116,317 +3824,88 @@ fn draw_styled_line(
     f64::from(distance)
 }
 
-struct XportFormatOptions<'a> {
-    show_time: bool,
-    enum_ds: bool,
-    graph_gprints: Option<&'a [(String, String)]>,
-    graph_prints: Option<&'a [String]>,
-}
-
-#[derive(Clone, Copy)]
-struct GraphPrintOptions {
+/// SI scaling state that RRDtool's print_calc shares across every PRINT and
+/// GPRINT of one graph.
+struct GraphSiScale {
     base: u32,
-    utc: bool,
-    export: bool,
-}
-
-impl Default for GraphPrintOptions {
-    fn default() -> Self {
-        Self {
-            base: 1000,
-            utc: false,
-            export: false,
-        }
-    }
-}
-
-#[derive(Default)]
-struct GraphSiState {
-    factor: Option<f64>,
+    magnitude: Option<f64>,
     symbol: &'static str,
 }
 
-fn format_graph_print(
+impl GraphSiScale {
+    fn new(base: u32) -> Self {
+        Self {
+            base,
+            magnitude: None,
+            symbol: "",
+        }
+    }
+}
+
+/// Which printf formats a PRINT value: print_calc uses the C library
+/// (`sprintf_alloc`, locale aware) and rrd_xport.c:1235 uses `rrd_snprintf`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GraphPrintf {
+    Libc,
+    Rrd,
+}
+
+/// Format one numeric PRINT/GPRINT value. Like print_calc and rrd_xport.c,
+/// this rewrites the element's first "%S" to "%s" in place, so a later pass
+/// over the same element (graphv's xport, then print_calc) scales afresh.
+fn format_graph_numeric(
     value: f64,
-    timestamp: Option<i64>,
-    formatter: GraphPrintFormatter,
-    format: &str,
-    options: GraphPrintOptions,
-    si: &mut GraphSiState,
-) -> Result<String, Box<dyn std::error::Error>> {
-    match formatter {
-        GraphPrintFormatter::Numeric => {
-            format_graph_numeric_impl(value, format, false, options.base, si)
-        }
-        GraphPrintFormatter::Timestamp => format_graph_value_timestamp(value, format),
-        GraphPrintFormatter::Duration => format_graph_duration(value, format),
-        GraphPrintFormatter::Strftime => match timestamp {
-            Some(timestamp) => format_graph_time(timestamp, format, options.utc),
-            None => Ok(clean_graph_time_format(format)),
-        },
-    }
-}
-
-fn format_graph_value_timestamp(
-    value: f64,
-    format: &str,
-) -> Result<String, Box<dyn std::error::Error>> {
-    // timestamp_to_tm truncates the value to whole seconds and uses UTC,
-    // unlike strftime's local-time rendering of the VDEF's event timestamp.
-    if !value.is_finite() || value < i64::MIN as f64 || value >= -(i64::MIN as f64) {
-        return graph_value_printf(value, c"%.0f");
-    }
-    let seconds = value as libc::time_t;
-    let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
-    // SAFETY: gmtime_r writes to valid storage and retains neither pointer.
-    if unsafe { libc::gmtime_r(&seconds, tm.as_mut_ptr()) }.is_null() {
-        return graph_value_printf(value, c"%.0f");
-    }
-    let format = std::ffi::CString::new(if format.is_empty() {
-        "%Y-%m-%d %H:%M:%S"
-    } else {
-        format
-    })?;
-    let mut buffer = [0_u8; 200];
-    // SAFETY: gmtime_r initialized tm; the format and output buffer are valid.
-    let length = unsafe {
-        libc::strftime(
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-            format.as_ptr(),
-            tm.as_ptr(),
-        )
-    };
-    if length == 0 {
-        return Err("graph print strftime output is empty or exceeds its buffer".into());
-    }
-    Ok(String::from_utf8_lossy(&buffer[..length]).into_owned())
-}
-
-fn graph_value_printf(
-    value: f64,
-    format: &std::ffi::CStr,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let mut buffer = [0_u8; 200];
-    // SAFETY: callers supply one floating conversion; the buffer is writable.
-    let length = unsafe {
-        libc::snprintf(
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-            format.as_ptr(),
-            value,
-        )
-    };
-    if length < 0 {
-        return Err("graph print value formatting failed".into());
-    }
-    let length = (length as usize).min(buffer.len() - 1);
-    Ok(String::from_utf8_lossy(&buffer[..length]).into_owned())
-}
-
-fn format_graph_duration(value: f64, format: &str) -> Result<String, Box<dyn std::error::Error>> {
-    // strfduration interprets values as milliseconds, truncates component
-    // precision before printf rounding, and puts one sign before the format.
-    if !value.is_finite() {
-        return graph_value_printf(value, c"%f");
-    }
-    let format = if format.is_empty() {
-        "%H:%02m:%02s"
-    } else {
-        format
-    };
-    let seconds = value.abs() / 1000.0;
-    let minutes = seconds / 60.0;
-    let hours = minutes / 60.0;
-    let days = hours / 24.0;
-    let weeks = days / 7.0;
-    let mut output = if value < 0.0 {
-        String::from("-")
-    } else {
-        String::new()
-    };
-    let mut chars = format.chars().peekable();
-    while let Some(character) = chars.next() {
-        if character != '%' {
-            output.push(character);
-            continue;
-        }
-        let zero_pad = chars.next_if_eq(&'0').is_some();
-        let mut width = String::new();
-        while let Some(digit) = chars.next_if(|character| character.is_ascii_digit()) {
-            width.push(digit);
-        }
-        let width = if width.is_empty() {
-            0
-        } else {
-            width
-                .parse::<usize>()
-                .map_err(|_| "Wrong duration format")?
-        };
-        let mut precision = String::new();
-        if chars.next_if_eq(&'.').is_some() {
-            while let Some(digit) = chars.next_if(|character| character.is_ascii_digit()) {
-                precision.push(digit);
-            }
-        }
-        let precision = if precision.is_empty() {
-            0
-        } else {
-            precision
-                .parse::<usize>()
-                .map_err(|_| "Wrong duration format")?
-        };
-        if width > 4096 || precision > 308 {
-            return Err("duration format width or precision exceeds the safety limit".into());
-        }
-        let component = match chars.next() {
-            Some('%') => {
-                output.push('%');
-                continue;
-            }
-            Some('W') => weeks,
-            Some('d') => days - weeks.trunc() * 7.0,
-            Some('D') => days,
-            Some('h') => hours - days.trunc() * 24.0,
-            Some('H') => hours,
-            Some('m') => minutes - hours.trunc() * 60.0,
-            Some('M') => minutes,
-            Some('s') => seconds - minutes.trunc() * 60.0,
-            Some('S') => seconds,
-            Some('f') => value.abs() - seconds.trunc() * 1000.0,
-            _ => return Err("Wrong duration format".into()),
-        };
-        let factor = 10_f64.powi(precision as i32);
-        let truncated = (component * factor).trunc() / factor;
-        let spec = std::ffi::CString::new(format!(
-            "%{}{width}.{precision}f",
-            if zero_pad { "0" } else { "" }
-        ))?;
-        output.push_str(&graph_value_printf(truncated, &spec)?);
-    }
-    // The pinned graph engine's FMT_LEG_LEN includes the terminating NUL.
-    let bytes = output.as_bytes();
-    Ok(String::from_utf8_lossy(&bytes[..bytes.len().min(199)]).into_owned())
-}
-
-fn format_graph_time(
-    timestamp: i64,
-    format: &str,
-    utc: bool,
-) -> Result<String, Box<dyn std::error::Error>> {
-    use std::ffi::CString;
-    let timestamp = timestamp as libc::time_t;
-    let mut broken_down = unsafe { std::mem::zeroed::<libc::tm>() };
-    // SAFETY: both functions write to valid tm storage and retain no pointers.
-    let converted = unsafe {
-        if utc {
-            libc::gmtime_r(&timestamp, &mut broken_down)
-        } else {
-            libc::localtime_r(&timestamp, &mut broken_down)
-        }
-    };
-    if converted.is_null() {
-        return Err("graph print timestamp is outside the platform time range".into());
-    }
-    let format = CString::new(format)?;
-    let mut buffer = [0_u8; 4096];
-    let length = unsafe {
-        libc::strftime(
-            buffer.as_mut_ptr().cast(),
-            buffer.len(),
-            format.as_ptr(),
-            &broken_down,
-        )
-    };
-    if length == 0 {
-        return Err("graph print strftime output is empty or exceeds its buffer".into());
-    }
-    Ok(String::from_utf8_lossy(&buffer[..length]).into_owned())
-}
-
-fn clean_graph_time_format(format: &str) -> String {
-    let mut result = String::with_capacity(format.len());
-    let mut chars = format.chars();
-    while let Some(ch) = chars.next() {
-        if ch != '%' {
-            result.push(ch);
-            continue;
-        }
-        let Some(code) = chars.next() else {
-            break;
-        };
-        match code {
-            '%' => result.push('%'),
-            'n' => result.push('\n'),
-            't' => result.push('\t'),
-            'F' => result.push_str("----------"),
-            'T' => result.push_str("--:--:--"),
-            'R' => result.push_str("--:--"),
-            'D' => result.push_str("--/--/--"),
-            'Y' | 'G' => result.push_str("----"),
-            'j' => result.push_str("---"),
-            'C' | 'd' | 'g' | 'H' | 'I' | 'm' | 'M' | 'S' | 'U' | 'V' | 'W' | 'y' => {
-                result.push_str("--")
-            }
-            'E' | 'O' => {
-                chars.next();
-                result.push('-');
-            }
-            _ => result.push('-'),
-        }
-    }
-    result
-}
-
-fn format_graph_numeric_impl(
-    value: f64,
-    format: &str,
-    metadata: bool,
-    base: u32,
-    si: &mut GraphSiState,
+    format: &mut String,
+    si_scale: &mut GraphSiScale,
+    printf: GraphPrintf,
 ) -> Result<String, Box<dyn std::error::Error>> {
     use std::ffi::CString;
 
-    // The C path searches the raw format, including escaped percent literals,
-    // and rewrites only the first %S before passing it to printf.
-    let shared_units = format.contains("%S");
-    let autoscale = shared_units || format.contains("%s");
-    let normalized = shared_units.then(|| format.replacen("%S", "%s", 1));
-    let format = normalized.as_deref().unwrap_or(format);
+    // The unit conversion is found with strstr on the raw format, so "%%S"
+    // and "%%s" also scale the value.
+    let scaling = match format.find("%S") {
+        Some(position) => {
+            format.replace_range(position + 1..position + 2, "s");
+            Some(true)
+        }
+        None => format.contains("%s").then_some(false),
+    };
+    let format = format.as_str();
     let parsed = parse_graph_numeric_format(format)
         .map_err(|_| format!("bad format for PRINT in \"{format}'"))?;
-    let (scaled_value, si_symbol) = if autoscale {
-        if let Some(factor) = si.factor.filter(|_| shared_units) {
-            (value / factor, si.symbol)
-        } else {
-            let (scaled, symbol, factor) = graph_si_scale(value, base);
-            si.factor = if shared_units && scaled == 0.0 {
-                None
-            } else {
-                Some(factor)
-            };
-            si.symbol = symbol;
-            (scaled, symbol)
+    let scaled_value = match scaling {
+        Some(reuse) => {
+            // %S reuses the magnitude chosen by the first scaled value, unless
+            // that value scaled to zero; %s always picks a new one.
+            match si_scale.magnitude {
+                Some(magnitude) if reuse => value / magnitude,
+                _ => {
+                    let (scaled, magnitude, symbol) = graph_si_scale(value, si_scale.base);
+                    si_scale.magnitude = (!reuse || scaled != 0.0).then_some(magnitude);
+                    si_scale.symbol = symbol;
+                    scaled
+                }
+            }
         }
-    } else {
-        (value, "")
+        None => value,
     };
+    let si_symbol = si_scale.symbol;
+    if printf == GraphPrintf::Rrd {
+        return Ok(rondi::rrd_snprintf::rrd_snprintf(
+            format,
+            &[
+                rondi::rrd_snprintf::Arg::Double(scaled_value),
+                rondi::rrd_snprintf::Arg::Str(si_symbol),
+            ],
+        ));
+    }
     let mut output = String::with_capacity(format.len() + 32);
     let mut cursor = 0;
     for substitution in parsed.substitutions {
         append_graph_format_literal(&mut output, &format[cursor..substitution.start]);
         match substitution.kind {
             GraphFormatSubstitutionKind::Floating => {
-                let specification = &format[substitution.start..substitution.end];
-                if metadata {
-                    if let Some(formatted) = format_rrd_metadata_float(scaled_value, specification)
-                    {
-                        output.push_str(&formatted);
-                        cursor = substitution.end;
-                        continue;
-                    }
-                }
-                let conversion = CString::new(specification)?;
+                let conversion = CString::new(&format[substitution.start..substitution.end])?;
                 let mut buffer = [0 as libc::c_char; 4096];
                 let length = unsafe {
                     libc::snprintf(
@@ -4450,136 +3929,6 @@ fn format_graph_numeric_impl(
     }
     append_graph_format_literal(&mut output, &format[cursor..]);
     Ok(output)
-}
-
-// Port rrd_snprintf.c::fmtflt's fixed/scientific scaling and integer
-// rounding for the tested numeric range and printf grammar. The host printf
-// path remains separate for graphv console output and other conversions.
-fn format_rrd_metadata_float(value: f64, specification: &str) -> Option<String> {
-    if !specification.ends_with(['e', 'E', 'f', 'F']) {
-        return None;
-    }
-    let upper = specification.ends_with(['E', 'F']);
-    let scientific = specification.ends_with(['e', 'E']);
-    let mut body = specification.strip_prefix('%')?;
-    let flag = body.chars().next().filter(|flag| "-+ #0".contains(*flag));
-    if flag.is_some() {
-        body = &body[1..];
-    }
-    let body = body
-        .strip_suffix("le")
-        .or_else(|| body.strip_suffix("lE"))
-        .or_else(|| body.strip_suffix("lf"))
-        .or_else(|| body.strip_suffix("lF"))?;
-    let (width, precision) = body.split_once('.').unwrap_or((body, "6"));
-    let width = if width.is_empty() {
-        0
-    } else {
-        width.parse::<usize>().ok()?
-    };
-    if width > 4095 {
-        return None;
-    }
-    let precision = precision.parse::<usize>().ok()?.min(19);
-    if !value.is_finite() {
-        // fmtflt chooses the sign by comparison, never by NaN's sign bit.
-        let sign = if value < 0.0 {
-            "-"
-        } else if flag == Some('+') {
-            "+"
-        } else if flag == Some(' ') {
-            " "
-        } else {
-            ""
-        };
-        let token = if value.is_nan() {
-            if upper { "NAN" } else { "nan" }
-        } else if upper {
-            "INF"
-        } else {
-            "inf"
-        };
-        let text = format!("{sign}{token}");
-        let padding = " ".repeat(width.saturating_sub(text.len()));
-        return Some(if flag == Some('-') {
-            format!("{text}{padding}")
-        } else {
-            format!("{padding}{text}")
-        });
-    }
-    let mut exponent = 0_i32;
-    let mut factor = 1.0_f64;
-    if scientific {
-        let mut magnitude = value.abs();
-        while magnitude > 0.0 && magnitude < 1.0 && exponent > -307 {
-            magnitude *= 10.0;
-            exponent -= 1;
-        }
-        while magnitude >= 10.0 && exponent < 308 {
-            magnitude /= 10.0;
-            exponent += 1;
-        }
-        if magnitude > 0.0 && magnitude < 1.0 {
-            return None;
-        }
-        for _ in 0..exponent.max(0) {
-            factor *= 10.0;
-        }
-        for _ in 0..(-exponent).max(0) {
-            factor /= 10.0;
-        }
-    }
-    let scaled = value.abs() / factor;
-    if !scaled.is_finite() || scaled >= u64::MAX as f64 {
-        return None;
-    }
-    let mut integer = scaled as u64;
-    let mask = 10_u64.pow(precision as u32);
-    let fraction = mask as f64 * (scaled - integer as f64);
-    let mut fractional = fraction as u64;
-    if fraction - fractional as f64 >= 0.5 {
-        fractional += 1;
-    }
-    if fractional >= mask {
-        integer += 1;
-        fractional = 0;
-        if scientific && integer == 10 {
-            integer = 1;
-            exponent += 1;
-        }
-    }
-    let sign = if value < 0.0 {
-        "-"
-    } else if flag == Some('+') {
-        "+"
-    } else if flag == Some(' ') {
-        " "
-    } else {
-        ""
-    };
-    let fraction = if precision > 0 {
-        format!(".{fractional:0precision$}")
-    } else if flag == Some('#') {
-        ".".to_owned()
-    } else {
-        String::new()
-    };
-    let digits = if scientific {
-        format!(
-            "{integer}{fraction}{}{exponent:+03}",
-            if upper { 'E' } else { 'e' }
-        )
-    } else {
-        format!("{integer}{fraction}")
-    };
-    let padding = " ".repeat(width.saturating_sub(sign.len() + digits.len()));
-    Some(if flag == Some('-') {
-        format!("{sign}{digits}{padding}")
-    } else if flag == Some('0') {
-        format!("{sign}{}{digits}", "0".repeat(padding.len()))
-    } else {
-        format!("{padding}{sign}{digits}")
-    })
 }
 
 #[derive(Clone, Copy)]
@@ -4700,186 +4049,324 @@ fn append_graph_format_literal(output: &mut String, literal: &str) {
     }
 }
 
-fn graph_si_scale(value: f64, base: u32) -> (f64, &'static str, f64) {
+fn graph_si_scale(value: f64, base: u32) -> (f64, f64, &'static str) {
     const SYMBOLS: [&str; 13] = [
         "a", "f", "p", "n", "u", "m", " ", "k", "M", "G", "T", "P", "E",
     ];
     if value == 0.0 || value.is_nan() {
-        return (value, SYMBOLS[6], 1.0);
+        return (value, 1.0, SYMBOLS[6]);
     }
-    let exponent = (value.abs().ln() / f64::from(base).ln()).floor() as i32;
-    let factor = f64::from(base).powf(f64::from(exponent));
-    let symbol = exponent
-        .checked_add(6)
-        .and_then(|index| usize::try_from(index).ok())
+    if value.is_infinite() {
+        // auto_scale converts floor(log(inf)) to int: aarch64 saturates to
+        // INT_MAX and divides by pow(base, INT_MAX) = inf, while x86_64 yields
+        // INT_MIN and divides by zero. Either index is outside the table.
+        #[cfg(target_arch = "x86_64")]
+        let factor = 0.0;
+        #[cfg(not(target_arch = "x86_64"))]
+        let factor = f64::INFINITY;
+        return (value / factor, factor, "?");
+    }
+    let base = f64::from(base);
+    let exponent = (value.abs().ln() / base.ln()).floor() as i32;
+    let factor = base.powf(f64::from(exponent));
+    let symbol = usize::try_from(exponent + 6)
+        .ok()
         .and_then(|index| SYMBOLS.get(index))
         .copied()
         .unwrap_or("?");
-    (value / factor, symbol, factor)
+    (value / factor, factor, symbol)
 }
 
-fn format_xport_xml(
-    start: i64,
-    end: i64,
-    step: u64,
-    exports: &[rondi::RrdXportColumn],
-    rows: &[Vec<Option<f64>>],
-    options: XportFormatOptions<'_>,
-) -> String {
+/// `escapeJSON` from rrd_xport.c.
+fn escape_json(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '"' | '\\' => {
+                output.push('\\');
+                output.push(ch);
+            }
+            '\u{8}' => output.push_str("\\b"),
+            '\u{c}' => output.push_str("\\f"),
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            ch if (ch as u32) < 0x20 => write!(output, "\\u{:04x}", ch as u32).unwrap(),
+            ch => output.push(ch),
+        }
+    }
+    output
+}
+
+/// Port of `rrd_xport_format_addprints`. Elements are visited in definition
+/// order and written to separate prints, gprints and rules lists. A numeric
+/// format error is reported after the head of the document was written.
+fn format_xport_addprints(
+    json: bool,
+    output: &mut String,
+    im: &mut rondi::graph::GraphImage,
+    si_base: u32,
+) -> Result<(), String> {
+    use rondi::graph::Gf;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs() as i64);
+    let mut tmvdef = local_tm(now);
+    let (mut prints, mut gprints, mut rules) = (String::new(), String::new(), String::new());
+    let mut si_scale = GraphSiScale::new(si_base);
+    // time_clean writes to a different buffer than the one printed, so a
+    // never-set VDEF time repeats the previous formatted text.
+    let mut dbuf = String::new();
+    let entry = |tag: &str, text: &str| {
+        if json {
+            format!(",\n        {{ \"{tag}\": \"{text}\" }}")
+        } else {
+            format!("        <{tag}>{text}</{tag}>\n")
+        }
+    };
+    for i in 0..im.gdes.len() {
+        let element = &im.gdes[i];
+        match element.gf {
+            Gf::Print | Gf::Gprint => {
+                let source = element.vidx.map(|vidx| &im.gdes[vidx]);
+                if let Some(source) = source.filter(|source| source.gf == Gf::Vdef) {
+                    tmvdef = local_tm(source.vf.when);
+                }
+                let never = source.is_some_and(|source| source.vf.never);
+                let printval = im.print_value(i);
+                let element = &im.gdes[i];
+                if element.strftm {
+                    if !never {
+                        dbuf = c_strftime(&element.format, &tmvdef, 1024).unwrap_or_default();
+                    }
+                } else {
+                    // bad_format_print runs before the "%S" rewrite here.
+                    let original = element.format.clone();
+                    let mut format = original.clone();
+                    match format_graph_numeric(
+                        printval,
+                        &mut format,
+                        &mut si_scale,
+                        GraphPrintf::Rrd,
+                    ) {
+                        Ok(text) => dbuf = text,
+                        Err(_) => {
+                            return Err(format!("bad format for PRINT in \"{original}'"));
+                        }
+                    }
+                    im.gdes[i].format = format;
+                }
+                let text = if json {
+                    escape_json(&dbuf)
+                } else {
+                    dbuf.clone()
+                };
+                let (tag, buffer) = if im.gdes[i].gf == Gf::Print {
+                    ("print", &mut prints)
+                } else {
+                    ("gprint", &mut gprints)
+                };
+                buffer.push_str(&entry(tag, &text));
+            }
+            Gf::Comment => {
+                let text = if json {
+                    escape_json(&element.legend)
+                } else {
+                    element.legend.clone()
+                };
+                gprints.push_str(&entry("comment", &text));
+            }
+            Gf::Line => {
+                let legend = element
+                    .legend
+                    .trim_start_matches(|ch: char| ch.is_ascii_whitespace());
+                let text = if json {
+                    escape_json(legend)
+                } else {
+                    legend.to_owned()
+                };
+                gprints.push_str(&entry("line", &text));
+            }
+            Gf::Area => gprints.push_str(&entry("area", &element.legend)),
+            Gf::Stack => gprints.push_str(&entry("stack", &element.legend)),
+            Gf::TextAlign => {
+                let align = match element.txtalign {
+                    rondi::graph::TextAlign::Left => "left",
+                    rondi::graph::TextAlign::Right => "right",
+                    rondi::graph::TextAlign::Center => "center",
+                    rondi::graph::TextAlign::Justified => "justified",
+                };
+                gprints.push_str(&entry("align", align));
+            }
+            Gf::Hrule => rules.push_str(&entry("hrule", &format_xport_value(element.vf.val))),
+            Gf::Vrule => rules.push_str(&entry("vrule", &element.vf.when.to_string())),
+            _ => {}
+        }
+    }
+    let sections = [
+        ("prints", prints, true),
+        ("gprints", gprints, false),
+        ("rules", rules, false),
+    ];
+    for (name, data, first) in sections {
+        if data.is_empty() {
+            continue;
+        }
+        if json {
+            if first {
+                writeln!(output, "    \"{name}\": [").unwrap();
+                output.push_str(&data[2..]);
+                output.push_str("\n        ],\n");
+            } else {
+                writeln!(output, "    ,\"{name}\": [").unwrap();
+                output.push_str(&data[2..]);
+                output.push_str("\n        ]\n");
+            }
+        } else {
+            writeln!(output, "    <{name}>").unwrap();
+            output.push_str(&data);
+            writeln!(output, "    </{name}>").unwrap();
+        }
+    }
+    Ok(())
+}
+
+/// Port of `rrd_xport_format_xmljson`. Flags: 1 JSON, 2 show time, 4
+/// enumerate value tags. RRDtool only removes a trailing comma after the
+/// meta lists when the document is built in memory (`graph -`); xport and
+/// graph files stream it out. On a format error the partial document and
+/// the message are both returned.
+fn format_xport_xmljson(
+    flags: u8,
+    im: &mut rondi::graph::GraphImage,
+    data: &rondi::graph::XportData,
+    si_base: u32,
+    in_memory: bool,
+) -> (String, Option<String>) {
+    let json = flags & 1 != 0;
+    let show_time = flags & 2 != 0;
+    let enum_ds = flags & 4 != 0;
+    let step = data.step as i64;
     let mut output = String::new();
-    writeln!(
-        output,
-        "<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n\n<xport>\n  <meta>"
-    )
-    .unwrap();
-    writeln!(output, "    <start>{}</start>", start + step as i64).unwrap();
-    writeln!(output, "    <end>{end}</end>").unwrap();
-    writeln!(output, "    <step>{step}</step>").unwrap();
-    writeln!(output, "    <rows>{}</rows>", rows.len()).unwrap();
-    writeln!(output, "    <columns>{}</columns>", exports.len()).unwrap();
-    output.push_str("    <legend>\n");
-    for export in exports {
-        writeln!(
-            output,
-            "      <entry>{}</entry>",
-            xml_escape_text(&export.legend)
-        )
-        .unwrap();
+    if json {
+        output.push_str("{ \"about\": \"RRDtool graph JSON output\",\n  \"meta\": {\n");
+        writeln!(output, "    \"start\": {},", data.start + step).unwrap();
+        writeln!(output, "    \"end\": {},", data.end).unwrap();
+        writeln!(output, "    \"step\": {step},").unwrap();
+        output.push_str("    \"legend\": [\n");
+    } else {
+        output.push_str("<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n\n<xport>\n  <meta>\n");
+        writeln!(output, "    <start>{}</start>", data.start + step).unwrap();
+        writeln!(output, "    <end>{}</end>", data.end).unwrap();
+        writeln!(output, "    <step>{step}</step>").unwrap();
+        writeln!(output, "    <rows>{}</rows>", data.rows.len()).unwrap();
+        writeln!(output, "    <columns>{}</columns>", data.legends.len()).unwrap();
+        output.push_str("    <legend>\n");
     }
-    output.push_str("    </legend>\n");
-    if let Some(prints) = options.graph_prints.filter(|values| !values.is_empty()) {
-        output.push_str("    <prints>\n");
-        for value in prints {
-            writeln!(output, "        <print>{}</print>", xml_escape_text(value)).unwrap();
+    for (index, legend) in data.legends.iter().enumerate() {
+        let entry = legend.trim_start_matches(|ch: char| ch.is_ascii_whitespace());
+        if json {
+            let comma = if index + 1 < data.legends.len() {
+                ","
+            } else {
+                ""
+            };
+            writeln!(output, "      \"{}\"{comma}", escape_json(entry)).unwrap();
+        } else {
+            writeln!(output, "      <entry>{entry}</entry>").unwrap();
         }
-        output.push_str("    </prints>\n");
     }
-    if let Some(gprints) = options.graph_gprints.filter(|values| !values.is_empty()) {
-        output.push_str("    <gprints>\n");
-        for (kind, value) in gprints {
-            writeln!(
-                output,
-                "        <{kind}>{}</{kind}>",
-                xml_escape_text(value)
-            )
-            .unwrap();
-        }
-        output.push_str("    </gprints>\n");
+    output.push_str(if json {
+        "          ]\n"
+    } else {
+        "    </legend>\n"
+    });
+    if let Err(error) = format_xport_addprints(json, &mut output, im, si_base) {
+        return (output, Some(error));
     }
-    output.push_str("  </meta>\n  <data>\n");
-    for (row_index, row) in rows.iter().enumerate() {
-        let time = start + (row_index as i64 + 1) * step as i64;
-        if options.show_time {
+    if in_memory && output.as_bytes().get(output.len().wrapping_sub(2)) == Some(&b',') {
+        let last = output.pop().unwrap_or('\n');
+        output.pop();
+        output.push(last);
+    }
+    output.push_str(if json {
+        "     },\n  \"data\": [\n"
+    } else {
+        "  </meta>\n  <data>\n"
+    });
+    for (row_index, row) in data.rows.iter().enumerate() {
+        let time = data.start + (row_index as i64 + 1) * step;
+        if json {
+            output.push_str("    [ ");
+            if show_time {
+                write!(output, "\"{time}\",").unwrap();
+            }
+        } else if show_time {
             write!(output, "    <row><t>{time}</t>").unwrap();
         } else {
             output.push_str("    <row>");
         }
         for (column, value) in row.iter().enumerate() {
-            let tag = if options.enum_ds {
-                format!("v{column}")
+            if json {
+                if value.is_nan() || value.is_infinite() {
+                    output.push_str("null");
+                } else {
+                    output.push_str(&format_xport_value(*value));
+                }
+                if column + 1 < row.len() {
+                    output.push_str(", ");
+                }
             } else {
-                "v".to_owned()
-            };
-            match value {
-                Some(value) if value.is_finite() => {
-                    write!(output, "<{tag}>{}</{tag}>", format_rrd_scientific(*value)).unwrap();
+                let tag = if enum_ds {
+                    format!("v{column}")
+                } else {
+                    "v".to_owned()
+                };
+                if value.is_nan() {
+                    write!(output, "<{tag}>NaN</{tag}>").unwrap();
+                } else {
+                    write!(output, "<{tag}>{}</{tag}>", format_xport_value(*value)).unwrap();
                 }
-                _ => write!(output, "<{tag}>NaN</{tag}>").unwrap(),
             }
         }
-        output.push_str("</row>\n");
-    }
-    output.push_str("  </data>\n</xport>\n");
-    output
-}
-
-fn xml_escape_text(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}
-
-fn normalize_json_graph_nan(value: &str) -> String {
-    // RRDtool's JSON graph serializer emits NaN as `nan`, while graphv's
-    // diagnostics and other text formats preserve printf's `-nan` spelling.
-    value.replace("-nan", "nan")
-}
-
-fn format_xport_json(
-    start: i64,
-    end: i64,
-    step: u64,
-    exports: &[rondi::RrdXportColumn],
-    rows: &[Vec<Option<f64>>],
-    options: XportFormatOptions<'_>,
-) -> String {
-    let mut output = String::new();
-    output.push_str("{ \"about\": \"RRDtool graph JSON output\",\n  \"meta\": {\n");
-    writeln!(output, "    \"start\": {},", start + step as i64).unwrap();
-    writeln!(output, "    \"end\": {end},").unwrap();
-    writeln!(output, "    \"step\": {step},").unwrap();
-    output.push_str("    \"legend\": [\n");
-    for (index, export) in exports.iter().enumerate() {
-        let comma = if index + 1 < exports.len() { "," } else { "" };
-        writeln!(
-            output,
-            "      {}{comma}",
-            serde_json::to_string(&export.legend).unwrap()
-        )
-        .unwrap();
-    }
-    output.push_str("          ]");
-    let prints = options.graph_prints.filter(|values| !values.is_empty());
-    if let Some(prints) = prints {
-        output.push_str("\n    \"prints\": [\n");
-        for (index, value) in prints.iter().enumerate() {
-            let comma = if index + 1 < prints.len() { "," } else { "" };
-            writeln!(
-                output,
-                "        {{ \"print\": {} }}{comma}",
-                serde_json::to_string(&normalize_json_graph_nan(value)).unwrap()
-            )
-            .unwrap();
+        if json {
+            output.push_str(if time <= data.end - step {
+                " ],\n"
+            } else {
+                " ]\n"
+            });
+        } else {
+            output.push_str("</row>\n");
         }
-        output.push_str("        ],");
     }
-    if let Some(gprints) = options.graph_gprints.filter(|values| !values.is_empty()) {
-        output.push_str("\n    ,\"gprints\": [\n");
-        for (index, (kind, value)) in gprints.iter().enumerate() {
-            let comma = if index + 1 < gprints.len() { "," } else { "" };
-            writeln!(
-                output,
-                "        {{ \"{kind}\": {} }}{comma}",
-                serde_json::to_string(&normalize_json_graph_nan(value)).unwrap()
-            )
-            .unwrap();
-        }
-        output.push_str("        ]\n     },\n  \"data\": [\n");
+    output.push_str(if json {
+        "  ]\n}\n"
     } else {
-        output.push_str("\n     },\n  \"data\": [\n");
+        "  </data>\n</xport>\n"
+    });
+    (output, None)
+}
+
+/// Port of `rrd_xport_format_sv` for CSV, TSV and SSV.
+fn format_xport_sv(separator: char, data: &rondi::graph::XportData) -> String {
+    let mut output = String::from("\"time\"");
+    for legend in &data.legends {
+        let entry = legend.trim_start_matches(|ch: char| ch.is_ascii_whitespace());
+        write!(output, "{separator}\"{entry}\"").unwrap();
     }
-    for (row_index, row) in rows.iter().enumerate() {
-        let time = start + (row_index as i64 + 1) * step as i64;
-        output.push_str("    [ ");
-        if options.show_time {
-            write!(output, "\"{time}\",").unwrap();
-        }
-        for (column, value) in row.iter().enumerate() {
-            if column > 0 {
-                output.push_str(", ");
-            }
-            match value {
-                Some(value) if value.is_finite() => {
-                    write!(output, "{}", format_rrd_scientific(*value)).unwrap()
-                }
-                _ => output.push_str("null"),
+    output.push_str("\r\n");
+    let step = data.step as i64;
+    for (row_index, row) in data.rows.iter().enumerate() {
+        write!(output, "{}", data.start + (row_index as i64 + 1) * step).unwrap();
+        for value in row {
+            if value.is_nan() {
+                write!(output, "{separator}\"NaN\"").unwrap();
+            } else {
+                write!(output, "{separator}\"{}\"", format_xport_value(*value)).unwrap();
             }
         }
-        let comma = if row_index + 1 < rows.len() { "," } else { "" };
-        writeln!(output, " ]{comma}").unwrap();
+        output.push_str("\r\n");
     }
-    output.push_str("  ]\n}\n");
     output
 }
 
@@ -4900,65 +4387,111 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
         }
         return Ok(());
     }
-    if args.len() < 3 {
-        return Err("Usage: rrdtool update <file> <timestamp:value>...".into());
-    }
-    let filename = PathBuf::from(&args[1]);
+    // rrd_update.c:304 (updatev) and :679 (update).
+    const UPDATE_LONGOPTS: &[LongOpt] = &[
+        opt("template", b't' as i32, ArgType::Required),
+        opt("daemon", b'd' as i32, ArgType::Required),
+        opt("skip-past-updates", b's' as i32, ArgType::None),
+        opt("locking", b'L' as i32, ArgType::Required),
+    ];
+    const UPDATEV_LONGOPTS: &[LongOpt] = &[
+        opt("template", b't' as i32, ArgType::Required),
+        opt("skip-past-updates", b's' as i32, ArgType::None),
+        opt("locking", b'L' as i32, ArgType::Required),
+    ];
     let mut template = None;
     let mut skip_past_updates = false;
     let mut daemon_address = None;
-    let mut samples = Vec::new();
-    let mut index = 2;
-    while index < args.len() {
-        if args[index] == "--" {
-            samples.extend(args[index + 1..].iter().cloned());
-            break;
-        }
-        match args[index].as_str() {
-            "--template" | "-t" => {
-                index += 1;
+    let mut locking = String::new();
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        let option = options.long(if verbose {
+            UPDATEV_LONGOPTS
+        } else {
+            UPDATE_LONGOPTS
+        });
+        match u8::try_from(option).map(char::from) {
+            _ if option == optparse::DONE => break,
+            Ok('t') => {
                 template = Some(
-                    args.get(index)
-                        .ok_or("update --template requires a colon-separated DS list")?
+                    options
+                        .value()
                         .split(':')
                         .map(str::to_owned)
                         .collect::<Vec<_>>(),
                 );
             }
-            "--daemon" | "-d" => {
-                index += 1;
-                let address = args
-                    .get(index)
-                    .ok_or("update --daemon requires an address")?;
-                daemon_address = Some(address.clone());
+            Ok('s') => skip_past_updates = true,
+            Ok('d') => daemon_address = Some(options.value().to_owned()),
+            Ok('L') => {
+                if !rondi::is_rrd_locking_mode(options.value()) {
+                    return Err(format!("unsupported locking mode '{}'\n", options.value()).into());
+                }
+                locking = options.value().to_owned();
             }
-            option if option.starts_with("--daemon=") => {
-                daemon_address = Some(option["--daemon=".len()..].to_owned());
-            }
-            "--skip-past-updates" | "-s" => skip_past_updates = true,
-            option if option.starts_with('-') => {
-                return Err(format!("unsupported update option: {option}").into());
-            }
-            sample => samples.push(sample.to_owned()),
+            Ok('?') => return Err(options.errmsg.into()),
+            _ => {}
         }
-        index += 1;
     }
+    let [filename_text, samples @ ..] = options.positionals() else {
+        return Err("Not enough arguments".into());
+    };
+    if samples.is_empty() {
+        return Err("Not enough arguments".into());
+    }
+    let filename = PathBuf::from(filename_text);
     let daemon_address = daemon_address.or_else(|| {
         std::env::var("RRDCACHED_ADDRESS")
             .ok()
             .filter(|address| !address.is_empty())
     });
-    if verbose && daemon_address.is_some() {
-        return Err("rrdtool updatev cannot be used with rrdcached".into());
+    if verbose {
+        // rrd_update_v refuses only an empty RRDCACHED_ADDRESS and otherwise
+        // updates the file directly.
+        if std::env::var_os("RRDCACHED_ADDRESS").is_some_and(|address| address.is_empty()) {
+            return Err("The \"RRDCACHED_ADDRESS\" environment variable is defined, but \"updatev\" cannot work with rrdcached. Either unset the environment variable or use \"update\" instead.".into());
+        }
     }
+    let daemon_address = if verbose { None } else { daemon_address };
+    // Local RRD writes use RRDtool's per-file fcntl lock in the library, which
+    // tries once unless $RRD_LOCKING says otherwise. A directory-wide Rondi
+    // lock would serialize unrelated files and stop parallel poller updates.
     if daemon_address.is_none() {
         ensure_rrd_file_exists(&filename)?;
+        let template = template.as_ref().map(|names| names.join(":"));
+        let arguments = samples.iter().map(String::as_str).collect::<Vec<_>>();
+        let (summaries, result) = rondi::with_rrd_locking(&locking, || {
+            update_rrd_text(
+                &filename,
+                template.as_deref(),
+                &arguments,
+                skip_past_updates,
+            )
+        });
+        if verbose {
+            // rrd_update_v reports the rows written before a failure too.
+            println!("return_value = {}", if result.is_ok() { 0 } else { -1 });
+            let names = inspect_rrd(filename_text)
+                .map(|info| info.data_sources)
+                .unwrap_or_default();
+            for summary in summaries {
+                for (source, value) in names.iter().zip(summary.values) {
+                    println!(
+                        "[{}]RRA[{}][{}]DS[{}] = {}",
+                        summary.timestamp,
+                        summary.consolidation,
+                        summary.pdp_per_row,
+                        source.name,
+                        format_rrd_scientific(value)
+                    );
+                }
+            }
+        }
+        return result.map_err(|error| rrd_update_error(&filename, error));
     }
-    // Local RRD writes use RRDtool's blocking per-file fcntl lock in the
-    // library. A directory-wide Rondi lock incorrectly serializes unrelated
-    // files and prevents the poller from updating them in parallel.
+    let mut source_count = None;
     let source_names = if let Some(template) = &template {
-        let info = inspect_rrd(&args[1])?;
+        let info = inspect_rrd(filename_text)?;
         let mut indices = Vec::with_capacity(template.len());
         for name in template {
             indices.push(
@@ -4968,26 +4501,13 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                     .ok_or_else(|| format!("unknown DS name '{name}'"))?,
             );
         }
+        source_count = Some(info.data_sources.len());
         Some(indices)
     } else {
         None
     };
-    let verbose_source_names = if verbose {
-        Some(
-            inspect_rrd(filename.to_str().ok_or("RRD filename is not valid UTF-8")?)?
-                .data_sources
-                .into_iter()
-                .map(|source| source.name)
-                .collect::<Vec<_>>(),
-        )
-    } else {
-        None
-    };
-    if verbose {
-        println!("return_value = 0");
-    }
     let mut daemon_samples = Vec::new();
-    for sample in &samples {
+    for sample in samples {
         let (timestamp, values, at_style) =
             if let Some((timestamp, values)) = sample.split_once('@') {
                 (timestamp, values, true)
@@ -5010,31 +4530,12 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 }
             })
             .collect::<Vec<_>>();
-        if template.is_none() && daemon_address.is_none() {
-            let source_count = inspect_rrd(&args[1])?.data_sources.len();
-            if raw_values.len() > source_count {
-                return Err(format!(
-                    "{}: found extra data on update argument: {}",
-                    filename.display(),
-                    source_count + 1
-                )
-                .into());
-            }
-            if raw_values.len() < source_count {
-                return Err(format!(
-                    "{}: expected {source_count} data source readings (got {}) from {timestamp}",
-                    filename.display(),
-                    raw_values.len()
-                )
-                .into());
-            }
-        }
         let numeric_values = values
             .split(':')
             .enumerate()
             .map(|(value_index, value)| {
-                parse_value(value).map_err(|_| {
-                    let data_sources = inspect_rrd(&args[1])
+                parse_rrd_update_value(value).map_or_else(|| {
+                    let data_sources = inspect_rrd(filename_text)
                         .map(|info| info.data_sources)
                         .unwrap_or_default();
                     let source_index = template
@@ -5048,11 +4549,16 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                         })
                         .or_else(|| data_sources.get(value_index).map(|source| source.kind.as_str()))
                         .unwrap_or("GAUGE");
-                    format!(
+                    // update_pdp_prep converts DCOUNTER/DDERIVE text only when
+                    // the previous sample is known; the library decides.
+                    if matches!(source_index, "DCOUNTER" | "DDERIVE") {
+                        return Ok(None);
+                    }
+                    Err(format!(
                         "{}: Function update_pdp_prep, case DST_{source_index} - Cannot convert '{value}' to float",
                         filename.display()
-                    )
-                })
+                    ))
+                }, Ok)
             })
             .collect::<Result<Vec<_>, _>>()?;
         let raw_values = if let Some(indices) = &source_names {
@@ -5073,7 +4579,11 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 )
                 .into());
             }
-            let mut expanded = vec![None; inspect_rrd(&args[1])?.data_sources.len()];
+            let source_count = match source_count {
+                Some(count) => count,
+                None => *source_count.insert(inspect_rrd(filename_text)?.data_sources.len()),
+            };
+            let mut expanded = vec![None; source_count];
             for (source_index, raw_value) in indices.iter().zip(raw_values) {
                 expanded[*source_index] = raw_value;
             }
@@ -5085,8 +4595,17 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs_f64();
         let update_time = if at_style {
+            let seconds = rrd_parsetime(timestamp, update_now.floor() as i64)
+                .map_err(|error| format!("{}: ds time: {timestamp}: {error}", filename.display()))?
+                .absolute()
+                .ok_or_else(|| {
+                    format!(
+                        "{}: specifying time relative to the 'start' or 'end' makes no sense here: {timestamp}",
+                        filename.display()
+                    )
+                })?;
             UpdateTimestamp {
-                seconds: parse_rrd_time(timestamp, update_now.floor() as i64)?,
+                seconds,
                 microseconds: 0,
             }
         } else {
@@ -5097,83 +4616,36 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 )
             })?
         };
-        if skip_past_updates && daemon_address.is_none() {
-            let info = inspect_rrd(&args[1])?;
-            if (update_time.seconds, update_time.microseconds)
-                <= (info.last_update, info.last_update_usec)
-            {
-                continue;
-            }
-        }
-        if daemon_address.is_some() {
-            let encoded_values = raw_values
-                .iter()
-                .map(|value| value.as_deref().unwrap_or("U"))
-                .collect::<Vec<_>>()
-                .join(":");
-            daemon_samples.push(format!("{}:{encoded_values}", update_time.format_rrd()));
-            continue;
-        }
-        if verbose {
-            let raw_values = raw_values.iter().map(Option::as_deref).collect::<Vec<_>>();
-            let summaries = update_rrd_raw_values_precise_verbose(
-                &filename,
-                update_time.seconds,
-                update_time.microseconds,
-                &raw_values,
-            )?;
-            for summary in summaries {
-                for (source_name, value) in verbose_source_names
-                    .as_ref()
-                    .expect("verbose source names are initialized")
-                    .iter()
-                    .zip(summary.values)
-                {
-                    println!(
-                        "[{}]RRA[{}][{}]DS[{}] = {}",
-                        summary.timestamp,
-                        summary.consolidation,
-                        summary.pdp_per_row,
-                        source_name,
-                        format_rrd_scientific(value)
-                    );
-                }
-            }
-        } else {
-            let raw_values = raw_values.iter().map(Option::as_deref).collect::<Vec<_>>();
-            update_rrd_raw_values_precise(
-                &filename,
-                update_time.seconds,
-                update_time.microseconds,
-                &raw_values,
-            )?;
-        }
+        let encoded_values = raw_values
+            .iter()
+            .map(|value| value.as_deref().unwrap_or("U"))
+            .collect::<Vec<_>>()
+            .join(":");
+        daemon_samples.push(format!("{}:{encoded_values}", update_time.format_rrd()));
     }
     if let Some(address) = daemon_address {
         if !daemon_samples.is_empty() {
             #[cfg(unix)]
-            match connect_rrdcached(&address) {
-                Ok(stream) => {
-                    send_rrdcached_update_on_stream(
-                        stream,
-                        PathBuf::from(&args[1]).as_path(),
-                        &daemon_samples,
-                    )?;
-                }
-                Err(error) => {
-                    let error_text = error.to_string();
-                    let detail = error_text
-                        .split(" (os error ")
-                        .next()
-                        .unwrap_or("Internal error");
-                    return Err(format!("Unable to connect to rrdcached: {detail}").into());
-                }
+            {
+                let stream = connect_rrdcached(&address)?;
+                let path = rrdcached_client_path(&address, &filename.to_string_lossy())?;
+                send_rrdcached_update_on_stream(stream, Path::new(&path), &daemon_samples)?;
             }
             #[cfg(not(unix))]
             return Err("rrdcached updates are unavailable on this platform".into());
         }
     }
     Ok(())
+}
+
+/// RRDtool prefixes per-sample update failures with the file name.
+fn rrd_update_error(filename: &Path, error: rondi::StoreError) -> Box<dyn std::error::Error> {
+    match error {
+        rondi::StoreError::RrdTimestamp(message) | rondi::StoreError::RrdExpression(message) => {
+            format!("{}: {message}", filename.display()).into()
+        }
+        error => error.into(),
+    }
 }
 
 fn rrdtool_flushcached(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -5183,43 +4655,55 @@ fn rrdtool_flushcached(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         );
         return Ok(());
     }
+    // rrd_flushcached.c:27.
+    const LONGOPTS: &[LongOpt] = &[opt("daemon", b'd' as i32, ArgType::Required)];
     let mut daemon = None;
-    let mut files = Vec::new();
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "-d" | "--daemon" => {
-                index += 1;
-                daemon = Some(
-                    args.get(index)
-                        .ok_or("flushcached: --daemon requires an address")?
-                        .clone(),
-                );
-            }
-            option if option.starts_with("--daemon=") => {
-                daemon = Some(option["--daemon=".len()..].to_owned());
-            }
-            option if option.starts_with('-') => {
-                return Err(format!("flushcached: unknown option: {option}").into());
-            }
-            filename => files.push(filename.to_owned()),
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            option if option == b'd' as i32 => daemon = Some(options.value().to_owned()),
+            optparse::ERROR => return Err(options.errmsg.into()),
+            _ => {}
         }
-        index += 1;
     }
+    let files = options.positionals().to_vec();
     if files.is_empty() {
-        return Err("Usage: rrdtool flushcached [--daemon|-d <addr>] <file> [<file> ...]".into());
+        return Err(format!(
+            "Usage: rrdtool {} [--daemon|-d <addr>] <file> [<file> ...]",
+            args[0]
+        )
+        .into());
     }
-    let daemon = daemon.or_else(|| std::env::var("RRDCACHED_ADDRESS").ok());
-    let Some(daemon) = daemon.filter(|address| !address.is_empty()) else {
-        return Err("Daemon address \"(null)\" unknown. Please use the \"--daemon\" option to set an address on the command line or set the \"RRDCACHED_ADDRESS\" environment variable.".into());
+    // rrd_client_connect reads RRDCACHED_ADDRESS only when no --daemon was
+    // given, and the message prints opt_daemon with %s.
+    let address = match &daemon {
+        Some(address) => address.clone(),
+        None => std::env::var("RRDCACHED_ADDRESS").unwrap_or_default(),
     };
+    if address.is_empty() {
+        return Err(format!(
+            "Daemon address \"{}\" unknown. Please use the \"--daemon\" option to set an address on the command line or set the \"RRDCACHED_ADDRESS\" environment variable.",
+            daemon.as_deref().unwrap_or("(null)")
+        )
+        .into());
+    }
+    let daemon = address;
     for filename in &files {
         if let Err(error) = send_rrdcached_flush(&daemon, filename) {
+            if error.is::<RrdcachedConnectError>() {
+                return Err(error);
+            }
             // RRDtool 1.11.0 reports the number of filenames after the
             // command name, independent of the point at which flushing failed.
             let remaining = files.len().saturating_sub(1);
+            let detail = if error.downcast_ref::<RrdcachedPathUnavailable>().is_some() {
+                "unknown error".to_owned()
+            } else {
+                format!("rrdcached@{daemon}: {error}")
+            };
             return Err(format!(
-                "Flushing of file \"{filename}\" failed: rrdcached@{daemon}: {error}. Skipping remaining {remaining} file{}.",
+                "Flushing of file \"{filename}\" failed: {detail}. Skipping remaining {remaining} file{}.",
                 if remaining == 1 { "" } else { "s" }
             )
             .into());
@@ -5244,6 +4728,7 @@ fn send_rrdcached_command(
         return Err("invalid rrdcached socket or filename".into());
     }
     let mut stream = connect_rrdcached(address)?;
+    let command = translate_rrdcached_file_command(address, command)?;
     writeln!(stream, "{command}")?;
     let mut response = String::new();
     read_bounded_line(
@@ -5282,13 +4767,14 @@ fn send_rrdcached_update_on_stream(
     filename: &std::path::Path,
     samples: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if filename.to_string_lossy().chars().any(char::is_whitespace) {
+    let filename = filename.to_string_lossy();
+    if filename.contains(['\n', '\r', '\0']) {
         return Err("rrdtool update: invalid rrdcached socket or filename".into());
     }
     writeln!(
         stream,
         "UPDATE {} {}",
-        filename.display(),
+        escape_rrdcached_field(&filename),
         samples.join(" ")
     )?;
     let mut response = String::new();
@@ -5307,6 +4793,13 @@ fn send_rrdcached_update_on_stream(
         .unwrap_or(response)
         .to_owned()
         .into())
+}
+
+/// xport and graph data values go through `rrd_snprintf("%0.10e")`
+/// (rrd_xport.c:714, 968, 985), which is not correctly rounded and never
+/// signs -0. updatev uses libc printf and keeps the sign.
+fn format_xport_value(value: f64) -> String {
+    rondi::rrd_snprintf::rrd_snprintf("%0.10e", &[rondi::rrd_snprintf::Arg::Double(value)])
 }
 
 fn format_rrd_scientific(value: f64) -> String {
@@ -5328,56 +4821,30 @@ fn rrdtool_last(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", rrdtool_last_help());
         return Ok(());
     }
-    let mut filename = None::<String>;
+    // rrd_last.c:18.
+    const LONGOPTS: &[LongOpt] = &[opt("daemon", b'd' as i32, ArgType::Required)];
     let mut daemon_address = None::<String>;
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--daemon" | "-d" => {
-                index += 1;
-                daemon_address = Some(
-                    args.get(index)
-                        .ok_or("last --daemon requires an address")?
-                        .clone(),
-                );
-            }
-            option if option.starts_with("--daemon=") => {
-                daemon_address = Some(option["--daemon=".len()..].to_owned());
-            }
-            option if option.starts_with('-') => {
-                return Err(format!("unsupported last option: {option}").into());
-            }
-            path => {
-                if filename.replace(path.to_owned()).is_some() {
-                    return Err("rrdtool last accepts one filename".into());
-                }
-            }
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            option if option == b'd' as i32 => daemon_address = Some(options.value().to_owned()),
+            optparse::ERROR => return Err(options.errmsg.into()),
+            _ => {}
         }
-        index += 1;
     }
-    let Some(filename) = filename else {
-        print!("{}", rrdtool_last_help());
-        return Ok(());
+    let [filename] = options.positionals() else {
+        return Err(format!("Usage: rrdtool {} [--daemon|-d <addr>] <file>", args[0]).into());
     };
     if let Some(address) = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty())
     {
         let escaped_filename = filename.replace('\\', "\\\\").replace(' ', "\\ ");
-        let response = send_rrdcached_command(&address, &format!("LAST {escaped_filename}"))?;
-        let timestamp = response
-            .split_whitespace()
-            .nth(1)
-            .ok_or("invalid rrdcached LAST response")?;
+        let timestamp = rrdcached_time_value(&address, &format!("LAST {escaped_filename}"))?;
         println!("{timestamp}");
     } else {
-        if let Err(error) = std::fs::metadata(&filename) {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                println!("-1");
-                return Err(format!("opening '{filename}': No such file or directory").into());
-            }
-        }
-        println!("{}", inspect_rrd(&filename)?.last_update);
+        println!("{}", inspect_rrd(filename)?.last_update);
     }
     Ok(())
 }
@@ -5391,11 +4858,29 @@ fn rrdtool_lastupdate(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         print!("{}", include_str!("help/lastupdate.txt"));
         return Ok(());
     }
-    if args.len() != 2 {
-        return Err("Usage: rrdtool lastupdate filename.rrd".into());
+    // rrd_lastupdate.c:19.
+    const LONGOPTS: &[LongOpt] = &[opt("daemon", b'd' as i32, ArgType::Required)];
+    let mut daemon_address = None::<String>;
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            option if option == b'd' as i32 => daemon_address = Some(options.value().to_owned()),
+            optparse::ERROR => return Err(options.errmsg.into()),
+            _ => {}
+        }
     }
-    ensure_rrd_file_exists(std::path::Path::new(&args[1]))?;
-    let info = inspect_rrd(&args[1])?;
+    let [filename] = options.positionals() else {
+        return Err(format!("Usage: rrdtool {} [--daemon|-d <addr>] <file>", args[0]).into());
+    };
+    if let Some(address) = daemon_address
+        .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
+        .filter(|address| !address.is_empty())
+    {
+        send_rrdcached_flush(&address, filename)?;
+    }
+    ensure_rrd_file_exists(std::path::Path::new(filename))?;
+    let info = inspect_rrd(filename)?;
     println!(
         " {}",
         info.data_sources
@@ -5418,70 +4903,61 @@ fn rrdtool_first(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/first.txt"));
         return Ok(());
     }
-    let mut archive_index = 0usize;
+    // rrd_first.c:18.
+    const LONGOPTS: &[LongOpt] = &[
+        opt("rraindex", 129, ArgType::Required),
+        opt("daemon", b'd' as i32, ArgType::Required),
+    ];
+    let mut archive_index = 0_i32;
     let mut daemon_address = None::<String>;
-    let mut filename = None;
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--rraindex" => {
-                index += 1;
-                let raw = args
-                    .get(index)
-                    .ok_or("first --rraindex requires a number")?;
-                archive_index = raw
-                    .parse::<usize>()
-                    .map_err(|_| "invalid rraindex number")?;
-            }
-            "--daemon" | "-d" => {
-                index += 1;
-                let address = args
-                    .get(index)
-                    .ok_or("first --daemon requires an address")?;
-                daemon_address = Some(address.clone());
-            }
-            option if option.starts_with("--daemon=") => {
-                daemon_address = Some(option["--daemon=".len()..].to_owned());
-            }
-            option if option.starts_with('-') => {
-                return Err(format!("unsupported rrdtool first option: {option}").into());
-            }
-            value => {
-                if filename.replace(value).is_some() {
-                    return Err("rrdtool first accepts one filename".into());
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            129 => {
+                // rrd_first.c:33 stores strtol(optarg, &endptr, 0) in an int.
+                archive_index = rondi::c_strtol(options.value(), 0).0 as i32;
+                if archive_index < 0 {
+                    return Err("invalid rraindex number".into());
                 }
             }
+            option if option == b'd' as i32 => daemon_address = Some(options.value().to_owned()),
+            optparse::ERROR => return Err(options.errmsg.into()),
+            _ => {}
         }
-        index += 1;
     }
-    let filename = filename.ok_or("Usage: rrdtool first [--rraindex number] filename.rrd")?;
+    let Some(filename) = options.positionals().first() else {
+        return Err(format!(
+            "usage rrdtool {} [--rraindex number] [--daemon|-d <addr>] file.rrd",
+            args[0]
+        )
+        .into());
+    };
     if let Some(address) = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty())
     {
         let escaped_filename = filename.replace('\\', "\\\\").replace(' ', "\\ ");
-        let response = send_rrdcached_command(
+        let timestamp = rrdcached_time_value(
             &address,
             &format!("FIRST {escaped_filename} {archive_index}"),
         )?;
-        let timestamp = response
-            .split_whitespace()
-            .nth(1)
-            .ok_or("invalid rrdcached FIRST response")?;
         println!("{timestamp}");
         return Ok(());
     }
-    if let Err(error) = ensure_rrd_file_exists(std::path::Path::new(filename)) {
-        if std::path::Path::new(filename)
-            .metadata()
-            .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
-        {
-            println!("-1");
-        }
-        return Err(error);
-    }
-    println!("{}", first_rrd_time(filename, archive_index)?);
+    println!("{}", first_rrd_time(filename, archive_index as usize)?);
     Ok(())
+}
+
+/// rrd_tool.c:736-750 prints the time_t that rrd_first and rrd_last return,
+/// which is -1 on every error, before the ERROR line.
+fn print_minus_one_on_error(
+    result: Result<(), Box<dyn std::error::Error>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if result.is_err() {
+        println!("-1");
+    }
+    result
 }
 
 fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -5489,37 +4965,31 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/info.txt"));
         return Ok(());
     }
-    let mut filename = None::<String>;
+    // rrd_info.c:72.
+    const LONGOPTS: &[LongOpt] = &[
+        opt("daemon", b'd' as i32, ArgType::Required),
+        opt("noflush", b'F' as i32, ArgType::None),
+    ];
     let mut daemon_address = None::<String>;
     let mut noflush = false;
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--daemon" | "-d" => {
-                index += 1;
-                daemon_address = Some(
-                    args.get(index)
-                        .ok_or("info --daemon requires an address")?
-                        .clone(),
-                );
-            }
-            option if option.starts_with("--daemon=") => {
-                daemon_address = Some(option["--daemon=".len()..].to_owned());
-            }
-            "--noflush" | "-F" => noflush = true,
-            option if option.starts_with('-') => {
-                return Err(format!("unsupported info option: {option}").into());
-            }
-            path => {
-                if filename.replace(path.to_owned()).is_some() {
-                    return Err("rrdtool info accepts one filename".into());
-                }
-            }
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            option if option == b'd' as i32 => daemon_address = Some(options.value().to_owned()),
+            option if option == b'F' as i32 => noflush = true,
+            optparse::ERROR => return Err(options.errmsg.into()),
+            _ => {}
         }
-        index += 1;
     }
-    let filename =
-        filename.ok_or("Usage: rrdtool info [--daemon|-d <addr>] [--noflush|-F] file")?;
+    let [filename] = options.positionals() else {
+        return Err(format!(
+            "Usage: rrdtool {} [--daemon |-d <addr> [--noflush|-F]] <file>",
+            args[0]
+        )
+        .into());
+    };
+    let filename = filename.clone();
     if !noflush {
         if let Some(address) = daemon_address
             .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
@@ -5604,46 +5074,39 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/dump.txt"));
         return Ok(());
     }
+    // rrd_dump.c:556.
+    const LONGOPTS: &[LongOpt] = &[
+        opt("daemon", b'd' as i32, ArgType::Required),
+        opt("header", b'h' as i32, ArgType::Required),
+        opt("no-header", b'n' as i32, ArgType::None),
+    ];
+    let usage = format!(
+        "usage rrdtool {} [--header|-h {{none,xsd,dtd}}]\n[--no-header|-n]\n[--daemon|-d address]\nfile.rrd [file.xml]",
+        args[0]
+    );
     let mut header = RrdDumpHeader::Dtd;
-    let mut positional = Vec::new();
     let mut daemon_address = None::<String>;
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--no-header" | "-n" => header = RrdDumpHeader::None,
-            "--header" | "-h" => {
-                index += 1;
-                header = match args.get(index).map(String::as_str) {
-                    Some("none") => RrdDumpHeader::None,
-                    Some("dtd") => RrdDumpHeader::Dtd,
-                    Some("xsd") => RrdDumpHeader::Xsd,
-                    Some(value) => return Err(format!("invalid dump header: {value}").into()),
-                    None => return Err("dump --header requires none, dtd, or xsd".into()),
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            option if option == b'd' as i32 => daemon_address = Some(options.value().to_owned()),
+            option if option == b'n' as i32 => header = RrdDumpHeader::None,
+            // parse_opt_xmlheader returns -1 for other words, which
+            // rrd_dump_opt_r writes like "none".
+            option if option == b'h' as i32 => {
+                header = match options.value() {
+                    "dtd" => RrdDumpHeader::Dtd,
+                    "xsd" => RrdDumpHeader::Xsd,
+                    _ => RrdDumpHeader::None,
                 };
             }
-            "--daemon" | "-d" => {
-                index += 1;
-                daemon_address = Some(
-                    args.get(index)
-                        .ok_or("dump --daemon requires an address")?
-                        .clone(),
-                );
-            }
-            option if option.starts_with("--daemon=") => {
-                daemon_address = Some(option["--daemon=".len()..].to_owned());
-            }
-            value if value.starts_with('-') => {
-                return Err(format!("unsupported rrdtool dump option: {value}").into());
-            }
-            value => positional.push(value.to_owned()),
+            _ => return Err(usage.into()),
         }
-        index += 1;
     }
+    let positional = options.positionals().to_vec();
     if !(1..=2).contains(&positional.len()) {
-        return Err(
-            "Usage: rrdtool dump [--header {none,xsd,dtd}] [--no-header] file.rrd [file.xml]"
-                .into(),
-        );
+        return Err(usage.into());
     }
     if let Some(address) = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
@@ -5654,7 +5117,16 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     ensure_rrd_file_exists(std::path::Path::new(&positional[0]))?;
     let xml = dump_rrd_file_with_header(&positional[0], header)?;
     if let Some(output) = positional.get(1) {
-        std::fs::write(output, xml)?;
+        match write_output_file(output, xml.as_bytes()) {
+            Ok(()) => {}
+            // rrd_dump_opt_r returns -1 from a failed fopen without setting
+            // an error, so rrdtool reports nothing and exits 0.
+            Err(OutputError::Open(_)) => {}
+            Err(OutputError::Write(errno)) => {
+                return Err(format!("error writing output file: {}", rrd_strerror(errno)).into());
+            }
+            Err(error) => return Err(error.into()),
+        }
     } else {
         print!("{xml}");
     }
@@ -5666,32 +5138,51 @@ fn rrdtool_restore(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/restore.txt"));
         return Ok(());
     }
-    let mut force_overwrite = false;
-    let mut range_check = false;
-    let mut positional = Vec::new();
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--force-overwrite" => force_overwrite = true,
-            "--range-check" => range_check = true,
-            value if value.starts_with('-') && value != "-" => {
-                return Err(format!("unsupported rrdtool restore option: {value}").into());
+    // rrd_restore.c:1383. Upstream keeps both flags in file statics that
+    // nothing resets, so in pipe mode they stay set for later restores.
+    static RANGE_CHECK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static FORCE_OVERWRITE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    const LONGOPTS: &[LongOpt] = &[
+        opt("range-check", b'r' as i32, ArgType::None),
+        opt("force-overwrite", b'f' as i32, ArgType::None),
+    ];
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            option if option == b'r' as i32 => {
+                RANGE_CHECK.store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            value => positional.push(value.to_owned()),
+            option if option == b'f' as i32 => {
+                FORCE_OVERWRITE.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            optparse::ERROR => return Err(options.errmsg.into()),
+            _ => {}
         }
-        index += 1;
     }
+    let positional = options.positionals();
     if positional.len() != 2 {
-        return Err(
-            "Usage: rrdtool restore [--range-check] [--force-overwrite] file.xml file.rrd".into(),
-        );
+        return Err(format!(
+            "usage rrdtool {} [--range-check|-r] [--force-overwrite|-f] file.xml file.rrd",
+            args[0]
+        )
+        .into());
     }
+    let range_check = RANGE_CHECK.load(std::sync::atomic::Ordering::Relaxed);
+    let force_overwrite = FORCE_OVERWRITE.load(std::sync::atomic::Ordering::Relaxed);
+    // rrd_restore.c:1270-1290: stdin ends at the first ctrl-Z.
     let xml = if positional[0] == "-" {
-        let mut xml = String::new();
-        std::io::stdin().read_to_string(&mut xml)?;
-        xml
+        let mut xml = Vec::new();
+        std::io::stdin().read_to_end(&mut xml)?;
+        if let Some(end) = xml.iter().position(|byte| *byte == 0x1a) {
+            xml.truncate(end);
+        }
+        String::from_utf8_lossy(&xml).into_owned()
     } else {
-        std::fs::read_to_string(&positional[0])?
+        std::fs::read(&positional[0])
+            .map(|xml| String::from_utf8_lossy(&xml).into_owned())
+            .map_err(|_| format!("Could not create xml reader for: {}", positional[0]))?
     };
     restore_rrd_file(&xml, &positional[1], force_overwrite, range_check)?;
     Ok(())
@@ -5702,80 +5193,47 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/tune.txt"));
         return Ok(());
     }
-    let mut filename = None;
+    // rrd_tune.c:78. rrd_tune reads only --daemon in a first pass that
+    // ignores errors; rrd_tune_r then applies every option in order.
+    const LONGOPTS: &[LongOpt] = &[
+        opt("heartbeat", b'h' as i32, ArgType::Required),
+        opt("minimum", b'i' as i32, ArgType::Required),
+        opt("maximum", b'a' as i32, ArgType::Required),
+        opt("data-source-type", b'd' as i32, ArgType::Required),
+        opt("data-source-rename", b'r' as i32, ArgType::Required),
+        opt("deltapos", b'p' as i32, ArgType::Required),
+        opt("deltaneg", b'n' as i32, ArgType::Required),
+        opt("window-length", b'w' as i32, ArgType::Required),
+        opt("failure-threshold", b'f' as i32, ArgType::Required),
+        opt("alpha", b'x' as i32, ArgType::Required),
+        opt("beta", b'y' as i32, ArgType::Required),
+        opt("gamma", b'z' as i32, ArgType::Required),
+        opt("gamma-deviation", b'v' as i32, ArgType::Required),
+        opt("smoothing-window", b's' as i32, ArgType::Required),
+        opt("smoothing-window-deviation", b'S' as i32, ArgType::Required),
+        opt("aberrant-reset", b'b' as i32, ArgType::Required),
+        opt("step", b't' as i32, ArgType::Required),
+        opt("daemon", b'D' as i32, ArgType::Required),
+    ];
     let mut daemon_address = None::<String>;
-    let mut settings = Vec::<(&'static str, String)>::new();
-    let mut raw_settings = Vec::<String>::new();
-    let mut index = 1;
-    while index < args.len() {
-        let argument = args[index].as_str();
-        let (setting, inline_value) = if let Some(value) = argument.strip_prefix("--heartbeat=") {
-            (Some("heartbeat"), Some(value))
-        } else if let Some(value) = argument.strip_prefix("--data-source-type=") {
-            (Some("type"), Some(value))
-        } else if let Some(value) = argument.strip_prefix("--data-source-rename=") {
-            (Some("rename"), Some(value))
-        } else if let Some(value) = argument.strip_prefix("--minimum=") {
-            (Some("minimum"), Some(value))
-        } else if let Some(value) = argument.strip_prefix("--maximum=") {
-            (Some("maximum"), Some(value))
-        } else {
-            match argument {
-                "--heartbeat" | "-h" => (Some("heartbeat"), None),
-                "--data-source-type" | "-d" => (Some("type"), None),
-                "--data-source-rename" | "-r" => (Some("rename"), None),
-                "--minimum" | "-i" => (Some("minimum"), None),
-                "--maximum" | "-a" => (Some("maximum"), None),
-                "--daemon" | "-D" => {
-                    index += 1;
-                    daemon_address = Some(
-                        args.get(index)
-                            .ok_or("tune --daemon requires an address")?
-                            .clone(),
-                    );
-                    index += 1;
-                    continue;
-                }
-                option if option.starts_with("--daemon=") => {
-                    daemon_address = Some(option["--daemon=".len()..].to_owned());
-                    index += 1;
-                    continue;
-                }
-                value if value.starts_with('-') => {
-                    return Err(format!("unsupported rrdtool tune option: {value}").into());
-                }
-                value => {
-                    if filename.replace(value.to_owned()).is_some() {
-                        return Err("rrdtool tune expects one RRD filename".into());
-                    }
-                    index += 1;
-                    continue;
+    // The settings in long form, for the daemon's TUNE command.
+    let mut raw_settings = Vec::new();
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            option if option == b'D' as i32 => daemon_address = Some(options.value().to_owned()),
+            option => {
+                if let Some(longopt) = LONGOPTS.iter().find(|longopt| longopt.short == option) {
+                    raw_settings.push(format!("--{}", longopt.name));
+                    raw_settings.push(options.value().to_owned());
                 }
             }
-        };
-        if let Some(name) = setting {
-            let value = if let Some(value) = inline_value {
-                raw_settings.push(argument.to_owned());
-                value.to_owned()
-            } else {
-                raw_settings.push(argument.to_owned());
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| format!("tune --{name} requires a value"))?
-                    .clone();
-                raw_settings.push(value.clone());
-                value
-            };
-            settings.push((name, value));
         }
-        index += 1;
     }
-
-    let filename = filename.ok_or("Usage: rrdtool tune file.rrd [--heartbeat DS:VALUE] [--minimum DS:VALUE] [--maximum DS:VALUE]")?;
-    if settings.is_empty() {
-        return Ok(());
-    }
+    let Some(filename) = options.positionals().first().cloned() else {
+        return Err("missing file name".into());
+    };
     if let Some(address) = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty())
@@ -5800,7 +5258,6 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     ensure_rrd_file_exists(std::path::Path::new(&filename))?;
     let info = rondi::inspect_rrd_file(&filename)?;
-
     let mut changes = info
         .data_sources
         .iter()
@@ -5818,55 +5275,212 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|source| source.name.clone())
         .collect::<Vec<_>>();
-    for (setting, value) in settings {
-        if setting == "rename" {
-            let (old_name, new_name) = value
-                .split_once(':')
-                .ok_or("invalid arguments for data source rename")?;
-            let ds_index = current_names
-                .iter()
-                .position(|source| source == old_name)
-                .ok_or_else(|| format!("No DS called {old_name}"))?;
-            changes[ds_index].new_name = Some(new_name.to_owned());
-            current_names[ds_index] = new_name.to_owned();
-            continue;
-        }
-        let (name, value) = value
-            .split_once(':')
-            .ok_or_else(|| format!("invalid arguments for {setting}"))?;
-        let ds_index = current_names
+    let ds_match = |names: &[String], name: &str| {
+        names
             .iter()
             .position(|source| source == name)
-            .ok_or_else(|| format!("No DS called {name}"))?;
-        match setting {
-            "type" => changes[ds_index].kind = Some(value.to_owned()),
-            "heartbeat" => {
-                let heartbeat = value
-                    .parse::<i64>()
-                    .map_err(|_| "invalid arguments for heartbeat")?;
-                changes[ds_index].heartbeat = Some(heartbeat as u64);
+            .ok_or_else(|| format!("unknown data source name '{name}'"))
+    };
+    let mut options = OptParse::new(args.to_vec());
+    // rrd_tune_r edits the header through the file mapping, so settings
+    // applied before a failing option stay written.
+    let applied = (|| -> Result<(), Box<dyn std::error::Error>> {
+        loop {
+            let option = options.long(LONGOPTS);
+            if option == optparse::DONE {
+                break;
             }
-            "minimum" | "maximum" => {
-                let bound = if value == "U" {
-                    RrdTuneBound::Unbounded
-                } else {
-                    RrdTuneBound::Value(
-                        value
-                            .parse::<f64>()
-                            .map_err(|_| format!("invalid arguments for {setting} ds value"))?,
-                    )
-                };
-                if setting == "minimum" {
-                    changes[ds_index].minimum = Some(bound);
-                } else {
-                    changes[ds_index].maximum = Some(bound);
+            let value = options.value();
+            match u8::try_from(option).map(char::from) {
+                Ok('h') => {
+                    let Some((name, heartbeat)) = tune_scan_heartbeat(value) else {
+                        return Err("invalid arguments for heartbeat".into());
+                    };
+                    let ds = ds_match(&current_names, &name)?;
+                    changes[ds].heartbeat = Some(heartbeat as u64);
                 }
+                Ok(kind @ ('i' | 'a')) => {
+                    let which = if kind == 'i' { "minimum" } else { "maximum" };
+                    let bound = tune_scan_pair(value, c"%19[a-zA-Z0-9_-]:%40[U0-9.e+-]").and_then(
+                        |(name, text)| {
+                            let bound = if text == "U" {
+                                RrdTuneBound::Unbounded
+                            } else {
+                                let value = cparse::rrd_strtodbl(&text, None).ok()?;
+                                if value.is_nan() {
+                                    RrdTuneBound::Unbounded
+                                } else {
+                                    RrdTuneBound::Value(value)
+                                }
+                            };
+                            Some((name, bound))
+                        },
+                    );
+                    let Some((name, bound)) = bound else {
+                        return Err(format!("invalid arguments for {which} ds value").into());
+                    };
+                    let ds = ds_match(&current_names, &name)?;
+                    if kind == 'i' {
+                        changes[ds].minimum = Some(bound);
+                    } else {
+                        changes[ds].maximum = Some(bound);
+                    }
+                }
+                Ok('d') => {
+                    let Some((name, kind)) = tune_scan_pair(value, c"%19[a-zA-Z0-9_-]:%19[A-Z]")
+                    else {
+                        return Err("invalid arguments for data source type".into());
+                    };
+                    let ds = ds_match(&current_names, &name)?;
+                    if !matches!(
+                        kind.as_str(),
+                        "COUNTER"
+                            | "ABSOLUTE"
+                            | "GAUGE"
+                            | "DERIVE"
+                            | "COMPUTE"
+                            | "DCOUNTER"
+                            | "DDERIVE"
+                    ) {
+                        return Err(format!("unknown data acquisition function '{kind}'").into());
+                    }
+                    changes[ds].kind = Some(kind);
+                }
+                Ok('r') => {
+                    let Some((name, new_name)) =
+                        tune_scan_pair(value, c"%19[a-zA-Z0-9_-]:%19[a-zA-Z0-9_-]")
+                    else {
+                        return Err("invalid arguments for data source type".into());
+                    };
+                    let ds = ds_match(&current_names, &name)?;
+                    changes[ds].new_name = Some(new_name.clone());
+                    current_names[ds] = new_name;
+                }
+                // Rondi opens no Holt-Winters file, so after the value checks
+                // these always find their RRA missing (rrd_tune.c:475-640).
+                Ok('p' | 'n') => {
+                    let (status, parsed) = cparse::rrd_strtodbl_status(value, None);
+                    let param = parsed.unwrap_or_else(|_| cparse::rrd_strtod_prefix(value));
+                    if matches!(status, 1 | 2) && param < 0.1 {
+                        return Err("Parameter specified is too small".into());
+                    }
+                    if status == 1 {
+                        return Err("Unable to parse parameter in set_deltaarg".into());
+                    }
+                    return Err("Failures RRA does not exist in this RRD".into());
+                }
+                Ok('f' | 'w') => {
+                    let param = cparse::atoi(value) as libc::c_ulong;
+                    if !(1..=28).contains(&param) {
+                        return Err("Parameter must be between 1 and 28".into());
+                    }
+                    return Err("Failures RRA does not exist in this RRD".into());
+                }
+                Ok(kind @ ('x' | 'y' | 'z' | 'v' | 's' | 'S')) => {
+                    let (status, parsed) = cparse::rrd_strtodbl_status(value, None);
+                    let param = parsed.unwrap_or_else(|_| cparse::rrd_strtod_prefix(value));
+                    let out_of_range = if matches!(kind, 's' | 'S') {
+                        !(0.0..=1.0).contains(&param)
+                    } else {
+                        param <= 0.0 || param >= 1.0
+                    };
+                    if matches!(status, 1 | 2) && out_of_range {
+                        return Err("Holt-Winters parameter must be between 0 and 1".into());
+                    }
+                    if status == 0 {
+                        return Err("Unable to parse Holt-Winters parameter".into());
+                    }
+                    return Err("Holt-Winters RRA does not exist in this RRD".into());
+                }
+                Ok('b') => {
+                    let Some(name) = tune_scan_name(value) else {
+                        return Err("invalid argument for aberrant-reset".into());
+                    };
+                    // reset_aberrant_coefficients does nothing without
+                    // Holt-Winters archives.
+                    ds_match(&current_names, &name)?;
+                }
+                Ok('?') => return Err(options.errmsg.clone().into()),
+                _ => {}
             }
-            _ => unreachable!(),
+        }
+        Ok(())
+    })();
+    let changed = changes.iter().any(|change| {
+        change.kind.is_some()
+            || change.new_name.is_some()
+            || change.heartbeat.is_some()
+            || change.minimum.is_some()
+            || change.maximum.is_some()
+    });
+    if changed {
+        tune_rrd_data_sources(&filename, &changes)?;
+    }
+    applied?;
+
+    // handle_modify (rrd_modify.c:1299) takes the words after the file name.
+    for argument in &options.positionals()[1..] {
+        let known = ["DEL:", "DS:", "RRA#", "RRA:"]
+            .iter()
+            .any(|prefix| argument.starts_with(prefix) && argument.len() > prefix.len())
+            || (argument.starts_with("DELRRA:") && argument.len() > 7);
+        if !known {
+            return Err(format!("unparsable argument: {argument}").into());
         }
     }
-    tune_rrd_data_sources(&filename, &changes)?;
+    if options.positionals().len() > 1 {
+        return Err("rrdtool tune DS/RRA modification (rrd_modify) is not implemented".into());
+    }
     Ok(())
+}
+
+/// `sscanf(value, DS_NAM_FMT ":%ld", ...) == 2` (rrd_tune.c:258).
+fn tune_scan_heartbeat(value: &str) -> Option<(String, libc::c_long)> {
+    let input = cparse::c_string(value);
+    let mut name = [0_u8; 20];
+    let mut heartbeat: libc::c_long = 0;
+    // SAFETY: %19[ writes at most 20 bytes and %ld a long.
+    let matched = unsafe {
+        libc::sscanf(
+            input.as_ptr(),
+            c"%19[a-zA-Z0-9_-]:%ld".as_ptr(),
+            name.as_mut_ptr(),
+            &mut heartbeat as *mut libc::c_long,
+        )
+    };
+    (matched == 2).then(|| (cparse::buffer_text(&name), heartbeat))
+}
+
+/// Two string conversions of at most 40 bytes each.
+fn tune_scan_pair(value: &str, format: &std::ffi::CStr) -> Option<(String, String)> {
+    let input = cparse::c_string(value);
+    let mut first = [0_u8; 41];
+    let mut second = [0_u8; 41];
+    // SAFETY: every format passed has two %N[ conversions with N <= 40.
+    let matched = unsafe {
+        libc::sscanf(
+            input.as_ptr(),
+            format.as_ptr(),
+            first.as_mut_ptr(),
+            second.as_mut_ptr(),
+        )
+    };
+    (matched == 2).then(|| (cparse::buffer_text(&first), cparse::buffer_text(&second)))
+}
+
+/// `sscanf(value, DS_NAM_FMT, ds_nam) == 1`.
+fn tune_scan_name(value: &str) -> Option<String> {
+    let input = cparse::c_string(value);
+    let mut name = [0_u8; 20];
+    // SAFETY: %19[ writes at most 20 bytes.
+    let matched = unsafe {
+        libc::sscanf(
+            input.as_ptr(),
+            c"%19[a-zA-Z0-9_-]".as_ptr(),
+            name.as_mut_ptr(),
+        )
+    };
+    (matched == 1).then(|| cparse::buffer_text(&name))
 }
 
 fn rrdtool_resize(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -5874,47 +5488,31 @@ fn rrdtool_resize(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/resize.txt"));
         return Ok(());
     }
+    // rrd_resize.c:27-64, in order.
+    if args[1] == "resize.rrd" {
+        return Err("resize.rrd is a reserved name".into());
+    }
     if args.len() != 5 {
-        return Err("Usage: rrdtool resize <file> <rraindex> GROW|SHRINK <rows>".into());
+        return Err("wrong number of parameters".into());
     }
-    ensure_rrd_file_exists(std::path::Path::new(&args[1]))?;
-    let rra_index = parse_c_integer(&args[2])?;
-    let row_count = parse_c_integer(&args[4])?;
-    if row_count <= 0 {
-        return Err("Please grow or shrink with at least 1 row".into());
-    }
+    let target_rra = rondi::c_strtol(&args[2], 0).0 as u64;
     let action = match args[3].as_str() {
         "GROW" => RrdResizeAction::Grow,
         "SHRINK" => RrdResizeAction::Shrink,
-        _ => return Err("Invalid action: must be GROW or SHRINK".into()),
+        _ => return Err("I can only GROW or SHRINK".into()),
     };
+    let modify = rondi::c_strtol(&args[4], 0).0;
+    if modify < 1 {
+        return Err("Please grow or shrink with at least 1 row".into());
+    }
     resize_rrd_file(
         &args[1],
         std::env::current_dir()?.join("resize.rrd"),
-        usize::try_from(rra_index).map_err(|_| "invalid RRA index")?,
+        usize::try_from(target_rra).unwrap_or(usize::MAX),
         action,
-        u64::try_from(row_count).map_err(|_| "invalid row count")?,
+        modify as u64,
     )?;
     Ok(())
-}
-
-fn parse_c_integer(value: &str) -> Result<i64, Box<dyn std::error::Error>> {
-    let (negative, unsigned) = value
-        .strip_prefix('-')
-        .map_or((false, value), |rest| (true, rest));
-    let unsigned = unsigned.strip_prefix('+').unwrap_or(unsigned);
-    let (digits, radix) = if let Some(hex) = unsigned
-        .strip_prefix("0x")
-        .or_else(|| unsigned.strip_prefix("0X"))
-    {
-        (hex, 16)
-    } else if unsigned.len() > 1 && unsigned.starts_with('0') {
-        (&unsigned[1..], 8)
-    } else {
-        (unsigned, 10)
-    };
-    let parsed = i64::from_str_radix(digits, radix)?;
-    Ok(if negative { -parsed } else { parsed })
 }
 
 fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -5922,40 +5520,46 @@ fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/list.txt"));
         return Ok(());
     }
+    // rrd_list.c:256.
+    const LONGOPTS: &[LongOpt] = &[
+        opt("daemon", b'd' as i32, ArgType::Required),
+        opt("noflush", b'F' as i32, ArgType::None),
+        opt("recursive", b'r' as i32, ArgType::None),
+    ];
     let mut recursive = false;
-    let mut directory = None;
     let mut daemon = None;
     let mut noflush = false;
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--recursive" | "-r" => recursive = true,
-            "--noflush" | "-F" => noflush = true,
-            "--daemon" | "-d" => {
-                daemon = Some(
-                    args.get(index + 1)
-                        .ok_or("rrdtool list --daemon requires an address")?
-                        .clone(),
-                );
-            }
-            value if value.starts_with("--daemon=") => daemon = Some(value[9..].to_owned()),
-            value if value.starts_with('-') => {
-                return Err(format!("unsupported rrdtool list option: {value}").into());
-            }
-            value => {
-                if directory.replace(PathBuf::from(value)).is_some() {
-                    return Err("rrdtool list expects one directory".into());
-                }
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            option if option == b'd' as i32 => daemon = Some(options.value().to_owned()),
+            option if option == b'F' as i32 => noflush = true,
+            option if option == b'r' as i32 => recursive = true,
+            optparse::ERROR => return Err(options.errmsg.into()),
+            _ => {
+                return Err(format!(
+                    "Usage: rrdtool {} [--daemon <addr> [--noflush]] <file>",
+                    args[0]
+                )
+                .into());
             }
         }
-        index += if matches!(args[index].as_str(), "--daemon" | "-d") {
-            2
-        } else {
-            1
-        };
     }
-    let directory = directory.ok_or("Usage: rrdtool list [--recursive] <dirname>")?;
-    if let Some(address) = daemon.or_else(|| std::env::var("RRDCACHED_ADDRESS").ok()) {
+    let [directory] = options.positionals() else {
+        return Err(format!(
+            "Usage: rrdtool {} [--daemon <addr> [--noflush]] [--recursive] <directory>",
+            args[0]
+        )
+        .into());
+    };
+    let directory = PathBuf::from(directory);
+    // rrdc_connect treats an empty address as none (rrd_client.c:956).
+    if let Some(address) = daemon
+        .clone()
+        .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
+        .filter(|address| !address.is_empty())
+    {
         let path = directory.to_string_lossy();
         let protocol_path = if path.starts_with('/') {
             path.to_string()
@@ -5974,13 +5578,140 @@ fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{response}");
         return Ok(());
     }
-    let text = list_rrd_entries(&directory, recursive)?;
-    print!("{text}");
+    if daemon.is_some() {
+        // rrd_list.c:340: an explicit address that did not connect.
+        eprintln!("Error connecting to rrdcached");
+        return Ok(());
+    }
+    // rrd_list.c:350: a failed listing prints strerror(errno) without a
+    // newline and the command still succeeds.
+    match rrd_list_r(recursive, &directory.to_string_lossy()) {
+        Ok(Some(text)) => print!("{text}"),
+        Ok(None) => eprint!("{}", rrd_strerror(0)),
+        Err(errno) => eprint!("{}", rrd_strerror(errno)),
+    }
     Ok(())
 }
 
 fn escape_rrdcached_field(value: &str) -> String {
     value.replace('\\', "\\\\").replace(' ', "\\ ")
+}
+
+/// get_path can return NULL without setting rrd_error (empty local paths
+/// and a remote strip-prefix mismatch). FIRST and LAST then print -1
+/// without making rrd_tool.c's final rrd_test_error check fail.
+#[derive(Debug)]
+struct RrdcachedPathUnavailable;
+
+impl std::fmt::Display for RrdcachedPathUnavailable {
+    fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Ok(())
+    }
+}
+
+impl std::error::Error for RrdcachedPathUnavailable {}
+
+fn rrdcached_time_value(
+    address: &str,
+    command: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let response = send_rrdcached_command(address, command)?;
+    let verb = command.split_whitespace().next().unwrap_or_default();
+    response
+        .split_whitespace()
+        .nth(1)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("invalid rrdcached {verb} response").into())
+}
+
+/// Port of RRDtool 1.11.0 rrd_client.c `get_path` (105-193). A local
+/// daemon receives a canonical absolute path; a remote daemon receives its
+/// own relative path after the configured literal prefix is stripped.
+fn rrdcached_client_path(
+    address: &str,
+    filename: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if address.starts_with('/') || address.starts_with("unix:") {
+        if filename.is_empty() {
+            return Err(RrdcachedPathUnavailable.into());
+        }
+        if let Ok(path) = std::fs::canonicalize(filename) {
+            return Ok(path.to_string_lossy().into_owned());
+        }
+        // get_path also handles files that CREATE has not made yet. Keep
+        // its last-slash rule, including its "." directory for /new.rrd.
+        let slash = filename.rfind('/');
+        let directory = match slash {
+            Some(index) if index > 0 => &filename[..index],
+            _ => ".",
+        };
+        let directory = std::fs::canonicalize(directory).map_err(|error| {
+            let text = error.to_string();
+            let detail = text.split(" (os error ").next().unwrap_or(&text);
+            format!("realpath({filename}): {detail}")
+        })?;
+        let suffix = slash.map_or_else(
+            || format!("/{filename}"),
+            |index| filename[index..].to_owned(),
+        );
+        return Ok(format!("{}{suffix}", directory.display()));
+    }
+    if filename.starts_with('/') {
+        return match std::env::var("RRDCACHED_STRIPPATH") {
+            Ok(prefix) => filename
+                .strip_prefix(&prefix)
+                .map(|path| path.trim_start_matches('/').to_owned())
+                .ok_or_else(|| RrdcachedPathUnavailable.into()),
+            Err(_) => Err("absolute path names not allowed when talking to a remote daemon".into()),
+        };
+    }
+    Ok(filename.to_owned())
+}
+
+/// Translate the file field after connecting, preserving rrd_client.c's
+/// connection-error precedence. LIST uses daemon-relative directory names
+/// directly upstream and deliberately does not pass through get_path.
+fn translate_rrdcached_file_command(
+    address: &str,
+    command: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let Some((verb, fields)) = command.split_once(' ') else {
+        return Ok(command.to_owned());
+    };
+    if !matches!(
+        verb,
+        "CREATE" | "FETCH" | "FIRST" | "FLUSH" | "FORGET" | "INFO" | "LAST" | "TUNE"
+    ) {
+        return Ok(command.to_owned());
+    }
+    let mut filename = String::new();
+    let mut escaped = false;
+    let mut end = fields.len();
+    for (index, character) in fields.char_indices() {
+        if escaped {
+            filename.push(character);
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == ' ' {
+            end = index;
+            break;
+        } else {
+            filename.push(character);
+        }
+    }
+    if escaped {
+        return Err("invalid rrdcached filename escape".into());
+    }
+    let path = rrdcached_client_path(address, &filename)?;
+    if path.contains(['\n', '\r', '\0']) {
+        return Err("invalid rrdcached socket or filename".into());
+    }
+    Ok(format!(
+        "{verb} {}{}",
+        escape_rrdcached_field(&path),
+        &fields[end..]
+    ))
 }
 
 #[cfg(unix)]
@@ -5989,6 +5720,7 @@ fn send_rrdcached_multiline_command(
     command: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut stream = connect_rrdcached(address)?;
+    let command = translate_rrdcached_file_command(address, command)?;
     writeln!(stream, "{command}")?;
     let mut reader = std::io::BufReader::new(stream);
     let mut header = String::new();
@@ -6072,6 +5804,33 @@ impl<T: Read + Write> RrdcachedStream for T {}
 fn connect_rrdcached(
     address: &str,
 ) -> Result<Box<dyn RrdcachedStream>, Box<dyn std::error::Error>> {
+    open_rrdcached_stream(address).map_err(|error| {
+        let error_text = error.to_string();
+        let detail = error_text
+            .split(" (os error ")
+            .next()
+            .unwrap_or("Internal error");
+        RrdcachedConnectError(format!("Unable to connect to rrdcached: {detail}")).into()
+    })
+}
+
+/// A failed connection, kept distinct so `flushcached` can report it without
+/// the per-file wrapper, as RRDtool connects once before flushing any file.
+#[derive(Debug)]
+struct RrdcachedConnectError(String);
+
+impl std::fmt::Display for RrdcachedConnectError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RrdcachedConnectError {}
+
+#[cfg(unix)]
+fn open_rrdcached_stream(
+    address: &str,
+) -> Result<Box<dyn RrdcachedStream>, Box<dyn std::error::Error>> {
     use std::os::unix::net::UnixStream;
 
     if let Some(path) = address.strip_prefix("unix:") {
@@ -6103,91 +5862,145 @@ fn send_rrdcached_multiline_command(
     Err("rrdcached Unix socket commands are unavailable on this platform".into())
 }
 
-fn list_rrd_entries(
-    directory: &std::path::Path,
-    recursive: bool,
-) -> Result<String, Box<dyn std::error::Error>> {
-    use std::fmt::Write as _;
-    let input = directory.to_string_lossy();
-    if input.contains("..") {
-        return Err("path traversal is not allowed".into());
+/// `rrd_list_r` (rrd_list.c:150). `Ok(None)` is an empty listing, which
+/// upstream reports through errno 0; `Err` carries errno.
+#[cfg(unix)]
+fn rrd_list_r(recursive: bool, dirname: &str) -> Result<Option<String>, libc::c_int> {
+    // Prevent moving up the directory tree.
+    if dirname.contains("..") {
+        return Err(libc::EACCES);
     }
-    if input.contains('*') || input.contains('?') {
+    let c_dirname = std::ffi::CString::new(dirname).map_err(|_| libc::ENOENT)?;
+    if dirname.contains(['*', '?']) {
         if recursive {
-            print_list_error(libc::EINVAL);
-            return Ok(String::new());
+            return Err(libc::EINVAL);
         }
-        let matches = match glob::glob(input.as_ref()) {
-            Ok(paths) => match paths.collect::<Result<Vec<_>, _>>() {
-                Ok(matches) => matches,
-                Err(_) => {
-                    print_list_error(libc::ENOENT);
-                    return Ok(String::new());
+        let mut out = String::new();
+        // SAFETY: glob fills `buffer`, its paths are read while it is alive,
+        // and globfree releases it on every path.
+        unsafe {
+            let mut buffer = std::mem::zeroed::<libc::glob_t>();
+            if libc::glob(c_dirname.as_ptr(), 0, None, &mut buffer) != 0 {
+                libc::globfree(&mut buffer);
+                return Err(libc::ENOENT);
+            }
+            for index in 0..buffer.gl_pathc as usize {
+                let path = std::ffi::CStr::from_ptr(*buffer.gl_pathv.add(index)).to_bytes();
+                if let Some(slash) = path.iter().rposition(|byte| *byte == b'/') {
+                    out.push_str(&String::from_utf8_lossy(&path[slash + 1..]));
+                    out.push('\n');
                 }
-            },
-            Err(_) => {
-                print_list_error(libc::ENOENT);
-                return Ok(String::new());
             }
+            libc::globfree(&mut buffer);
+        }
+        return if out.is_empty() {
+            Err(libc::ENOENT)
+        } else {
+            Ok(Some(out))
         };
-        if matches.is_empty() {
-            print_list_error(libc::ENOENT);
-            return Ok(String::new());
-        }
-        let mut output = String::new();
-        for matched in matches {
-            if let Some(name) = matched.file_name() {
-                writeln!(output, "{}", name.to_string_lossy()).unwrap();
-            }
-        }
-        return Ok(output);
     }
-    if input.ends_with(".rrd") {
-        let metadata = std::fs::metadata(directory)?;
-        if !metadata.is_file() {
-            return Err("RRD path is not a regular file".into());
+    // A name whose first ".rrd" ends it (strstr) is one file.
+    if dirname
+        .find(".rrd")
+        .is_some_and(|index| index + 4 == dirname.len())
+    {
+        let metadata = c_stat(&c_dirname)?;
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(libc::ENXIO);
         }
-        let name = directory.file_name().ok_or("RRD path has no filename")?;
-        return Ok(format!("{}\n", name.to_string_lossy()));
+        return match dirname.rfind('/') {
+            Some(slash) => Ok(Some(format!("{}\n", &dirname[slash + 1..]))),
+            None => Err(libc::EINVAL),
+        };
     }
-    if !std::fs::metadata(directory)?.is_dir() {
-        return Err("list path is not a directory".into());
+    let metadata = c_stat(&c_dirname)?;
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err(libc::ENOTDIR);
     }
-    fn walk(
-        root: &std::path::Path,
-        path: &std::path::Path,
-        recursive: bool,
-        out: &mut String,
-    ) -> std::io::Result<()> {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            if name == "." || name == ".." {
-                continue;
-            }
-            let current = entry.path();
-            let metadata = std::fs::metadata(&current)?;
-            if metadata.is_dir() && recursive {
-                walk(root, &current, recursive, out)?;
-                continue;
-            }
-            if metadata.is_file() && !name.to_string_lossy().ends_with(".rrd") {
-                continue;
-            }
-            let relative = current.strip_prefix(root).unwrap_or(&current);
-            writeln!(out, "{}", relative.to_string_lossy().replace('\\', "/")).unwrap();
-        }
-        Ok(())
-    }
-    let mut out = String::new();
-    walk(directory, directory, recursive, &mut out)?;
-    Ok(out)
+    rrd_list_rec(recursive, dirname.as_bytes(), dirname.as_bytes())
 }
 
-fn print_list_error(errno: libc::c_int) {
-    // RRDtool writes strerror(errno) without a trailing newline for list errors.
-    let message = unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)).to_string_lossy() };
-    eprint!("{message}");
+#[cfg(unix)]
+fn c_stat(path: &std::ffi::CStr) -> Result<libc::stat, libc::c_int> {
+    // SAFETY: stat writes one struct into the zeroed buffer.
+    unsafe {
+        let mut status = std::mem::zeroed::<libc::stat>();
+        if libc::stat(path.as_ptr(), &mut status) != 0 {
+            return Err(last_errno());
+        }
+        Ok(status)
+    }
+}
+
+/// `rrd_list_rec` (rrd_list.c:39): readdir order, directories listed unless
+/// recursing, regular files only with an `.rrd` suffix.
+#[cfg(unix)]
+fn rrd_list_rec(
+    recursive: bool,
+    root: &[u8],
+    dirname: &[u8],
+) -> Result<Option<String>, libc::c_int> {
+    let c_dirname = std::ffi::CString::new(dirname).map_err(|_| libc::ENOENT)?;
+    let mut out = None::<String>;
+    // SAFETY: the directory handle is owned here and closed before return;
+    // each entry name is NUL-terminated.
+    unsafe {
+        let dir = libc::opendir(c_dirname.as_ptr());
+        if dir.is_null() {
+            return Err(last_errno());
+        }
+        loop {
+            let entry = libc::readdir(dir);
+            if entry.is_null() {
+                break;
+            }
+            let name = std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()).to_bytes();
+            if name == b"." || name == b".." {
+                continue;
+            }
+            if dirname.len() + name.len() + 1 >= libc::PATH_MAX as usize {
+                continue;
+            }
+            let current = [dirname, b"/", name].concat();
+            let Ok(c_current) = std::ffi::CString::new(current.clone()) else {
+                continue;
+            };
+            let Ok(status) = c_stat(&c_current) else {
+                continue;
+            };
+            let kind = status.st_mode & libc::S_IFMT;
+            if kind == libc::S_IFDIR && recursive {
+                if let Ok(Some(nested)) = rrd_list_rec(recursive, root, &current) {
+                    out.get_or_insert_with(String::new).push_str(&nested);
+                }
+                continue;
+            }
+            if kind == libc::S_IFREG {
+                let suffix = name.windows(4).position(|window| window == b".rrd");
+                if suffix.is_none_or(|index| index + 4 != name.len()) {
+                    continue;
+                }
+            }
+            // move_past_prefix: skip the characters shared with the root.
+            let mut short = &current[..];
+            if root.len() <= current.len() {
+                let shared = root
+                    .iter()
+                    .zip(&current)
+                    .take_while(|(left, right)| left == right)
+                    .count();
+                short = &current[shared..];
+            }
+            if short.first() == Some(&b'/') {
+                short = &short[1..];
+            }
+            let out = out.get_or_insert_with(String::new);
+            out.push_str(&String::from_utf8_lossy(short));
+            out.push('\n');
+        }
+        libc::closedir(dir);
+    }
+    Ok(out)
 }
 
 fn format_info_float(value: f64) -> String {
@@ -6207,6 +6020,21 @@ fn inspect_rrd(path: &str) -> Result<rondi::RrdInfo, Box<dyn std::error::Error>>
     Ok(rondi::inspect_rrd_file(path)?)
 }
 
+// rrd_tool.c prints fetch rows with printf, so LC_NUMERIC picks the decimal
+// separator.
+fn format_fetch_value(value: f64) -> String {
+    let mut buffer = [0 as libc::c_char; 64];
+    let length =
+        unsafe { libc::snprintf(buffer.as_mut_ptr(), buffer.len(), c"%0.10e".as_ptr(), value) };
+    match usize::try_from(length) {
+        Ok(length) if length < buffer.len() => {
+            let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), length) };
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+        _ => format_rrd_float(value),
+    }
+}
+
 fn format_rrd_float(value: f64) -> String {
     let formatted = format!("{value:0.10e}");
     let Some((mantissa, exponent)) = formatted.split_once('e') else {
@@ -6214,6 +6042,13 @@ fn format_rrd_float(value: f64) -> String {
     };
     let exponent = exponent.parse::<i32>().unwrap_or_default();
     format!("{mantissa}e{exponent:+03}")
+}
+
+fn parse_rrd_update_value(value: &str) -> Option<Option<f64>> {
+    if value.eq_ignore_ascii_case("U") || value.eq_ignore_ascii_case("UNKNOWN") {
+        return Some(None);
+    }
+    rondi::parse_rrd_number(value).map(Some)
 }
 
 fn parse_value(value: &str) -> Result<Option<f64>, Box<dyn std::error::Error>> {
@@ -6224,21 +6059,15 @@ fn parse_value(value: &str) -> Result<Option<f64>, Box<dyn std::error::Error>> {
 }
 
 fn parse_rrd_resolution(value: &str) -> Result<u64, Box<dyn std::error::Error>> {
-    match parse_rrd_scaled_duration(value, 1) {
-        Ok(resolution) => Ok(resolution),
-        Err(_) if is_rrd_zero_duration(value) => Err("resolution: value must be positive".into()),
-        Err(error) => {
-            let message = error.to_string();
-            let detail = if message.contains("duration must be a positive integer") {
-                "value must be (suffixed) positive number"
-            } else if message.contains("duration has trailing garbage") {
-                "value has trailing garbage"
-            } else {
-                return Err(error.into());
-            };
-            Err(format!("resolution: {detail}").into())
-        }
-    }
+    parse_scaled_duration_option(value, "resolution")
+}
+
+/// `rrd_scaled_duration(value, 1, ...)` with its message after `label: `.
+fn parse_scaled_duration_option(
+    value: &str,
+    label: &str,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    Ok(parse_rrd_scaled_duration(value, 1).map_err(|error| format!("{label}: {error}"))?)
 }
 
 fn is_rrd_zero_duration(value: &str) -> bool {
@@ -6320,473 +6149,6 @@ fn rrd_archive_definition_matches(
     xff == archive.xff && pdp_per_row == archive.pdp_per_row && rows == archive.rows
 }
 
-/// Implements the numeric and `now +/- duration` start forms accepted by the
-/// pinned RRDtool create command. The full at-style grammar remains broader.
-fn parse_rrd_time(value: &str, now: i64) -> Result<i64, Box<dyn std::error::Error>> {
-    let normalized = value.replace(['_', ','], " ").to_ascii_lowercase();
-    if let Some(timestamp) = parse_rrd_reference_time(&normalized, now) {
-        return Ok(timestamp);
-    }
-    if let Ok(epoch) = normalized.trim().parse::<i64>() {
-        return Ok(epoch);
-    }
-
-    // A sign begins the at-style offset. Try each occurrence because absolute
-    // references may themselves contain separators (for example dates).
-    for (index, character) in normalized.char_indices() {
-        if !matches!(character, '+' | '-') {
-            continue;
-        }
-        let reference = normalized[..index].trim();
-        let offset = normalized[index..]
-            .chars()
-            .filter(|character| !character.is_ascii_whitespace() && *character != '_')
-            .collect::<String>();
-        let Some(reference_time) = parse_rrd_reference_time(reference, now) else {
-            continue;
-        };
-        return apply_rrd_offsets(reference_time, &offset);
-    }
-
-    Err(format!("unsupported RRDtool time specification: {value}").into())
-}
-
-fn parse_rrd_reference_time(value: &str, now: i64) -> Option<i64> {
-    let value = value.trim();
-    if matches!(value, "now" | "n") {
-        return Some(now);
-    }
-    if value == "epoch" {
-        return Some(0);
-    }
-    if let Some(timestamp) = parse_rrd_absolute_date(value, now) {
-        return Some(timestamp);
-    }
-    let (special_time, rest) = value.split_once(char::is_whitespace)?;
-    let hour = match special_time {
-        "midnight" => 0,
-        "noon" => 12,
-        "teatime" => 16,
-        _ => return None,
-    };
-    let rest = rest.trim();
-    if rest.is_empty() {
-        return set_local_hour(now, hour);
-    }
-    if let Some(timestamp) = parse_rrd_absolute_date(&format!("{rest} {hour:02}:00"), now) {
-        return Some(timestamp);
-    }
-    let base = set_local_hour(now, hour)?;
-    let day_delta = match rest {
-        "today" => Some(0),
-        "yesterday" => Some(-1),
-        "tomorrow" => Some(1),
-        _ => parse_weekday(rest).map(|day| {
-            let raw = libc::time_t::try_from(base).unwrap_or_default();
-            let mut local = unsafe { std::mem::zeroed::<libc::tm>() };
-            if unsafe { libc::localtime_r(&raw, &mut local) }.is_null() {
-                return 0;
-            }
-            day - local.tm_wday
-        }),
-    }?;
-    shift_local_calendar(base, CalendarUnit::Days, i64::from(day_delta)).ok()
-}
-
-fn parse_weekday(value: &str) -> Option<i32> {
-    Some(match value {
-        "sun" | "sunday" => 0,
-        "mon" | "monday" => 1,
-        "tue" | "tuesday" => 2,
-        "wed" | "wednesday" => 3,
-        "thu" | "thursday" => 4,
-        "fri" | "friday" => 5,
-        "sat" | "saturday" => 6,
-        _ => return None,
-    })
-}
-
-#[cfg(unix)]
-fn set_local_hour(timestamp: i64, hour: i32) -> Option<i64> {
-    let mut raw = libc::time_t::try_from(timestamp).ok()?;
-    let mut local = unsafe { std::mem::zeroed::<libc::tm>() };
-    if unsafe { libc::localtime_r(&raw, &mut local) }.is_null() {
-        return None;
-    }
-    local.tm_hour = hour;
-    local.tm_min = 0;
-    local.tm_sec = 0;
-    local.tm_isdst = -1;
-    raw = unsafe { libc::mktime(&mut local) };
-    if raw == -1 {
-        return None;
-    }
-    #[cfg(target_pointer_width = "64")]
-    {
-        Some(raw)
-    }
-    #[cfg(not(target_pointer_width = "64"))]
-    {
-        Some(raw as i64)
-    }
-}
-
-#[cfg(not(unix))]
-fn set_local_hour(timestamp: i64, hour: i32) -> Option<i64> {
-    Some(timestamp - timestamp.rem_euclid(86_400) + i64::from(hour) * 3_600)
-}
-
-#[derive(Clone, Copy)]
-enum CalendarUnit {
-    Days,
-    Months,
-    Years,
-}
-
-#[cfg(unix)]
-fn shift_local_calendar(
-    timestamp: i64,
-    unit: CalendarUnit,
-    amount: i64,
-) -> Result<i64, Box<dyn std::error::Error>> {
-    let mut timestamp = libc::time_t::try_from(timestamp)?;
-    let mut local = unsafe { std::mem::zeroed::<libc::tm>() };
-    if unsafe { libc::localtime_r(&timestamp, &mut local) }.is_null() {
-        return Err("RRDtool local time is outside the supported range".into());
-    }
-    let amount = i32::try_from(amount)?;
-    match unit {
-        CalendarUnit::Days => {
-            local.tm_mday = local.tm_mday.checked_add(amount).ok_or("date overflow")?
-        }
-        CalendarUnit::Months => {
-            local.tm_mon = local.tm_mon.checked_add(amount).ok_or("date overflow")?
-        }
-        CalendarUnit::Years => {
-            local.tm_year = local.tm_year.checked_add(amount).ok_or("date overflow")?
-        }
-    }
-    local.tm_isdst = -1;
-    timestamp = unsafe { libc::mktime(&mut local) };
-    if timestamp == -1 {
-        return Err("RRDtool calendar time is outside the supported range".into());
-    }
-    #[cfg(target_pointer_width = "64")]
-    {
-        Ok(timestamp)
-    }
-    #[cfg(not(target_pointer_width = "64"))]
-    {
-        Ok(timestamp as i64)
-    }
-}
-
-#[cfg(not(unix))]
-fn shift_local_calendar(
-    timestamp: i64,
-    unit: CalendarUnit,
-    amount: i64,
-) -> Result<i64, Box<dyn std::error::Error>> {
-    let seconds = match unit {
-        CalendarUnit::Days => 86_400,
-        CalendarUnit::Months => 31 * 86_400,
-        CalendarUnit::Years => 366 * 86_400,
-    };
-    timestamp
-        .checked_add(amount.checked_mul(seconds).ok_or("date overflow")?)
-        .ok_or_else(|| "date overflow".into())
-}
-
-fn apply_rrd_offsets(reference: i64, offsets: &str) -> Result<i64, Box<dyn std::error::Error>> {
-    let bytes = offsets.as_bytes();
-    let mut index = 0;
-    let mut sign = 1_i64;
-    let mut previous_unit = "";
-    let mut timestamp = reference;
-    let mut saw_offset = false;
-    while index < bytes.len() {
-        if bytes[index] == b'+' || bytes[index] == b'-' {
-            sign = if bytes[index] == b'+' { 1 } else { -1 };
-            index += 1;
-        } else if !saw_offset {
-            return Err(format!("invalid RRDtool time offset: {offsets}").into());
-        }
-        let start = index;
-        while index < bytes.len() && bytes[index].is_ascii_digit() {
-            index += 1;
-        }
-        if start == index {
-            return Err(format!("invalid RRDtool time offset: {offsets}").into());
-        }
-        let amount = offsets[start..index].parse::<i64>()?;
-        let unit_start = index;
-        while index < bytes.len() && bytes[index].is_ascii_alphabetic() {
-            index += 1;
-        }
-        let mut unit = &offsets[unit_start..index];
-        if unit.is_empty() {
-            unit = "s";
-        }
-        if unit == "m" {
-            unit = match previous_unit {
-                "d" | "day" | "days" | "w" | "wk" | "week" | "weeks" | "mon" | "month"
-                | "months" | "y" | "yr" | "year" | "years" => "mon",
-                "s" | "sec" | "second" | "seconds" | "min" | "minute" | "minutes" | "h" | "hr"
-                | "hour" | "hours" => "min",
-                _ if amount < 6 => "mon",
-                _ => "min",
-            };
-        }
-        let signed = amount
-            .checked_mul(sign)
-            .ok_or("RRDtool time offset overflows")?;
-        match unit {
-            "s" | "sec" | "second" | "seconds" => {
-                timestamp = timestamp
-                    .checked_add(signed)
-                    .ok_or("time offset overflows")?;
-            }
-            "m" | "min" | "minute" | "minutes" => {
-                timestamp = timestamp
-                    .checked_add(signed.checked_mul(60).ok_or("time offset overflows")?)
-                    .ok_or("time offset overflows")?;
-            }
-            "h" | "hr" | "hour" | "hours" => {
-                timestamp = timestamp
-                    .checked_add(signed.checked_mul(3_600).ok_or("time offset overflows")?)
-                    .ok_or("time offset overflows")?;
-            }
-            "d" | "day" | "days" => {
-                timestamp = shift_local_calendar(timestamp, CalendarUnit::Days, signed)?;
-            }
-            "w" | "wk" | "week" | "weeks" => {
-                timestamp = shift_local_calendar(
-                    timestamp,
-                    CalendarUnit::Days,
-                    signed.checked_mul(7).ok_or("date overflow")?,
-                )?;
-            }
-            "mon" | "month" | "months" => {
-                timestamp = shift_local_calendar(timestamp, CalendarUnit::Months, signed)?;
-            }
-            "y" | "yr" | "year" | "years" => {
-                timestamp = shift_local_calendar(timestamp, CalendarUnit::Years, signed)?;
-            }
-            _ => return Err(format!("unsupported RRDtool time unit: {unit}").into()),
-        }
-        previous_unit = unit;
-        saw_offset = true;
-    }
-    if !saw_offset {
-        return Err(format!("invalid RRDtool time offset: {offsets}").into());
-    }
-    Ok(timestamp)
-}
-
-/// RRDtool's at-style parser uses local calendar time plus `mktime`'s DST
-/// normalization. Cover common fully specified calendar forms while retaining
-/// that system behavior. Month/day names and broader at-style references remain
-/// outside this bounded implementation.
-#[cfg(unix)]
-fn parse_rrd_absolute_date(value: &str, now: i64) -> Option<i64> {
-    use std::ffi::CString;
-
-    let normalized = value.replace(['_', ','], " ");
-    let input = CString::new(normalized).ok()?;
-    const FORMATS: [&[u8]; 16] = [
-        b"%Y-%m-%d %H:%M:%S\0",
-        b"%Y-%m-%d %H:%M\0",
-        b"%Y-%m-%dT%H:%M:%S\0",
-        b"%m/%d/%Y %H:%M:%S\0",
-        b"%m/%d/%Y %H:%M\0",
-        b"%d.%m.%Y %H:%M:%S\0",
-        b"%d.%m.%Y %H:%M\0",
-        b"%H:%M:%S %Y-%m-%d\0",
-        b"%H:%M %Y-%m-%d\0",
-        b"%b %d %Y %H:%M:%S\0",
-        b"%b %d %Y %H:%M\0",
-        b"%B %d %Y %H:%M:%S\0",
-        b"%B %d %Y %H:%M\0",
-        b"%H:%M %b %d %Y\0",
-        b"%H:%M:%S %B %d %Y\0",
-        b"%I:%M %p %b %d %Y\0",
-    ];
-    for format in FORMATS {
-        // strptime and mktime use the same local-time and DST rules as RRDtool's
-        // rrd_parsetime + mktime path for these calendar forms.
-        let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
-        let end = unsafe { libc::strptime(input.as_ptr(), format.as_ptr().cast(), &mut tm) };
-        if end.is_null() || unsafe { *end } != 0 {
-            continue;
-        }
-        tm.tm_isdst = -1;
-        let timestamp = unsafe { libc::mktime(&mut tm) };
-        if timestamp != -1 {
-            return Some(timestamp as i64);
-        }
-    }
-
-    // RRDtool preserves the current local time-of-day when a calendar date is
-    // given without an explicit time component.
-    const DATE_ONLY_FORMATS: [(&[u8], bool); 5] = [
-        (b"%B %d %Y\0", true),
-        (b"%b %d %Y\0", true),
-        (b"%m/%d/%Y\0", false),
-        (b"%d.%m.%Y\0", false),
-        (b"%Y%m%d\0", false),
-    ];
-    let mut raw_now = libc::time_t::try_from(now).ok()?;
-    for (format, preserve_time) in DATE_ONLY_FORMATS {
-        let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
-        if unsafe { libc::localtime_r(&raw_now, &mut tm) }.is_null() {
-            return None;
-        }
-        let end = unsafe { libc::strptime(input.as_ptr(), format.as_ptr().cast(), &mut tm) };
-        if end.is_null() || unsafe { *end } != 0 {
-            continue;
-        }
-        if !preserve_time {
-            tm.tm_hour = 0;
-            tm.tm_min = 0;
-            tm.tm_sec = 0;
-        }
-        tm.tm_isdst = -1;
-        raw_now = unsafe { libc::mktime(&mut tm) };
-        if raw_now != -1 {
-            #[cfg(target_pointer_width = "64")]
-            return Some(raw_now);
-            #[cfg(not(target_pointer_width = "64"))]
-            return Some(raw_now as i64);
-        }
-    }
-    None
-}
-
-#[cfg(not(unix))]
-fn parse_rrd_absolute_date(_value: &str, _now: i64) -> Option<i64> {
-    None
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum RangeTimeSpec {
-    Absolute(i64),
-    RelativeToStart(String),
-    RelativeToEnd(String),
-}
-
-fn parse_range_time_spec(
-    value: &str,
-    now: i64,
-) -> Result<RangeTimeSpec, Box<dyn std::error::Error>> {
-    let normalized = value.trim().to_ascii_lowercase();
-    for (reference, kind) in [("start", 0_u8), ("end", 1_u8), ("s", 0_u8), ("e", 1_u8)] {
-        if let Some(offset) = normalized.strip_prefix(reference)
-            && offset.starts_with(['+', '-'])
-        {
-            if kind == 0 {
-                return Ok(RangeTimeSpec::RelativeToStart(offset.to_owned()));
-            }
-            return Ok(RangeTimeSpec::RelativeToEnd(offset.to_owned()));
-        }
-    }
-    if let Ok(timestamp) = normalized.parse::<i64>() {
-        return Ok(RangeTimeSpec::Absolute(if timestamp > 0 {
-            timestamp
-        } else {
-            now.checked_add(timestamp)
-                .ok_or("relative fetch time overflows")?
-        }));
-    }
-    Ok(RangeTimeSpec::Absolute(parse_rrd_time(&normalized, now)?))
-}
-
-/// Resolve RRDtool's pair-dependent `start`/`end` references. In RRDtool,
-/// `start-1d` is based on the resolved end and `end+1d` on the resolved start;
-/// references to the same endpoint or mutually relative endpoints are invalid.
-fn resolve_rrd_range_times(
-    start_spec: Option<&str>,
-    end_spec: Option<&str>,
-    default_start: i64,
-    default_end: i64,
-    now: i64,
-) -> Result<(i64, i64), Box<dyn std::error::Error>> {
-    use RangeTimeSpec::{Absolute, RelativeToEnd, RelativeToStart};
-    let start_spec = match start_spec {
-        Some(value) => parse_range_time_spec(value, now)?,
-        None if end_spec.is_none() => Absolute(default_start),
-        None => RelativeToEnd(String::from("-24h")),
-    };
-    let end_spec = end_spec
-        .map(|value| parse_range_time_spec(value, now))
-        .transpose()?
-        .unwrap_or(Absolute(default_end));
-    match (start_spec, end_spec) {
-        (Absolute(start), Absolute(end)) => Ok((start, end)),
-        (RelativeToEnd(offset), Absolute(end)) => Ok((apply_rrd_offsets(end, &offset)?, end)),
-        (Absolute(start), RelativeToStart(offset)) => {
-            Ok((start, apply_rrd_offsets(start, &offset)?))
-        }
-        (RelativeToStart(_), _) => {
-            Err("the start time cannot be specified relative to itself".into())
-        }
-        (_, RelativeToEnd(_)) => Err("the end time cannot be specified relative to itself".into()),
-        (RelativeToEnd(_), RelativeToStart(_)) => {
-            Err("the start and end times cannot be specified relative to each other".into())
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct UpdateTimestamp {
-    seconds: i64,
-    microseconds: u64,
-}
-
-impl UpdateTimestamp {
-    fn format_rrd(self) -> String {
-        if self.microseconds == 0 {
-            self.seconds.to_string()
-        } else {
-            format!("{}.{:06}", self.seconds, self.microseconds)
-        }
-    }
-}
-
-/// RRDtool accepts `N` for the current time and interprets negative numeric
-/// update times as offsets from the current time.
-fn parse_rrd_update_timestamp(
-    value: &str,
-    now: f64,
-) -> Result<UpdateTimestamp, Box<dyn std::error::Error>> {
-    let timestamp = if value == "N" {
-        now
-    } else {
-        let timestamp = rondi::parse_rrd_number(value)
-            .filter(|timestamp| timestamp.is_finite())
-            .ok_or("invalid numeric timestamp")?;
-        if timestamp < 0.0 {
-            now + timestamp
-        } else {
-            timestamp
-        }
-    };
-    if !timestamp.is_finite() || timestamp < i64::MIN as f64 || timestamp >= i64::MAX as f64 {
-        return Err("update timestamp is outside the supported range".into());
-    }
-    let mut seconds = timestamp.floor() as i64;
-    let mut microseconds = ((timestamp - seconds as f64) * 1_000_000.0) as u64;
-    if microseconds >= 1_000_000 {
-        seconds = seconds
-            .checked_add(1)
-            .ok_or("update timestamp is outside the supported range")?;
-        microseconds = 0;
-    }
-    Ok(UpdateTimestamp {
-        seconds,
-        microseconds,
-    })
-}
-
 async fn server_mode(socket: PathBuf, command: Command) -> Result<(), Box<dyn std::error::Error>> {
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
@@ -6857,176 +6219,93 @@ async fn server_mode(socket: PathBuf, command: Command) -> Result<(), Box<dyn st
 
 #[cfg(test)]
 mod xml_output_tests {
-    use super::{XportFormatOptions, format_xport_xml, xml_escape_text};
-    use rondi::RrdXportColumn;
+    use super::format_xport_xmljson;
 
+    // rrd_xport.c writes these text nodes unescaped, so the document is not
+    // well-formed XML when they contain markup characters.
     #[test]
-    fn escapes_graph_xport_text_nodes() {
-        let exports = [RrdXportColumn {
-            variable: "rate".to_owned(),
-            legend: "load & <peak>".to_owned(),
-        }];
-        let prints = ["value > 1 & < 2".to_owned()];
-        let gprints = [("gprint".to_owned(), "<ok & done>".to_owned())];
-        let xml = format_xport_xml(
-            100,
-            110,
-            10,
-            &exports,
-            &[vec![Some(2.0)]],
-            XportFormatOptions {
-                show_time: false,
-                enum_ds: false,
-                graph_gprints: Some(&gprints),
-                graph_prints: Some(&prints),
-            },
-        );
+    fn writes_graph_xport_text_nodes_verbatim() {
+        let mut im = rondi::graph::GraphImage::new(1_000_000_000, 1_000_000_010, 10);
+        let script = ["DEF:rate=unused.rrd:x:AVERAGE", "COMMENT:<ok & done>"].map(String::from);
+        im.graph_script(&script, &|_, _, start, end| Ok((start, end)))
+            .unwrap();
+        let data = rondi::graph::XportData {
+            start: 100,
+            end: 110,
+            step: 10,
+            columns: vec![0],
+            legends: vec!["load & <peak>".to_owned()],
+            rows: vec![vec![2.0]],
+        };
+        let (xml, error) = format_xport_xmljson(0, &mut im, &data, 1000, false);
 
-        assert!(xml.contains("<entry>load &amp; &lt;peak&gt;</entry>"));
-        assert!(xml.contains("<print>value &gt; 1 &amp; &lt; 2</print>"));
-        assert!(xml.contains("<gprint>&lt;ok &amp; done&gt;</gprint>"));
-    }
-
-    #[test]
-    fn xml_escaper_handles_ampersands_before_entities() {
-        assert_eq!(xml_escape_text("&amp; <x>"), "&amp;amp; &lt;x&gt;");
-    }
-}
-
-#[cfg(test)]
-mod time_spec_tests {
-    use super::{
-        RangeTimeSpec, UpdateTimestamp, parse_range_time_spec, parse_rrd_time,
-        parse_rrd_update_timestamp, resolve_rrd_range_times,
-    };
-
-    #[test]
-    fn parses_rrd_create_numeric_and_common_relative_times() {
-        assert_eq!(
-            parse_rrd_time("1000000000", 2_000_000_000).unwrap(),
-            1_000_000_000
-        );
-        assert_eq!(parse_rrd_time("now", 2_000_000_000).unwrap(), 2_000_000_000);
-        assert_eq!(
-            parse_rrd_time("now - 1 hour", 2_000_000_000).unwrap(),
-            1_999_996_400
-        );
-        assert_eq!(
-            parse_rrd_time("now+2d", 2_000_000_000).unwrap(),
-            2_000_172_800
-        );
-    }
-
-    #[test]
-    fn rejects_unsupported_or_overflowing_rrd_time_forms() {
-        assert!(parse_rrd_time("end-1d", 2_000_000_000).is_err());
-        assert!(parse_rrd_time("now+999999999999999999999d", 2_000_000_000).is_err());
-    }
-
-    #[test]
-    fn resolves_range_times_relative_to_the_other_endpoint() {
-        assert_eq!(
-            resolve_rrd_range_times(
-                Some("end-30s"),
-                Some("2000000000"),
-                1_999_913_600,
-                2_000_000_000,
-                2_000_000_000,
-            )
-            .unwrap(),
-            (1_999_999_970, 2_000_000_000)
-        );
-        assert_eq!(
-            resolve_rrd_range_times(
-                Some("2000000000"),
-                Some("start+30s"),
-                1_999_913_600,
-                2_000_000_000,
-                2_000_000_000,
-            )
-            .unwrap(),
-            (2_000_000_000, 2_000_000_030)
-        );
-    }
-
-    #[test]
-    fn rejects_self_and_mutually_relative_range_times() {
-        let now = 2_000_000_000;
-        assert!(resolve_rrd_range_times(Some("start-1h"), None, now - 86_400, now, now).is_err());
-        assert!(resolve_rrd_range_times(None, Some("end+1h"), now - 86_400, now, now).is_err());
-        assert!(
-            resolve_rrd_range_times(Some("end-1h"), Some("start+1h"), now - 86_400, now, now)
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn fetch_negative_and_zero_times_are_relative_to_now() {
-        assert_eq!(
-            parse_range_time_spec("1000000000", 2_000_000_000).unwrap(),
-            RangeTimeSpec::Absolute(1_000_000_000)
-        );
-        assert_eq!(
-            parse_range_time_spec("-3600", 2_000_000_000).unwrap(),
-            RangeTimeSpec::Absolute(1_999_996_400)
-        );
-    }
-
-    #[test]
-    fn update_n_and_negative_times_are_relative_to_current_time() {
-        assert_eq!(
-            parse_rrd_update_timestamp("N", 2_000_000_000.75).unwrap(),
-            UpdateTimestamp {
-                seconds: 2_000_000_000,
-                microseconds: 750_000
-            }
-        );
-        assert_eq!(
-            parse_rrd_update_timestamp("-60", 2_000_000_000.75).unwrap(),
-            UpdateTimestamp {
-                seconds: 1_999_999_940,
-                microseconds: 750_000
-            }
-        );
-        assert_eq!(
-            parse_rrd_update_timestamp("10.9", 2_000_000_000.75).unwrap(),
-            UpdateTimestamp {
-                seconds: 10,
-                microseconds: 900_000
-            }
-        );
-        assert!(parse_rrd_update_timestamp("NaN", 2_000_000_000.75).is_err());
+        assert_eq!(error, None);
+        assert!(xml.contains("<entry>load & <peak></entry>"));
+        assert!(xml.contains("<comment><ok & done></comment>"));
     }
 }
 
 #[cfg(test)]
 mod graph_stroke_tests {
     use super::{
-        GraphPngOptions, GraphScaleOptions, LegendDirection, RenderedGraphXport,
-        draw_line_with_width, draw_styled_line, draw_vertical_text, graph_scale_bounds,
-        graph_value_bounds, interpolate_graph_color, parse_graph_hrule, parse_graph_series,
-        parse_graph_tick, parse_graph_vrule, prepare_graph_series, prepare_legend_rows,
-        render_graph_png, set_pixel, tick_mark_range,
+        GraphCanvas, GraphPngOptions, GraphSeries, RenderedGraphXport, draw_line_with_width,
+        draw_styled_line, draw_vertical_text, graph_render_input, interpolate_graph_color,
+        prepare_graph_series, render_graph_png, set_pixel, tick_mark_range,
     };
 
-    #[test]
-    fn small_and_upward_legend_controls_adjust_the_following_row() {
-        let series = ["A\\s", "B\\u", "C\\l", "\\u", "D\\l"]
-            .into_iter()
-            .map(|legend| {
-                let mut item = parse_graph_series("LINE1:x#ffffff").unwrap().0;
-                item.style = "comment";
-                item.color = None;
-                item.legend = legend.into();
-                item
-            })
-            .collect::<Vec<_>>();
-        let rows = prepare_legend_rows(&series, 0.0, 1.0, 0, 10, false).unwrap();
-        assert_eq!(
-            rows.iter().map(|row| row.offset).collect::<Vec<_>>(),
-            [0, 5, 5, 17, 5]
-        );
-        assert!(rows[3].entries.is_empty());
+    /// Parses one drawing element through rrd_graph_script after DEFs for
+    /// every source name used here, and returns its renderer series with
+    /// the source name as its column.
+    /// A renderer series plus the legend and scale exclusion of its element.
+    #[derive(Clone)]
+    struct TestElement {
+        series: GraphSeries,
+        legend: String,
+        skip_scale: bool,
+    }
+
+    impl std::ops::Deref for TestElement {
+        type Target = GraphSeries;
+
+        fn deref(&self) -> &GraphSeries {
+            &self.series
+        }
+    }
+
+    fn element(definition: &str) -> Result<TestElement, rondi::graph::ScriptError> {
+        let names = [
+            "rate", "base", "x", "upper", "normal", "spike", "load", "events", "extra",
+        ];
+        let mut script: Vec<String> = names
+            .iter()
+            .map(|name| format!("DEF:{name}=unused.rrd:x:AVERAGE"))
+            .collect();
+        script.push(definition.to_owned());
+        let mut im = rondi::graph::GraphImage::new(1_000_000_000, 1_000_000_100, 10);
+        im.graph_script(&script, &|_, _, start, end| Ok((start, end)))?;
+        let last = im.gdes.last().expect("a drawing element");
+        let source = last.vname.clone();
+        // data_proc leaves TICKs and skipscale elements out of the range.
+        let skip_scale = last.skipscale || last.gf == rondi::graph::Gf::Tick;
+        let legend = last
+            .legend
+            .strip_prefix("  ")
+            .unwrap_or(&last.legend)
+            .to_owned();
+        let (_, series) = graph_render_input(&im);
+        let mut series = series.into_iter().last().expect("a drawing element");
+        series.variable = source;
+        Ok(TestElement {
+            series,
+            legend,
+            skip_scale,
+        })
+    }
+
+    fn parse_graph_series(
+        definition: &str,
+    ) -> Result<(TestElement, ()), rondi::graph::ScriptError> {
+        element(definition).map(|series| (series, ()))
     }
 
     #[test]
@@ -7081,6 +6360,7 @@ mod graph_stroke_tests {
         let series = parse_graph_series("LINE:base::STACK").unwrap().0;
         assert_eq!(series.color, None);
         assert!(series.stack);
+        // The empty field is the legend; the next one is left unused.
         assert!(parse_graph_series("LINE:base::Hidden base").is_err());
     }
 
@@ -7117,22 +6397,24 @@ mod graph_stroke_tests {
                 .dash_pattern,
             [2.0, 4.0, 6.0, 8.0]
         );
-        for invalid in ["0", "-1,2", "1,2,3", "NaN", "inf"] {
+        // getDouble accepts any rrd_strtodbl number, so these parse.
+        for accepted in ["0", "-1,2", "1,2,3", "NaN", "inf"] {
             assert!(
-                parse_graph_series(&format!("LINE:x#ffffff:x:dashes={invalid}")).is_err(),
-                "{invalid}"
+                parse_graph_series(&format!("LINE:x#ffffff:x:dashes={accepted}")).is_ok(),
+                "{accepted}"
             );
         }
+        assert!(parse_graph_series("LINE:x#ffffff:x:dashes=a").is_err());
     }
 
     #[test]
-    fn dash_offset_is_parsed_and_must_be_finite() {
+    fn dash_offset_is_parsed() {
         let parsed = parse_graph_series("LINE:x#ffffff:x:dashes=2,3:dash-offset=-1.5")
             .unwrap()
             .0;
         assert_eq!(parsed.dash_pattern, [2.0, 3.0]);
         assert_eq!(parsed.dash_offset, -1.5);
-        assert!(parse_graph_series("LINE:x#ffffff:x:dash-offset=NaN").is_err());
+        assert!(parse_graph_series("LINE:x#ffffff:x:dash-offset=abc").is_err());
     }
 
     #[test]
@@ -7176,7 +6458,7 @@ mod graph_stroke_tests {
 
     #[test]
     fn horizontal_rule_accepts_dash_options() {
-        let rule = parse_graph_hrule("HRULE:4#ff0000:limit:dashes=2,4:dash-offset=1").unwrap();
+        let rule = element("HRULE:4#ff0000:limit:dashes=2,4:dash-offset=1").unwrap();
         assert_eq!(rule.legend, "limit");
         assert_eq!(rule.dash_pattern, [2.0, 4.0]);
         assert_eq!(rule.dash_offset, 1.0);
@@ -7184,8 +6466,7 @@ mod graph_stroke_tests {
 
     #[test]
     fn vertical_rule_accepts_default_dash_options() {
-        let rule =
-            parse_graph_vrule("VRULE:1000000030#00ff00:deploy:dashes", 1_000_000_000).unwrap();
+        let rule = element("VRULE:1000000030#00ff00:deploy:dashes").unwrap();
         assert_eq!(rule.dash_pattern, [5.0, 5.0]);
         assert_eq!(rule.legend, "deploy");
     }
@@ -7206,19 +6487,13 @@ mod graph_stroke_tests {
             .unwrap()
             .0;
         let graph = RenderedGraphXport {
-            output: String::new(),
             start: 0,
             end: 1,
-            step: 1,
-            prints: Vec::new(),
-            gprint_values: Default::default(),
-            vdef_values: Default::default(),
             variables: vec!["base".into(), "upper".into()],
             rows: vec![vec![Some(3.0), Some(2.0)]],
         };
-        let prepared = prepare_graph_series(&graph, &[hidden.clone(), visible]);
+        let prepared = prepare_graph_series(&graph, &[hidden.series, visible.series]);
         assert_eq!(prepared[1].values, [Some(5.0)]);
-        assert_eq!(graph_value_bounds(&graph, &[hidden]), (3.0, 3.0));
     }
 
     #[test]
@@ -7234,117 +6509,12 @@ mod graph_stroke_tests {
     }
 
     #[test]
-    fn skipscale_series_is_drawn_but_does_not_expand_automatic_bounds() {
-        let in_scale = parse_graph_series("LINE:normal#ffffff:normal").unwrap().0;
+    fn skipscale_series_is_parsed_as_excluded_from_automatic_bounds() {
         let excluded = parse_graph_series("LINE:spike#ffffff:spike:skipscale")
             .unwrap()
             .0;
         assert_eq!(excluded.legend, "spike");
         assert!(excluded.skip_scale);
-
-        let graph = RenderedGraphXport {
-            output: String::new(),
-            start: 0,
-            end: 10,
-            step: 1,
-            prints: Vec::new(),
-            gprint_values: Default::default(),
-            vdef_values: Default::default(),
-            variables: vec![String::from("normal"), String::from("spike")],
-            rows: vec![
-                vec![Some(2.0), Some(1000.0)],
-                vec![Some(4.0), Some(-1000.0)],
-            ],
-        };
-        assert_eq!(
-            graph_value_bounds(&graph, &[in_scale, excluded]),
-            (2.0, 4.0)
-        );
-    }
-
-    #[test]
-    fn rigid_limits_hold_until_allow_shrink_is_selected() {
-        let limits = || GraphScaleOptions {
-            lower_limit: Some(0.0),
-            upper_limit: Some(10.0),
-            rigid: true,
-            allow_shrink: false,
-            alternate: false,
-            alternate_min: false,
-            alternate_max: false,
-        };
-        assert_eq!(
-            graph_scale_bounds((2.0, 8.0), limits()).unwrap(),
-            (0.0, 10.0)
-        );
-        let shrunk = GraphScaleOptions {
-            allow_shrink: true,
-            ..limits()
-        };
-        assert_eq!(graph_scale_bounds((2.0, 8.0), shrunk).unwrap(), (2.0, 8.0));
-    }
-
-    #[test]
-    fn flexible_limits_expand_to_include_outlying_data() {
-        let options = GraphScaleOptions {
-            lower_limit: Some(3.0),
-            upper_limit: Some(7.0),
-            rigid: false,
-            allow_shrink: false,
-            alternate: false,
-            alternate_min: false,
-            alternate_max: false,
-        };
-        assert_eq!(graph_scale_bounds((2.0, 8.0), options).unwrap(), (2.0, 8.0));
-    }
-
-    #[test]
-    fn alternate_autoscale_modes_expand_the_requested_side() {
-        let opts = |alternate, alternate_min, alternate_max| GraphScaleOptions {
-            lower_limit: None,
-            upper_limit: None,
-            rigid: false,
-            allow_shrink: false,
-            alternate,
-            alternate_min,
-            alternate_max,
-        };
-        assert_eq!(
-            graph_scale_bounds((2.0, 8.0), opts(true, false, false)).unwrap(),
-            (1.4, 8.6)
-        );
-        assert_eq!(
-            graph_scale_bounds((2.0, 8.0), opts(false, true, false)).unwrap(),
-            (1.4, 8.0)
-        );
-        assert_eq!(
-            graph_scale_bounds((2.0, 8.0), opts(false, false, true)).unwrap(),
-            (2.0, 8.6)
-        );
-    }
-
-    #[test]
-    fn invalid_and_collapsed_scale_limits_are_rejected() {
-        let invalid = GraphScaleOptions {
-            lower_limit: Some(9.0),
-            upper_limit: Some(4.0),
-            rigid: true,
-            allow_shrink: false,
-            alternate: false,
-            alternate_min: false,
-            alternate_max: false,
-        };
-        assert!(graph_scale_bounds((2.0, 8.0), invalid).is_err());
-        let collapsed = GraphScaleOptions {
-            lower_limit: Some(4.0),
-            upper_limit: Some(4.0),
-            rigid: true,
-            allow_shrink: false,
-            alternate: false,
-            alternate_min: false,
-            alternate_max: false,
-        };
-        assert!(graph_scale_bounds((2.0, 8.0), collapsed).is_err());
     }
 
     #[test]
@@ -7360,26 +6530,21 @@ mod graph_stroke_tests {
             interpolate_graph_color([255, 0, 0, 255], [0, 0, 255, 127], 0.5),
             [128, 0, 128, 191]
         );
-        assert!(parse_graph_series("AREA:load#ff0000#00ff00:Load:gradheight=NaN").is_err());
-        // RRDtool's AREA parser does not enable PARSE_DASHES, so these tokens
-        // remain part of the legend instead of changing the fill style.
-        let area = parse_graph_series("AREA:load#ff0000:Load:dashes")
-            .unwrap()
-            .0;
-        assert_eq!(area.legend, "Load:dashes");
-        assert!(area.dash_pattern.is_empty());
+        assert!(parse_graph_series("AREA:load#ff0000#00ff00:Load:gradheight=abc").is_err());
+        // RRDtool's AREA parser does not enable PARSE_DASHES, so the keyword
+        // is an unused argument.
+        assert!(parse_graph_series("AREA:load#ff0000:Load:dashes").is_err());
     }
 
     #[test]
     fn tick_directive_uses_source_default_fraction_and_vertical_direction() {
-        let (default_tick, _) = parse_graph_tick("TICK:events#ff000080").unwrap();
-        assert_eq!(default_tick.tick_fraction, 0.1);
-        assert_eq!(default_tick.legend, "");
-        assert!(default_tick.skip_scale);
+        // rrd_graph_helper.c requires the positional fraction.
+        assert!(element("TICK:events#ff000080").is_err());
 
-        let (labeled_tick, legend) = parse_graph_tick("TICK:events#ff0000:-0.25:Events").unwrap();
+        let labeled_tick = element("TICK:events#ff0000:-0.25:Events").unwrap();
+        assert!(labeled_tick.skip_scale);
         assert_eq!(labeled_tick.tick_fraction, -0.25);
-        assert_eq!(legend, "Events");
+        assert_eq!(labeled_tick.legend, "Events");
         assert_eq!(tick_mark_range(10, 110, 25, -0.25), (10, 35));
         assert_eq!(tick_mark_range(10, 110, 25, 0.25), (85, 110));
     }
@@ -7387,40 +6552,33 @@ mod graph_stroke_tests {
     #[test]
     fn zero_fraction_tick_is_invisible_like_rrdtool() {
         let graph = RenderedGraphXport {
-            output: String::new(),
             start: 0,
             end: 10,
-            step: 1,
-            prints: Vec::new(),
-            gprint_values: Default::default(),
-            vdef_values: Default::default(),
             variables: vec!["events".to_owned()],
             rows: vec![vec![Some(1.0)]; 11],
         };
-        let (zero, _) = parse_graph_tick("TICK:events#ff0000:0").unwrap();
-        let (visible, _) = parse_graph_tick("TICK:events#ff0000:0.5").unwrap();
-        let render = |tick: super::GraphSeries| {
+        let zero = element("TICK:events#ff0000:0").unwrap();
+        let visible = element("TICK:events#ff0000:0.5").unwrap();
+        let render = |tick: TestElement| {
             let png = render_graph_png(
                 &graph,
-                &[tick],
+                &[tick.series],
                 GraphPngOptions {
-                    width: 40,
-                    height: 30,
+                    canvas: GraphCanvas {
+                        width: 121,
+                        height: 71,
+                        left: 51,
+                        top: 15,
+                        plot_width: 40,
+                        plot_height: 30,
+                        minimum: 0.0,
+                        maximum: 1.0,
+                    },
+                    legends: &[],
                     title: None,
                     vertical_label: None,
                     vertical_label_angle: 90.0,
-                    lower_limit: None,
-                    upper_limit: None,
-                    show_legend: false,
-                    rigid_scale: false,
-                    allow_shrink: false,
-                    alt_autoscale: false,
-                    alt_autoscale_min: false,
-                    alt_autoscale_max: false,
                     only_graph: false,
-                    full_size_mode: false,
-                    force_rules_legend: false,
-                    legend_direction: LegendDirection::TopDown,
                     colors: super::GraphColors::default(),
                     grid_dash: Vec::new(),
                     border_width: 0,
@@ -7430,7 +6588,7 @@ mod graph_stroke_tests {
             let mut reader = png::Decoder::new(std::io::Cursor::new(png))
                 .read_info()
                 .unwrap();
-            let mut bytes = vec![0; reader.output_buffer_size()];
+            let mut bytes = vec![0; reader.output_buffer_size().unwrap()];
             let info = reader.next_frame(&mut bytes).unwrap();
             bytes.truncate(info.buffer_size());
             bytes
@@ -7455,40 +6613,21 @@ mod graph_stroke_tests {
 
     #[test]
     fn numeric_hrule_is_parsed_without_expanding_data_scale_bounds() {
-        let rule = parse_graph_hrule("HRULE:20#ff000080:Threshold").unwrap();
+        let rule = element("HRULE:20#ff000080:Threshold").unwrap();
         assert_eq!(rule.rule_value, Some(20.0));
         assert_eq!(rule.legend, "Threshold");
         assert_eq!(rule.color, Some([255, 0, 0, 128]));
-        assert!(parse_graph_hrule("HRULE:NaN#ff0000").is_err());
-
-        let graph = RenderedGraphXport {
-            output: String::new(),
-            start: 0,
-            end: 10,
-            step: 1,
-            prints: Vec::new(),
-            gprint_values: Default::default(),
-            vdef_values: Default::default(),
-            variables: vec![String::from("load")],
-            rows: vec![vec![Some(2.0)], vec![Some(4.0)]],
-        };
-        let load = parse_graph_series("LINE:load#ffffff:Load").unwrap().0;
-        assert_eq!(graph_value_bounds(&graph, &[load, rule]), (2.0, 4.0));
+        assert!(element("HRULE:abc#ff0000").is_err());
     }
 
     #[test]
-    fn vrule_accepts_rrd_timestamps_and_does_not_affect_data_scale() {
-        let rule =
-            parse_graph_vrule("VRULE:1000000030#00ff0080:Maintenance", 1_000_000_000).unwrap();
+    fn vrule_accepts_numeric_timestamps_only() {
+        let rule = element("VRULE:1000000030#00ff0080:Maintenance").unwrap();
         assert_eq!(rule.rule_time, Some(1_000_000_030));
         assert_eq!(rule.legend, "Maintenance");
         assert_eq!(rule.color, Some([0, 255, 0, 128]));
-        assert_eq!(
-            parse_graph_vrule("VRULE:now#00ff00", 1_000_000_000)
-                .unwrap()
-                .rule_time,
-            Some(1_000_000_000)
-        );
+        // A VRULE value is a VDEF or a number, not an at-style time.
+        assert!(element("VRULE:now#00ff00").is_err());
     }
 
     #[test]
@@ -7499,13 +6638,8 @@ mod graph_stroke_tests {
             .0;
         assert!(second.stack);
         let graph = RenderedGraphXport {
-            output: String::new(),
             start: 0,
             end: 30,
-            step: 10,
-            prints: Vec::new(),
-            gprint_values: Default::default(),
-            vdef_values: Default::default(),
             variables: vec![String::from("base"), String::from("extra")],
             rows: vec![
                 vec![Some(2.0), Some(3.0)],
@@ -7513,22 +6647,10 @@ mod graph_stroke_tests {
                 vec![None, Some(1.0)],
             ],
         };
-        let prepared = prepare_graph_series(&graph, &[first, second]);
+        let prepared = prepare_graph_series(&graph, &[first.series, second.series]);
         assert_eq!(prepared[0].values, vec![Some(2.0), Some(4.0), None]);
         assert_eq!(prepared[1].baseline, vec![Some(2.0), Some(4.0), Some(0.0)]);
         assert_eq!(prepared[1].values, vec![Some(5.0), Some(4.0), Some(1.0)]);
-        assert_eq!(
-            graph_value_bounds(
-                &graph,
-                &[
-                    parse_graph_series("AREA:base#ff0000:Base").unwrap().0,
-                    parse_graph_series("AREA:extra#0000ff:Extra:STACK")
-                        .unwrap()
-                        .0,
-                ]
-            ),
-            (1.0, 5.0)
-        );
     }
 }
 
@@ -7557,5 +6679,75 @@ mod rrdcached_response_tests {
         let error =
             read_bounded_line(&mut reader, &mut line, MAX_RRDCACHED_LINE_BYTES).unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    // The helper tests above pass even if a call site reads with an unbounded
+    // read_line, so drive each client path against a daemon that never sends a
+    // newline. The daemon stops writing once the client hangs up.
+    #[cfg(unix)]
+    fn serve_oversized_response(prefix: &'static str) -> (tempfile::TempDir, String) {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("rrdcached.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut command = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut command)
+                .unwrap();
+            let _ = stream.write_all(prefix.as_bytes());
+            let chunk = [b'x'; 64 * 1024];
+            for _ in 0..(2 * MAX_RRDCACHED_LINE_BYTES / chunk.len()) {
+                if stream.write_all(&chunk).is_err() {
+                    break;
+                }
+            }
+        });
+        (dir, format!("unix:{}", socket.display()))
+    }
+
+    #[cfg(unix)]
+    fn assert_oversized_line_error(error: &dyn std::error::Error) {
+        let message = error.to_string();
+        // An unbounded read surfaces the payload itself as the error text.
+        assert!(
+            message == "rrdcached response line exceeds 1 MiB",
+            "{message:.80}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn single_line_commands_reject_an_oversized_daemon_response() {
+        let (_dir, address) = serve_oversized_response("");
+        let error = super::send_rrdcached_command(&address, "FLUSH x.rrd").unwrap_err();
+        assert_oversized_line_error(&*error);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn updates_reject_an_oversized_daemon_response() {
+        let (_dir, address) = serve_oversized_response("");
+        let stream = super::connect_rrdcached(&address).unwrap();
+        let error = super::send_rrdcached_update_on_stream(
+            stream,
+            std::path::Path::new("x.rrd"),
+            &["1000000010:1".to_owned()],
+        )
+        .unwrap_err();
+        assert_oversized_line_error(&*error);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn multiline_commands_reject_an_oversized_header_or_body_line() {
+        for prefix in ["", "1 entries follow\n"] {
+            let (_dir, address) = serve_oversized_response(prefix);
+            let error = super::send_rrdcached_multiline_command(&address, "LIST /").unwrap_err();
+            assert_oversized_line_error(&*error);
+        }
     }
 }

@@ -5,25 +5,24 @@ use crate::format::{RrdFetchResult, RrdFetchRow};
 use crate::storage::StoreError;
 use std::fmt::Write as FmtWrite;
 use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-const STAT_HEAD_LEN: usize = 128;
-const DS_DEF_LEN: usize = 120;
-const RRA_DEF_LEN: usize = 120;
-const LIVE_HEAD_LEN: usize = 16;
-const PDP_PREP_LEN: usize = 112;
-const CDP_PREP_LEN: usize = 80;
-const RRA_PTR_LEN: usize = 8;
-const VALUE_LEN: usize = 8;
-const FLOAT_COOKIE: f64 = 8.642135E130;
-const MAX_HEADER_LEN: usize = 64 * 1024 * 1024;
+pub(crate) const STAT_HEAD_LEN: usize = 128;
+pub(crate) const DS_DEF_LEN: usize = 120;
+pub(crate) const RRA_DEF_LEN: usize = 120;
+pub(crate) const LIVE_HEAD_LEN: usize = 16;
+pub(crate) const PDP_PREP_LEN: usize = 112;
+pub(crate) const CDP_PREP_LEN: usize = 80;
+pub(crate) const RRA_PTR_LEN: usize = 8;
+pub(crate) const VALUE_LEN: usize = 8;
+pub(crate) const FLOAT_COOKIE: f64 = 8.642135E130;
 
 /// Match the NaN produced by RRDtool's `rrd_set_to_DNAN`: the pinned x86_64
 /// build uses a negative quiet NaN, while aarch64 and the other supported
 /// targets use the positive quiet NaN representation.
 #[inline]
-fn rrd_nan() -> f64 {
+pub(crate) fn rrd_nan() -> f64 {
     #[cfg(target_arch = "x86_64")]
     {
         f64::from_bits(0xfff8_0000_0000_0000)
@@ -34,9 +33,23 @@ fn rrd_nan() -> f64 {
     }
 }
 
-/// Create an interoperable RRDtool file for the basic DS/RRA grammar.
-/// The archive row pointer is initialized deterministically; RRDtool itself may
-/// choose any row because every row in a newly created archive is unknown.
+/// Evaluate `a * b + c` the way the pinned RRDtool builds do. GCC and Clang
+/// contract this pattern into a fused multiply-add on aarch64, which always
+/// has the instruction, while baseline x86_64 builds round the product first.
+#[inline]
+pub(crate) fn rrd_mul_add(a: f64, b: f64, c: f64) -> f64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        a.mul_add(b, c)
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        a * b + c
+    }
+}
+
+/// Create an RRDtool file from `DS:` and `RRA:` definitions with
+/// `rrd_create_r2`; the data sources are parsed before the archives.
 pub fn create_rrd_file(
     path: impl AsRef<Path>,
     start: i64,
@@ -45,315 +58,115 @@ pub fn create_rrd_file(
     archives: &[String],
     no_overwrite: bool,
 ) -> Result<(), StoreError> {
-    if !cfg!(target_pointer_width = "64") || cfg!(target_endian = "big") {
-        return Err(StoreError::RrdUnsupported(
-            "RRD v3 creation currently requires a 64-bit little-endian target".into(),
-        ));
-    }
-    if step == 0 || data_sources.is_empty() || archives.is_empty() {
-        return Err(StoreError::RrdUnsupported(
-            "RRD create requires a positive step, at least one DS, and at least one RRA".into(),
-        ));
-    }
     if start < 315_360_000 {
-        return Err(StoreError::RrdUnsupported(
+        return Err(StoreError::Rrd(
             "the first entry to the RRD should be after 1980".into(),
         ));
     }
-    let mut sources = Vec::new();
-    let mut source_names = std::collections::HashSet::new();
-    for definition in data_sources {
-        let fields = definition.split(':').collect::<Vec<_>>();
-        if fields.len() != 6
-            || fields[0] != "DS"
-            || !matches!(
-                fields[2],
-                "GAUGE" | "COUNTER" | "DERIVE" | "ABSOLUTE" | "DCOUNTER" | "DDERIVE"
-            )
-        {
-            return Err(StoreError::RrdUnsupported(format!(
-                "unsupported data source definition: {definition}"
-            )));
-        }
-        if fields[1].is_empty()
-            || fields[1].len() > 19
-            || !fields[1]
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        {
-            return Err(StoreError::RrdUnsupported(format!(
-                "invalid data source name: {}",
-                fields[1]
-            )));
-        }
-        if !source_names.insert(fields[1]) {
-            return Err(StoreError::RrdUnsupported(format!(
-                "duplicate data source name: {}",
-                fields[1]
-            )));
-        }
-        let heartbeat = parse_rrd_scaled_duration(fields[3], 1)?;
-        if heartbeat == 0 {
-            return Err(StoreError::RrdUnsupported(
-                "heartbeat must be positive".into(),
-            ));
-        }
-        let minimum = parse_rrd_bound(fields[4])?;
-        let maximum = parse_rrd_bound(fields[5])?;
-        if minimum.zip(maximum).is_some_and(|(min, max)| min > max) {
-            return Err(StoreError::RrdUnsupported(format!(
-                "minimum exceeds maximum for data source {}",
-                fields[1]
-            )));
-        }
-        sources.push((fields[1], fields[2], heartbeat, minimum, maximum));
-    }
-    let mut rras = Vec::new();
-    for definition in archives {
-        let fields = definition.split(':').collect::<Vec<_>>();
-        if fields.len() != 5
-            || fields[0] != "RRA"
-            || !matches!(fields[1], "AVERAGE" | "MIN" | "MAX" | "LAST")
-        {
-            return Err(StoreError::RrdUnsupported(format!(
-                "unsupported archive definition: {definition}"
-            )));
-        }
-        let xff = fields[2]
-            .parse::<f64>()
-            .map_err(|_| StoreError::RrdUnsupported("invalid RRA xff".into()))?;
-        let pdps = parse_rrd_scaled_duration(fields[3], step)?;
-        let row_divisor = step
-            .checked_mul(pdps)
-            .ok_or_else(|| StoreError::RrdUnsupported("RRA duration divisor overflows".into()))?;
-        let rows = parse_rrd_scaled_duration(fields[4], row_divisor)?;
-        if !xff.is_finite() || !(0.0..1.0).contains(&xff) || pdps == 0 || rows == 0 {
-            return Err(StoreError::RrdUnsupported(format!(
-                "invalid archive parameters: {definition}"
-            )));
-        }
-        rras.push((fields[1], xff, pdps, rows));
-    }
-    let mut bytes = vec![0_u8; STAT_HEAD_LEN];
-    bytes[0..4].copy_from_slice(b"RRD\0");
-    let file_version = if sources
-        .iter()
-        .any(|(_, kind, _, _, _)| matches!(*kind, "DCOUNTER" | "DDERIVE"))
-    {
-        "0005"
-    } else {
-        "0003"
-    };
-    copy_fixed(&mut bytes[4..9], file_version);
-    put_f64(&mut bytes, 16, FLOAT_COOKIE);
-    put_u64(&mut bytes, 24, sources.len() as u64);
-    put_u64(&mut bytes, 32, rras.len() as u64);
-    put_u64(&mut bytes, 40, step);
-    for (name, kind, heartbeat, minimum, maximum) in &sources {
-        let offset = bytes.len();
-        bytes.resize(offset + DS_DEF_LEN, 0);
-        copy_fixed(&mut bytes[offset..offset + 20], name);
-        copy_fixed(&mut bytes[offset + 20..offset + 40], kind);
-        put_u64(&mut bytes, offset + 40, *heartbeat);
-        put_f64(&mut bytes, offset + 48, minimum.unwrap_or(rrd_nan()));
-        put_f64(&mut bytes, offset + 56, maximum.unwrap_or(rrd_nan()));
-    }
-    for (cf, xff, pdps, rows) in &rras {
-        let offset = bytes.len();
-        bytes.resize(offset + RRA_DEF_LEN, 0);
-        copy_fixed(&mut bytes[offset..offset + 20], cf);
-        put_u64(&mut bytes, offset + 24, *rows);
-        put_u64(&mut bytes, offset + 32, *pdps);
-        put_f64(&mut bytes, offset + 40, *xff);
-    }
-    let live_offset = bytes.len();
-    bytes.resize(live_offset + LIVE_HEAD_LEN, 0);
-    put_i64(&mut bytes, live_offset, start);
-    let unknown = start.rem_euclid(
-        i64::try_from(step).map_err(|_| StoreError::RrdUnsupported("step too large".into()))?,
-    ) as u64;
-    for _ in &sources {
-        let offset = bytes.len();
-        bytes.resize(offset + PDP_PREP_LEN, 0);
-        copy_fixed(&mut bytes[offset..offset + 30], "U");
-        put_u64(&mut bytes, offset + 32, unknown);
-        put_f64(&mut bytes, offset + 40, rrd_nan());
-    }
-    let step_i64 =
-        i64::try_from(step).map_err(|_| StoreError::RrdUnsupported("step too large".into()))?;
-    for (_, _, pdps, _) in &rras {
-        let period = step_i64
-            .checked_mul(
-                i64::try_from(*pdps)
-                    .map_err(|_| StoreError::RrdUnsupported("RRA period too large".into()))?,
-            )
-            .ok_or_else(|| StoreError::RrdUnsupported("RRA period too large".into()))?;
-        let unknown_pdps = (start - unknown as i64).rem_euclid(period) as u64 / step;
-        for _ in &sources {
-            let offset = bytes.len();
-            bytes.resize(offset + CDP_PREP_LEN, 0);
-            put_f64(&mut bytes, offset, rrd_nan());
-            put_u64(&mut bytes, offset + 8, unknown_pdps);
-        }
-    }
-    for _ in &rras {
-        bytes.extend_from_slice(&0_u64.to_le_bytes());
-    }
-    for (_, _, _, rows) in &rras {
-        let cells = rows
-            .checked_mul(sources.len() as u64)
-            .ok_or_else(|| StoreError::RrdUnsupported("RRA size overflow".into()))?;
-        let byte_count = cells
-            .checked_mul(VALUE_LEN as u64)
-            .and_then(|n| usize::try_from(n).ok())
-            .ok_or_else(|| StoreError::RrdUnsupported("RRA size overflow".into()))?;
-        bytes.reserve(byte_count);
-        for _ in 0..cells {
-            bytes.extend_from_slice(&rrd_nan().to_le_bytes());
-        }
-    }
     let path = path.as_ref();
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
     let filename = path
-        .file_name()
-        .ok_or_else(|| StoreError::RrdUnsupported("invalid output filename".into()))?
-        .to_string_lossy();
-    let existing_metadata = std::fs::metadata(path).ok();
-    if no_overwrite && existing_metadata.is_some() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::AlreadyExists,
-            format!("creating '{}': File exists", path.display()),
-        )
-        .into());
-    }
-    static TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let (temp_path, mut file) = (0..100)
-        .find_map(|_| {
-            let id = TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let candidate =
-                parent.join(format!(".{filename}.rondi-{}-{id}.tmp", std::process::id()));
-            match std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&candidate)
-            {
-                Ok(file) => Some(Ok((candidate, file))),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => None,
-                Err(error) => Some(Err(error)),
-            }
-        })
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                "unable to allocate temporary RRD filename",
-            )
-        })??;
-    let result = (|| -> Result<(), StoreError> {
-        file.write_all(&bytes)?;
-        if let Some(metadata) = &existing_metadata {
-            file.set_permissions(metadata.permissions())?;
-        }
-        file.sync_all()?;
-        drop(file);
-        if no_overwrite {
-            std::fs::hard_link(&temp_path, path)?;
-            std::fs::remove_file(&temp_path)?;
-        } else {
-            std::fs::rename(&temp_path, path)?;
-        }
-        std::fs::File::open(parent)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
-    }
-    result
+        .to_str()
+        .ok_or_else(|| StoreError::RrdUnsupported("RRD path is not UTF-8".into()))?;
+    let argv = data_sources
+        .iter()
+        .chain(archives)
+        .cloned()
+        .collect::<Vec<_>>();
+    crate::rrd_create::rrd_create_r2(filename, step, start, no_overwrite, None, &argv)
 }
 
-/// Parse RRDtool's integer or suffixed duration syntax. The source implementation
-/// (`rrd_scaled_duration`) treats bare integers as counts and scales suffixed
-/// values, rejecting values that would be truncated by the supplied divisor.
+/// The parts of an existing file that `rrd_create_r2` copies from a
+/// `--template`: its step, last update and the raw DS and RRA definitions.
+pub(crate) struct TemplateDefinitions {
+    pub(crate) pdp_step: u64,
+    pub(crate) last_up: i64,
+    pub(crate) ds_defs: Vec<[u8; DS_DEF_LEN]>,
+    pub(crate) rra_defs: Vec<[u8; RRA_DEF_LEN]>,
+}
+
+pub(crate) fn read_template_definitions(path: &Path) -> Result<TemplateDefinitions, StoreError> {
+    let mut file = RrdFileLock::shared(open_rrd_read(path)?)?;
+    let info = read_info(&mut file, path)?;
+    let ds_count = info.data_sources.len();
+    let rra_count = info.archives.len();
+    let live_start = STAT_HEAD_LEN + ds_count * DS_DEF_LEN + rra_count * RRA_DEF_LEN;
+    let mut header = vec![0; live_start + 8];
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut header)?;
+    let definitions = |start: usize, count: usize, length: usize| {
+        (0..count)
+            .map(|index| {
+                let offset = start + index * length;
+                header[offset..offset + length].try_into().unwrap()
+            })
+            .collect::<Vec<[u8; 120]>>()
+    };
+    Ok(TemplateDefinitions {
+        pdp_step: info.step,
+        last_up: i64_at(&header, live_start)?,
+        ds_defs: definitions(STAT_HEAD_LEN, ds_count, DS_DEF_LEN),
+        rra_defs: definitions(
+            STAT_HEAD_LEN + ds_count * DS_DEF_LEN,
+            rra_count,
+            RRA_DEF_LEN,
+        ),
+    })
+}
+
+/// Parse RRDtool's integer or suffixed duration syntax, reporting
+/// `rrd_scaled_duration`'s text without a prefix.
 pub fn parse_rrd_scaled_duration(text: &str, divisor: u64) -> Result<u64, StoreError> {
-    let bytes = text.as_bytes();
+    rrd_scaled_duration(text, divisor).map_err(|reason| StoreError::Rrd(reason.into()))
+}
+
+/// rrd_utils.c:235 `rrd_scaled_duration`. A bare count is not scaled; a
+/// suffixed duration must divide evenly. As in C, `strtoul` saturates and the
+/// suffix multiplication wraps.
+pub(crate) fn rrd_scaled_duration(token: &str, divisor: u64) -> Result<u64, &'static str> {
+    let bytes = token.as_bytes();
+    if !bytes.first().is_some_and(u8::is_ascii_digit) {
+        return Err("value must be (suffixed) positive number");
+    }
     let digits = bytes
         .iter()
         .take_while(|byte| byte.is_ascii_digit())
         .count();
-    if digits == 0 {
-        return Err(StoreError::RrdUnsupported(
-            "duration must be a positive integer".into(),
-        ));
+    let mut value = bytes[..digits].iter().fold(0_u64, |total, digit| {
+        total
+            .checked_mul(10)
+            .and_then(|total| total.checked_add(u64::from(digit - b'0')))
+            .unwrap_or(u64::MAX)
+    });
+    if divisor == 0 {
+        return Err("INTERNAL ERROR: Zero divisor");
     }
-    let mut value = text[..digits]
-        .parse::<u64>()
-        .map_err(|_| StoreError::RrdUnsupported("duration overflows".into()))?;
-    let suffix = bytes.get(digits).copied();
-    let Some(suffix) = suffix else {
-        if value == 0 {
-            return Err(StoreError::RrdUnsupported(
-                "duration must be positive".into(),
-            ));
-        }
-        return Ok(value);
+    let multiplier = match bytes.get(digits) {
+        None => 0,
+        Some(b's') => 1,
+        Some(b'm') => 60,
+        Some(b'h') => 60 * 60,
+        Some(b'd') => 24 * 60 * 60,
+        Some(b'w') => 7 * 24 * 60 * 60,
+        Some(b'M') => 31 * 24 * 60 * 60,
+        Some(b'y') => 366 * 24 * 60 * 60,
+        Some(_) => return Err("value has trailing garbage"),
     };
-    let multiplier = match suffix {
-        b's' => 1,
-        b'm' => 60,
-        b'h' => 60 * 60,
-        b'd' => 24 * 60 * 60,
-        b'w' => 7 * 24 * 60 * 60,
-        b'M' => 31 * 24 * 60 * 60,
-        b'y' => 366 * 24 * 60 * 60,
-        _ => {
-            return Err(StoreError::RrdUnsupported(
-                "duration has trailing garbage".into(),
-            ));
-        }
-    };
-    value = value
-        .checked_mul(multiplier)
-        .ok_or_else(|| StoreError::RrdUnsupported("duration overflows".into()))?;
+    if multiplier != 0 {
+        value = value.wrapping_mul(multiplier);
+    }
     if value == 0 {
-        return Err(StoreError::RrdUnsupported(
-            "duration must be positive".into(),
-        ));
+        return Err("value must be positive");
     }
-    if divisor == 0 || value % divisor != 0 {
-        return Err(StoreError::RrdUnsupported(
-            "duration would truncate when scaled".into(),
-        ));
+    if multiplier != 0 {
+        if value % divisor != 0 {
+            return Err("value would truncate when scaled");
+        }
+        value /= divisor;
     }
-    Ok(value / divisor)
-}
-
-fn parse_rrd_bound(text: &str) -> Result<Option<f64>, StoreError> {
-    if text == "U" {
-        return Ok(None);
-    }
-    let value = text
-        .parse::<f64>()
-        .map_err(|_| StoreError::RrdUnsupported(format!("invalid DS bound: {text}")))?;
-    if !value.is_finite() {
-        return Err(StoreError::RrdUnsupported(format!(
-            "invalid DS bound: {text}"
-        )));
-    }
-    Ok(Some(value))
-}
-
-fn copy_fixed(destination: &mut [u8], value: &str) {
-    let count = value.len().min(destination.len().saturating_sub(1));
-    destination[..count].copy_from_slice(&value.as_bytes()[..count]);
+    Ok(value)
 }
 
 fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
-    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-}
-fn put_i64(bytes: &mut [u8], offset: usize, value: i64) {
     bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
 }
 fn put_f64(bytes: &mut [u8], offset: usize, value: f64) {
@@ -368,6 +181,8 @@ pub struct RrdInfo {
     /// Microsecond component of the RRDtool live header's last update time.
     pub last_update_usec: u64,
     pub header_size: usize,
+    /// 16, or 8 for a version 0001/0002 file whose live head is a time_t.
+    pub(crate) live_head_len: usize,
     pub data_sources: Vec<RrdDataSourceInfo>,
     pub archives: Vec<RrdArchiveInfo>,
 }
@@ -404,9 +219,16 @@ pub struct RrdCdpPrepInfo {
 }
 
 pub(crate) fn inspect_path(path: &Path) -> Result<RrdInfo, StoreError> {
-    let mut file = open_rrd_read(path)?;
-    let _lock = RrdFileLock::shared(&file)?;
-    read_info(&mut file)
+    let mut file = RrdFileLock::shared(open_rrd_read(path)?)?;
+    read_info(&mut file, path)
+}
+
+/// [`inspect_rrd_file`] on a file the caller opened, so the header comes
+/// from the descriptor it checked. `path` names it in errors.
+pub fn inspect_rrd_open_file(file: File, path: &Path) -> Result<RrdInfo, StoreError> {
+    let mut file = RrdFileLock::shared(file)?;
+    file.seek(SeekFrom::Start(0))?;
+    read_info(&mut file, path)
 }
 
 pub(crate) fn fetch_path(
@@ -421,9 +243,33 @@ pub(crate) fn fetch_path(
             "RRD fetch requires a positive resolution and end >= start".into(),
         ));
     }
-    let mut file = open_rrd_read(path)?;
-    let _lock = RrdFileLock::shared(&file)?;
-    let info = read_info(&mut file)?;
+    fetch_rrd_open_file(
+        open_rrd_read(path)?,
+        path,
+        consolidation,
+        requested_start,
+        requested_end,
+        requested_step,
+    )
+}
+
+/// Fetch from an already opened descriptor under a shared RRD lock.
+pub fn fetch_rrd_open_file(
+    file: File,
+    path: &Path,
+    consolidation: &str,
+    requested_start: i64,
+    requested_end: i64,
+    requested_step: u64,
+) -> Result<RrdFetchResult, StoreError> {
+    if requested_step == 0 || requested_end < requested_start {
+        return Err(StoreError::RrdUnsupported(
+            "RRD fetch requires a positive resolution and end >= start".into(),
+        ));
+    }
+    let mut file = RrdFileLock::shared(file)?;
+    file.seek(SeekFrom::Start(0))?;
+    let info = read_info(&mut file, path)?;
     let archive_index = choose_archive(
         &info,
         consolidation,
@@ -438,13 +284,24 @@ pub(crate) fn fetch_path(
         .ok_or_else(|| rrd_error("RRD archive step overflows"))?;
     let step_i64 = i64::try_from(step).map_err(|_| rrd_error("RRD archive step overflows"))?;
     let start = requested_start
-        .checked_sub(requested_start.rem_euclid(step_i64))
+        .checked_sub(
+            requested_start
+                .checked_rem_euclid(step_i64)
+                .ok_or_else(divides_by_zero)?,
+        )
         .ok_or_else(|| rrd_error("RRD fetch start overflows"))?;
     let mut end = requested_end
-        .checked_add(step_i64 - requested_end.rem_euclid(step_i64))
+        .checked_add(
+            step_i64
+                - requested_end
+                    .checked_rem_euclid(step_i64)
+                    .ok_or_else(divides_by_zero)?,
+        )
         .ok_or_else(|| rrd_error("RRD fetch end overflows"))?;
-    let range_rows = usize::try_from((end - start) / step_i64 + 1)
-        .map_err(|_| rrd_error("RRD fetch range is too large"))?;
+    let range_rows = end
+        .checked_sub(start)
+        .and_then(|span| usize::try_from(span / step_i64 + 1).ok())
+        .ok_or_else(|| rrd_error("RRD fetch range is too large"))?;
     if range_rows > 10_000_000 {
         return Err(StoreError::RrdUnsupported(
             "RRD fetch range exceeds the 10 million row safety limit".into(),
@@ -453,15 +310,19 @@ pub(crate) fn fetch_path(
 
     let archive_end = info
         .last_update
-        .checked_sub(info.last_update.rem_euclid(step_i64))
+        .checked_sub(
+            info.last_update
+                .checked_rem_euclid(step_i64)
+                .ok_or_else(divides_by_zero)?,
+        )
         .ok_or_else(|| rrd_error("RRD archive end overflows"))?;
     let archive_start = archive_end
         .checked_sub(
             step_i64
-                .checked_mul(
-                    i64::try_from(archive.rows - 1)
-                        .map_err(|_| rrd_error("RRD row count overflows"))?,
-                )
+                // rrd_fetch.c:479 computes row_cnt - 1 unsigned, so an empty
+                // archive starts one step after its end. Row counts are bound
+                // by the file length, which keeps the cast in range.
+                .checked_mul(archive.rows.wrapping_sub(1) as i64)
                 .ok_or_else(|| rrd_error("RRD archive time range overflows"))?,
         )
         .ok_or_else(|| rrd_error("RRD archive time range overflows"))?;
@@ -470,23 +331,51 @@ pub(crate) fn fetch_path(
     let end_offset = (i128::from(archive_end) - i128::from(end)) / i128::from(step);
     let row_count = i128::from(archive.rows);
     let mut pointer = 0_i128;
-    let in_archive_range = start <= archive_end && end >= archive_start - step_i64;
+    let in_archive_range =
+        start <= archive_end && i128::from(end) >= i128::from(archive_start) - i128::from(step);
     if in_archive_range {
         pointer = if start_offset <= 0 {
             i128::from(archive.current_row) + 1
         } else {
             i128::from(archive.current_row) + 1 + start_offset
         }
-        .rem_euclid(row_count);
+        .checked_rem_euclid(row_count)
+        .ok_or_else(divides_by_zero)?;
     }
 
-    // rrd_fetch.c seeks once initially and again at the ring boundary.
-    // Buffer sequential rows under the same shared lock, reusing the byte
-    // scratch space rather than allocating and issuing two syscalls per row.
-    let mut reader = BufReader::with_capacity(64 * 1024, &mut file);
+    // The rows inside the archive form one circular run starting at
+    // `pointer`; read it in at most two pieces instead of one read per row.
     let row_bytes = info.data_sources.len() * VALUE_LEN;
-    let mut bytes = vec![0; row_bytes];
-    let mut next_pointer = None;
+    let stored_rows = if in_archive_range {
+        let first = start_offset.max(0);
+        let last = (row_count - end_offset).min(row_count);
+        usize::try_from((last - first).max(0)).map_err(|_| rrd_error("RRD row count overflows"))?
+    } else {
+        0
+    };
+    let mut stored = vec![0_u8; stored_rows * row_bytes];
+    let mut filled = 0;
+    let mut segment_start = pointer;
+    while filled < stored.len() {
+        let segment_rows =
+            (row_count - segment_start).min(((stored.len() - filled) / row_bytes) as i128);
+        let offset = archive
+            .data_offset
+            .checked_add(
+                u64::try_from(segment_start)
+                    .map_err(|_| rrd_error("RRD row offset overflows"))?
+                    .checked_mul(row_bytes as u64)
+                    .ok_or_else(|| rrd_error("RRD row offset overflows"))?,
+            )
+            .ok_or_else(|| rrd_error("RRD row offset overflows"))?;
+        let length = segment_rows as usize * row_bytes;
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(&mut stored[filled..filled + length])?;
+        filled += length;
+        segment_start = 0;
+    }
+    let mut stored_rows = stored.chunks_exact(row_bytes.max(1));
+
     let mut rows = Vec::new();
     let mut timestamp = start
         .checked_add(step_i64)
@@ -501,26 +390,20 @@ pub(crate) fn fetch_path(
         let values = if index < 0 || index >= row_count || !in_archive_range {
             vec![None; info.data_sources.len()]
         } else {
-            let offset = archive
-                .data_offset
-                .checked_add(
-                    u64::try_from(pointer)
-                        .map_err(|_| rrd_error("RRD row offset overflows"))?
-                        .checked_mul(info.data_sources.len() as u64 * VALUE_LEN as u64)
-                        .ok_or_else(|| rrd_error("RRD row offset overflows"))?,
-                )
-                .ok_or_else(|| rrd_error("RRD row offset overflows"))?;
-            if next_pointer != Some(pointer) {
-                reader.seek(SeekFrom::Start(offset))?;
-            }
-            reader.read_exact(&mut bytes)?;
-            pointer += 1;
-            next_pointer = Some(pointer);
+            let bytes = if row_bytes == 0 {
+                &[][..]
+            } else {
+                stored_rows
+                    .next()
+                    .ok_or_else(|| rrd_error("RRD fetch read fewer rows than it addressed"))?
+            };
             bytes
                 .chunks_exact(VALUE_LEN)
                 .map(|chunk| {
                     let value = f64::from_le_bytes(chunk.try_into().expect("eight byte value"));
-                    value.is_finite().then_some(value)
+                    // rrd_fetch.c:552 copies stored rows as they are; only
+                    // NaN means unknown, so infinities reach the caller.
+                    (!value.is_nan()).then_some(value)
                 })
                 .collect()
         };
@@ -529,9 +412,6 @@ pub(crate) fn fetch_path(
             .checked_add(step_i64)
             .ok_or_else(|| rrd_error("RRD fetch timestamp overflows"))?;
         index += 1;
-        if pointer >= row_count {
-            pointer -= row_count;
-        }
     }
     // RRDtool reports the aligned request bounds, not the first/last emitted
     // row timestamps.
@@ -578,18 +458,51 @@ fn update_path_values_with_raw(
     values: &[Option<f64>],
     raw_values: Option<&[Option<&str>]>,
 ) -> Result<Vec<RrdUpdateSummary>, StoreError> {
+    check_update_arguments(timestamp_usec, values, raw_values)?;
+    let mut file = RrdFileLock::exclusive(open_rrd_write(path)?)?;
+    let mut info = read_info(&mut file, path)?;
+    apply_update(
+        &mut file,
+        &mut info,
+        &mut None,
+        timestamp,
+        timestamp_usec,
+        values,
+        raw_values,
+    )
+}
+
+fn check_update_arguments(
+    timestamp_usec: u64,
+    values: &[Option<f64>],
+    raw_values: Option<&[Option<&str>]>,
+) -> Result<(), StoreError> {
     if timestamp_usec >= 1_000_000 {
         return Err(StoreError::InvalidValue);
     }
-    if values.iter().flatten().any(|value| !value.is_finite()) {
+    // RRDtool's text update path accepts nan and inf spellings; callers that
+    // pass numbers directly keep the stricter finite-only contract.
+    if raw_values.is_none() && values.iter().flatten().any(|value| !value.is_finite()) {
         return Err(StoreError::InvalidValue);
     }
     if raw_values.is_some_and(|raw| raw.len() != values.len()) {
         return Err(StoreError::InvalidValue);
     }
-    let mut file = open_rrd_write(path)?;
-    let _lock = RrdFileLock::exclusive(&file)?;
-    let info = read_info(&mut file)?;
+    Ok(())
+}
+
+/// Apply one sample to an open, locked file whose header is `info`, then
+/// bring `info` and the cached prep area `state_cache` up to date so the
+/// next sample in a batch needs no further header read.
+fn apply_update(
+    file: &mut File,
+    info: &mut RrdInfo,
+    state_cache: &mut Option<Vec<u8>>,
+    timestamp: i64,
+    timestamp_usec: u64,
+    values: &[Option<f64>],
+    raw_values: Option<&[Option<&str>]>,
+) -> Result<Vec<RrdUpdateSummary>, StoreError> {
     if info.data_sources.len() != values.len()
         || info.data_sources.iter().any(|ds| {
             !matches!(
@@ -609,17 +522,16 @@ fn update_path_values_with_raw(
             "in-place update requires one value per supported data source and basic archives (AVERAGE, MIN, MAX, LAST)".into(),
         ));
     }
-    for (index, (source, value)) in info.data_sources.iter().zip(values).enumerate() {
-        if let Some(value) = value {
-            if matches!(source.kind.as_str(), "COUNTER" | "DERIVE") {
-                let valid = if let Some(raw) = raw_values.and_then(|raw| raw[index]) {
-                    valid_integer_sample(raw, source.kind == "COUNTER")
-                } else {
-                    value.fract() == 0.0
+    // Text samples are converted lazily in update_pdp_new, as
+    // update_pdp_prep does; numeric callers keep an up-front check.
+    if raw_values.is_none() {
+        for (source, value) in info.data_sources.iter().zip(values) {
+            if let Some(value) = value {
+                if matches!(source.kind.as_str(), "COUNTER" | "DERIVE")
+                    && !(value.fract() == 0.0
                         && (source.kind != "COUNTER" || *value >= 0.0)
-                        && value.abs() <= 9_007_199_254_740_992.0
-                };
-                if !valid {
+                        && value.abs() <= 9_007_199_254_740_992.0)
+                {
                     return Err(StoreError::InvalidValue);
                 }
             }
@@ -629,164 +541,68 @@ fn update_path_values_with_raw(
     let last_update_usec = info.last_update_usec;
     if (timestamp, timestamp_usec) <= (last_update, last_update_usec) {
         return Err(StoreError::RrdTimestamp(format!(
-            "update time {timestamp}.{timestamp_usec:06} is not later than last update {last_update}.{last_update_usec:06}"
+            "illegal attempt to update using time {timestamp} when last update time is {last_update} (minimum one second step)"
         )));
     }
     let step = i64::try_from(info.step).map_err(|_| rrd_error("RRD PDP step overflows"))?;
+    // update_all_cdp_prep and write_to_rras take pdp_cnt as a modulus.
+    if info.archives.iter().any(|archive| archive.pdp_per_row == 0) {
+        return Err(divides_by_zero());
+    }
     let interval = (timestamp
         .checked_sub(last_update)
         .ok_or_else(|| rrd_error("RRD update interval overflows"))? as f64)
         + (timestamp_usec as f64 - last_update_usec as f64) / 1_000_000.0;
     let previous_boundary = last_update
-        .checked_sub(last_update.rem_euclid(step))
+        .checked_sub(
+            last_update
+                .checked_rem_euclid(step)
+                .ok_or_else(divides_by_zero)?,
+        )
         .ok_or_else(|| rrd_error("RRD timestamp alignment overflows"))?;
     let current_boundary = timestamp
-        .checked_sub(timestamp.rem_euclid(step))
+        .checked_sub(
+            timestamp
+                .checked_rem_euclid(step)
+                .ok_or_else(divides_by_zero)?,
+        )
         .ok_or_else(|| rrd_error("RRD timestamp alignment overflows"))?;
     let elapsed_steps = current_boundary
         .checked_sub(previous_boundary)
         .ok_or_else(|| rrd_error("RRD elapsed steps overflow"))?
         / step;
-    let stat_len = STAT_HEAD_LEN;
-    let ds_start = stat_len;
-    let rra_start = ds_start + info.data_sources.len() * DS_DEF_LEN;
+    let ds_count = info.data_sources.len();
+    let rra_start = STAT_HEAD_LEN + ds_count * DS_DEF_LEN;
     let live_start = rra_start + info.archives.len() * RRA_DEF_LEN;
-    let pdp_start = live_start + LIVE_HEAD_LEN;
-    let cdp_start = pdp_start + info.data_sources.len() * PDP_PREP_LEN;
-    let pointer_start = cdp_start + info.data_sources.len() * info.archives.len() * CDP_PREP_LEN;
-    let mut prep = Vec::with_capacity(values.len());
-    let mut completed_pdp = Vec::with_capacity(values.len());
-    let mut first_completed_pdp = Vec::with_capacity(values.len());
-    let mut fill_completed_pdp = Vec::with_capacity(values.len());
-    let mut last_ds_bytes = Vec::with_capacity(values.len());
-    let open_pdp_seconds =
-        (last_update - previous_boundary).max(0) as f64 + last_update_usec as f64 / 1_000_000.0;
+    let pdp_start = live_start + info.live_head_len;
+    let cdp_start = pdp_start + ds_count * PDP_PREP_LEN;
+    let pointer_start = cdp_start + ds_count * info.archives.len() * CDP_PREP_LEN;
+
+    // The steps below follow rrd_update.c process_arg so that every archive
+    // value is produced by the same sequence of floating-point operations.
+    let mut pdp_new = Vec::with_capacity(ds_count);
+    let mut last_ds_bytes: Vec<[u8; 30]> = Vec::with_capacity(ds_count);
     for (index, (source, value)) in info.data_sources.iter().zip(values).enumerate() {
-        let prep_offset = pdp_start + index * PDP_PREP_LEN;
-        let old_unknown = u64_at_file(&mut file, prep_offset + 32)?;
-        let old_pdp_value = f64_at_file(&mut file, prep_offset + 40)?;
-        let old_last_ds = fixed_string_file(&mut file, prep_offset, 30)?;
-        let heartbeat = source.heartbeat as f64;
-        let rate = value.and_then(|sample| match source.kind.as_str() {
-            "GAUGE" => Some(sample),
-            "ABSOLUTE" => Some(sample / interval),
-            "COUNTER" | "DERIVE" if old_last_ds != "U" => {
-                let mut delta = if let Some(current) = raw_values.and_then(|raw| raw[index]) {
-                    exact_integer_delta(current, &old_last_ds)?
-                } else {
-                    sample - old_last_ds.parse::<f64>().ok()?
-                };
-                if source.kind == "COUNTER" && delta < 0.0 {
-                    delta += 4_294_967_295.0;
-                    if delta < 0.0 {
-                        delta += 18_446_744_069_414_584_320.0;
-                    }
+        let amount = match update_pdp_new(
+            source,
+            *value,
+            raw_values.and_then(|raw| raw[index]),
+            interval,
+        ) {
+            Ok(amount) => amount,
+            Err(error) => {
+                // RRDtool edits last_ds in the mapped header as it goes, so
+                // the sources before the failing one keep their new text.
+                for (earlier, last_ds) in last_ds_bytes.iter().enumerate() {
+                    file.seek(SeekFrom::Start((pdp_start + earlier * PDP_PREP_LEN) as u64))?;
+                    file.write_all(last_ds)?;
                 }
-                Some(delta / interval)
+                *state_cache = None;
+                return Err(error);
             }
-            "COUNTER" | "DERIVE" => None,
-            "DCOUNTER" | "DDERIVE" if old_last_ds != "U" => {
-                let previous = old_last_ds.parse::<f64>().ok()?;
-                if source.kind == "DCOUNTER"
-                    && ((sample > 0.0 && previous > sample) || (sample < 0.0 && sample > previous))
-                {
-                    None
-                } else {
-                    Some((sample - previous) / interval)
-                }
-            }
-            "DCOUNTER" | "DDERIVE" => None,
-            _ => unreachable!("data source types were checked above"),
-        });
-        let integral = rate
-            .filter(|rate| {
-                interval <= heartbeat
-                    && source.minimum.is_none_or(|minimum| *rate >= minimum)
-                    && source.maximum.is_none_or(|maximum| *rate <= maximum)
-            })
-            .map(|rate| rate * interval);
-        let (next_unknown, next_pdp_value, pdp) = if elapsed_steps == 0 {
-            let next_value = if let Some(integral) = integral {
-                if old_pdp_value.is_nan() {
-                    integral
-                } else {
-                    old_pdp_value + integral
-                }
-            } else {
-                old_pdp_value
-            };
-            let unknown = if integral.is_some() {
-                old_unknown
-            } else {
-                old_unknown.saturating_add(interval.floor() as u64)
-            };
-            (unknown, next_value, None)
-        } else {
-            let post_interval =
-                (timestamp - current_boundary) as f64 + timestamp_usec as f64 / 1_000_000.0;
-            // When the previous update is on a PDP boundary and this update
-            // crosses multiple boundaries, all elapsed time belongs before
-            // the current boundary. RRDtool's calculate_elapsed_steps uses
-            // the full interval as pre_int in this case.
-            let pre_interval = if open_pdp_seconds == 0.0 {
-                interval - post_interval
-            } else {
-                step as f64 - open_pdp_seconds
-            };
-            let mut accumulated = old_pdp_value;
-            let mut pre_unknown = 0.0;
-            if let Some(integral) = integral {
-                if accumulated.is_nan() {
-                    accumulated = 0.0;
-                }
-                accumulated += integral / interval * pre_interval;
-            } else {
-                pre_unknown = pre_interval;
-            }
-            let pdp = if interval > heartbeat || (info.step as f64 / 2.0) < old_unknown as f64 {
-                rrd_nan()
-            } else {
-                accumulated
-                    / (info.step as f64 * elapsed_steps as f64 - old_unknown as f64 - pre_unknown)
-            };
-            let (unknown, next_value) = if let Some(integral) = integral {
-                (0, integral / interval * post_interval)
-            } else {
-                (post_interval.floor() as u64, rrd_nan())
-            };
-            (unknown, next_value, Some(pdp))
         };
-        let first_pdp = if elapsed_steps > 1 && open_pdp_seconds > 0.0 {
-            let pre_interval = step as f64 - open_pdp_seconds;
-            let (partial_value, pre_unknown) = if let Some(integral) = integral {
-                let old_value = if old_pdp_value.is_nan() {
-                    0.0
-                } else {
-                    old_pdp_value
-                };
-                (old_value + integral / interval * pre_interval, 0.0)
-            } else {
-                (old_pdp_value, pre_interval)
-            };
-            let denominator = info.step as f64 - old_unknown as f64 - pre_unknown;
-            if denominator <= 0.0 || partial_value.is_nan() {
-                Some(rrd_nan())
-            } else {
-                Some(partial_value / denominator)
-            }
-        } else {
-            pdp
-        };
-        let fill_pdp = if elapsed_steps > 1 {
-            integral.map_or(rrd_nan(), |integral| integral / interval)
-        } else {
-            pdp.unwrap_or(rrd_nan())
-        };
-        prep.push((next_unknown, next_pdp_value));
-        completed_pdp.push(pdp);
-        first_completed_pdp.push(first_pdp.unwrap_or(rrd_nan()));
-        fill_completed_pdp.push(fill_pdp);
-        let mut last_ds = value.map_or_else(
+        pdp_new.push(amount);
+        let last_ds = value.map_or_else(
             || "U".to_owned(),
             |v| {
                 raw_values
@@ -794,442 +610,763 @@ fn update_path_values_with_raw(
                     .map_or_else(|| v.to_string(), str::to_owned)
             },
         );
-        last_ds.truncate(29);
+        // strncpy(last_ds, ..., LAST_DS_LEN - 1) cuts at a byte count, which
+        // can split a multibyte character.
+        let last_ds = &last_ds.as_bytes()[..last_ds.len().min(29)];
         let mut encoded = [0_u8; 30];
-        encoded[..last_ds.len()].copy_from_slice(last_ds.as_bytes());
+        encoded[..last_ds.len()].copy_from_slice(last_ds);
         last_ds_bytes.push(encoded);
     }
-
-    // All format and semantic checks precede the first write. These writes
-    // mirror RRDtool's live/PDP/CDP/pointer and archive-row state locations.
+    let mut pdp_prep = info
+        .data_sources
+        .iter()
+        .map(|source| (source.unknown_seconds, source.pdp_value))
+        .collect::<Vec<_>>();
+    let mut cdp_prep = info
+        .archives
+        .iter()
+        .flat_map(|archive| archive.cdp_prep.iter().cloned())
+        .collect::<Vec<_>>();
+    let mut current_rows = info
+        .archives
+        .iter()
+        .map(|archive| archive.current_row)
+        .collect::<Vec<_>>();
+    let mut row_writes = Vec::new();
     let mut summaries = Vec::new();
-    if elapsed_steps > 0 {
-        for (archive_index, archive) in info.archives.iter().enumerate() {
-            let prior_pdp_index = previous_boundary.div_euclid(step) as u64;
-            let start_offset = archive.pdp_per_row - prior_pdp_index % archive.pdp_per_row;
-            let has_open_pdp = elapsed_steps > 1 && open_pdp_seconds > 0.0;
-            let first_rows_due = u64::from(has_open_pdp && start_offset <= 1);
-            let remaining_elapsed = elapsed_steps as u64 - u64::from(has_open_pdp);
-            let remaining_start = if has_open_pdp {
-                archive.pdp_per_row - (prior_pdp_index + 1) % archive.pdp_per_row
+
+    if elapsed_steps == 0 {
+        for ((unknown, value), amount) in pdp_prep.iter_mut().zip(&pdp_new) {
+            if amount.is_nan() {
+                *unknown = (*unknown as f64 + interval.floor()) as u64;
+            } else if value.is_nan() {
+                *value = *amount;
             } else {
-                start_offset
-            };
-            let rows_due = first_rows_due
-                + if remaining_start <= remaining_elapsed {
-                    (((remaining_elapsed - remaining_start) / archive.pdp_per_row) + 1)
-                        .min(archive.rows)
-                } else {
-                    0
-                };
-            let rows_to_write = rows_due.min(archive.rows);
-            let skipped_rows = rows_due - rows_to_write;
-            let has_open_pdp = elapsed_steps > 1 && open_pdp_seconds > 0.0;
-            if has_open_pdp && archive.pdp_per_row > 1 {
-                let remaining_elapsed = elapsed_steps as u64 - 1;
-                let remaining_start =
-                    archive.pdp_per_row - (prior_pdp_index + 1) % archive.pdp_per_row;
-                let remaining_rows_due = if remaining_start <= remaining_elapsed {
-                    (((remaining_elapsed - remaining_start) / archive.pdp_per_row) + 1)
-                        .min(archive.rows)
-                } else {
-                    0
-                };
-                let first_phase_time = previous_boundary
-                    .checked_add(step)
-                    .ok_or_else(|| rrd_error("RRD update summary time overflows"))?;
-                let phases = [
-                    (
-                        1_u64,
-                        start_offset,
-                        first_rows_due,
-                        first_completed_pdp.clone(),
-                        first_phase_time,
-                    ),
-                    (
-                        remaining_elapsed,
-                        remaining_start,
-                        remaining_rows_due,
-                        fill_completed_pdp.clone(),
-                        current_boundary,
-                    ),
-                ];
-                let archive_step = info
-                    .step
-                    .checked_mul(archive.pdp_per_row)
-                    .ok_or_else(|| rrd_error("RRD archive step overflows"))?;
-                let mut row_times = Vec::with_capacity(rows_due as usize);
-                for (_, _, phase_rows, _, phase_end) in &phases {
-                    if *phase_rows == 0 {
-                        continue;
-                    }
-                    for row_index in 0..*phase_rows {
-                        let distance = phase_rows - row_index - 1;
-                        let row_time = i128::from(*phase_end)
-                            - i128::from(archive_step) * i128::from(distance);
-                        row_times.push(
-                            i64::try_from(row_time)
-                                .map_err(|_| rrd_error("RRD update summary time overflows"))?,
-                        );
-                    }
-                }
-                if row_times.len() != rows_due as usize {
-                    return Err(rrd_error(
-                        "RRD split PDP processing produced an invalid row count",
-                    ));
-                }
-                let mut archive_rows = row_times
-                    .into_iter()
-                    .skip(skipped_rows as usize)
-                    .map(|timestamp| (timestamp, vec![rrd_nan(); info.data_sources.len()]))
-                    .collect::<Vec<_>>();
-
-                for ds_index in 0..info.data_sources.len() {
-                    let cdp_offset = cdp_start
-                        + (archive_index * info.data_sources.len() + ds_index) * CDP_PREP_LEN;
-                    let mut cdp_value = f64_at_file(&mut file, cdp_offset)?;
-                    let mut unknown_count = u64_at_file(&mut file, cdp_offset + 8)?;
-                    let mut primary = f64_at_file(&mut file, cdp_offset + 64)?;
-                    let mut secondary = f64_at_file(&mut file, cdp_offset + 72)?;
-                    let mut phase_base = 0_u64;
-
-                    for (phase_elapsed, phase_start, phase_rows, phase_values, _) in &phases {
-                        let pdp = phase_values[ds_index];
-                        if *phase_rows > 0 {
-                            if pdp.is_nan() {
-                                unknown_count = unknown_count.saturating_add(*phase_start);
-                                secondary = rrd_nan();
-                            } else {
-                                secondary = pdp;
-                            }
-                            primary = if unknown_count as f64
-                                > archive.pdp_per_row as f64 * archive.xff
-                            {
-                                rrd_nan()
-                            } else {
-                                let identity = match archive.consolidation.as_str() {
-                                    "AVERAGE" => 0.0,
-                                    "MIN" => f64::INFINITY,
-                                    "MAX" => f64::NEG_INFINITY,
-                                    "LAST" => rrd_nan(),
-                                    _ => unreachable!("consolidation was checked above"),
-                                };
-                                let carried = if cdp_value.is_nan() {
-                                    identity
-                                } else {
-                                    cdp_value
-                                };
-                                let current = if pdp.is_nan() { identity } else { pdp };
-                                match archive.consolidation.as_str() {
-                                    "AVERAGE" => {
-                                        (carried + current * *phase_start as f64)
-                                            / (archive.pdp_per_row - unknown_count) as f64
-                                    }
-                                    "MIN" => carried.min(current),
-                                    "MAX" => carried.max(current),
-                                    "LAST" => pdp,
-                                    _ => unreachable!("consolidation was checked above"),
-                                }
-                            };
-                            let carry_count = (*phase_elapsed - *phase_start) % archive.pdp_per_row;
-                            cdp_value = if carry_count == 0 || pdp.is_nan() {
-                                match archive.consolidation.as_str() {
-                                    "AVERAGE" => 0.0,
-                                    "MIN" => f64::INFINITY,
-                                    "MAX" => f64::NEG_INFINITY,
-                                    "LAST" => rrd_nan(),
-                                    _ => unreachable!("consolidation was checked above"),
-                                }
-                            } else {
-                                match archive.consolidation.as_str() {
-                                    "AVERAGE" => pdp * carry_count as f64,
-                                    "MIN" | "MAX" => pdp,
-                                    "LAST" => rrd_nan(),
-                                    _ => unreachable!("consolidation was checked above"),
-                                }
-                            };
-                            unknown_count = if pdp.is_nan() { carry_count } else { 0 };
-
-                            for local_row in 0..*phase_rows {
-                                let global_row = phase_base + local_row;
-                                if global_row < skipped_rows {
-                                    continue;
-                                }
-                                let out_index = usize::try_from(global_row - skipped_rows)
-                                    .map_err(|_| rrd_error("RRD row index exceeds host size"))?;
-                                archive_rows[out_index].1[ds_index] =
-                                    if local_row == 0 { primary } else { secondary };
-                            }
-                        } else if pdp.is_nan() {
-                            unknown_count = unknown_count.saturating_add(*phase_elapsed);
-                        } else {
-                            cdp_value = match archive.consolidation.as_str() {
-                                "AVERAGE" => {
-                                    (if cdp_value.is_nan() { 0.0 } else { cdp_value })
-                                        + pdp * *phase_elapsed as f64
-                                }
-                                "MIN" => {
-                                    if cdp_value.is_nan() {
-                                        pdp
-                                    } else {
-                                        cdp_value.min(pdp)
-                                    }
-                                }
-                                "MAX" => {
-                                    if cdp_value.is_nan() {
-                                        pdp
-                                    } else {
-                                        cdp_value.max(pdp)
-                                    }
-                                }
-                                "LAST" => pdp,
-                                _ => unreachable!("consolidation was checked above"),
-                            };
-                        }
-                        phase_base += *phase_rows;
-                    }
-                    file.seek(SeekFrom::Start(cdp_offset as u64))?;
-                    file.write_all(&cdp_value.to_le_bytes())?;
-                    file.write_all(&unknown_count.to_le_bytes())?;
-                    file.seek(SeekFrom::Start((cdp_offset + 64) as u64))?;
-                    file.write_all(&primary.to_le_bytes())?;
-                    file.write_all(&secondary.to_le_bytes())?;
-                }
-
-                for (row_index, (row_time, row_values)) in archive_rows.into_iter().enumerate() {
-                    let current_row =
-                        (archive.current_row + skipped_rows + row_index as u64 + 1) % archive.rows;
-                    let row_offset = archive
-                        .data_offset
-                        .checked_add(
-                            current_row
-                                .checked_mul(info.data_sources.len() as u64 * VALUE_LEN as u64)
-                                .ok_or_else(|| rrd_error("RRD archive row offset overflows"))?,
-                        )
-                        .ok_or_else(|| rrd_error("RRD archive row offset overflows"))?;
-                    file.seek(SeekFrom::Start(row_offset))?;
-                    for value in &row_values {
-                        file.write_all(&value.to_le_bytes())?;
-                    }
-                    summaries.push(RrdUpdateSummary {
-                        timestamp: row_time,
-                        consolidation: archive.consolidation.clone(),
-                        pdp_per_row: archive.pdp_per_row,
-                        values: row_values,
-                    });
-                }
-                if rows_due > 0 {
-                    let current_row = (archive.current_row + rows_due) % archive.rows;
-                    file.seek(SeekFrom::Start(
-                        (pointer_start + archive_index * RRA_PTR_LEN) as u64,
-                    ))?;
-                    file.write_all(&current_row.to_le_bytes())?;
-                }
-                continue;
-            }
-            let mut archive_values = Vec::with_capacity(info.data_sources.len());
-            for (ds_index, completed_value) in completed_pdp.iter().enumerate() {
-                let pdp = completed_value.unwrap_or(rrd_nan());
-                let first_pdp = first_completed_pdp[ds_index];
-                let fill_pdp = fill_completed_pdp[ds_index];
-                let cdp_offset =
-                    cdp_start + (archive_index * info.data_sources.len() + ds_index) * CDP_PREP_LEN;
-                let mut cdp_value = f64_at_file(&mut file, cdp_offset)?;
-                let mut unknown_count = u64_at_file(&mut file, cdp_offset + 8)?;
-                let mut primary = f64_at_file(&mut file, cdp_offset + 64)?;
-                let mut secondary = f64_at_file(&mut file, cdp_offset + 72)?;
-                if archive.pdp_per_row == 1 {
-                    primary = fill_pdp;
-                    if elapsed_steps > 1 && (!has_open_pdp || elapsed_steps - 1 > 1) {
-                        secondary = fill_pdp;
-                    }
-                } else if rows_due > 0 {
-                    if pdp.is_nan() {
-                        unknown_count = unknown_count.saturating_add(start_offset);
-                        secondary = rrd_nan();
-                    } else {
-                        secondary = pdp;
-                    }
-                    primary = if unknown_count as f64 > archive.pdp_per_row as f64 * archive.xff {
-                        rrd_nan()
-                    } else {
-                        let identity = match archive.consolidation.as_str() {
-                            "AVERAGE" => 0.0,
-                            "MIN" => f64::INFINITY,
-                            "MAX" => f64::NEG_INFINITY,
-                            "LAST" => rrd_nan(),
-                            _ => unreachable!("consolidation was checked above"),
-                        };
-                        let carried = if cdp_value.is_nan() {
-                            identity
-                        } else {
-                            cdp_value
-                        };
-                        let current = if pdp.is_nan() { identity } else { pdp };
-                        match archive.consolidation.as_str() {
-                            "AVERAGE" => {
-                                (carried + current * start_offset as f64)
-                                    / (archive.pdp_per_row - unknown_count) as f64
-                            }
-                            "MIN" => carried.min(current),
-                            "MAX" => carried.max(current),
-                            "LAST" => pdp,
-                            _ => unreachable!("consolidation was checked above"),
-                        }
-                    };
-                    let carry_count = (elapsed_steps as u64 - start_offset) % archive.pdp_per_row;
-                    cdp_value = if carry_count == 0 || pdp.is_nan() {
-                        match archive.consolidation.as_str() {
-                            "AVERAGE" => 0.0,
-                            "MIN" => f64::INFINITY,
-                            "MAX" => f64::NEG_INFINITY,
-                            "LAST" => rrd_nan(),
-                            _ => unreachable!("consolidation was checked above"),
-                        }
-                    } else {
-                        match archive.consolidation.as_str() {
-                            "AVERAGE" => pdp * carry_count as f64,
-                            "MIN" | "MAX" => pdp,
-                            "LAST" => rrd_nan(),
-                            _ => unreachable!("consolidation was checked above"),
-                        }
-                    };
-                    unknown_count = if pdp.is_nan() { carry_count } else { 0 };
-                } else if pdp.is_nan() {
-                    unknown_count = unknown_count.saturating_add(elapsed_steps as u64);
-                } else {
-                    cdp_value = match archive.consolidation.as_str() {
-                        "AVERAGE" => {
-                            (if cdp_value.is_nan() { 0.0 } else { cdp_value })
-                                + pdp * elapsed_steps as f64
-                        }
-                        "MIN" => {
-                            if cdp_value.is_nan() {
-                                pdp
-                            } else {
-                                cdp_value.min(pdp)
-                            }
-                        }
-                        "MAX" => {
-                            if cdp_value.is_nan() {
-                                pdp
-                            } else {
-                                cdp_value.max(pdp)
-                            }
-                        }
-                        "LAST" => pdp,
-                        _ => unreachable!("consolidation was checked above"),
-                    };
-                }
-                file.seek(SeekFrom::Start(cdp_offset as u64))?;
-                file.write_all(&cdp_value.to_le_bytes())?;
-                file.write_all(&unknown_count.to_le_bytes())?;
-                file.seek(SeekFrom::Start((cdp_offset + 64) as u64))?;
-                file.write_all(&primary.to_le_bytes())?;
-                file.write_all(&secondary.to_le_bytes())?;
-                archive_values.push(if archive.pdp_per_row == 1 {
-                    first_pdp
-                } else {
-                    primary
-                });
-            }
-            if rows_due > 0 {
-                for row_index in 0..rows_to_write {
-                    let current_row =
-                        (archive.current_row + skipped_rows + row_index + 1) % archive.rows;
-                    let row_offset = archive
-                        .data_offset
-                        .checked_add(
-                            current_row
-                                .checked_mul(info.data_sources.len() as u64 * VALUE_LEN as u64)
-                                .ok_or_else(|| rrd_error("RRD archive row offset overflows"))?,
-                        )
-                        .ok_or_else(|| rrd_error("RRD archive row offset overflows"))?;
-                    file.seek(SeekFrom::Start(row_offset))?;
-                    let mut row_values = Vec::with_capacity(info.data_sources.len());
-                    for (ds_index, primary_value) in archive_values.iter().enumerate() {
-                        let value = if has_open_pdp && archive.pdp_per_row == 1 {
-                            if skipped_rows + row_index < first_rows_due {
-                                first_completed_pdp[ds_index]
-                            } else {
-                                fill_completed_pdp[ds_index]
-                            }
-                        } else if skipped_rows + row_index == 0 {
-                            *primary_value
-                        } else {
-                            f64_at_file(
-                                &mut file,
-                                cdp_start
-                                    + (archive_index * info.data_sources.len() + ds_index)
-                                        * CDP_PREP_LEN
-                                    + 72,
-                            )?
-                        };
-                        file.seek(SeekFrom::Start(
-                            row_offset + ds_index as u64 * VALUE_LEN as u64,
-                        ))?;
-                        file.write_all(&value.to_le_bytes())?;
-                        row_values.push(value);
-                    }
-                    let archive_step = info
-                        .step
-                        .checked_mul(archive.pdp_per_row)
-                        .ok_or_else(|| rrd_error("RRD archive step overflows"))?;
-                    let row_distance = rows_due - row_index - 1;
-                    let row_time = i128::from(current_boundary)
-                        - i128::from(archive_step) * i128::from(row_distance);
-                    summaries.push(RrdUpdateSummary {
-                        timestamp: i64::try_from(row_time)
-                            .map_err(|_| rrd_error("RRD update summary time overflows"))?,
-                        consolidation: archive.consolidation.clone(),
-                        pdp_per_row: archive.pdp_per_row,
-                        values: row_values,
-                    });
-                }
-                let current_row = (archive.current_row + rows_due) % archive.rows;
-                file.seek(SeekFrom::Start(
-                    (pointer_start + archive_index * RRA_PTR_LEN) as u64,
-                ))?;
-                file.write_all(&current_row.to_le_bytes())?;
+                *value += *amount;
             }
         }
+    } else {
+        let mut interval = interval;
+        let mut elapsed = elapsed_steps as u64;
+        let mut proc_pdp_count = previous_boundary.div_euclid(step) as u64;
+        let mut pre_interval =
+            (current_boundary - last_update) as f64 - last_update_usec as f64 / 1_000_000.0;
+        let post_interval =
+            (timestamp - current_boundary) as f64 + timestamp_usec as f64 / 1_000_000.0;
+        if elapsed > 1 {
+            // RRDtool closes the previously open PDP on its own before the
+            // remaining ones. The cast truncates fractional seconds, so a
+            // sub-second last update moves time between the two phases.
+            let open_seconds = (pre_interval as u64) % info.step;
+            if open_seconds > 0 {
+                let open_new = pdp_new
+                    .iter_mut()
+                    .map(|amount| {
+                        if amount.is_nan() || interval <= 0.0 {
+                            rrd_nan()
+                        } else {
+                            let open = *amount * open_seconds as f64 / interval;
+                            *amount -= open;
+                            open
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let pdp_temp = process_pdp_steps(
+                    info,
+                    &mut pdp_prep,
+                    open_seconds as f64,
+                    open_seconds as f64,
+                    0.0,
+                    1,
+                    &open_new,
+                );
+                let row_counts =
+                    update_cdp_preps(info, &mut cdp_prep, 1, proc_pdp_count, &pdp_temp);
+                let open_close_time = last_update
+                    .checked_add(open_seconds as i64)
+                    .ok_or_else(|| rrd_error("RRD timestamp alignment overflows"))?;
+                write_rra_rows(
+                    info,
+                    &cdp_prep,
+                    &mut current_rows,
+                    &row_counts,
+                    open_close_time,
+                    &mut row_writes,
+                    &mut summaries,
+                )?;
+                interval -= open_seconds as f64;
+                pre_interval -= open_seconds as f64;
+                elapsed -= 1;
+                proc_pdp_count += 1;
+            }
+        }
+        let pdp_temp = process_pdp_steps(
+            info,
+            &mut pdp_prep,
+            interval,
+            pre_interval,
+            post_interval,
+            elapsed,
+            &pdp_new,
+        );
+        let row_counts = update_cdp_preps(info, &mut cdp_prep, elapsed, proc_pdp_count, &pdp_temp);
+        write_rra_rows(
+            info,
+            &cdp_prep,
+            &mut current_rows,
+            &row_counts,
+            timestamp,
+            &mut row_writes,
+            &mut summaries,
+        )?;
     }
-    for (index, ((unknown, pdp_value), last_ds)) in prep.iter().zip(&last_ds_bytes).enumerate() {
-        let offset = pdp_start + index * PDP_PREP_LEN;
-        file.seek(SeekFrom::Start(offset as u64))?;
-        file.write_all(last_ds)?;
-        file.seek(SeekFrom::Start((offset + 32) as u64))?;
-        file.write_all(&unknown.to_le_bytes())?;
-        file.write_all(&pdp_value.to_le_bytes())?;
+
+    // All format and semantic checks precede the first write.
+    for (offset, row) in &row_writes {
+        file.seek(SeekFrom::Start(*offset))?;
+        let mut bytes = Vec::with_capacity(row.len() * VALUE_LEN);
+        for value in row {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        file.write_all(&bytes)?;
     }
+    let mut state = match state_cache.take() {
+        Some(state) => state,
+        None => {
+            let mut state =
+                vec![0_u8; pointer_start + info.archives.len() * RRA_PTR_LEN - pdp_start];
+            file.seek(SeekFrom::Start(pdp_start as u64))?;
+            file.read_exact(&mut state)?;
+            state
+        }
+    };
+    for (index, ((unknown, value), last_ds)) in pdp_prep.iter().zip(&last_ds_bytes).enumerate() {
+        let offset = index * PDP_PREP_LEN;
+        state[offset..offset + 30].copy_from_slice(last_ds);
+        put_u64(&mut state, offset + 32, *unknown);
+        put_f64(&mut state, offset + 40, *value);
+    }
+    for (index, scratch) in cdp_prep.iter().enumerate() {
+        let offset = cdp_start - pdp_start + index * CDP_PREP_LEN;
+        put_f64(&mut state, offset, scratch.value);
+        put_u64(&mut state, offset + 8, scratch.unknown_datapoints);
+        put_f64(&mut state, offset + 64, scratch.primary_value);
+        put_f64(&mut state, offset + 72, scratch.secondary_value);
+    }
+    for (index, current_row) in current_rows.iter().enumerate() {
+        put_u64(
+            &mut state,
+            pointer_start - pdp_start + index * RRA_PTR_LEN,
+            *current_row,
+        );
+    }
+    file.seek(SeekFrom::Start(pdp_start as u64))?;
+    file.write_all(&state)?;
     file.seek(SeekFrom::Start(live_start as u64))?;
     file.write_all(&timestamp.to_le_bytes())?;
-    file.write_all(&(timestamp_usec as i64).to_le_bytes())?;
-    file.sync_data()?;
+    // rrd_update.c:2509-2520 writes only the time_t before version 3.
+    if info.live_head_len == LIVE_HEAD_LEN {
+        file.write_all(&(timestamp_usec as i64).to_le_bytes())?;
+    }
+    // No fsync: RRDtool leaves writeback to the kernel on every .rrd write
+    // path (rrd_flush is a no-op, rrd_close only unmaps and closes).
+    *state_cache = Some(state);
+    for (index, (source, (unknown, value))) in
+        info.data_sources.iter_mut().zip(pdp_prep).enumerate()
+    {
+        let last_ds = &last_ds_bytes[index];
+        let length = last_ds
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(last_ds.len());
+        source.last_value = String::from_utf8_lossy(&last_ds[..length]).into_owned();
+        source.unknown_seconds = unknown;
+        source.pdp_value = value;
+    }
+    for ((archive, scratch), current_row) in info
+        .archives
+        .iter_mut()
+        .zip(cdp_prep.chunks(ds_count))
+        .zip(current_rows)
+    {
+        archive.cdp_prep = scratch.to_vec();
+        archive.current_row = current_row;
+    }
+    info.last_update = timestamp;
+    info.last_update_usec = timestamp_usec;
     Ok(summaries)
 }
 
-fn valid_integer_sample(value: &str, unsigned: bool) -> bool {
-    if value.is_empty() || value.len() > 29 {
-        return false;
-    }
-    let digits = if !unsigned && value.starts_with('-') {
-        &value[1..]
-    } else {
-        value
-    };
-    !digits.is_empty()
-        && digits.bytes().all(|byte| byte.is_ascii_digit())
-        && value.parse::<i128>().is_ok()
+/// `rrd_update_r()` over RRDtool's update argument text (`time:v1:v2...` or
+/// `time@v1:...`), with an optional `--template` list. The file is opened
+/// and locked once. Like `_rrd_update`, processing stops at the first failing
+/// argument and keeps the ones before it; the second element is that error,
+/// worded as rrd_set_error words it (sample errors carry the file name).
+pub fn update_rrd_text(
+    path: impl AsRef<Path>,
+    template: Option<&str>,
+    arguments: &[&str],
+    skip_past_updates: bool,
+) -> (Vec<RrdUpdateSummary>, Result<(), StoreError>) {
+    let mut summaries = Vec::new();
+    let result = update_text_arguments(
+        path.as_ref(),
+        template,
+        arguments,
+        skip_past_updates,
+        &mut summaries,
+    );
+    (summaries, result)
 }
 
-fn exact_integer_delta(current: &str, previous: &str) -> Option<f64> {
-    let current = current.parse::<i128>().ok()?;
-    let previous = previous.parse::<i128>().ok()?;
-    if (current < 0) != (previous < 0) {
-        return None;
+fn update_text_arguments(
+    path: &Path,
+    template: Option<&str>,
+    arguments: &[&str],
+    skip_past_updates: bool,
+    summaries: &mut Vec<RrdUpdateSummary>,
+) -> Result<(), StoreError> {
+    // rrd_update.c:864-867
+    if arguments.is_empty() {
+        return Err(StoreError::Rrd("Not enough arguments".into()));
     }
-    Some((current - previous) as f64)
+    let mut file = RrdFileLock::exclusive(open_rrd_write(path)?)?;
+    let mut info = read_info(&mut file, path)?;
+    let ds_count = info.data_sources.len();
+    // parse_template (rrd_update.c:1073-1116): slot 0 is the time; each
+    // further slot names the data source it fills.
+    let slots = match template {
+        None => (0..ds_count).collect::<Vec<_>>(),
+        Some(template) => {
+            let mut slots = Vec::new();
+            for name in template.split(':') {
+                if slots.len() >= ds_count {
+                    return Err(StoreError::Rrd(
+                        "tmplt contains more DS definitions than RRD".into(),
+                    ));
+                }
+                let index = info
+                    .data_sources
+                    .iter()
+                    .position(|source| source.name == name)
+                    .ok_or_else(|| StoreError::Rrd(format!("unknown DS name '{name}'")))?;
+                slots.push(index);
+            }
+            slots
+        }
+    };
+    let version = info.version.parse::<u32>().unwrap_or(0);
+    let mut state_cache = None;
+    for argument in arguments {
+        let prefixed = |message: String| StoreError::Rrd(format!("{}: {message}", path.display()));
+        // parse_ds (rrd_update.c:1302-1358)
+        let (time_text, values_text, at_style) = if let Some(at) = argument.find('@') {
+            (&argument[..at], &argument[at + 1..], true)
+        } else if let Some(colon) = argument.find(':') {
+            (&argument[..colon], &argument[colon + 1..], false)
+        } else {
+            return Err(prefixed(format!(
+                "expected timestamp not found in data source from {argument}"
+            )));
+        };
+        let mut texts = vec!["U"; ds_count];
+        let mut filled = 0;
+        let mut rest = values_text;
+        loop {
+            let (value, remainder) = match rest.find(':') {
+                Some(colon) => (&rest[..colon], Some(&rest[colon + 1..])),
+                None => (rest, None),
+            };
+            if filled > 0 && filled >= slots.len() {
+                return Err(prefixed(format!(
+                    "found extra data on update argument: {value}{}",
+                    remainder.map_or(String::new(), |remainder| format!(":{remainder}"))
+                )));
+            }
+            if let Some(&slot) = slots.get(filled) {
+                texts[slot] = value;
+            }
+            filled += 1;
+            match remainder {
+                Some(remainder) => rest = remainder,
+                None => break,
+            }
+        }
+        if filled != slots.len() {
+            // parse_ds has already cut the argument at the time separator.
+            return Err(prefixed(format!(
+                "expected {} data source readings (got {filled}) from {time_text}",
+                slots.len()
+            )));
+        }
+        // get_time_from_reading (rrd_update.c:1368-1425)
+        let (seconds, mut microseconds) = if at_style {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_secs() as i64);
+            let value = crate::time::rrd_parsetime(time_text, now)
+                .map_err(|error| prefixed(format!("ds time: {time_text}: {error}")))?;
+            let seconds = value.absolute().ok_or_else(|| {
+                prefixed(format!(
+                    "specifying time relative to the 'start' or 'end' makes no sense here: {time_text}"
+                ))
+            })?;
+            (seconds, 0)
+        } else {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            if time_text == "N" {
+                (now.as_secs() as i64, u64::from(now.subsec_micros()))
+            } else {
+                let mut time = crate::rrd_number::rrd_strtodbl(
+                    time_text,
+                    "error while parsing time in get_time_from_reading",
+                )
+                .map_err(prefixed)?;
+                if time < 0.0 {
+                    // tv_usec * 1e-6f: the constant is a float.
+                    time +=
+                        now.as_secs() as f64 + f64::from(now.subsec_micros()) * f64::from(1e-6_f32);
+                }
+                let seconds = time.floor();
+                (seconds as i64, ((time - seconds) * 1e6) as u64)
+            }
+        };
+        if version < 3 {
+            microseconds = 0;
+        }
+        if seconds < info.last_update
+            || (seconds == info.last_update && microseconds <= info.last_update_usec)
+        {
+            if skip_past_updates {
+                continue;
+            }
+            return Err(prefixed(format!(
+                "illegal attempt to update using time {seconds} when last update time is {} (minimum one second step)",
+                info.last_update
+            )));
+        }
+        let raw = texts.iter().map(|text| Some(*text)).collect::<Vec<_>>();
+        let values = parse_raw_values(&raw)?;
+        let written = apply_update(
+            &mut file,
+            &mut info,
+            &mut state_cache,
+            seconds,
+            microseconds,
+            &values,
+            Some(&raw),
+        )
+        .map_err(|error| match error {
+            StoreError::Rrd(message) => prefixed(message),
+            error => error,
+        })?;
+        summaries.extend(written);
+    }
+    Ok(())
+}
+
+/// One sample for [`update_rrd_raw_batch`], with the caller's exact text for
+/// each data source (`None` is unknown).
+#[derive(Clone, Debug, PartialEq)]
+pub struct RrdRawUpdate<'a> {
+    pub timestamp: i64,
+    pub timestamp_usec: u64,
+    pub values: Vec<Option<&'a str>>,
+}
+
+/// Apply several samples in order under one open and one lock, reading the
+/// header once, as `rrdtool update file s1 s2 ...` does. Processing stops at
+/// the first failing sample; the samples before it stay written. With
+/// `skip_past_updates`, samples not newer than the last update are ignored
+/// (`--skip-past-updates`). Returns the archive rows written by all samples.
+pub fn update_rrd_raw_batch(
+    path: impl AsRef<Path>,
+    updates: &[RrdRawUpdate<'_>],
+    skip_past_updates: bool,
+) -> Result<Vec<RrdUpdateSummary>, StoreError> {
+    let path = path.as_ref();
+    update_rrd_raw_batch_file(open_rrd_write(path)?, path, updates, skip_past_updates)
+}
+
+/// [`update_rrd_raw_batch`] on a file the caller opened read-write, so it
+/// can check the descriptor it writes through. `path` names it in errors.
+pub fn update_rrd_raw_batch_file(
+    file: File,
+    path: &Path,
+    updates: &[RrdRawUpdate<'_>],
+    skip_past_updates: bool,
+) -> Result<Vec<RrdUpdateSummary>, StoreError> {
+    let mut file = RrdFileLock::exclusive(file)?;
+    file.seek(SeekFrom::Start(0))?;
+    let mut info = read_info(&mut file, path)?;
+    let mut state_cache = None;
+    let mut summaries = Vec::new();
+    for update in updates {
+        if skip_past_updates
+            && (update.timestamp, update.timestamp_usec)
+                <= (info.last_update, info.last_update_usec)
+        {
+            continue;
+        }
+        let values = parse_raw_values(&update.values)?;
+        check_update_arguments(update.timestamp_usec, &values, Some(&update.values))?;
+        summaries.extend(apply_update(
+            &mut file,
+            &mut info,
+            &mut state_cache,
+            update.timestamp,
+            update.timestamp_usec,
+            &values,
+            Some(&update.values),
+        )?);
+    }
+    Ok(summaries)
+}
+
+/// rrd_update.c update_pdp_prep: the rate times seconds contributed by one
+/// sample, or NaN when it is unknown, out of range, or past the heartbeat.
+fn update_pdp_new(
+    source: &RrdDataSourceInfo,
+    value: Option<f64>,
+    raw_value: Option<&str>,
+    interval: f64,
+) -> Result<f64, StoreError> {
+    let Some(sample) = value else {
+        return Ok(rrd_nan());
+    };
+    // rrd_update.c:1458-1460: text starting with 'U' is unknown, and nothing
+    // is converted past the heartbeat.
+    if raw_value.is_some_and(|text| text.starts_with('U')) || (source.heartbeat as f64) < interval {
+        return Ok(rrd_nan());
+    }
+    let previous = source.last_value.as_str();
+    let previous_known = !previous.starts_with('U');
+    let context = format!("Function update_pdp_prep, case DST_{}", source.kind);
+    let convert =
+        |text: &str| crate::rrd_number::rrd_strtodbl(text, &context).map_err(StoreError::Rrd);
+    let (amount, rate) = match source.kind.as_str() {
+        "GAUGE" => {
+            let sample = raw_value.map_or(Ok(sample), convert)?;
+            (sample * interval, sample)
+        }
+        "ABSOLUTE" => {
+            let sample = raw_value.map_or(Ok(sample), convert)?;
+            (sample, sample / interval)
+        }
+        "COUNTER" | "DERIVE" => {
+            if let Some(text) = raw_value {
+                // rrd_update.c:1470-1484 checks digits only; a leading '-'
+                // is allowed for DERIVE.
+                let signed = source.kind == "DERIVE";
+                let simple = text.bytes().enumerate().all(|(index, byte)| {
+                    byte.is_ascii_digit() || (index == 0 && signed && byte == b'-')
+                });
+                if !simple {
+                    return Err(StoreError::Rrd(format!(
+                        "not a simple {} integer: '{text}'",
+                        if signed { "signed" } else { "unsigned" }
+                    )));
+                }
+            }
+            if !previous_known {
+                return Ok(rrd_nan());
+            }
+            let delta = if let Some(current) = raw_value {
+                Some(crate::rrd_number::rrd_diff(current, previous))
+            } else {
+                previous
+                    .parse::<f64>()
+                    .ok()
+                    .map(|previous| sample - previous)
+            };
+            let Some(mut delta) = delta else {
+                return Ok(rrd_nan());
+            };
+            if source.kind == "COUNTER" {
+                if delta < 0.0 {
+                    delta += 4_294_967_295.0;
+                }
+                if delta < 0.0 {
+                    delta += 18_446_744_069_414_584_320.0;
+                }
+            }
+            (delta, delta / interval)
+        }
+        "DCOUNTER" | "DDERIVE" if previous_known => {
+            // rrd_update.c:1520-1533 converts the new text, then the stored
+            // one, and fails the update if either does not convert.
+            let sample = raw_value.map_or(Ok(sample), convert)?;
+            let previous = convert(previous)?;
+            if source.kind == "DCOUNTER"
+                && ((sample > 0.0 && previous > sample) || (sample < 0.0 && sample > previous))
+            {
+                return Ok(rrd_nan());
+            }
+            let delta = sample - previous;
+            (delta, delta / interval)
+        }
+        _ => return Ok(rrd_nan()),
+    };
+    if !rate.is_nan()
+        && (source.maximum.is_some_and(|maximum| rate > maximum)
+            || source.minimum.is_some_and(|minimum| rate < minimum))
+    {
+        return Ok(rrd_nan());
+    }
+    Ok(amount)
+}
+
+/// rrd_update.c process_pdp_st for every data source. Returns the rate for
+/// each completed PDP and leaves the PDP prep area ready for the next update.
+fn process_pdp_steps(
+    info: &RrdInfo,
+    pdp_prep: &mut [(u64, f64)],
+    interval: f64,
+    pre_interval: f64,
+    post_interval: f64,
+    elapsed: u64,
+    pdp_new: &[f64],
+) -> Vec<f64> {
+    let elapsed_seconds = elapsed.wrapping_mul(info.step);
+    info.data_sources
+        .iter()
+        .zip(pdp_prep.iter_mut())
+        .zip(pdp_new)
+        .map(|((source, (unknown, value)), &amount)| {
+            let mut pre_unknown = 0.0;
+            if amount.is_nan() {
+                pre_unknown = pre_interval;
+            } else {
+                if value.is_nan() {
+                    *value = 0.0;
+                }
+                *value = rrd_mul_add(amount / interval, pre_interval, *value);
+            }
+            // RRDtool compares the unknown seconds through a signed int cast.
+            let rate = if interval > source.heartbeat as f64
+                || (info.step as f64 / 2.0) < f64::from(*unknown as i32)
+            {
+                rrd_nan()
+            } else {
+                *value / (elapsed_seconds.wrapping_sub(*unknown) as f64 - pre_unknown)
+            };
+            if amount.is_nan() {
+                *unknown = post_interval.floor() as u64;
+                *value = rrd_nan();
+            } else {
+                *unknown = 0;
+                *value = amount / interval * post_interval;
+            }
+            rate
+        })
+        .collect()
+}
+
+/// rrd_update.c update_all_cdp_prep for the basic consolidation functions.
+/// Returns how many rows each archive must write.
+fn update_cdp_preps(
+    info: &RrdInfo,
+    cdp_prep: &mut [RrdCdpPrepInfo],
+    elapsed: u64,
+    proc_pdp_count: u64,
+    pdp_temp: &[f64],
+) -> Vec<u64> {
+    let ds_count = pdp_temp.len();
+    info.archives
+        .iter()
+        .enumerate()
+        .map(|(archive_index, archive)| {
+            let pdp_count = archive.pdp_per_row;
+            let start_offset = pdp_count - proc_pdp_count % pdp_count;
+            let row_count = if start_offset <= elapsed {
+                ((elapsed - start_offset) / pdp_count + 1).min(archive.rows)
+            } else {
+                0
+            };
+            for (ds_index, &rate) in pdp_temp.iter().enumerate() {
+                let scratch = &mut cdp_prep[archive_index * ds_count + ds_index];
+                if pdp_count > 1 {
+                    update_cdp(scratch, archive, rate, row_count, elapsed, start_offset);
+                } else {
+                    // update_aberrant_CF sets the primary value and, when two
+                    // or more PDPs completed, reset_cdp or a second pass sets
+                    // the secondary value too.
+                    scratch.primary_value = rate;
+                    if elapsed > 1 {
+                        scratch.secondary_value = rate;
+                    }
+                }
+            }
+            row_count
+        })
+        .collect()
+}
+
+/// rrd_update.c update_cdp with initialize_cdp_val, initialize_carry_over
+/// and calculate_cdp_val.
+fn update_cdp(
+    scratch: &mut RrdCdpPrepInfo,
+    archive: &RrdArchiveInfo,
+    rate: f64,
+    row_count: u64,
+    elapsed: u64,
+    start_offset: u64,
+) {
+    let pdp_count = archive.pdp_per_row;
+    let consolidation = archive.consolidation.as_str();
+    if row_count > 0 {
+        if rate.is_nan() {
+            scratch.unknown_datapoints = scratch.unknown_datapoints.wrapping_add(start_offset);
+            scratch.secondary_value = rrd_nan();
+        } else {
+            scratch.secondary_value = rate;
+        }
+        if scratch.unknown_datapoints as f64 > pdp_count as f64 * archive.xff {
+            scratch.primary_value = rrd_nan();
+        } else {
+            scratch.primary_value = match consolidation {
+                "AVERAGE" => {
+                    let cumulative = if scratch.value.is_nan() {
+                        0.0
+                    } else {
+                        scratch.value
+                    };
+                    let current = if rate.is_nan() { 0.0 } else { rate };
+                    rrd_mul_add(current, start_offset as f64, cumulative)
+                        / pdp_count.wrapping_sub(scratch.unknown_datapoints) as f64
+                }
+                "MAX" => {
+                    let cumulative = if scratch.value.is_nan() {
+                        f64::NEG_INFINITY
+                    } else {
+                        scratch.value
+                    };
+                    let current = if rate.is_nan() {
+                        f64::NEG_INFINITY
+                    } else {
+                        rate
+                    };
+                    if current > cumulative {
+                        current
+                    } else {
+                        cumulative
+                    }
+                }
+                "MIN" => {
+                    let cumulative = if scratch.value.is_nan() {
+                        f64::INFINITY
+                    } else {
+                        scratch.value
+                    };
+                    let current = if rate.is_nan() { f64::INFINITY } else { rate };
+                    if current < cumulative {
+                        current
+                    } else {
+                        cumulative
+                    }
+                }
+                _ => rate,
+            };
+        }
+        let carried = (elapsed - start_offset) % pdp_count;
+        scratch.value = if carried == 0 || rate.is_nan() {
+            match consolidation {
+                "MAX" => f64::NEG_INFINITY,
+                "MIN" => f64::INFINITY,
+                "AVERAGE" => 0.0,
+                _ => rrd_nan(),
+            }
+        } else if consolidation == "AVERAGE" {
+            rate * carried as f64
+        } else {
+            rate
+        };
+        scratch.unknown_datapoints = if rate.is_nan() { carried } else { 0 };
+    } else if rate.is_nan() {
+        scratch.unknown_datapoints = scratch.unknown_datapoints.wrapping_add(elapsed);
+    } else if scratch.value.is_nan() {
+        scratch.value = if consolidation == "AVERAGE" {
+            rate * elapsed as f64
+        } else {
+            rate
+        };
+    } else {
+        scratch.value = match consolidation {
+            "AVERAGE" => rrd_mul_add(rate, elapsed as f64, scratch.value),
+            "MIN" if rate < scratch.value => rate,
+            "MAX" if rate > scratch.value => rate,
+            "MIN" | "MAX" => scratch.value,
+            _ => rate,
+        };
+    }
+}
+
+/// rrd_update.c write_to_rras: advance each archive pointer and queue the
+/// primary value for the first row and the secondary value for the rest.
+fn write_rra_rows(
+    info: &RrdInfo,
+    cdp_prep: &[RrdCdpPrepInfo],
+    current_rows: &mut [u64],
+    row_counts: &[u64],
+    current_time: i64,
+    row_writes: &mut Vec<(u64, Vec<f64>)>,
+    summaries: &mut Vec<RrdUpdateSummary>,
+) -> Result<(), StoreError> {
+    let ds_count = info.data_sources.len();
+    for (archive_index, archive) in info.archives.iter().enumerate() {
+        let mut remaining = row_counts[archive_index];
+        if remaining == 0 {
+            continue;
+        }
+        let step_time = archive
+            .pdp_per_row
+            .checked_mul(info.step)
+            .ok_or_else(|| rrd_error("RRD archive step overflows"))?;
+        let time = current_time as u64;
+        let base_time = time.wrapping_sub(time % step_time);
+        let mut step_subtract = 1_u64;
+        while remaining > 0 {
+            let current_row = &mut current_rows[archive_index];
+            // cur_row is an unsigned long in rrd_update.c, so it wraps.
+            *current_row = current_row.wrapping_add(1);
+            if *current_row >= archive.rows {
+                *current_row = 0;
+            }
+            let row = cdp_prep[archive_index * ds_count..(archive_index + 1) * ds_count]
+                .iter()
+                .map(|scratch| {
+                    if step_subtract == 1 {
+                        scratch.primary_value
+                    } else {
+                        scratch.secondary_value
+                    }
+                })
+                .collect::<Vec<_>>();
+            let offset = current_row
+                .checked_mul(ds_count as u64 * VALUE_LEN as u64)
+                .and_then(|offset| archive.data_offset.checked_add(offset))
+                .ok_or_else(|| rrd_error("RRD archive row offset overflows"))?;
+            // RRDtool derives the reported time from the count it is
+            // decrementing, so rows after the second report later times.
+            let row_time = base_time.wrapping_sub(
+                remaining
+                    .wrapping_sub(step_subtract)
+                    .wrapping_mul(step_time),
+            );
+            summaries.push(RrdUpdateSummary {
+                timestamp: row_time as i64,
+                consolidation: archive.consolidation.clone(),
+                pdp_per_row: archive.pdp_per_row,
+                values: row.clone(),
+            });
+            row_writes.push((offset, row));
+            remaining -= 1;
+            step_subtract = 2;
+        }
+    }
+    Ok(())
 }
 
 /// One archive row written by a verbose RRDtool-compatible update.
@@ -1289,26 +1426,24 @@ pub fn update_rrd_raw_values_precise(
     timestamp_usec: u64,
     values: &[Option<&str>],
 ) -> Result<(), StoreError> {
-    let numeric = values
-        .iter()
-        .map(|value| {
-            value
-                .map(|value| {
-                    crate::parse_rrd_number(value)
-                        .filter(|number| number.is_finite())
-                        .ok_or(StoreError::InvalidValue)
-                })
-                .transpose()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     update_path_values_with_raw(
         path.as_ref(),
         timestamp,
         timestamp_usec,
-        &numeric,
+        &parse_raw_values(values)?,
         Some(values),
     )
     .map(|_| ())
+}
+
+/// RRDtool's update and updatev both convert samples with rrd_strtodbl.
+/// Text that does not convert is kept as NaN here; whether it is an error
+/// depends on the data source type and is decided once the file is read.
+fn parse_raw_values(values: &[Option<&str>]) -> Result<Vec<Option<f64>>, StoreError> {
+    Ok(values
+        .iter()
+        .map(|value| value.map(|value| crate::parse_rrd_number(value).unwrap_or_else(rrd_nan)))
+        .collect())
 }
 
 /// Update an RRD and return the archive rows written, in RRA and row order.
@@ -1336,19 +1471,11 @@ pub fn update_rrd_raw_values_precise_verbose(
     timestamp_usec: u64,
     values: &[Option<&str>],
 ) -> Result<Vec<RrdUpdateSummary>, StoreError> {
-    let numeric = values
-        .iter()
-        .map(|value| {
-            value
-                .map(|value| value.parse::<f64>().map_err(|_| StoreError::InvalidValue))
-                .transpose()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     update_path_values_with_raw(
         path.as_ref(),
         timestamp,
         timestamp_usec,
-        &numeric,
+        &parse_raw_values(values)?,
         Some(values),
     )
 }
@@ -1375,9 +1502,20 @@ pub fn tune_rrd_data_sources(
     path: impl AsRef<Path>,
     changes: &[RrdDataSourceTune],
 ) -> Result<(), StoreError> {
-    let mut file = open_rrd_write(path.as_ref())?;
-    let _lock = RrdFileLock::exclusive(&file)?;
-    let info = read_info(&mut file)?;
+    let path = path.as_ref();
+    tune_rrd_data_sources_file(open_rrd_write(path)?, path, changes)
+}
+
+/// [`tune_rrd_data_sources`] on a file the caller opened read-write, so it
+/// can check the descriptor it writes through. `path` names it in errors.
+pub fn tune_rrd_data_sources_file(
+    file: File,
+    path: &Path,
+    changes: &[RrdDataSourceTune],
+) -> Result<(), StoreError> {
+    let mut file = RrdFileLock::exclusive(file)?;
+    file.seek(SeekFrom::Start(0))?;
+    let info = read_info(&mut file, path)?;
     if info.data_sources.iter().any(|source| {
         !matches!(
             source.kind.as_str(),
@@ -1447,7 +1585,7 @@ pub fn tune_rrd_data_sources(
                 let pdp_start = STAT_HEAD_LEN
                     + info.data_sources.len() * DS_DEF_LEN
                     + info.archives.len() * RRA_DEF_LEN
-                    + LIVE_HEAD_LEN;
+                    + info.live_head_len;
                 let pdp_offset = pdp_start + index * PDP_PREP_LEN;
                 file.seek(SeekFrom::Start(pdp_offset as u64))?;
                 file.write_all(b"UNKN\0")?;
@@ -1472,9 +1610,6 @@ pub fn tune_rrd_data_sources(
             }
         }
     }
-    if !changes.is_empty() {
-        file.sync_data()?;
-    }
     Ok(())
 }
 
@@ -1482,233 +1617,6 @@ pub fn tune_rrd_data_sources(
 pub enum RrdResizeAction {
     Grow,
     Shrink,
-}
-
-/// Write an RRDtool-compatible resized copy to `output`, preserving row order
-/// and the archive cursor. The input is held under the upstream exclusive lock.
-pub fn resize_rrd_file(
-    input_path: impl AsRef<Path>,
-    output_path: impl AsRef<Path>,
-    rra_index: usize,
-    action: RrdResizeAction,
-    row_count: u64,
-) -> Result<(), StoreError> {
-    let input_path = input_path.as_ref();
-    let output_path = output_path.as_ref();
-    if input_path
-        .file_name()
-        .is_some_and(|name| name == "resize.rrd")
-    {
-        return Err(StoreError::RrdUnsupported(
-            "resize.rrd is a reserved name".into(),
-        ));
-    }
-    if row_count == 0 {
-        return Err(StoreError::RrdUnsupported(
-            "Please grow or shrink with at least 1 row".into(),
-        ));
-    }
-    if input_path == output_path {
-        return Err(StoreError::RrdUnsupported(
-            "resize output must be different from the input file".into(),
-        ));
-    }
-
-    let mut input = open_rrd_write(input_path)?;
-    let _lock = RrdFileLock::exclusive(&input)?;
-    let info = read_info(&mut input)?;
-    if !matches!(info.version.as_str(), "0003" | "0004") {
-        return Err(StoreError::RrdUnsupported(format!(
-            "Do not know how to handle RRD version {}",
-            info.version
-        )));
-    }
-    let archive = info
-        .archives
-        .get(rra_index)
-        .ok_or_else(|| StoreError::RrdUnsupported("no such RRA in this RRD".into()))?;
-    let new_row_count = match action {
-        RrdResizeAction::Grow => archive
-            .rows
-            .checked_add(row_count)
-            .ok_or_else(|| StoreError::RrdUnsupported("RRA row count overflows".into()))?,
-        RrdResizeAction::Shrink if archive.rows <= row_count => {
-            return Err(StoreError::RrdUnsupported(
-                "This RRA is not that big".into(),
-            ));
-        }
-        RrdResizeAction::Shrink => archive.rows - row_count,
-    };
-    let data_sources = info.data_sources.len();
-    let row_bytes = data_sources
-        .checked_mul(VALUE_LEN)
-        .ok_or_else(|| StoreError::RrdUnsupported("RRA row size overflows".into()))?;
-    let header_size = info.header_size;
-    let mut header = vec![0_u8; header_size];
-    input.seek(SeekFrom::Start(0))?;
-    input.read_exact(&mut header)?;
-    let rra_start = STAT_HEAD_LEN + data_sources * DS_DEF_LEN;
-    put_u64(
-        &mut header,
-        rra_start + rra_index * RRA_DEF_LEN + 24,
-        new_row_count,
-    );
-
-    let output_parent = output_path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let output_name = output_path
-        .file_name()
-        .ok_or_else(|| StoreError::RrdUnsupported("invalid resize output filename".into()))?
-        .to_string_lossy();
-    static RESIZE_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let mut temporary = None;
-    for _ in 0..100 {
-        let id = RESIZE_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let candidate = output_parent.join(format!(
-            ".{output_name}.rondi-{}-{id}.resize.tmp",
-            std::process::id()
-        ));
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&candidate)
-        {
-            Ok(file) => {
-                temporary = Some((candidate, file));
-                break;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-    let (temporary_path, mut output) = temporary.ok_or_else(|| {
-        StoreError::RrdUnsupported("unable to allocate temporary resize filename".into())
-    })?;
-
-    let result = (|| -> Result<(), StoreError> {
-        output.write_all(&header)?;
-        let unknown_row = rrd_nan().to_le_bytes();
-        let mut row = vec![0_u8; row_bytes];
-        for (index, current_archive) in info.archives.iter().enumerate() {
-            input.seek(SeekFrom::Start(current_archive.data_offset))?;
-            if index != rra_index {
-                let byte_count = current_archive
-                    .rows
-                    .checked_mul(row_bytes as u64)
-                    .ok_or_else(|| StoreError::RrdUnsupported("RRA byte size overflows".into()))?;
-                copy_exact(&mut input, &mut output, byte_count)?;
-                continue;
-            }
-
-            match action {
-                RrdResizeAction::Grow => {
-                    let pointer = current_archive.current_row;
-                    for output_row in 0..new_row_count {
-                        if output_row > pointer && output_row <= pointer + row_count {
-                            for value in row.chunks_exact_mut(VALUE_LEN) {
-                                value.copy_from_slice(&unknown_row);
-                            }
-                        } else {
-                            let old_row = if output_row <= pointer {
-                                output_row
-                            } else {
-                                output_row - row_count
-                            };
-                            input.seek(SeekFrom::Start(
-                                current_archive.data_offset + old_row * row_bytes as u64,
-                            ))?;
-                            input.read_exact(&mut row)?;
-                        }
-                        output.write_all(&row)?;
-                    }
-                }
-                RrdResizeAction::Shrink => {
-                    let old_rows = current_archive.rows;
-                    let pointer = current_archive.current_row;
-                    let remove_start = (pointer + 1) % old_rows;
-                    let mut new_pointer = 0_u64;
-                    let mut output_row = 0_u64;
-                    for old_row in 0..old_rows {
-                        let distance = (old_row + old_rows - remove_start) % old_rows;
-                        if distance < row_count {
-                            continue;
-                        }
-                        input.seek(SeekFrom::Start(
-                            current_archive.data_offset + old_row * row_bytes as u64,
-                        ))?;
-                        input.read_exact(&mut row)?;
-                        output.write_all(&row)?;
-                        if old_row == pointer {
-                            new_pointer = output_row;
-                        }
-                        output_row += 1;
-                    }
-                    if output_row != new_row_count {
-                        return Err(StoreError::RrdFormat(
-                            "resize row mapping produced an invalid row count".into(),
-                        ));
-                    }
-                    let pointer_start = header_size - info.archives.len() * RRA_PTR_LEN;
-                    put_u64(
-                        &mut header,
-                        pointer_start + rra_index * RRA_PTR_LEN,
-                        new_pointer,
-                    );
-                }
-            }
-        }
-
-        if action == RrdResizeAction::Shrink {
-            let pointer_start = header_size - info.archives.len() * RRA_PTR_LEN;
-            output.seek(SeekFrom::Start(pointer_start as u64))?;
-            output.write_all(&header[pointer_start..])?;
-            output.seek(SeekFrom::End(0))?;
-        }
-        output.sync_all()?;
-        drop(output);
-        std::fs::hard_link(&temporary_path, output_path)?;
-        std::fs::remove_file(&temporary_path)?;
-        std::fs::File::open(output_parent)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary_path);
-    }
-    result
-}
-
-fn copy_exact(input: &mut File, output: &mut File, mut byte_count: u64) -> Result<(), StoreError> {
-    let mut buffer = [0_u8; 64 * 1024];
-    while byte_count > 0 {
-        let count = buffer.len().min(byte_count as usize);
-        input.read_exact(&mut buffer[..count])?;
-        output.write_all(&buffer[..count])?;
-        byte_count -= count as u64;
-    }
-    Ok(())
-}
-
-fn u64_at_file(file: &mut File, offset: usize) -> Result<u64, StoreError> {
-    file.seek(SeekFrom::Start(offset as u64))?;
-    let mut bytes = [0; 8];
-    file.read_exact(&mut bytes)?;
-    Ok(u64::from_le_bytes(bytes))
-}
-
-fn fixed_string_file(file: &mut File, offset: usize, len: usize) -> Result<String, StoreError> {
-    file.seek(SeekFrom::Start(offset as u64))?;
-    let mut bytes = vec![0; len];
-    file.read_exact(&mut bytes)?;
-    fixed_string(&bytes, 0, len)
-}
-
-fn f64_at_file(file: &mut File, offset: usize) -> Result<f64, StoreError> {
-    file.seek(SeekFrom::Start(offset as u64))?;
-    let mut bytes = [0; 8];
-    file.read_exact(&mut bytes)?;
-    Ok(f64::from_le_bytes(bytes))
 }
 
 /// Fetch data from an existing RRDtool file by path. The file is opened
@@ -1732,9 +1640,15 @@ pub fn inspect_rrd_file(path: impl AsRef<Path>) -> Result<RrdInfo, StoreError> {
 /// Return RRDtool's first-row timestamp for an archive index.
 pub fn first_rrd_time(path: impl AsRef<Path>, archive_index: usize) -> Result<i64, StoreError> {
     let info = inspect_path(path.as_ref())?;
-    let archive = info.archives.get(archive_index).ok_or_else(|| {
-        StoreError::RrdUnsupported(format!("invalid rraindex number: {archive_index}"))
-    })?;
+    first_rrd_time_from_info(&info, archive_index)
+}
+
+/// Compute an archive's first timestamp from its inspected metadata.
+pub fn first_rrd_time_from_info(info: &RrdInfo, archive_index: usize) -> Result<i64, StoreError> {
+    let archive = info
+        .archives
+        .get(archive_index)
+        .ok_or_else(|| StoreError::Rrd("invalid rraindex number".into()))?;
     let resolution = info
         .step
         .checked_mul(archive.pdp_per_row)
@@ -1742,11 +1656,16 @@ pub fn first_rrd_time(path: impl AsRef<Path>, archive_index: usize) -> Result<i6
         .ok_or_else(|| rrd_error("RRD archive resolution overflows"))?;
     let aligned_last = info
         .last_update
-        .checked_sub(info.last_update.rem_euclid(resolution))
+        .checked_sub(
+            info.last_update
+                .checked_rem_euclid(resolution)
+                .ok_or_else(divides_by_zero)?,
+        )
         .ok_or_else(|| rrd_error("RRD first timestamp alignment overflows"))?;
-    let retained = i64::try_from(archive.rows - 1)
-        .ok()
-        .and_then(|rows| rows.checked_mul(resolution))
+    // rrd_first.c:109 negates the unsigned row_cnt - 1, so an empty archive
+    // starts one resolution after its end.
+    let retained = (archive.rows.wrapping_sub(1) as i64)
+        .checked_mul(resolution)
         .ok_or_else(|| rrd_error("RRD archive range overflows"))?;
     aligned_last
         .checked_sub(retained)
@@ -1769,9 +1688,18 @@ pub fn dump_rrd_file_with_header(
     path: impl AsRef<Path>,
     header: RrdDumpHeader,
 ) -> Result<String, StoreError> {
-    let mut file = open_rrd_read(path.as_ref())?;
-    let _lock = RrdFileLock::shared(&file)?;
-    let info = read_info(&mut file)?;
+    dump_rrd_open_file(open_rrd_read(path.as_ref())?, path.as_ref(), header)
+}
+
+/// Dump an already opened descriptor under a shared RRD lock.
+pub fn dump_rrd_open_file(
+    file: File,
+    path: &Path,
+    header: RrdDumpHeader,
+) -> Result<String, StoreError> {
+    let mut file = RrdFileLock::shared(file)?;
+    file.seek(SeekFrom::Start(0))?;
+    let info = read_info(&mut file, path)?;
     if info.data_sources.iter().any(|ds| {
         !matches!(
             ds.kind.as_str(),
@@ -1793,7 +1721,13 @@ pub fn dump_rrd_file_with_header(
         RrdDumpHeader::Dtd => out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!DOCTYPE rrd SYSTEM \"https://oss.oetiker.ch/rrdtool/rrdtool.dtd\">\n<!-- Round Robin Database Dump -->\n<rrd>\n"),
         RrdDumpHeader::Xsd => out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!-- Round Robin Database Dump -->\n<rrd xmlns=\"https://oss.oetiker.ch/rrdtool/rrdtool-dump.xml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n\txsi:schemaLocation=\"https://oss.oetiker.ch/rrdtool/rrdtool-dump.xml https://oss.oetiker.ch/rrdtool/rrdtool-dump.xsd\">\n"),
     }
-    writeln!(out, "\t<version>{}</version>", info.version).unwrap();
+    // rrd_dump.c:119-123 writes 0003 for every version up to 3.
+    let version = if c_atoi(info.version.as_bytes()) <= 3 {
+        "0003"
+    } else {
+        info.version.as_str()
+    };
+    writeln!(out, "\t<version>{version}</version>").unwrap();
     writeln!(out, "\t<step>{}</step> <!-- Seconds -->", info.step).unwrap();
     writeln!(
         out,
@@ -1854,7 +1788,11 @@ pub fn dump_rrd_file_with_header(
             .ok_or_else(|| rrd_error("RRA resolution overflows"))?;
         let aligned_last = info
             .last_update
-            .checked_sub(info.last_update.rem_euclid(resolution))
+            .checked_sub(
+                info.last_update
+                    .checked_rem_euclid(resolution)
+                    .ok_or_else(divides_by_zero)?,
+            )
             .ok_or_else(|| rrd_error("RRD last timestamp alignment overflows"))?;
         writeln!(out, "\t<rra>\n\t\t<cf>{}</cf>", archive.consolidation).unwrap();
         writeln!(
@@ -1864,7 +1802,15 @@ pub fn dump_rrd_file_with_header(
         )
         .unwrap();
         out.push_str("\t\t<params>\n");
-        writeln!(out, "\t\t<xff>{}</xff>", format_rrd_float(archive.xff)).unwrap();
+        writeln!(
+            out,
+            "\t\t<xff>{}</xff>",
+            crate::rrd_snprintf::rrd_snprintf(
+                "%0.10e",
+                &[crate::rrd_snprintf::Arg::Double(archive.xff)]
+            )
+        )
+        .unwrap();
         out.push_str("\t\t</params>\n\t\t<cdp_prep>\n");
         for prep in &archive.cdp_prep {
             out.push_str("\t\t\t<ds>\n");
@@ -1892,8 +1838,14 @@ pub fn dump_rrd_file_with_header(
         out.push_str("\t\t</cdp_prep>\n\t\t<database>\n");
         let rows =
             usize::try_from(archive.rows).map_err(|_| rrd_error("RRA row count overflows"))?;
+        // rrd_dump.c:330-340 steps past cur_row and wraps to row 0 once it
+        // reaches row_cnt, so a cur_row at or past the end starts at row 0.
+        let first_row = match archive.current_row.checked_add(1) {
+            Some(row) if row < archive.rows => row,
+            _ => 0,
+        };
         for row in 0..rows {
-            let ring_row = (archive.current_row + 1 + row as u64) % archive.rows;
+            let ring_row = (first_row + row as u64) % archive.rows;
             let offset = archive
                 .data_offset
                 .checked_add(
@@ -1929,330 +1881,6 @@ pub fn dump_rrd_file_with_header(
     }
     out.push_str("</rrd>\n");
     Ok(out)
-}
-
-/// Restore the basic RRDtool XML subset emitted by [`dump_rrd_file_with_header`].
-/// The file is assembled at a sibling temporary path and linked/renamed into
-/// place only after its headers, prep state, pointers, and archive rows are
-/// complete and synced.
-pub fn restore_rrd_file(
-    xml: &str,
-    path: impl AsRef<Path>,
-    force_overwrite: bool,
-    range_check: bool,
-) -> Result<(), StoreError> {
-    use roxmltree::Node;
-
-    fn child_text(node: Node<'_, '_>, name: &str) -> Result<String, StoreError> {
-        node.children()
-            .find(|child| child.is_element() && child.tag_name().name() == name)
-            .and_then(|child| child.text())
-            .map(str::trim)
-            .map(str::to_owned)
-            .ok_or_else(|| StoreError::RrdUnsupported(format!("RRD XML is missing <{name}>")))
-    }
-
-    fn single_text_child(node: Node<'_, '_>, name: &str) -> Result<String, StoreError> {
-        let element = child(node, name)?;
-        let mut text_nodes = element.children().filter(|child| child.is_text());
-        let Some(text) = text_nodes.next() else {
-            return Err(StoreError::RrdUnsupported(format!(
-                "RRD XML <{name}> must contain one text node"
-            )));
-        };
-        if element.children().any(|child| child.is_element()) || text_nodes.next().is_some() {
-            return Err(StoreError::RrdUnsupported(format!(
-                "RRD XML <{name}> must contain one text node"
-            )));
-        }
-        Ok(text.text().unwrap_or_default().trim().to_owned())
-    }
-
-    fn child<'a, 'input>(
-        node: Node<'a, 'input>,
-        name: &str,
-    ) -> Result<Node<'a, 'input>, StoreError> {
-        node.children()
-            .find(|child| child.is_element() && child.tag_name().name() == name)
-            .ok_or_else(|| StoreError::RrdUnsupported(format!("RRD XML is missing <{name}>")))
-    }
-
-    fn parse_f64(text: &str) -> Result<f64, StoreError> {
-        let lower = text.to_ascii_lowercase();
-        let value = match lower.as_str() {
-            "nan" | "+nan" | "-nan" => rrd_nan(),
-            "inf" | "+inf" | "infinity" | "+infinity" => f64::INFINITY,
-            "-inf" | "-infinity" => f64::NEG_INFINITY,
-            _ => text.parse::<f64>().map_err(|_| {
-                StoreError::RrdUnsupported(format!("invalid RRD XML number: {text}"))
-            })?,
-        };
-        Ok(value)
-    }
-
-    // RRDtool's own default dump includes an external DTD declaration. Restore
-    // reads the document structure without needing that DTD, and the parser
-    // deliberately does not resolve external entities or fetch network data.
-    let xml_without_doctype = xml
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("<!DOCTYPE"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let document = roxmltree::Document::parse(&xml_without_doctype)
-        .map_err(|error| StoreError::RrdUnsupported(format!("invalid RRD XML: {error}")))?;
-    let root = document.root_element();
-    if root.tag_name().name() != "rrd" {
-        return Err(StoreError::RrdUnsupported(
-            "RRD XML root element must be <rrd>".into(),
-        ));
-    }
-    let version = child_text(root, "version")?;
-    if !matches!(version.as_str(), "0003" | "0005") {
-        return Err(StoreError::RrdUnsupported(format!(
-            "RRD XML format version {version} is unsupported"
-        )));
-    }
-    let step = child_text(root, "step")?
-        .parse::<u64>()
-        .map_err(|_| StoreError::RrdUnsupported("invalid RRD XML step".into()))?;
-    let last_update = child_text(root, "lastupdate")?
-        .parse::<i64>()
-        .map_err(|_| StoreError::RrdUnsupported("invalid RRD XML lastupdate".into()))?;
-    let ds_nodes = root
-        .children()
-        .filter(|node| node.is_element() && node.tag_name().name() == "ds")
-        .collect::<Vec<_>>();
-    let rra_nodes = root
-        .children()
-        .filter(|node| node.is_element() && node.tag_name().name() == "rra")
-        .collect::<Vec<_>>();
-    if ds_nodes.is_empty() || rra_nodes.is_empty() {
-        return Err(StoreError::RrdUnsupported(
-            "RRD XML requires at least one data source and archive".into(),
-        ));
-    }
-
-    let mut source_definitions = Vec::with_capacity(ds_nodes.len());
-    let mut source_bounds = Vec::with_capacity(ds_nodes.len());
-    for ds in &ds_nodes {
-        let name = single_text_child(*ds, "name")?;
-        let kind = child_text(*ds, "type")?;
-        if version == "0003" && matches!(kind.as_str(), "DCOUNTER" | "DDERIVE") {
-            return Err(StoreError::RrdUnsupported(
-                "RRD format version 0003 cannot store DCOUNTER or DDERIVE".into(),
-            ));
-        }
-        let heartbeat = child_text(*ds, "minimal_heartbeat")?;
-        let minimum = child_text(*ds, "min")?;
-        let maximum = child_text(*ds, "max")?;
-        let min_value = if minimum == "U" {
-            None
-        } else {
-            Some(parse_f64(&minimum)?).filter(|value| value.is_finite())
-        };
-        let max_value = if maximum == "U" {
-            None
-        } else {
-            Some(parse_f64(&maximum)?).filter(|value| value.is_finite())
-        };
-        let minimum = min_value.map_or_else(|| "U".to_owned(), |value| value.to_string());
-        let maximum = max_value.map_or_else(|| "U".to_owned(), |value| value.to_string());
-        source_definitions.push(format!("DS:{name}:{kind}:{heartbeat}:{minimum}:{maximum}"));
-        source_bounds.push((min_value, max_value));
-    }
-
-    let mut archive_definitions = Vec::with_capacity(rra_nodes.len());
-    let mut archive_rows = Vec::with_capacity(rra_nodes.len());
-    for rra in &rra_nodes {
-        let cf = child_text(*rra, "cf")?;
-        let pdp_per_row = child_text(*rra, "pdp_per_row")?
-            .parse::<u64>()
-            .map_err(|_| StoreError::RrdUnsupported("invalid RRD XML pdp_per_row".into()))?;
-        let xff = parse_f64(&child_text(child(*rra, "params")?, "xff")?)?;
-        let database = child(*rra, "database")?;
-        let rows = database
-            .children()
-            .filter(|node| node.is_element() && node.tag_name().name() == "row")
-            .collect::<Vec<_>>();
-        if rows.is_empty() {
-            return Err(StoreError::RrdUnsupported(
-                "RRD XML archive database must contain rows".into(),
-            ));
-        }
-        archive_definitions.push(format!("RRA:{cf}:{xff}:{pdp_per_row}:{}", rows.len()));
-        archive_rows.push(rows);
-    }
-
-    let destination = path.as_ref();
-    let parent = destination
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let filename = destination
-        .file_name()
-        .ok_or_else(|| StoreError::RrdUnsupported("invalid restore output filename".into()))?
-        .to_string_lossy();
-    static RESTORE_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let mut temporary = None;
-    for _ in 0..100 {
-        let id = RESTORE_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let candidate = parent.join(format!(
-            ".{filename}.rondi-{}-{id}.restore.tmp",
-            std::process::id()
-        ));
-        if !candidate.exists() {
-            temporary = Some(candidate);
-            break;
-        }
-    }
-    let temporary = temporary.ok_or_else(|| {
-        StoreError::RrdUnsupported("unable to allocate temporary restore filename".into())
-    })?;
-
-    let result = (|| -> Result<(), StoreError> {
-        create_rrd_file(
-            &temporary,
-            last_update,
-            step,
-            &source_definitions,
-            &archive_definitions,
-            true,
-        )?;
-        let info = inspect_path(&temporary)?;
-        let mut restore_options = std::fs::OpenOptions::new();
-        restore_options.read(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            restore_options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
-        }
-        let mut file = restore_options.open(&temporary)?;
-        if !file.metadata()?.file_type().is_file() {
-            return Err(StoreError::RrdUnsupported(
-                "restore temporary path is not a regular file".into(),
-            ));
-        }
-        let ds_start = STAT_HEAD_LEN;
-        let rra_start = ds_start + info.data_sources.len() * DS_DEF_LEN;
-        let live_start = rra_start + info.archives.len() * RRA_DEF_LEN;
-        let pdp_start = live_start + LIVE_HEAD_LEN;
-        let cdp_start = pdp_start + info.data_sources.len() * PDP_PREP_LEN;
-        let pointer_start = info.header_size - info.archives.len() * RRA_PTR_LEN;
-        file.seek(SeekFrom::Start(4))?;
-        file.write_all(version.as_bytes())?;
-        file.write_all(&[0])?;
-        file.seek(SeekFrom::Start(live_start as u64))?;
-        file.write_all(&last_update.to_le_bytes())?;
-
-        for (index, ds) in ds_nodes.iter().enumerate() {
-            let offset = pdp_start + index * PDP_PREP_LEN;
-            let last_ds = single_text_child(*ds, "last_ds")?;
-            if last_ds.len() >= 30 {
-                return Err(StoreError::RrdUnsupported(
-                    "RRD XML last_ds value is too long".into(),
-                ));
-            }
-            let mut last_ds_bytes = [0_u8; 30];
-            last_ds_bytes[..last_ds.len()].copy_from_slice(last_ds.as_bytes());
-            file.seek(SeekFrom::Start(offset as u64))?;
-            file.write_all(&last_ds_bytes)?;
-            let unknown_seconds = child_text(*ds, "unknown_sec")?
-                .parse::<u64>()
-                .map_err(|_| StoreError::RrdUnsupported("invalid RRD XML unknown_sec".into()))?;
-            file.seek(SeekFrom::Start((offset + 32) as u64))?;
-            file.write_all(&unknown_seconds.to_le_bytes())?;
-            let value = parse_f64(&child_text(*ds, "value")?)?;
-            file.seek(SeekFrom::Start((offset + 40) as u64))?;
-            file.write_all(&value.to_le_bytes())?;
-        }
-
-        for (rra_index, rra) in rra_nodes.iter().enumerate() {
-            let cdp = child(*rra, "cdp_prep")?
-                .children()
-                .filter(|node| node.is_element() && node.tag_name().name() == "ds")
-                .collect::<Vec<_>>();
-            if cdp.len() != ds_nodes.len() {
-                return Err(StoreError::RrdUnsupported(
-                    "RRD XML cdp_prep data-source count does not match".into(),
-                ));
-            }
-            for (ds_index, prep) in cdp.iter().enumerate() {
-                let offset = cdp_start + (rra_index * ds_nodes.len() + ds_index) * CDP_PREP_LEN;
-                for (field, relative_offset) in [
-                    ("value", 0_usize),
-                    ("primary_value", 64),
-                    ("secondary_value", 72),
-                ] {
-                    let value = parse_f64(&child_text(*prep, field)?)?;
-                    file.seek(SeekFrom::Start((offset + relative_offset) as u64))?;
-                    file.write_all(&value.to_le_bytes())?;
-                }
-                let unknown = child_text(*prep, "unknown_datapoints")?
-                    .parse::<u64>()
-                    .map_err(|_| {
-                        StoreError::RrdUnsupported("invalid RRD XML unknown_datapoints".into())
-                    })?;
-                file.seek(SeekFrom::Start((offset + 8) as u64))?;
-                file.write_all(&unknown.to_le_bytes())?;
-            }
-
-            let archive = &info.archives[rra_index];
-            let pointer = archive.rows - 1;
-            file.seek(SeekFrom::Start(
-                (pointer_start + rra_index * RRA_PTR_LEN) as u64,
-            ))?;
-            file.write_all(&pointer.to_le_bytes())?;
-            if archive_rows[rra_index].len() as u64 != archive.rows {
-                return Err(StoreError::RrdUnsupported(
-                    "RRD XML archive row count changed during restore".into(),
-                ));
-            }
-            for (row_index, row) in archive_rows[rra_index].iter().enumerate() {
-                let values = row
-                    .children()
-                    .filter(|node| node.is_element() && node.tag_name().name() == "v")
-                    .collect::<Vec<_>>();
-                if values.len() != ds_nodes.len() {
-                    return Err(StoreError::RrdUnsupported(
-                        "RRD XML row data-source count does not match".into(),
-                    ));
-                }
-                for (ds_index, value_node) in values.iter().enumerate() {
-                    let text = value_node.text().unwrap_or_default().trim();
-                    let mut value = parse_f64(text)?;
-                    if range_check
-                        && ((source_bounds[ds_index]
-                            .0
-                            .is_some_and(|minimum| value < minimum))
-                            || source_bounds[ds_index]
-                                .1
-                                .is_some_and(|maximum| value > maximum))
-                    {
-                        value = rrd_nan();
-                    }
-                    let offset = archive.data_offset
-                        + ((row_index * ds_nodes.len() + ds_index) * VALUE_LEN) as u64;
-                    file.seek(SeekFrom::Start(offset))?;
-                    file.write_all(&value.to_le_bytes())?;
-                }
-            }
-        }
-        file.sync_all()?;
-        drop(file);
-        if force_overwrite {
-            std::fs::rename(&temporary, destination)?;
-        } else {
-            std::fs::hard_link(&temporary, destination)?;
-            std::fs::remove_file(&temporary)?;
-        }
-        std::fs::File::open(parent)?.sync_all()?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result
 }
 
 fn format_rrd_value(value: f64) -> String {
@@ -2313,25 +1941,159 @@ fn rrd_local_timestamp(timestamp: i64) -> Result<String, StoreError> {
     String::from_utf8(bytes.to_vec()).map_err(|_| rrd_error("local timestamp is not UTF-8"))
 }
 
-fn read_info(file: &mut File) -> Result<RrdInfo, StoreError> {
-    let file_len = usize::try_from(file.metadata()?.len())
-        .map_err(|_| rrd_error("RRD file length exceeds host size"))?;
-    let mut prefix = vec![0; STAT_HEAD_LEN];
-    file.read_exact(&mut prefix)
-        .map_err(|_| rrd_error("truncated RRD file"))?;
-    let header_len = header_length(&prefix)?;
-    if header_len > MAX_HEADER_LEN {
-        return Err(StoreError::RrdUnsupported(
-            "RRD metadata header exceeds the 64 MiB inspection limit".into(),
+/// rrd_open.c:336-560: RRDtool maps the file and reads the header piece by
+/// piece, failing with these texts in this order before anything else looks
+/// at the contents.
+pub(crate) fn read_info(file: &mut File, path: &Path) -> Result<RrdInfo, StoreError> {
+    let name = path.display();
+    let metadata = file.metadata().map_err(|error| {
+        StoreError::RrdFile(format!("fstat '{name}': {}", rrd_strerror(&error)))
+    })?;
+    let file_len = metadata.len();
+    if file_len == 0 || !metadata.is_file() {
+        probe_mmap(file, file_len).map_err(|error| {
+            StoreError::RrdFile(format!("mmaping file '{name}': {}", rrd_strerror(&error)))
+        })?;
+    }
+    let mut offset = 0_u64;
+    let load = |offset: &mut u64, what: &str, size: usize, count: u64| match (size as u64)
+        .checked_mul(count)
+        .and_then(|wanted| offset.checked_add(wanted))
+    {
+        Some(end) if end <= file_len => {
+            *offset = end;
+            Ok(())
+        }
+        _ => Err(StoreError::RrdFile(format!(
+            "reached EOF while loading header {what}"
+        ))),
+    };
+    load(&mut offset, "rrd->stat_head", STAT_HEAD_LEN, 1)?;
+    let mut stat_head = [0_u8; STAT_HEAD_LEN];
+    file.read_exact(&mut stat_head)?;
+    if stat_head[0..4] != *b"RRD\0" {
+        return Err(StoreError::RrdFile(format!("'{name}' is not an RRD file")));
+    }
+    if f64_at(&stat_head, 16)? != FLOAT_COOKIE {
+        return Err(StoreError::RrdFile(
+            "This RRD was created on another architecture".into(),
         ));
     }
-    file.seek(SeekFrom::Start(0))?;
+    let version_field = &stat_head[4..];
+    let version_field = &version_field[..version_field
+        .iter()
+        .position(|byte| *byte == 0)
+        .unwrap_or(version_field.len())];
+    let version = c_atoi(version_field);
+    if version > 5 {
+        return Err(StoreError::RrdFile(format!(
+            "can't handle RRD file version {}",
+            String::from_utf8_lossy(version_field)
+        )));
+    }
+    let ds_count = u64_at(&stat_head, 24)?;
+    let rra_count = u64_at(&stat_head, 32)?;
+    load(&mut offset, "rrd->ds_def", DS_DEF_LEN, ds_count)?;
+    let rra_def_start = offset;
+    load(&mut offset, "rrd->rra_def", RRA_DEF_LEN, rra_count)?;
+    if version < 3 {
+        load(&mut offset, "rrd->legacy_last_up", 8, 1)?;
+    } else {
+        load(&mut offset, "rrd->live_head", LIVE_HEAD_LEN, 1)?;
+    }
+    load(&mut offset, "rrd->pdp_prep", PDP_PREP_LEN, ds_count)?;
+    load(
+        &mut offset,
+        "rrd->cdp_prep",
+        CDP_PREP_LEN,
+        rra_count.saturating_mul(ds_count),
+    )?;
+    load(&mut offset, "rrd->rra_ptr", RRA_PTR_LEN, rra_count)?;
+    let header_len =
+        usize::try_from(offset).map_err(|_| rrd_error("RRD metadata header exceeds host size"))?;
     let mut header = vec![0; header_len];
-    file.read_exact(&mut header)
-        .map_err(|_| rrd_error("truncated RRD metadata header"))?;
-    inspect_parts(&header, file_len)
+    file.seek(SeekFrom::Start(0))?;
+    file.read_exact(&mut header)?;
+    let row_count = (0..rra_count as usize).fold(0_u64, |total, index| {
+        let row_cnt = rra_def_start as usize + index * RRA_DEF_LEN + 24;
+        total.wrapping_add(u64::from_le_bytes(
+            header[row_cnt..row_cnt + 8].try_into().unwrap(),
+        ))
+    });
+    let correct_len = offset.wrapping_add(
+        (VALUE_LEN as u64)
+            .wrapping_mul(row_count)
+            .wrapping_mul(ds_count),
+    );
+    if correct_len > file_len {
+        return Err(StoreError::RrdFile(format!(
+            "'{name}' is too small (should be {} bytes)",
+            correct_len as i64
+        )));
+    }
+    inspect_parts(
+        &header,
+        usize::try_from(file_len).map_err(|_| rrd_error("RRD file length exceeds host size"))?,
+    )
 }
 
+/// RRDtool maps every file it opens; an empty file or a directory fails
+/// there with the kernel's errno.
+#[cfg(unix)]
+fn probe_mmap(file: &File, length: u64) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let length =
+        usize::try_from(length).map_err(|_| std::io::Error::from_raw_os_error(libc::ENOMEM))?;
+    // SAFETY: a fresh read-only private mapping of an open descriptor; it is
+    // unmapped before returning and never dereferenced.
+    let mapped = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            length,
+            libc::PROT_READ,
+            libc::MAP_PRIVATE,
+            file.as_raw_fd(),
+            0,
+        )
+    };
+    if mapped == libc::MAP_FAILED {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `mapped` is the mapping created above with this length.
+    unsafe { libc::munmap(mapped, length) };
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn probe_mmap(_file: &File, length: u64) -> std::io::Result<()> {
+    if length == 0 {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    }
+    Ok(())
+}
+
+/// C `atoi` over a NUL-trimmed byte field.
+fn c_atoi(field: &[u8]) -> i64 {
+    let text = String::from_utf8_lossy(field);
+    i64::from(crate::rrd_number::c_strtol(&text, 10).0 as i32)
+}
+
+/// `rrd_strerror(errno)` for an I/O error.
+pub(crate) fn rrd_strerror(error: &std::io::Error) -> String {
+    match error.raw_os_error() {
+        // SAFETY: strerror returns a valid NUL-terminated string.
+        Some(code) => unsafe {
+            std::ffi::CStr::from_ptr(libc::strerror(code))
+                .to_string_lossy()
+                .into_owned()
+        },
+        None => error.to_string(),
+    }
+}
+
+/// Decode a header that passed rrd_open's checks. RRDtool validates nothing
+/// beyond those, so neither does this: a zero step, an out-of-range xff,
+/// cur_row past row_cnt or an empty name are reported as stored.
 fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
     if !cfg!(target_pointer_width = "64") || cfg!(target_endian = "big") {
         return Err(StoreError::RrdUnsupported(
@@ -2339,40 +2101,21 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
         ));
     }
     require(bytes, 0, STAT_HEAD_LEN)?;
-    if &bytes[0..4] != b"RRD\0" {
-        return Err(StoreError::RrdFormat("invalid RRD cookie".into()));
-    }
     let version = fixed_string(bytes, 4, 5)?;
-    if !matches!(version.as_str(), "0003" | "0004" | "0005") {
-        return Err(StoreError::RrdUnsupported(format!(
-            "RRD format version {version} is not supported by the inspector"
-        )));
-    }
-    if f64_at(bytes, 16)? != FLOAT_COOKIE {
-        return Err(StoreError::RrdFormat(
-            "RRD float cookie does not match the host representation".into(),
-        ));
-    }
-
     let ds_count = usize_at(bytes, 24)?;
     let rra_count = usize_at(bytes, 32)?;
     let step = u64_at(bytes, 40)?;
-    if ds_count == 0 || rra_count == 0 || step == 0 {
-        return Err(StoreError::RrdFormat(
-            "RRD requires data sources, archives, and a positive step".into(),
-        ));
-    }
     let ds_start = STAT_HEAD_LEN;
     let rra_start = checked_add(ds_start, checked_mul(ds_count, DS_DEF_LEN)?)?;
     let live_start = checked_add(rra_start, checked_mul(rra_count, RRA_DEF_LEN)?)?;
     let last_update = i64_at(bytes, live_start)?;
-    let last_update_usec = u64_at(bytes, checked_add(live_start, 8)?)?;
-    if last_update_usec >= 1_000_000 {
-        return Err(StoreError::RrdFormat(
-            "RRD last update microseconds are out of range".into(),
-        ));
-    }
-    let pdp_start = checked_add(live_start, LIVE_HEAD_LEN)?;
+    // rrd_open.c:519-533: before version 3 the live head is a bare time_t.
+    let (live_head_len, last_update_usec) = if c_atoi(version.as_bytes()) < 3 {
+        (8, 0)
+    } else {
+        (LIVE_HEAD_LEN, u64_at(bytes, checked_add(live_start, 8)?)?)
+    };
+    let pdp_start = checked_add(live_start, live_head_len)?;
     let cdp_start = checked_add(pdp_start, checked_mul(ds_count, PDP_PREP_LEN)?)?;
     let pointer_start = checked_add(
         cdp_start,
@@ -2386,25 +2129,24 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
         let start = checked_add(ds_start, checked_mul(index, DS_DEF_LEN)?)?;
         let name = fixed_string(bytes, start, 20)?;
         let kind = fixed_string(bytes, checked_add(start, 20)?, 20)?;
-        if name.is_empty() || kind.is_empty() {
-            return Err(StoreError::RrdFormat(
-                "RRD data source definition has an empty name or type".into(),
-            ));
-        }
         let heartbeat = u64_at(bytes, checked_add(start, 40)?)?;
-        let minimum = known_number(f64_at(bytes, checked_add(start, 48)?)?);
-        let maximum = known_number(f64_at(bytes, checked_add(start, 56)?)?);
+        // NaN means unbounded; infinite bounds are kept as RRDtool prints them.
+        let minimum = Some(f64_at(bytes, checked_add(start, 48)?)?).filter(|v| !v.is_nan());
+        let maximum = Some(f64_at(bytes, checked_add(start, 56)?)?).filter(|v| !v.is_nan());
         data_sources.push(RrdDataSourceInfo {
             name,
             kind,
             heartbeat,
             minimum,
             maximum,
-            last_value: fixed_string(
-                bytes,
-                checked_add(pdp_start, checked_mul(index, PDP_PREP_LEN)?)?,
-                30,
-            )?,
+            // last_ds holds raw sample text that RRDtool cut at 29 bytes.
+            last_value: {
+                let offset = checked_add(pdp_start, checked_mul(index, PDP_PREP_LEN)?)?;
+                require(bytes, offset, 30)?;
+                let field = &bytes[offset..offset + 30];
+                let end = field.iter().position(|byte| *byte == 0).unwrap_or(30);
+                String::from_utf8_lossy(&field[..end]).into_owned()
+            },
             pdp_value: f64_at(
                 bytes,
                 checked_add(
@@ -2434,17 +2176,6 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
             bytes,
             checked_add(pointer_start, checked_mul(index, RRA_PTR_LEN)?)?,
         )?;
-        if consolidation.is_empty()
-            || rows == 0
-            || pdp_per_row == 0
-            || !xff.is_finite()
-            || !(0.0..=1.0).contains(&xff)
-            || current_row >= rows
-        {
-            return Err(StoreError::RrdFormat(format!(
-                "RRD archive {index} has invalid metadata"
-            )));
-        }
         let archive_bytes = checked_mul(
             checked_mul(
                 usize::try_from(rows).map_err(|_| rrd_error("row count overflows"))?,
@@ -2480,9 +2211,9 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
             data_offset: data_offset as u64,
         });
     }
-    if archive_data_start != file_len {
+    if archive_data_start > file_len {
         return Err(StoreError::RrdFormat(
-            "RRD v3 file length does not match its declared archive layout".into(),
+            "RRD file is shorter than its declared archive layout".into(),
         ));
     }
 
@@ -2492,38 +2223,10 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
         last_update,
         last_update_usec,
         header_size: data_start,
+        live_head_len,
         data_sources,
         archives,
     })
-}
-
-fn header_length(stat_head: &[u8]) -> Result<usize, StoreError> {
-    require(stat_head, 0, STAT_HEAD_LEN)?;
-    if &stat_head[0..4] != b"RRD\0" {
-        return Err(StoreError::RrdFormat("invalid RRD cookie".into()));
-    }
-    let version = fixed_string(stat_head, 4, 5)?;
-    if !matches!(version.as_str(), "0003" | "0004" | "0005") {
-        return Err(StoreError::RrdUnsupported(format!(
-            "RRD format version {version} is not supported by the inspector"
-        )));
-    }
-    let ds_count = usize_at(stat_head, 24)?;
-    let rra_count = usize_at(stat_head, 32)?;
-    if ds_count == 0 || rra_count == 0 {
-        return Err(StoreError::RrdFormat(
-            "RRD requires data sources and archives".into(),
-        ));
-    }
-    let mut len = checked_add(STAT_HEAD_LEN, checked_mul(ds_count, DS_DEF_LEN)?)?;
-    len = checked_add(len, checked_mul(rra_count, RRA_DEF_LEN)?)?;
-    len = checked_add(len, LIVE_HEAD_LEN)?;
-    len = checked_add(len, checked_mul(ds_count, PDP_PREP_LEN)?)?;
-    len = checked_add(
-        len,
-        checked_mul(checked_mul(ds_count, rra_count)?, CDP_PREP_LEN)?,
-    )?;
-    checked_add(len, checked_mul(rra_count, RRA_PTR_LEN)?)
 }
 
 fn choose_archive(
@@ -2552,7 +2255,11 @@ fn choose_archive(
             i64::try_from(archive_step).map_err(|_| rrd_error("RRD archive step overflows"))?;
         let archive_end = info
             .last_update
-            .checked_sub(info.last_update.rem_euclid(archive_step_i64))
+            .checked_sub(
+                info.last_update
+                    .checked_rem_euclid(archive_step_i64)
+                    .ok_or_else(divides_by_zero)?,
+            )
             .ok_or_else(|| rrd_error("RRD archive end overflows"))?;
         let span = archive_step_i64
             .checked_mul(
@@ -2588,24 +2295,147 @@ fn choose_archive(
         })
 }
 
-struct RrdFileLock {
-    fd: i32,
+/// A descriptor holding RRDtool's whole-file `fcntl` lock.
+///
+/// `fcntl` record locks belong to the process, so they never exclude another
+/// thread, and closing any descriptor for the file drops every lock the
+/// process holds on it. Locked access is therefore also serialized per inode
+/// inside the process, and the descriptor is closed before the next thread may
+/// open its own lock on that inode.
+pub(crate) struct RrdFileLock {
+    file: Option<File>,
+    #[cfg(unix)]
+    key: (u64, u64),
+}
+
+#[cfg(unix)]
+static LOCKED_RRD_FILES: std::sync::Mutex<std::collections::BTreeSet<(u64, u64)>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+#[cfg(unix)]
+static LOCKED_RRD_FILE_RELEASED: std::sync::Condvar = std::sync::Condvar::new();
+
+#[cfg(unix)]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RrdLockMode {
+    Try,
+    Block,
+    None,
+}
+
+#[cfg(unix)]
+thread_local! {
+    static LOCK_MODE_OPTION: std::cell::Cell<Option<RrdLockMode>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// `_rrd_lock_parse` (rrd_open.c:1216); an empty string is the default.
+#[cfg(unix)]
+fn parse_rrd_lock_mode(mode: &str) -> Option<RrdLockMode> {
+    match mode {
+        "" | "try" => Some(RrdLockMode::Try),
+        "block" => Some(RrdLockMode::Block),
+        "none" => Some(RrdLockMode::None),
+        _ => None,
+    }
+}
+
+/// Whether `rrdtool update --locking` accepts `mode`.
+pub fn is_rrd_locking_mode(mode: &str) -> bool {
+    #[cfg(unix)]
+    {
+        parse_rrd_lock_mode(mode).is_some()
+    }
+    #[cfg(not(unix))]
+    {
+        matches!(mode, "" | "try" | "block" | "none")
+    }
+}
+
+/// Runs `f` with the mode `update --locking` selected
+/// (`_rrd_lock_from_opt`, rrd_open.c:1264) in place of `$RRD_LOCKING`. An
+/// empty mode leaves `$RRD_LOCKING` in charge.
+pub fn with_rrd_locking<T>(mode: &str, f: impl FnOnce() -> T) -> T {
+    #[cfg(unix)]
+    {
+        let selected = if mode.is_empty() {
+            None
+        } else {
+            parse_rrd_lock_mode(mode)
+        };
+        let previous = LOCK_MODE_OPTION.with(|cell| cell.replace(selected));
+        let result = f();
+        LOCK_MODE_OPTION.with(|cell| cell.set(previous));
+        result
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        f()
+    }
+}
+
+/// RRDtool reads `$RRD_LOCKING` on every open and defaults to a single
+/// non-blocking attempt, so a held lock fails with "could not lock RRD".
+#[cfg(unix)]
+fn rrd_lock_mode() -> RrdLockMode {
+    if let Some(mode) = LOCK_MODE_OPTION.with(std::cell::Cell::get) {
+        return mode;
+    }
+    match std::env::var_os("RRD_LOCKING") {
+        None => RrdLockMode::Try,
+        Some(value) => match value.to_str() {
+            Some("" | "try") => RrdLockMode::Try,
+            Some("block") => RrdLockMode::Block,
+            Some("none") => RrdLockMode::None,
+            _ => {
+                eprintln!(
+                    "unsupported locking mode '{}' in $RRD_LOCKING; assuming 'try'",
+                    value.to_string_lossy()
+                );
+                RrdLockMode::Try
+            }
+        },
+    }
 }
 
 impl RrdFileLock {
     #[cfg(unix)]
-    fn shared(file: &File) -> Result<Self, StoreError> {
+    fn shared(file: File) -> Result<Self, StoreError> {
         Self::lock(file, false)
     }
 
     #[cfg(unix)]
-    fn exclusive(file: &File) -> Result<Self, StoreError> {
+    pub(crate) fn exclusive(file: File) -> Result<Self, StoreError> {
         Self::lock(file, true)
     }
 
     #[cfg(unix)]
-    fn lock(file: &File, exclusive: bool) -> Result<Self, StoreError> {
+    fn lock(file: File, exclusive: bool) -> Result<Self, StoreError> {
         use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata()?;
+        let key = (metadata.dev(), metadata.ino());
+        {
+            let mut held = LOCKED_RRD_FILES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while held.contains(&key) {
+                held = LOCKED_RRD_FILE_RELEASED
+                    .wait(held)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+            }
+            held.insert(key);
+        }
+        // From here on, Drop closes the descriptor and releases the inode.
+        let guard = Self {
+            file: Some(file),
+            key,
+        };
+        let operation = match rrd_lock_mode() {
+            RrdLockMode::None => return Ok(guard),
+            RrdLockMode::Try => libc::F_SETLK,
+            RrdLockMode::Block => libc::F_SETLKW,
+        };
         let mut lock = libc::flock {
             l_type: if exclusive {
                 libc::F_WRLCK
@@ -2617,45 +2447,62 @@ impl RrdFileLock {
             l_len: 0,
             l_pid: 0,
         };
-        // SAFETY: `lock` is a valid flock structure and the descriptor remains
-        // open for the lifetime of this guard.
-        let result = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLKW, &mut lock) };
+        let fd = guard.file.as_ref().map_or(-1, AsRawFd::as_raw_fd);
+        // SAFETY: `lock` is a valid flock structure and the descriptor stays
+        // open until the guard is dropped.
+        let result = unsafe { libc::fcntl(fd, operation, &mut lock) };
         if result == -1 {
-            return Err(StoreError::Io(std::io::Error::last_os_error()));
+            return Err(StoreError::RrdLocked);
         }
-        Ok(Self {
-            fd: file.as_raw_fd(),
-        })
+        Ok(guard)
     }
 
     #[cfg(not(unix))]
-    fn shared(_file: &File) -> Result<Self, StoreError> {
+    fn shared(_file: File) -> Result<Self, StoreError> {
         Err(StoreError::RrdUnsupported(
             "RRDtool-compatible advisory locking is unavailable on this platform".into(),
         ))
     }
 
     #[cfg(not(unix))]
-    fn exclusive(_file: &File) -> Result<Self, StoreError> {
+    fn exclusive(_file: File) -> Result<Self, StoreError> {
         Err(StoreError::RrdUnsupported(
             "RRDtool-compatible advisory locking is unavailable on this platform".into(),
         ))
     }
 }
 
+impl std::ops::Deref for RrdFileLock {
+    type Target = File;
+
+    fn deref(&self) -> &File {
+        self.file
+            .as_ref()
+            .expect("locked RRD file is open until drop")
+    }
+}
+
+impl std::ops::DerefMut for RrdFileLock {
+    fn deref_mut(&mut self) -> &mut File {
+        self.file
+            .as_mut()
+            .expect("locked RRD file is open until drop")
+    }
+}
+
 impl Drop for RrdFileLock {
     fn drop(&mut self) {
+        // Closing the descriptor releases the fcntl lock. It must happen
+        // before another thread can lock the inode, or this close would drop
+        // that thread's lock as well.
+        drop(self.file.take());
         #[cfg(unix)]
         {
-            let mut lock = libc::flock {
-                l_type: libc::F_UNLCK as _,
-                l_whence: libc::SEEK_SET as _,
-                l_start: 0,
-                l_len: 0,
-                l_pid: 0,
-            };
-            // SAFETY: the descriptor is still open and the flock structure is valid.
-            let _ = unsafe { libc::fcntl(self.fd, libc::F_SETLK, &mut lock) };
+            let mut held = LOCKED_RRD_FILES
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            held.remove(&self.key);
+            LOCKED_RRD_FILE_RELEASED.notify_all();
         }
     }
 }
@@ -2667,9 +2514,7 @@ fn fixed_string(bytes: &[u8], offset: usize, length: usize) -> Result<String, St
         .iter()
         .position(|byte| *byte == 0)
         .unwrap_or(field.len());
-    let value = std::str::from_utf8(&field[..end])
-        .map_err(|_| StoreError::RrdFormat("RRD string field is not UTF-8/ASCII".into()))?;
-    Ok(value.to_owned())
+    Ok(String::from_utf8_lossy(&field[..end]).into_owned())
 }
 
 fn xml_escape_text(value: &str) -> String {
@@ -2683,13 +2528,127 @@ fn xml_escape_text(value: &str) -> String {
 // Keep that compatibility behavior separate from the stricter native-store
 // helpers, which intentionally refuse symlinked database files.
 fn open_rrd_read(path: &Path) -> Result<File, StoreError> {
-    Ok(File::open(path)?)
+    File::open(path).map_err(|error| open_error(path, &error))
 }
 
-fn open_rrd_write(path: &Path) -> Result<File, StoreError> {
+pub(crate) fn open_rrd_write(path: &Path) -> Result<File, StoreError> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true);
-    Ok(options.open(path)?)
+    options.open(path).map_err(|error| open_error(path, &error))
+}
+
+/// Open an output file for writing, creating it with mode 0600 (less the
+/// umask) or, with `exclusive`, only if it does not exist. RRDtool follows a
+/// symbolic link at the final component and writes through any inode; Rondi
+/// refuses a symbolic link, anything but a regular file and a file with more
+/// than one hard link, so an output path cannot redirect the write. A
+/// character device, reached directly or through a symbolic link, is the one
+/// exception. The file is not truncated; callers that truncate do so after
+/// this check.
+pub fn open_output_file(path: &Path, exclusive: bool) -> std::io::Result<File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true);
+    if exclusive {
+        options.create_new(true);
+    } else {
+        options.create(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        // Private output and nonblocking opens keep FIFO destinations from waiting.
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY);
+        let file = match options.open(path) {
+            Ok(file) => file,
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+                return open_linked_character_device(path);
+            }
+            Err(error) => return Err(error),
+        };
+        let metadata = file.metadata()?;
+        // The kernel already applied its own permission check to a device,
+        // so ownership says nothing about whether it may be written.
+        if is_character_device(&metadata) {
+            clear_nonblocking(&file)?;
+            return Ok(file);
+        }
+        // SAFETY: geteuid has no preconditions.
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(std::io::Error::other(
+                "refusing to write a file owned by another user",
+            ));
+        }
+        if !metadata.is_file() {
+            return Err(std::io::Error::other("not a regular file"));
+        }
+        if metadata.nlink() > 1 {
+            return Err(std::io::Error::other(
+                "refusing to write a file with more than one hard link",
+            ));
+        }
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        options.open(path)
+    }
+}
+
+#[cfg(unix)]
+fn is_character_device(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    metadata.file_type().is_char_device()
+}
+
+#[cfg(unix)]
+fn clear_nonblocking(file: &File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let fd = file.as_raw_fd();
+    // SAFETY: fd is open for the lifetime of `file`.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: as above; only the status flags change.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// A symbolic link at the output path is followed only to a character
+/// device such as /dev/stdout. Nothing is created, and the opened descriptor
+/// is checked again so a retargeted link cannot reach a regular file.
+#[cfg(unix)]
+fn open_linked_character_device(path: &Path) -> std::io::Result<File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let refused = || std::io::Error::other("refusing to follow a symbolic link");
+    // Skip the open entirely for targets whose open could have side effects.
+    if !std::fs::metadata(path).is_ok_and(|metadata| is_character_device(&metadata)) {
+        return Err(refused());
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+        .map_err(|_| refused())?;
+    if !is_character_device(&file.metadata()?) {
+        return Err(refused());
+    }
+    clear_nonblocking(&file)?;
+    Ok(file)
+}
+
+/// rrd_open.c:336.
+fn open_error(path: &Path, error: &std::io::Error) -> StoreError {
+    StoreError::RrdFile(format!(
+        "opening '{}': {}",
+        path.display(),
+        rrd_strerror(error)
+    ))
 }
 
 fn usize_at(bytes: &[u8], offset: usize) -> Result<usize, StoreError> {
@@ -2717,10 +2676,6 @@ fn f64_at(bytes: &[u8], offset: usize) -> Result<f64, StoreError> {
     ))
 }
 
-fn known_number(value: f64) -> Option<f64> {
-    value.is_finite().then_some(value)
-}
-
 fn require(bytes: &[u8], offset: usize, length: usize) -> Result<(), StoreError> {
     let end = checked_add(offset, length)?;
     if end > bytes.len() {
@@ -2739,6 +2694,67 @@ fn checked_mul(left: usize, right: usize) -> Result<usize, StoreError> {
         .ok_or_else(|| rrd_error("RRD length overflows"))
 }
 
+/// RRDtool opens files with a zero step, pdp_cnt or row_cnt and then divides
+/// by it, which traps on x86_64 and yields garbage on aarch64.
+fn divides_by_zero() -> StoreError {
+    StoreError::RrdUnsupported("RRD step, pdp_cnt or row_cnt is zero".into())
+}
+
 fn rrd_error(message: &str) -> StoreError {
     StoreError::RrdFormat(message.into())
+}
+
+#[cfg(all(test, unix))]
+mod lock_tests {
+    use super::*;
+    use std::process::Command;
+
+    fn rrdtool_1110_available() -> bool {
+        Command::new("rrdtool")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| {
+                output.status.success()
+                    && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+            })
+    }
+
+    #[test]
+    fn another_thread_reading_the_file_does_not_drop_the_process_lock() {
+        if !rrdtool_1110_available() {
+            eprintln!("skipping lock retention check: pinned RRDtool 1.11.0 is not installed");
+            return;
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("held.rrd");
+        create_rrd_file(
+            &path,
+            1_000_000_000,
+            10,
+            &["DS:value:GAUGE:30:U:U".to_owned()],
+            &["RRA:AVERAGE:0.5:1:8".to_owned()],
+            true,
+        )
+        .unwrap();
+        let held = RrdFileLock::exclusive(open_rrd_write(&path).unwrap()).unwrap();
+        let reader = {
+            let path = path.clone();
+            std::thread::spawn(move || inspect_path(&path).map(|info| info.last_update))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        // A second descriptor closed by the reader would release this
+        // process's lock and let an external writer in.
+        let external = Command::new("rrdtool")
+            .args(["update", path.to_str().unwrap(), "1000000010:1"])
+            .env_remove("RRD_LOCKING")
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&external.stderr),
+            "ERROR: could not lock RRD\n"
+        );
+        assert!(!reader.is_finished());
+        drop(held);
+        assert_eq!(reader.join().unwrap().unwrap(), 1_000_000_000);
+    }
 }

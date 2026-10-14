@@ -1,0 +1,6 @@
+-b
+now-1h
+-s
+5m
+DS:x:DCOUNTER:600:U:U
+RRA:LAST:0:1:3
