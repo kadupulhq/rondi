@@ -106,7 +106,7 @@ Closed since the earlier draft (all EXECUTED unless noted):
 - Pipe mode still lacks commands. EXECUTED: `pwd`, `ls`, `cd /tmp`, `xport`, `graph`, `graphv`, and `flushcached` each print `ERROR: unknown function '<name>'`; upstream runs them. The chroot argument is not implemented (READ-ONLY).
 - The pipe tokenizer is still `shell_words::split` (`crates/rondi-cli/src/main.rs`). EXECUTED: input `info no\:such.rrd` prints `opening 'no:such.rrd'` from Rondi and `opening 'no\:such.rrd'` from upstream. This breaks `COMMENT` text with `\:` once graph commands reach pipe mode.
 - Help text for 14 commands is stored under `crates/rondi-cli/src/help/` (dump, fetch, first, graph, graphv, info, lastupdate, list, resize, restore, tune, update, updatev, xport). EXECUTED (file listing). `create`, `last`, and `flushcached` help are not in that set; whether they match was not checked.
-- `RRDCACHED_ADDRESS` is read in 13 places (EXECUTED: `grep -c`). `RRDCACHED_STRIPPATH` and `RRD_DEFAULT_FONT` are not read; `RRD_LOCKING` is.
+- `RRDCACHED_ADDRESS` is read in 13 places (EXECUTED: `grep -c`). `RRDCACHED_STRIPPATH` now follows `rrd_client.c` `get_path` for TCP client filenames; Unix clients canonicalize paths before sending them. Differential tests compare CREATE, UPDATE, FIRST, LAST, FETCH and FLUSH requests and outcomes with RRDtool 1.11.0. `RRD_DEFAULT_FONT` is not read; `RRD_LOCKING` is.
 - Upstream shell suite against Rondi (exploratory, macOS probe, 31 scripts from `tests/` at `v1.11.0`, run with `RRDTOOL=<binary>`). Upstream passed 15 on this host. Rondi passed 10 of those 15 and failed `graph1`, `graph2`, `graph4`, `rpn1`, and `vformatter1`. `rpn1` stops at a `graphv` call (EXECUTED: rerun with `bash -x`); the other four were not traced. The 16 scripts that fail with upstream on macOS (the `create-with-source-*`, `modify*`, `tune*`, `list1`, and `graph5` scripts, among others) say nothing about Rondi and must be rerun in the Linux container. The earlier draft listed `tune2` and `pdp-calc1` as Rondi failures; `pdp-calc1` now passes, and `tune2` fails for upstream too here.
 
 ### Gaps
@@ -115,7 +115,7 @@ Closed since the earlier draft (all EXECUTED unless noted):
 2. `rrdupdate` name. `rrdcgi` only if a consumer needs it (see Roadmap).
 3. Option completeness outside graph (RD-002, RD-004).
 4. Upstream's local-fallback text after "Unable to connect to rrdcached" (decided).
-5. `RRDCACHED_STRIPPATH`.
+5. `RRDCACHED_STRIPPATH` is implemented for the supported daemon client commands, with differential path and error cases; broader daemon client behavior remains incomplete.
 6. Error text corpus beyond the tested set (RD-010).
 7. Time parser completeness. The parser is a subset with differential tests (READ-ONLY).
 8. TCP paths for `xport`, `graphv`, and other daemon commands. TLS does not exist in RRDtool 1.11.0 (READ-ONLY) and should not be added under the compatibility names.
@@ -225,7 +225,7 @@ Nothing. EXECUTED: no `crate-type` in `crates/*/Cargo.toml`; no FFI, no headers.
 - Thread test: N threads calling `rrd_update_r` and `rrd_fetch_r` on distinct files with error injection; check per-thread errors.
 - `abidiff` (libabigail) or `abi-compliance-checker` against upstream `librrd.so.8`.
 
-## Surface: rrdcached (RD-007, RD-013, RD-014, RD-015)
+## Surface: rrdcached (RD-007, RD-013, RD-014)
 
 ### What RRDtool does
 
@@ -238,14 +238,14 @@ Nothing. EXECUTED: no `crate-type` in `crates/*/Cargo.toml`; no FFI, no headers.
 
 - Handles the 25 commands (`crates/rondi-server/src/lib.rs`; READ-ONLY for the full list).
 - Unix sockets only. EXECUTED (read): `-l` with a non-Unix address returns `rrdcached network listeners are not enabled; use a Unix socket`, and a second `-l` returns `rrdcached mode supports one listener; give -l only once` (`crates/rondi-cli/src/main.rs`).
-- Parses all 23 upstream options. `-F` and `-g` are accepted and ignored. `-U` and `-G` do not switch accounts: if the requested user or group differs from the current one, startup fails with `rrdcached -U/-G cannot switch accounts in Rondi` (READ-ONLY). No fork and no socket activation (EXECUTED: `grep -rn "LISTEN_FDS\|fork()\|daemonize" crates` is empty).
-- Journal: JSON lines (`serde_json`) in `.rrdcached.journal`, in the `-j` directory or the storage root. A journal is always written, with `sync_data` per accepted update, and is rewritten at each flush interval. It cannot be read by upstream, and upstream's cannot be read by Rondi. Both differ from the decisions above.
+- Parses all 23 upstream options. `-g` is accepted and ignored; `-F` controls the shutdown flush as upstream. `-U` and `-G` do not switch accounts: if the requested user or group differs from the current one, startup fails with `rrdcached -U/-G cannot switch accounts in Rondi` (READ-ONLY). No fork and no socket activation (EXECUTED: `grep -rn "LISTEN_FDS\|fork()\|daemonize" crates` is empty).
+- Journal: upstream format and file layout, written only with `-j`, buffered like stdio with no sync, rotated each flush interval, and replayed at startup. Journals hand over between upstream and Rondi in both directions (`rrdcached_journal_replays_across_upstream_and_rondi`).
 - Client side: Rondi `rrdtool` talks to upstream `rrdcached` over Unix and TCP (tests in `crates/rondi-cli/tests/server_roundtrip.rs`, run in CI). Upstream `rrdtool` talks to Rondi `rrdcached` over Unix only.
 - Pending queue limit of 64 MiB (`DEFAULT_RRDCACHED_QUEUE_BYTES`), a deliberate deviation that rejects updates before journaling them. Under "exact behavior" it needs a decision: match upstream (no limit) or document it as the one allowed exception.
 
 ### Gaps
 
-TCP listeners and several `-l` options; real `-U` and `-G` privilege drop; daemonizing without `-g`; socket activation; `-V` log levels through syslog; journal only with `-j`, in upstream's format, readable at start-up and rotated; no per-update `fsync`; RD-015 enqueue-time versus flush-time validation; error-text parity; the queue-limit decision.
+TCP listeners and several `-l` options; real `-U` and `-G` privilege drop; daemonizing without `-g`; socket activation; `-V` log levels through syslog; journal only with `-j`, in upstream's format, readable at start-up and rotated; no per-update `fsync`; error-text parity; the queue-limit decision.
 
 ### Effort
 
@@ -302,7 +302,7 @@ Effort is for one engineer with IDE support. The total is 58 to 82 engineer-week
 
 **M2: CLI parity (9 to 12 weeks).** Full pipe mode and tokenizer; all non-graph options; `rrdupdate`; `RRDCACHED_STRIPPATH`; local-fallback text; time parser; error corpus. Exit: every upstream `tests/` script that passes with upstream passes with Rondi (graph scripts wait for M5); a golden corpus of at least 2,000 argv cases matches; Cacti poller and maintenance flows pass unchanged in a disposable Kadupul install (closes RD-011 except graphs).
 
-**M3: rrdcached (4 to 7 weeks).** TCP and multiple listeners, `-U`/`-G`, daemonizing, socket activation, upstream journal format behind `-j` only, rotation, error parity, RD-015. Exit: all four client and daemon pairings pass the protocol differential over Unix and TCP; journal handover works both ways; upstream `rrdcached-*` test styles pass.
+**M3: rrdcached (4 to 7 weeks).** TCP and multiple listeners, `-U`/`-G`, daemonizing, socket activation, upstream journal format behind `-j` only, rotation, error parity. Exit: all four client and daemon pairings pass the protocol differential over Unix and TCP; journal handover works both ways; upstream `rrdcached-*` test styles pass.
 
 **M4: librrd ABI (10 to 14 weeks, graph symbols stubbed until M5).** `rondi-ffi`, headers, `.pc`. Prerequisites, in order: (1) argv command implementations move from `rondi-cli` into the library so the CLI and `rrd_*_r` entry points share them; (2) one `rrdc` client module for rrdcached connection, path and escaping rules; (3) a `rondi-graph` crate for graph and xport; (4) RPN parsed once into an expression tree instead of re-tokenized per row; (5) lock down the public Rust API to what the shim needs. The typed `RrdError` layer that emits exact `rrd_set_error` strings is done earlier, with the error-text work. Exit: 97 symbols exported without versions; struct layout checks pass; upstream binding tests pass; pecl `rrd` and collectd suites pass against the shim; `abidiff` reports no incompatible change.
 

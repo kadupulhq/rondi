@@ -14,6 +14,7 @@ mod rrd_number;
 mod rrd_resize;
 mod rrd_restore;
 pub mod rrd_snprintf;
+pub mod rrdc_proto;
 pub(crate) mod storage;
 pub mod time;
 pub mod vdef;
@@ -25,8 +26,9 @@ pub use rrd_binary::{
     RrdArchiveInfo, RrdCdpPrepInfo, RrdDataSourceInfo, RrdDataSourceTune, RrdDumpHeader, RrdInfo,
     RrdRawUpdate, RrdResizeAction, RrdTuneBound, RrdUpdateSummary, create_rrd_file, dump_rrd_file,
     dump_rrd_file_with_header, fetch_rrd_file, first_rrd_time, inspect_rrd_file,
-    is_rrd_locking_mode, open_output_file, parse_rrd_scaled_duration, tune_rrd_data_sources,
-    update_rrd_file, update_rrd_file_precise, update_rrd_raw_batch, update_rrd_raw_values,
+    inspect_rrd_open_file, is_rrd_locking_mode, open_output_file, parse_rrd_scaled_duration,
+    tune_rrd_data_sources, tune_rrd_data_sources_file, update_rrd_file, update_rrd_file_precise,
+    update_rrd_raw_batch, update_rrd_raw_batch_file, update_rrd_raw_values,
     update_rrd_raw_values_precise, update_rrd_raw_values_precise_verbose,
     update_rrd_raw_values_verbose, update_rrd_text, update_rrd_values, update_rrd_values_verbose,
     with_rrd_locking,

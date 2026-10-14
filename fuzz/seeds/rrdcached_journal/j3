@@ -1,2 +1,5 @@
-{"record":"update","id":18446744073709551615,"path":"ROOT/../g.rrd","samples":["x"]}
+update ROOT/../g.rrd x
 
+WROTE ROOT/g.rrd
+FLUSH g.rrd
+update g\ \\.rrd 1:2

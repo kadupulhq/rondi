@@ -79,22 +79,33 @@ enum Command {
     Health,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let invoked_as = std::env::args_os()
+fn invoked_name() -> String {
+    std::env::args_os()
         .next()
         .and_then(|value| {
             PathBuf::from(value)
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--rrdproxy-launcher"))
+        && invoked_name() == "rrdcached"
+    {
+        // rrdcached binds its sockets and drops privileges before any runtime
+        // thread exists, so it starts its own runtime afterwards.
+        return rrdcached_mode(&std::env::args().skip(1).collect::<Vec<_>>());
+    }
+    async_main()
+}
+
+#[tokio::main]
+async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
+    let invoked_as = invoked_name();
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--rrdproxy-launcher")) {
         return rrdproxy_mode(&std::env::args().skip(2).collect::<Vec<_>>());
-    }
-    if invoked_as == "rrdcached" {
-        let args = std::env::args().skip(1).collect::<Vec<_>>();
-        return rrdcached_mode(&args).await;
     }
     if invoked_as == "rrdtool" {
         initialize_rrdtool_locale();
@@ -240,10 +251,10 @@ fn current_local_year() -> i32 {
     }
 }
 
-async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut root = PathBuf::from("/tmp");
-    let mut base_seen = false;
+fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut root = None;
     let mut journal_directory = None;
+    let mut flush_at_shutdown = false;
     let mut pid_file = None;
     let mut log_file = None;
     let mut no_overwrite = false;
@@ -253,9 +264,11 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let mut active_socket_commands = None;
     let mut active_socket_group = None;
     // Each listener takes the -m/-P/-s values in effect when it was named.
-    let mut listeners = Vec::<(String, Option<u32>, Option<Vec<String>>, Option<u32>)>::new();
+    let mut addresses = Vec::<rondi_server::RrdcachedListenAddress>::new();
     let mut daemon_user = None;
-    let mut daemon_group = None;
+    let mut group_given = false;
+    // SAFETY: getegid has no preconditions.
+    let mut daemon_group = unsafe { libc::getegid() };
     let mut write_timeout_seconds = 300;
     let mut write_jitter_seconds = 0;
     let mut flush_interval_seconds = 3600;
@@ -284,27 +297,98 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
             }
             'l' | 'L' => {
                 let address = if option == 'L' { String::new() } else { value };
-                listeners.push((
+                addresses.push(rondi_server::RrdcachedListenAddress {
                     address,
-                    active_socket_mode,
-                    active_socket_commands.clone(),
-                    active_socket_group,
-                ));
+                    mode: active_socket_mode,
+                    group: active_socket_group,
+                    commands: active_socket_commands.clone(),
+                });
             }
-            'b' => {
-                base_seen = true;
-                root = PathBuf::from(value);
+            'b' => root = Some(PathBuf::from(value)),
+            'j' => {
+                let strerror = |error: std::io::Error| {
+                    error.raw_os_error().map_or_else(String::new, |errno| {
+                        // SAFETY: strerror returns a valid NUL-terminated string.
+                        unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)) }
+                            .to_string_lossy()
+                            .into_owned()
+                    })
+                };
+                let directory = match std::fs::canonicalize(&value) {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        eprintln!(
+                            "Unable to resolve journal path ({value},{})",
+                            strerror(error)
+                        );
+                        std::process::exit(6);
+                    }
+                };
+                if let Err(error) = std::fs::create_dir_all(&directory) {
+                    eprintln!(
+                        "Failed to create journal directory '{}': {}",
+                        directory.display(),
+                        strerror(error)
+                    );
+                    std::process::exit(6);
+                }
+                let writable = std::ffi::CString::new(directory.as_os_str().as_encoded_bytes())
+                    .is_ok_and(|path| {
+                        let mode = libc::R_OK | libc::W_OK | libc::X_OK;
+                        // SAFETY: the CString is NUL terminated and outlives the call.
+                        let status = unsafe { libc::access(path.as_ptr(), mode) };
+                        status == 0
+                    });
+                if !writable {
+                    eprintln!(
+                        "Must specify a writable directory with -j! ({})",
+                        strerror(std::io::Error::last_os_error())
+                    );
+                    std::process::exit(6);
+                }
+                journal_directory = Some(directory);
             }
-            'j' => journal_directory = Some(PathBuf::from(value)),
             'p' => pid_file = Some(PathBuf::from(value)),
-            'o' => log_file = Some(PathBuf::from(value)),
+            'o' => {
+                use std::os::unix::fs::OpenOptionsExt;
+                // O_NOFOLLOW: the file is opened as root, so a symlink planted
+                // at the final component must not redirect appends elsewhere.
+                // O_NONBLOCK keeps a FIFO at the path from hanging startup;
+                // it has no effect on the regular file that is required.
+                let opened = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+                    .open(&value);
+                // A hard link at the path could aim root's appends at
+                // another file, so only a singly linked regular file is used.
+                let opened = opened.and_then(|file| {
+                    use std::os::unix::fs::MetadataExt;
+                    let metadata = file.metadata()?;
+                    if !metadata.file_type().is_file() {
+                        Err(std::io::Error::other("not a regular file"))
+                    } else if metadata.nlink() != 1 {
+                        Err(std::io::Error::from_raw_os_error(libc::EMLINK))
+                    } else {
+                        Ok(file)
+                    }
+                });
+                match opened {
+                    Ok(file) => log_file = Some(file),
+                    Err(error) => {
+                        let error = error.to_string();
+                        let detail = error.split(" (os error ").next().unwrap_or_default();
+                        eprintln!("Failed to open log file '{value}': {detail}");
+                        std::process::exit(6);
+                    }
+                }
+            }
             'O' => no_overwrite = true,
             'R' => allow_recursive_mkdir = true,
             'B' => base_only = true,
-            // Rondi always stays in the foreground and flushes accepted
-            // entries during graceful shutdown, so these request behavior
-            // already enabled.
-            'F' | 'g' => {}
+            'F' => flush_at_shutdown = true,
+            // Rondi always stays in the foreground.
+            'g' => {}
             'm' => {
                 let mode = u32::from_str_radix(&value, 8)
                     .ok()
@@ -325,6 +409,10 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 for command in commands {
                     if RRDCACHED_COMMANDS.contains(&command.as_str()) {
                         valid.push(command);
+                        // Upstream assigns each permission's result to the
+                        // shared status, so a later valid name clears an
+                        // earlier error, including one from another option.
+                        status = 0;
                     } else {
                         eprintln!(
                             "read_options: Adding permission \"{command}\" to socket failed. Most likely, this permission doesn't exist. Check your command line."
@@ -346,7 +434,8 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
                     eprintln!("read_options: couldn't map \"{value}\" to a group, Sorry");
                     std::process::exit(5);
                 };
-                daemon_group = Some(group);
+                daemon_group = group;
+                group_given = true;
             }
             'U' => {
                 let Some(user) = resolve_rrdcached_daemon_user(&value) else {
@@ -424,7 +513,7 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
     if write_jitter_seconds > write_timeout_seconds {
         eprintln!("WARNING: write delay (-z) should NOT be larger than write interval (-w) !");
     }
-    if base_only && !base_seen {
+    if base_only && root.is_none() {
         eprintln!(
             "WARNING: -B does not make sense without -b!\n  Consult the rrdcached documentation"
         );
@@ -437,60 +526,81 @@ async fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error
     if status != 0 {
         std::process::exit(status.max(0));
     }
-    // Rondi does not change identity after startup. Refusing a different
-    // account keeps the daemon from silently running with more privilege
-    // than the operator asked for.
-    // SAFETY: geteuid and getegid have no preconditions.
-    let (euid, egid) = unsafe { (libc::geteuid(), libc::getegid()) };
-    if daemon_user.is_some_and(|user| user != euid)
-        || daemon_group.is_some_and(|group| group != egid)
-    {
-        return Err(
-            "rrdcached -U/-G cannot switch accounts in Rondi; start the service as that user and group"
-                .into(),
-        );
-    }
-    if listeners.len() > 1 {
-        return Err("rrdcached mode supports one listener; give -l only once".into());
-    }
-    let (socket, socket_mode, socket_commands, socket_group) = match listeners.pop() {
-        Some((address, mode, commands, group)) => {
-            let socket = if let Some(path) = address.strip_prefix("unix:") {
-                PathBuf::from(path)
-            } else if address.starts_with('/') {
-                PathBuf::from(address)
-            } else {
-                return Err(
-                    "rrdcached network listeners are not enabled; use a Unix socket".into(),
-                );
-            };
-            (socket, mode, commands, group)
+    rondi_server::block_shutdown_signals();
+    let pid_file = match pid_file.as_deref().map(rondi_server::PidFile::create) {
+        None => None,
+        Some(Ok(pid_file)) => pid_file,
+        Some(Err(rondi_server::PidFileFailed)) => {
+            eprintln!("rrdcached: daemonize failed, exiting.");
+            std::process::exit(1);
         }
-        None => (
-            PathBuf::from("/tmp/rrdcached.sock"),
-            active_socket_mode,
-            active_socket_commands,
-            active_socket_group,
-        ),
     };
-    rondi_server::run_rrdcached(rondi_server::RrdcachedConfig {
+    if addresses.is_empty() {
+        addresses.push(rondi_server::RrdcachedListenAddress {
+            address: "unix:/tmp/rrdcached.sock".to_owned(),
+            mode: active_socket_mode,
+            group: active_socket_group,
+            commands: active_socket_commands,
+        });
+    }
+    let mut listeners = Vec::new();
+    let mut all_opened = true;
+    for address in &addresses {
+        // Every listener is attempted so the diagnostics match upstream's.
+        all_opened &= rondi_server::open_rrdcached_listener(address, &mut listeners);
+    }
+    let failure = if listeners.is_empty() {
+        Some("rrdcached: FATAL: cannot open any listen sockets".to_owned())
+    } else if !all_opened {
+        // Upstream serves whatever opened; Rondi will not run with a
+        // configured listener missing. Its error is already printed.
+        Some(String::new())
+    } else {
+        // Upstream keeps the starting egid when only -U is given, so a root
+        // start would run as gid 0; a root Rondi uses the account's primary
+        // group. Unprivileged starts keep upstream's behaviour and text.
+        // SAFETY: geteuid has no preconditions.
+        let privileged = unsafe { libc::geteuid() } == 0;
+        let group = match &daemon_user {
+            Some(user) if privileged && !group_given => user.gid,
+            _ => daemon_group,
+        };
+        rondi_server::drop_rrdcached_privileges(daemon_user.as_ref(), group).err()
+    };
+    if let Some(message) = failure {
+        // Fail closed: nothing has been accepted yet. Exit closes every
+        // listener; the Unix socket names are removed so none is left behind.
+        if !message.is_empty() {
+            eprintln!("{message}");
+        }
+        for listener in &listeners {
+            if let rondi_server::RrdcachedSocket::Unix { path, .. } = &listener.socket
+                && let Err(error) = std::fs::remove_file(path)
+            {
+                eprintln!("rrdcached: unlink({}) failed: {error}", path.display());
+            }
+        }
+        drop(pid_file);
+        eprintln!("rrdcached: daemonize failed, exiting.");
+        std::process::exit(1);
+    }
+    let runtime = tokio::runtime::Runtime::new()?;
+    runtime.block_on(rondi_server::run_rrdcached(rondi_server::RrdcachedConfig {
         root,
-        socket,
+        base_only,
+        listeners,
         journal_directory,
+        flush_at_shutdown,
         pid_file,
         log_file,
         no_overwrite,
         allow_recursive_mkdir,
-        socket_mode,
-        socket_commands,
-        socket_group,
         allocation_chunk,
         write_timeout_seconds,
         flush_interval_seconds,
         queue_threads,
         max_pending_bytes: rondi_server::DEFAULT_RRDCACHED_QUEUE_BYTES,
-    })
-    .await
+    }))
 }
 
 const RRDCACHED_COMMANDS: &[&str] = &[
@@ -593,12 +703,10 @@ fn rrdcached_duration(value: &str) -> Result<u64, &'static str> {
     parse_rrd_scaled_duration(value, 1).map_err(|_| "value has trailing garbage")
 }
 
-fn resolve_rrdcached_daemon_user(value: &str) -> Option<libc::uid_t> {
+fn resolve_rrdcached_daemon_user(value: &str) -> Option<rondi_server::RrdcachedUser> {
     use std::ffi::CString;
-    // RRDtool treats any all-digit argument (including an empty one) as a
-    // numeric id and everything else as a name.
-    let user = if value.bytes().all(|byte| byte.is_ascii_digit()) {
-        let uid = value.parse::<libc::uid_t>().unwrap_or(0);
+    let user = if let Some(uid) = c_strtoul_whole(value) {
+        let uid = uid as libc::uid_t;
         // SAFETY: getpwuid returns a pointer to libc-owned static data.
         unsafe { libc::getpwuid(uid) }
     } else {
@@ -609,15 +717,52 @@ fn resolve_rrdcached_daemon_user(value: &str) -> Option<libc::uid_t> {
     if user.is_null() {
         None
     } else {
-        // SAFETY: non-null user points to libc-owned passwd data.
-        Some(unsafe { (*user).pw_uid })
+        // SAFETY: non-null user points to libc-owned passwd data whose name is
+        // NUL terminated; both are copied before the next lookup.
+        let (uid, gid, name) = unsafe {
+            (
+                (*user).pw_uid,
+                (*user).pw_gid,
+                std::ffi::CStr::from_ptr((*user).pw_name),
+            )
+        };
+        Some(rondi_server::RrdcachedUser {
+            uid,
+            gid,
+            name: name.to_owned(),
+        })
     }
+}
+
+/// `strtoul(value, &ep, 10)` followed by upstream's `0 == *ep` test: the
+/// whole argument, after optional leading space and sign, is decimal digits.
+/// An empty argument converts to zero; overflow saturates and a minus sign
+/// negates modulo 2^64, as C does.
+fn c_strtoul_whole(value: &str) -> Option<u64> {
+    if value.is_empty() {
+        return Some(0);
+    }
+    let unsigned = value.trim_start_matches([' ', '\t', '\n', '\x0b', '\x0c', '\r']);
+    let (negative, digits) = match unsigned.as_bytes().first() {
+        Some(b'-') => (true, &unsigned[1..]),
+        Some(b'+') => (false, &unsigned[1..]),
+        _ => (false, unsigned),
+    };
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let magnitude = digits.parse::<u64>().unwrap_or(u64::MAX);
+    Some(if negative && magnitude != u64::MAX {
+        magnitude.wrapping_neg()
+    } else {
+        magnitude
+    })
 }
 
 fn resolve_rrdcached_daemon_group(value: &str) -> Option<libc::gid_t> {
     use std::ffi::CString;
-    let group = if value.bytes().all(|byte| byte.is_ascii_digit()) {
-        let gid = value.parse::<libc::gid_t>().unwrap_or(0);
+    let group = if let Some(gid) = c_strtoul_whole(value) {
+        let gid = gid as libc::gid_t;
         // SAFETY: getgrgid returns a pointer to libc-owned static data.
         unsafe { libc::getgrgid(gid) }
     } else {
@@ -802,6 +947,9 @@ fn rrdupdate_main(name: &str, argv: &[String]) -> i32 {
     let Err(error) = result else {
         return 0;
     };
+    if error.downcast_ref::<RrdcachedPathUnavailable>().is_some() {
+        return 0;
+    }
     print!("RRDtool 1.11.0  Copyright by Tobi Oetiker\n\n");
     match name {
         "rrdcreate" => print!(
@@ -819,7 +967,7 @@ fn rrdupdate_main(name: &str, argv: &[String]) -> i32 {
 /// The command switch in `HandleInputLine` (rrd_tool.c:713), shared by
 /// argv and pipe mode. `args[0]` is the command name.
 fn rrdtool_dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    match args[0].as_str() {
+    let result: Result<(), Box<dyn std::error::Error>> = match args[0].as_str() {
         "create" => rrdtool_create(args),
         "dump" => rrdtool_dump(args),
         "info" => rrdtool_info(args),
@@ -838,6 +986,12 @@ fn rrdtool_dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "tune" => rrdtool_tune(args),
         "flushcached" => rrdtool_flushcached(args),
         command => Err(format!("unknown function '{command}'").into()),
+    };
+    // HandleInputLine checks rrd_test_error, not the command's return code.
+    // get_path's silent refusals therefore end the command with status 0.
+    match result {
+        Err(error) if error.downcast_ref::<RrdcachedPathUnavailable>().is_some() => Ok(()),
+        result => result,
     }
 }
 
@@ -1519,7 +1673,6 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let daemon_address = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty());
-    let from_daemon = daemon_address.is_some();
     let result = if let Some(address) = daemon_address {
         let escaped = escape_rrdcached_field(&filename.to_string_lossy());
         let command = format!("FETCH {escaped} {cf} {start} {end}");
@@ -1539,7 +1692,6 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         for value in row.values {
             match value {
                 Some(value) => write!(out, " {}", format_fetch_value(value))?,
-                None if from_daemon => write!(out, " {}", rrd_daemon_unknown_text())?,
                 None => write!(out, " {}", rrd_unknown_text())?,
             }
         }
@@ -1566,14 +1718,6 @@ fn rrd_nan() -> f64 {
 // path carries the sign bit depends on the CPU's default NaN.
 fn rrd_unknown_text() -> &'static str {
     if cfg!(all(target_env = "gnu", target_arch = "x86_64")) {
-        "-nan"
-    } else {
-        "nan"
-    }
-}
-
-fn rrd_daemon_unknown_text() -> &'static str {
-    if cfg!(all(target_env = "gnu", not(target_arch = "x86_64"))) {
         "-nan"
     } else {
         "nan"
@@ -1636,14 +1780,14 @@ fn parse_rrdcached_fetch(
         let values = values
             .split_whitespace()
             .map(|value| {
-                let parsed: f64 = value.parse()?;
-                Ok(if parsed.is_finite() {
-                    Some(parsed)
-                } else {
-                    None
-                })
+                // rrd_client.c:345 uses rrd_strtodbl, whose NaN conversion
+                // differs from Rust's parser. Reuse the existing C port and
+                // retain the converted value for printf-compatible output.
+                rondi::parse_rrd_number(value)
+                    .map(Some)
+                    .ok_or("invalid rrdcached FETCH value")
             })
-            .collect::<Result<Vec<_>, std::num::ParseFloatError>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
         if values.len() != ds_count {
             return Err("rrdcached FETCH row has an invalid data-source count".into());
         }
@@ -1659,6 +1803,27 @@ fn parse_rrdcached_fetch(
         data_sources: names,
         rows,
     })
+}
+
+#[test]
+fn daemon_fetch_uses_rrd_numeric_conversion() {
+    let result = parse_rrdcached_fetch(
+        "FlushVersion: 1\nStart: 1000000000\nEnd: 1000000010\nStep: 10\nDSCount: 4\nDSName: a b c d\n1000000010: nan -nan inf -inf\n",
+    )
+    .unwrap();
+    let values = &result.rows[0].values;
+    assert!(values[0].unwrap().is_nan());
+    assert_eq!(
+        values[0].unwrap().is_sign_negative(),
+        !cfg!(target_arch = "x86_64")
+    );
+    assert!(values[1].unwrap().is_nan());
+    assert_eq!(
+        values[1].unwrap().is_sign_negative(),
+        cfg!(target_arch = "x86_64")
+    );
+    assert_eq!(values[2], Some(f64::INFINITY));
+    assert_eq!(values[3], Some(f64::NEG_INFINITY));
 }
 
 fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -4352,11 +4517,11 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
     if let Some(address) = daemon_address {
         if !daemon_samples.is_empty() {
             #[cfg(unix)]
-            send_rrdcached_update_on_stream(
-                connect_rrdcached(&address)?,
-                PathBuf::from(&args[1]).as_path(),
-                &daemon_samples,
-            )?;
+            {
+                let stream = connect_rrdcached(&address)?;
+                let path = rrdcached_client_path(&address, &filename.to_string_lossy())?;
+                send_rrdcached_update_on_stream(stream, Path::new(&path), &daemon_samples)?;
+            }
             #[cfg(not(unix))]
             return Err("rrdcached updates are unavailable on this platform".into());
         }
@@ -4423,8 +4588,13 @@ fn rrdtool_flushcached(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             // RRDtool 1.11.0 reports the number of filenames after the
             // command name, independent of the point at which flushing failed.
             let remaining = files.len().saturating_sub(1);
+            let detail = if error.downcast_ref::<RrdcachedPathUnavailable>().is_some() {
+                "unknown error".to_owned()
+            } else {
+                format!("rrdcached@{daemon}: {error}")
+            };
             return Err(format!(
-                "Flushing of file \"{filename}\" failed: rrdcached@{daemon}: {error}. Skipping remaining {remaining} file{}.",
+                "Flushing of file \"{filename}\" failed: {detail}. Skipping remaining {remaining} file{}.",
                 if remaining == 1 { "" } else { "s" }
             )
             .into());
@@ -4449,6 +4619,7 @@ fn send_rrdcached_command(
         return Err("invalid rrdcached socket or filename".into());
     }
     let mut stream = connect_rrdcached(address)?;
+    let command = translate_rrdcached_file_command(address, command)?;
     writeln!(stream, "{command}")?;
     let mut response = String::new();
     read_bounded_line(
@@ -4487,13 +4658,14 @@ fn send_rrdcached_update_on_stream(
     filename: &std::path::Path,
     samples: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if filename.to_string_lossy().chars().any(char::is_whitespace) {
+    let filename = filename.to_string_lossy();
+    if filename.contains(['\n', '\r', '\0']) {
         return Err("rrdtool update: invalid rrdcached socket or filename".into());
     }
     writeln!(
         stream,
         "UPDATE {} {}",
-        filename.display(),
+        escape_rrdcached_field(&filename),
         samples.join(" ")
     )?;
     let mut response = String::new();
@@ -4560,11 +4732,7 @@ fn rrdtool_last(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .filter(|address| !address.is_empty())
     {
         let escaped_filename = filename.replace('\\', "\\\\").replace(' ', "\\ ");
-        let response = send_rrdcached_command(&address, &format!("LAST {escaped_filename}"))?;
-        let timestamp = response
-            .split_whitespace()
-            .nth(1)
-            .ok_or("invalid rrdcached LAST response")?;
+        let timestamp = rrdcached_time_value(&address, &format!("LAST {escaped_filename}"))?;
         println!("{timestamp}");
     } else {
         println!("{}", inspect_rrd(filename)?.last_update);
@@ -4661,14 +4829,10 @@ fn rrdtool_first(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .filter(|address| !address.is_empty())
     {
         let escaped_filename = filename.replace('\\', "\\\\").replace(' ', "\\ ");
-        let response = send_rrdcached_command(
+        let timestamp = rrdcached_time_value(
             &address,
             &format!("FIRST {escaped_filename} {archive_index}"),
         )?;
-        let timestamp = response
-            .split_whitespace()
-            .nth(1)
-            .ok_or("invalid rrdcached FIRST response")?;
         println!("{timestamp}");
         return Ok(());
     }
@@ -5315,12 +5479,130 @@ fn escape_rrdcached_field(value: &str) -> String {
     value.replace('\\', "\\\\").replace(' ', "\\ ")
 }
 
+/// get_path can return NULL without setting rrd_error (empty local paths
+/// and a remote strip-prefix mismatch). FIRST and LAST then print -1
+/// without making rrd_tool.c's final rrd_test_error check fail.
+#[derive(Debug)]
+struct RrdcachedPathUnavailable;
+
+impl std::fmt::Display for RrdcachedPathUnavailable {
+    fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Ok(())
+    }
+}
+
+impl std::error::Error for RrdcachedPathUnavailable {}
+
+fn rrdcached_time_value(
+    address: &str,
+    command: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let response = send_rrdcached_command(address, command)?;
+    let verb = command.split_whitespace().next().unwrap_or_default();
+    response
+        .split_whitespace()
+        .nth(1)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("invalid rrdcached {verb} response").into())
+}
+
+/// Port of RRDtool 1.11.0 rrd_client.c `get_path` (105-193). A local
+/// daemon receives a canonical absolute path; a remote daemon receives its
+/// own relative path after the configured literal prefix is stripped.
+fn rrdcached_client_path(
+    address: &str,
+    filename: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if address.starts_with('/') || address.starts_with("unix:") {
+        if filename.is_empty() {
+            return Err(RrdcachedPathUnavailable.into());
+        }
+        if let Ok(path) = std::fs::canonicalize(filename) {
+            return Ok(path.to_string_lossy().into_owned());
+        }
+        // get_path also handles files that CREATE has not made yet. Keep
+        // its last-slash rule, including its "." directory for /new.rrd.
+        let slash = filename.rfind('/');
+        let directory = match slash {
+            Some(index) if index > 0 => &filename[..index],
+            _ => ".",
+        };
+        let directory = std::fs::canonicalize(directory).map_err(|error| {
+            let text = error.to_string();
+            let detail = text.split(" (os error ").next().unwrap_or(&text);
+            format!("realpath({filename}): {detail}")
+        })?;
+        let suffix = slash.map_or_else(
+            || format!("/{filename}"),
+            |index| filename[index..].to_owned(),
+        );
+        return Ok(format!("{}{suffix}", directory.display()));
+    }
+    if filename.starts_with('/') {
+        return match std::env::var("RRDCACHED_STRIPPATH") {
+            Ok(prefix) => filename
+                .strip_prefix(&prefix)
+                .map(|path| path.trim_start_matches('/').to_owned())
+                .ok_or_else(|| RrdcachedPathUnavailable.into()),
+            Err(_) => Err("absolute path names not allowed when talking to a remote daemon".into()),
+        };
+    }
+    Ok(filename.to_owned())
+}
+
+/// Translate the file field after connecting, preserving rrd_client.c's
+/// connection-error precedence. LIST uses daemon-relative directory names
+/// directly upstream and deliberately does not pass through get_path.
+fn translate_rrdcached_file_command(
+    address: &str,
+    command: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let Some((verb, fields)) = command.split_once(' ') else {
+        return Ok(command.to_owned());
+    };
+    if !matches!(
+        verb,
+        "CREATE" | "FETCH" | "FIRST" | "FLUSH" | "FORGET" | "INFO" | "LAST" | "TUNE"
+    ) {
+        return Ok(command.to_owned());
+    }
+    let mut filename = String::new();
+    let mut escaped = false;
+    let mut end = fields.len();
+    for (index, character) in fields.char_indices() {
+        if escaped {
+            filename.push(character);
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == ' ' {
+            end = index;
+            break;
+        } else {
+            filename.push(character);
+        }
+    }
+    if escaped {
+        return Err("invalid rrdcached filename escape".into());
+    }
+    let path = rrdcached_client_path(address, &filename)?;
+    if path.contains(['\n', '\r', '\0']) {
+        return Err("invalid rrdcached socket or filename".into());
+    }
+    Ok(format!(
+        "{verb} {}{}",
+        escape_rrdcached_field(&path),
+        &fields[end..]
+    ))
+}
+
 #[cfg(unix)]
 fn send_rrdcached_multiline_command(
     address: &str,
     command: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut stream = connect_rrdcached(address)?;
+    let command = translate_rrdcached_file_command(address, command)?;
     writeln!(stream, "{command}")?;
     let mut reader = std::io::BufReader::new(stream);
     let mut header = String::new();
