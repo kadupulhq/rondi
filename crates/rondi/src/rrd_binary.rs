@@ -976,13 +976,13 @@ fn update_text_arguments(
                     time +=
                         now.as_secs() as f64 + f64::from(now.subsec_micros()) * f64::from(1e-6_f32);
                 }
-                // rrd_update.c:1409-1410 takes the microseconds from the
-                // time_t it stored, so past 2^63 the excess over the
-                // saturated seconds becomes a huge (long) microsecond count.
-                // Rust's saturating casts reproduce the arm64 conversion of
-                // the pinned oracle; x86-64 C yields LONG_MIN instead.
-                let seconds = time.floor() as i64;
-                let microseconds = ((time - seconds as f64) * f64::from(1e6_f32)) as i64;
+                // rrd_update.c:1409-1410 converts floor(tmp) to time_t and
+                // takes the microseconds from what it stored. Past 2^63 that
+                // conversion is out of range: aarch64 saturates, so the
+                // excess becomes a huge (long) microsecond count, while
+                // x86_64 stores LONG_MIN and the time check rejects it.
+                let seconds = crate::rpn::c_long(time.floor());
+                let microseconds = crate::rpn::c_long((time - seconds as f64) * f64::from(1e6_f32));
                 (seconds, microseconds as u64)
             }
         };

@@ -383,11 +383,12 @@ fn a18_rrd_strtod_whitespace_and_exponent_wrap() {
     );
 }
 
-// A19: get_time_from_reading takes the microseconds from the saturated
-// time_t (rrd_update.c:1409-1410), so a time past 2^63 leaves a huge
-// unknown_sec, and calculate_elapsed_steps returns the step count as int.
+// A19: get_time_from_reading converts a time past 2^63 to time_t out of
+// range (rrd_update.c:1409-1410). aarch64 saturates and leaves a huge
+// unknown_sec; x86_64 stores LONG_MIN and rejects the update. Separately,
+// calculate_elapsed_steps returns the step count as int.
 #[test]
-fn a19_huge_times_saturate_and_wrap_elapsed_steps() {
+fn a19_huge_times_follow_the_cpu_and_wrap_elapsed_steps() {
     let create: &[&str] = &[
         "--start",
         "1000000000",
