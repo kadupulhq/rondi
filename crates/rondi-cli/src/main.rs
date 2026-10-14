@@ -1935,7 +1935,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     if format == "PNG"
         && (10..).contains(&image_width)
         && (10..).contains(&image_height)
-        && (image_width > PNG_MAX_DIMENSION || image_height > PNG_MAX_DIMENSION)
+        && !png_within_limit(image_width, image_height)
         && im.gdes.iter().any(|element| {
             use rondi::graph::Gf;
             matches!(
@@ -2970,8 +2970,17 @@ impl Default for GraphColors {
 
 /// cairo_image_surface_create rejects larger surfaces (MAX_IMAGE_SIZE).
 const CAIRO_MAX_IMAGE_SIZE: i32 = 32767;
-const PNG_MAX_DIMENSION: u32 = 4096;
-const PNG_DIMENSION_LIMIT_MESSAGE: &str = "PNG graph dimensions exceed the 4096 pixel safety limit";
+/// rrdtool has no limit of its own beyond cairo's 32767-pixel side. Rondi
+/// also caps the pixel count so one request cannot allocate an unbounded
+/// canvas; 2^24 pixels is about 48 MiB of RGB and admits every canvas the
+/// earlier 4096x4096 limit did, plus tall or wide graphs up to cairo's side.
+const PNG_MAX_PIXELS: u64 = 1 << 24;
+const PNG_DIMENSION_LIMIT_MESSAGE: &str = "PNG graph exceeds the 16777216 pixel safety limit";
+
+fn png_within_limit(width: u32, height: u32) -> bool {
+    let side = CAIRO_MAX_IMAGE_SIZE.unsigned_abs();
+    width <= side && height <= side && u64::from(width) * u64::from(height) <= PNG_MAX_PIXELS
+}
 
 fn render_graph_png(
     graph: &RenderedGraphXport,
@@ -3001,9 +3010,8 @@ fn render_graph_png(
         minimum,
         maximum,
     } = canvas;
-    if [canvas_width, canvas_height, surface_width, surface_height]
-        .iter()
-        .any(|&size| size > PNG_MAX_DIMENSION)
+    if !png_within_limit(canvas_width, canvas_height)
+        || !png_within_limit(surface_width, surface_height)
     {
         return Err(PNG_DIMENSION_LIMIT_MESSAGE.into());
     }

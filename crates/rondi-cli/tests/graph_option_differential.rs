@@ -383,7 +383,7 @@ fn png_dimension_limit_applies_before_data_processing() {
         assert_eq!(output.status.code(), Some(1), "{extra:?}");
         assert_eq!(
             String::from_utf8_lossy(&output.stderr),
-            "ERROR: PNG graph dimensions exceed the 4096 pixel safety limit\n",
+            "ERROR: PNG graph exceeds the 16777216 pixel safety limit\n",
             "{extra:?}"
         );
     }
@@ -501,4 +501,32 @@ fn negative_units_length_moves_the_graph_origin() {
     })
     .collect();
     f.assert_all_same_output(&cases);
+}
+
+// Tall and wide graphs up to cairo's 32767-pixel side render like rrdtool
+// while the pixel count stays under Rondi's 2^24 safety limit; one more
+// pixel of height is cairo's surface error. A large square canvas is still
+// refused (RD-016).
+#[test]
+fn tall_and_wide_png_graphs_match_up_to_the_cairo_limit() {
+    let Some(f) = fixture() else { return };
+    let line = "LINE1:x#ff0000";
+    let cases: Vec<Vec<String>> = [
+        vec!["-h", "32000", line],
+        vec!["-h", "32726", line],
+        vec!["-h", "32727", line],
+        vec!["-w", "32000", line],
+        vec!["-w", "4000", "-h", "4000", line],
+        vec!["-h", "8000", "--zoom", "2", "--imginfo", "%s %lu %lu", line],
+    ]
+    .iter()
+    .map(|extra| f.graph(extra))
+    .collect();
+    f.assert_all_same_output(&cases);
+    let square = f.run(&f.alias, &f.graph(&["-w", "20000", "-h", "20000", line]));
+    assert_eq!(square.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&square.stderr),
+        "ERROR: PNG graph exceeds the 16777216 pixel safety limit\n"
+    );
 }
