@@ -253,6 +253,10 @@ pub(crate) fn fetch_path(
     )
 }
 
+/// Collected fetches hold every row in memory, so they stop here; the
+/// `rrdtool fetch` command streams through [`fetch_rrd_rows`] instead.
+const MAX_COLLECTED_FETCH_ROWS: usize = 10_000_000;
+
 /// Fetch from an already opened descriptor under a shared RRD lock.
 pub fn fetch_rrd_open_file(
     file: File,
@@ -262,6 +266,121 @@ pub fn fetch_rrd_open_file(
     requested_end: i64,
     requested_step: u64,
 ) -> Result<RrdFetchResult, StoreError> {
+    let fetch = prepare_fetch(
+        file,
+        path,
+        consolidation,
+        requested_start,
+        requested_end,
+        requested_step,
+        Some(MAX_COLLECTED_FETCH_ROWS),
+    )?;
+    if fetch.len() > MAX_COLLECTED_FETCH_ROWS {
+        return Err(StoreError::RrdUnsupported(
+            "RRD fetch output exceeds the 10 million row safety limit".into(),
+        ));
+    }
+    let rows = fetch.rows().collect();
+    Ok(RrdFetchResult {
+        start: fetch.start,
+        end: fetch.end,
+        step: fetch.step,
+        data_sources: fetch.data_sources,
+        rows,
+    })
+}
+
+/// A fetch whose rows are produced on demand, as rrd_fetch.c fills its data
+/// area. Only the stored rows inside the archive are held, so memory is
+/// bounded by the file rather than by the requested range.
+#[derive(Debug)]
+pub struct RrdFetchRows {
+    /// The aligned request start RRDtool reports.
+    pub start: i64,
+    /// The aligned request end RRDtool reports.
+    pub end: i64,
+    pub step: u64,
+    pub data_sources: Vec<String>,
+    count: usize,
+    first_timestamp: i64,
+    step_i64: i64,
+    first_index: i128,
+    first_stored: i128,
+    row_count: i128,
+    in_archive_range: bool,
+    stored: Vec<u8>,
+    ds_count: usize,
+}
+
+impl RrdFetchRows {
+    /// The number of rows [`Self::rows`] yields.
+    pub fn len(&self) -> usize {
+        self.count
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+
+    pub fn rows(&self) -> impl Iterator<Item = RrdFetchRow> + '_ {
+        let row_bytes = self.ds_count * VALUE_LEN;
+        (0..self.count).map(move |offset| {
+            let index = self.first_index + offset as i128;
+            // prepare_fetch checked that every timestamp fits.
+            let timestamp = self.first_timestamp + self.step_i64 * offset as i64;
+            let values = if index < 0 || index >= self.row_count || !self.in_archive_range {
+                vec![None; self.ds_count]
+            } else {
+                let at = (index - self.first_stored) as usize * row_bytes;
+                self.stored[at..at + row_bytes]
+                    .chunks_exact(VALUE_LEN)
+                    .map(|chunk| {
+                        let value = f64::from_le_bytes(chunk.try_into().expect("eight byte value"));
+                        // rrd_fetch.c:552 copies stored rows as they are; only
+                        // NaN means unknown, so infinities reach the caller.
+                        (!value.is_nan()).then_some(value)
+                    })
+                    .collect()
+            };
+            RrdFetchRow { timestamp, values }
+        })
+    }
+}
+
+/// Opens `path` and prepares a fetch without materialising its rows.
+pub fn fetch_rrd_rows(
+    path: impl AsRef<Path>,
+    consolidation: &str,
+    start: i64,
+    end: i64,
+    resolution: u64,
+) -> Result<RrdFetchRows, StoreError> {
+    let path = path.as_ref();
+    if resolution == 0 || end < start {
+        return Err(StoreError::RrdUnsupported(
+            "RRD fetch requires a positive resolution and end >= start".into(),
+        ));
+    }
+    prepare_fetch(
+        open_rrd_read(path)?,
+        path,
+        consolidation,
+        start,
+        end,
+        resolution,
+        None,
+    )
+}
+
+fn prepare_fetch(
+    file: File,
+    path: &Path,
+    consolidation: &str,
+    requested_start: i64,
+    requested_end: i64,
+    requested_step: u64,
+    row_limit: Option<usize>,
+) -> Result<RrdFetchRows, StoreError> {
     if requested_step == 0 || requested_end < requested_start {
         return Err(StoreError::RrdUnsupported(
             "RRD fetch requires a positive resolution and end >= start".into(),
@@ -302,7 +421,7 @@ pub fn fetch_rrd_open_file(
         .checked_sub(start)
         .and_then(|span| usize::try_from(span / step_i64 + 1).ok())
         .ok_or_else(|| rrd_error("RRD fetch range is too large"))?;
-    if range_rows > 10_000_000 {
+    if row_limit.is_some_and(|limit| range_rows > limit) {
         return Err(StoreError::RrdUnsupported(
             "RRD fetch range exceeds the 10 million row safety limit".into(),
         ));
@@ -374,62 +493,45 @@ pub fn fetch_rrd_open_file(
         filled += length;
         segment_start = 0;
     }
-    let mut stored_rows = stored.chunks_exact(row_bytes.max(1));
 
-    let mut rows = Vec::new();
-    let mut timestamp = start
+    let first_index = start_offset;
+    let count = usize::try_from((row_count - end_offset - first_index).max(0))
+        .map_err(|_| rrd_error("RRD result is too large"))?;
+    let first_timestamp = start
         .checked_add(step_i64)
         .ok_or_else(|| rrd_error("RRD fetch timestamp overflows"))?;
-    let mut index = start_offset;
-    while index < row_count - end_offset {
-        if rows.len() >= 10_000_000 {
-            return Err(StoreError::RrdUnsupported(
-                "RRD fetch output exceeds the 10 million row safety limit".into(),
-            ));
-        }
-        let values = if index < 0 || index >= row_count || !in_archive_range {
-            vec![None; info.data_sources.len()]
-        } else {
-            let bytes = if row_bytes == 0 {
-                &[][..]
-            } else {
-                stored_rows
-                    .next()
-                    .ok_or_else(|| rrd_error("RRD fetch read fewer rows than it addressed"))?
-            };
-            bytes
-                .chunks_exact(VALUE_LEN)
-                .map(|chunk| {
-                    let value = f64::from_le_bytes(chunk.try_into().expect("eight byte value"));
-                    // rrd_fetch.c:552 copies stored rows as they are; only
-                    // NaN means unknown, so infinities reach the caller.
-                    (!value.is_nan()).then_some(value)
-                })
-                .collect()
-        };
-        rows.push(RrdFetchRow { timestamp, values });
-        timestamp = timestamp
-            .checked_add(step_i64)
-            .ok_or_else(|| rrd_error("RRD fetch timestamp overflows"))?;
-        index += 1;
-    }
+    // Every row timestamp and the one after the last must fit, so rows()
+    // can compute them unchecked.
+    i64::try_from(count)
+        .ok()
+        .and_then(|count| step_i64.checked_mul(count))
+        .and_then(|span| first_timestamp.checked_add(span))
+        .ok_or_else(|| rrd_error("RRD fetch timestamp overflows"))?;
     // RRDtool reports the aligned request bounds, not the first/last emitted
     // row timestamps.
     end = start
         .checked_add(
             step_i64
                 .checked_mul(
-                    i64::try_from(rows.len()).map_err(|_| rrd_error("RRD result is too large"))?,
+                    i64::try_from(count).map_err(|_| rrd_error("RRD result is too large"))?,
                 )
                 .ok_or_else(|| rrd_error("RRD fetch range overflows"))?,
         )
         .ok_or_else(|| rrd_error("RRD fetch range overflows"))?;
-    Ok(RrdFetchResult {
+    Ok(RrdFetchRows {
         start,
         end,
         step,
+        ds_count: info.data_sources.len(),
         data_sources: info.data_sources.into_iter().map(|ds| ds.name).collect(),
-        rows,
+        count,
+        first_timestamp,
+        step_i64,
+        first_index,
+        first_stored: start_offset.max(0),
+        row_count,
+        in_archive_range,
+        stored,
     })
 }
 

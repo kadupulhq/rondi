@@ -294,6 +294,93 @@ fn fetch_options() {
     ]);
 }
 
+/// Exit status, stderr, line count, byte count, FNV-1a hash and the first
+/// and last lines of a command whose stdout is too large to hold twice.
+fn streamed_summary(
+    program: &Path,
+    dir: &Path,
+    args: &[&str],
+) -> (
+    Option<i32>,
+    String,
+    usize,
+    u64,
+    u64,
+    Vec<String>,
+    Vec<String>,
+) {
+    use std::io::BufRead;
+
+    let mut child = Command::new(program)
+        .current_dir(dir)
+        .args(args)
+        .env("LC_ALL", "C")
+        .env("TZ", "UTC")
+        .env_remove("RRDCACHED_ADDRESS")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+    let (mut lines, mut bytes, mut hash) = (0, 0_u64, 0xcbf2_9ce4_8422_2325_u64);
+    let (mut head, mut tail) = (Vec::new(), std::collections::VecDeque::new());
+    let mut line = Vec::new();
+    while stdout.read_until(b'\n', &mut line).unwrap() > 0 {
+        lines += 1;
+        bytes += line.len() as u64;
+        for byte in &line {
+            hash = (hash ^ u64::from(*byte)).wrapping_mul(0x100_0000_01b3);
+        }
+        let text = String::from_utf8_lossy(&line).into_owned();
+        if head.len() < 4 {
+            head.push(text.clone());
+        }
+        tail.push_back(text);
+        if tail.len() > 3 {
+            tail.pop_front();
+        }
+        line.clear();
+    }
+    let output = child.wait_with_output().unwrap();
+    (
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        lines,
+        bytes,
+        hash,
+        head,
+        tail.into(),
+    )
+}
+
+// rrd_fetch.c:463 allocates the whole requested range, so RRDtool prints
+// ranges past ten million rows; Rondi streams them instead of refusing.
+#[test]
+fn fetch_prints_more_than_ten_million_rows() {
+    if !pinned_rrdtool_available() {
+        oracle_skip!("skipping: pinned RRDtool 1.11.0 is not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    fixture(dir.path());
+    let alias = dir.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let args = [
+        "fetch",
+        "a.rrd",
+        "AVERAGE",
+        "-s",
+        "1700000000",
+        "-e",
+        "4700000600",
+    ];
+    let upstream = streamed_summary(Path::new("rrdtool"), dir.path(), &args);
+    let rondi = streamed_summary(&alias, dir.path(), &args);
+    assert_eq!(upstream.0, Some(0), "{}", upstream.1);
+    assert!(upstream.2 > 10_000_000, "{} lines", upstream.2);
+    assert_eq!(rondi, upstream);
+}
+
 // rrd_update.c:304 and :679.
 #[test]
 fn update_options() {

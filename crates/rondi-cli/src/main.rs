@@ -22,7 +22,7 @@ use rondi::time::{
 use rondi::{
     DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, DatabaseConfig, RrdDataSourceTune, RrdDumpHeader,
     RrdResizeAction, RrdTuneBound, Store, StoreOptions, Update, dump_rrd_file_with_header,
-    fetch_rrd_file, first_rrd_time, parse_rrd_scaled_duration, resize_rrd_file, restore_rrd_file,
+    fetch_rrd_rows, first_rrd_time, parse_rrd_scaled_duration, resize_rrd_file, restore_rrd_file,
     tune_rrd_data_sources, update_rrd_text,
 };
 use std::fmt::Write as FmtWrite;
@@ -1719,21 +1719,30 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let daemon_address = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty());
-    let result = if let Some(address) = daemon_address {
+    if let Some(address) = daemon_address {
         let escaped = escape_rrdcached_field(&filename.to_string_lossy());
         let command = format!("FETCH {escaped} {cf} {start} {end}");
-        parse_rrdcached_fetch(&send_rrdcached_multiline_command(&address, &command)?)?
-    } else {
-        fetch_rrd_file(&filename, cf, start, end, resolution)?
-    };
+        let result = parse_rrdcached_fetch(&send_rrdcached_multiline_command(&address, &command)?)?;
+        return write_fetch_rows(&result.data_sources, result.rows);
+    }
+    // rrd_fetch.c allocates the whole range; streaming keeps memory bounded
+    // by the archive while printing the same rows.
+    let fetch = fetch_rrd_rows(&filename, cf, start, end, resolution)?;
+    write_fetch_rows(&fetch.data_sources, fetch.rows())
+}
+
+fn write_fetch_rows(
+    data_sources: &[String],
+    rows: impl IntoIterator<Item = rondi::RrdFetchRow>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // stdout is line buffered; one write per row dominates large fetches.
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     write!(out, "           ")?;
-    for data_source in &result.data_sources {
+    for data_source in data_sources {
         write!(out, "{data_source:>20}")?;
     }
     writeln!(out, "\n")?;
-    for row in result.rows {
+    for row in rows {
         write!(out, "{:>10}:", row.timestamp)?;
         for value in row.values {
             match value {
