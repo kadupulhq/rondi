@@ -319,10 +319,10 @@ pub fn fetch_rrd_open_file(
     let archive_start = archive_end
         .checked_sub(
             step_i64
-                .checked_mul(
-                    i64::try_from(archive.rows - 1)
-                        .map_err(|_| rrd_error("RRD row count overflows"))?,
-                )
+                // rrd_fetch.c:479 computes row_cnt - 1 unsigned, so an empty
+                // archive starts one step after its end. Row counts are bound
+                // by the file length, which keeps the cast in range.
+                .checked_mul(archive.rows.wrapping_sub(1) as i64)
                 .ok_or_else(|| rrd_error("RRD archive time range overflows"))?,
         )
         .ok_or_else(|| rrd_error("RRD archive time range overflows"))?;
@@ -1329,7 +1329,8 @@ fn write_rra_rows(
         let mut step_subtract = 1_u64;
         while remaining > 0 {
             let current_row = &mut current_rows[archive_index];
-            *current_row += 1;
+            // cur_row is an unsigned long in rrd_update.c, so it wraps.
+            *current_row = current_row.wrapping_add(1);
             if *current_row >= archive.rows {
                 *current_row = 0;
             }
@@ -1661,9 +1662,10 @@ pub fn first_rrd_time_from_info(info: &RrdInfo, archive_index: usize) -> Result<
                 .ok_or_else(divides_by_zero)?,
         )
         .ok_or_else(|| rrd_error("RRD first timestamp alignment overflows"))?;
-    let retained = i64::try_from(archive.rows - 1)
-        .ok()
-        .and_then(|rows| rows.checked_mul(resolution))
+    // rrd_first.c:109 negates the unsigned row_cnt - 1, so an empty archive
+    // starts one resolution after its end.
+    let retained = (archive.rows.wrapping_sub(1) as i64)
+        .checked_mul(resolution)
         .ok_or_else(|| rrd_error("RRD archive range overflows"))?;
     aligned_last
         .checked_sub(retained)

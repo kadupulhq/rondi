@@ -1406,3 +1406,53 @@ fn update_with_zero_pdp_per_row_is_an_error_instead_of_a_division_panic() {
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
+
+// RRDtool 1.11.0 on the same file: `first` prints 1000000010, and a fetch
+// that ends before the archive pads with NaN rows. A fetch that reaches the
+// archive takes `% row_cnt` with a zero row count, which is undefined in C.
+#[test]
+fn zero_row_archive_first_and_out_of_range_fetch_match_rrdtool() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("rows.rrd");
+    create_geometry_probe(&path);
+    poke_u64(&path, RRA_ROWS_OFFSET, 0);
+    let first = std::panic::catch_unwind(|| rondi::first_rrd_time(&path, 0));
+    assert_eq!(first.expect("first panicked").unwrap(), 1_000_000_010);
+    let fetched = std::panic::catch_unwind(|| {
+        rondi::fetch_rrd_file(&path, "AVERAGE", 999_999_900, 999_999_950, 10)
+    });
+    let rows = fetched
+        .expect("fetch panicked")
+        .unwrap()
+        .rows
+        .iter()
+        .map(|row| (row.timestamp, row.values[0]))
+        .collect::<Vec<_>>();
+    let expected = (999_999_910..=999_999_960)
+        .step_by(10)
+        .map(|timestamp| (timestamp, None))
+        .collect::<Vec<_>>();
+    assert_eq!(rows, expected);
+    let reaching = std::panic::catch_unwind(|| {
+        rondi::fetch_rrd_file(&path, "AVERAGE", 999_999_990, 1_000_000_000, 10)
+    });
+    let error = reaching.expect("fetch panicked").unwrap_err().to_string();
+    assert!(error.contains("row_cnt is zero"), "{error}");
+}
+
+// RRDtool 1.11.0 increments cur_row as an unsigned long, so u64::MAX wraps
+// to 0 and the pointer is stored as 0.
+#[test]
+fn update_wraps_a_maximal_row_pointer_like_rrdtool() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("cur_row.rrd");
+    create_geometry_probe(&path);
+    poke_u64(&path, RRA_CUR_ROW_OFFSET, u64::MAX);
+    let result =
+        std::panic::catch_unwind(|| rondi::update_rrd_file(&path, 1_000_000_010, Some(5.0)));
+    result.expect("update panicked").unwrap();
+    assert_eq!(
+        rondi::inspect_rrd_file(&path).unwrap().archives[0].current_row,
+        0
+    );
+}
