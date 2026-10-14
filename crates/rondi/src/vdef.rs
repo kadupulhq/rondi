@@ -7,6 +7,13 @@ use thiserror::Error;
 
 use crate::rrd_binary::rrd_mul_add;
 
+/// The pinned Linux aarch64 oracle is built with GCC, which contracts across
+/// statements (`-ffp-contract=fast`) and after expanding `pow(x, 2.0)`, while
+/// the macOS build uses Clang, which only fuses within one expression. They
+/// also split `a * b - c * d` differently. x86_64 never fuses, so there both
+/// forms round the same.
+const GCC_CONTRACTION: bool = cfg!(all(target_arch = "aarch64", target_os = "linux"));
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VdefFunction {
     Maximum,
@@ -142,12 +149,17 @@ pub fn evaluate_vdef(
                 let value = match function {
                     VdefFunction::Average => average,
                     VdefFunction::Total => sum * step as f64,
-                    VdefFunction::Stdev => (finite
-                        .iter()
-                        .map(|value| (value - average).powi(2))
-                        .sum::<f64>()
-                        / finite.len() as f64)
-                        .sqrt(),
+                    VdefFunction::Stdev => {
+                        let squares = finite.iter().fold(0.0, |sum, value| {
+                            let deviation = value - average;
+                            if GCC_CONTRACTION {
+                                rrd_mul_add(deviation, deviation, sum)
+                            } else {
+                                sum + deviation * deviation
+                            }
+                        });
+                        (squares / finite.len() as f64).sqrt()
+                    }
                     _ => unreachable!(),
                 };
                 no_time(value)
@@ -172,11 +184,16 @@ pub fn evaluate_vdef(
             if count == 0.0 {
                 no_time(f64::NAN)
             } else {
-                // The pinned Clang build rounds the count products and fuses
-                // the others; the correlation below stays unfused because
-                // each product feeds a division first.
-                let slope = rrd_mul_add(sum_x, sum_y, -(count * sum_xy))
-                    / rrd_mul_add(sum_x, sum_x, -(count * sum_xx));
+                // Clang rounds the count products and fuses the others; GCC
+                // does the reverse. The correlation below stays unfused in
+                // both because each product feeds a division first.
+                let slope = if GCC_CONTRACTION {
+                    rrd_mul_add(-sum_xy, count, sum_x * sum_y)
+                        / rrd_mul_add(-sum_xx, count, sum_x * sum_x)
+                } else {
+                    rrd_mul_add(sum_x, sum_y, -(count * sum_xy))
+                        / rrd_mul_add(sum_x, sum_x, -(count * sum_xx))
+                };
                 let intercept = rrd_mul_add(-slope, sum_x, sum_y) / count;
                 let correlation = (sum_xy - sum_x * sum_y / count)
                     / ((sum_xx - sum_x * sum_x / count) * (sum_yy - sum_y * sum_y / count)).sqrt();

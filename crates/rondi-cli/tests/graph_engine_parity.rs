@@ -69,11 +69,14 @@ fn split(line: &str) -> Vec<&str> {
     line.split_whitespace().collect()
 }
 
-// rrd_rpncalc.c:1110, 1131, 1157 and 1302 and rrd_graph.c:6236-6264: the
-// pinned aarch64 build fuses the PREDICT and STDEV accumulators, the
-// PREDICTSIGMA variance, the PREDICTPERC interpolation and the
-// least-squares sums, slope and intercept, so the last bits differ from
-// separately rounded arithmetic.
+// rrd_rpncalc.c:1110, 1131, 1157 and 1302 and rrd_graph.c:6147 and
+// 6236-6264: the pinned aarch64 builds fuse the PREDICT and STDEV
+// accumulators, the PREDICTSIGMA variance, the PREDICTPERC interpolation and
+// the least-squares sums, slope and intercept, so the last bits differ from
+// separately rounded arithmetic. The macOS (Clang) and Linux (GCC) oracles
+// split the slope differently and only GCC fuses the VDEF STDEV sum; the
+// LSLSLOPE, LSLINT and VDEF STDEV cases below each tell the two apart on one
+// of those platforms. x86_64 fuses nothing.
 #[test]
 fn rpn_and_vdef_accumulators_round_like_the_pinned_build() {
     let Some(sides) = sides() else { return };
@@ -91,23 +94,25 @@ fn rpn_and_vdef_accumulators_round_like_the_pinned_build() {
         ("300,1,3000,71.7,a,PREDICTPERC", "MINIMUM"),
         ("300,1,3000,71.7,a,PREDICTPERC", "STDEV"),
         ("a,PREV,a,3,STDEV", "MAXIMUM"),
+        ("a,SQRT", "STDEV"),
     ] {
         let line = format!(
             "graphv - {window} DEF:a=t.rrd:a:AVERAGE CDEF:r={cdef} VDEF:v=r,{vdef} PRINT:v:%.17le"
         );
         assert_same(&sides, &split(&line), &[]);
     }
-    for (ds, function) in [
-        ("a", "LSLSLOPE"),
-        ("a", "LSLINT"),
-        ("a", "LSLCORREL"),
-        ("a", "STDEV"),
-        ("b", "LSLSLOPE"),
-        ("b", "LSLINT"),
+    for (source, function) in [
+        ("a:AVERAGE", "LSLSLOPE"),
+        ("a:AVERAGE", "LSLINT"),
+        ("a:AVERAGE", "LSLCORREL"),
+        ("a:AVERAGE", "STDEV"),
+        ("a:MAX", "STDEV"),
+        ("b:AVERAGE", "LSLSLOPE"),
+        ("b:AVERAGE", "LSLINT"),
+        ("b:AVERAGE", "STDEV"),
     ] {
-        let line = format!(
-            "graphv - {window} DEF:a=t.rrd:{ds}:AVERAGE VDEF:v=a,{function} PRINT:v:%.17le"
-        );
+        let line =
+            format!("graphv - {window} DEF:a=t.rrd:{source} VDEF:v=a,{function} PRINT:v:%.17le");
         assert_same(&sides, &split(&line), &[]);
     }
 }
