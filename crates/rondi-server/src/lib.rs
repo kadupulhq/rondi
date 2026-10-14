@@ -1685,7 +1685,24 @@ pub async fn run_rrdcached(mut args: RrdcachedConfig) -> Result<(), Box<dyn std:
     }
     // Without -b upstream has no base directory, so nothing is locked or
     // created in /tmp on its behalf.
-    let _store = args.root.as_deref().map(Store::open).transpose()?;
+    // Upstream needs no write access to -b; Rondi's ownership lock does, so
+    // a failure here is reported plainly and the published sockets removed.
+    let _store = match args.root.as_deref().map(Store::open).transpose() {
+        Ok(store) => store,
+        Err(error) => {
+            for listener in &args.listeners {
+                if let RrdcachedSocket::Unix { path, .. } = &listener.socket {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+            let root = args.root.as_deref().unwrap_or(Path::new(""));
+            return Err(format!(
+                "rrdcached: cannot lock base directory '{}': {error}",
+                root.display()
+            )
+            .into());
+        }
+    };
     let base = RrdcachedBase::new(args.root.as_deref(), args.base_only)?;
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } == 0 && !base.confined() {

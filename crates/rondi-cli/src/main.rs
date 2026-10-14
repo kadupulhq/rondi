@@ -339,7 +339,7 @@ fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     commands: active_socket_commands.clone(),
                 });
             }
-            'b' => root = Some(PathBuf::from(value)),
+            'b' => root = Some(rrdcached_base_directory(&value)),
             'j' => {
                 let strerror = |error: std::io::Error| {
                     error.raw_os_error().map_or_else(String::new, |errno| {
@@ -629,7 +629,7 @@ fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(rondi_server::run_rrdcached(rondi_server::RrdcachedConfig {
+    let served = runtime.block_on(rondi_server::run_rrdcached(rondi_server::RrdcachedConfig {
         root,
         base_only,
         listeners,
@@ -644,7 +644,77 @@ fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         flush_interval_seconds,
         queue_threads,
         max_pending_bytes: rondi_server::DEFAULT_RRDCACHED_QUEUE_BYTES,
-    }))
+    }));
+    if let Err(error) = served {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// read_options' `-b` checks (rrd_daemon.c:4923-4986): create the directory,
+/// then require the name, less trailing slashes, to be its own realpath.
+/// Exits with upstream's message and status on failure.
+fn rrdcached_base_directory(value: &str) -> PathBuf {
+    let strerror = |error: &std::io::Error| {
+        let text = error.to_string();
+        text.split(" (os error ")
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    if let Err(error) = rrd_mkdir_p(Path::new(value)) {
+        eprintln!(
+            "Failed to create base directory '{value}': {}",
+            strerror(&error)
+        );
+        std::process::exit(3);
+    }
+    let real = match std::fs::canonicalize(value) {
+        Ok(real) => real,
+        Err(error) => {
+            eprintln!(
+                "Failed to canonicalize the base directory '{value}': {}",
+                strerror(&error)
+            );
+            std::process::exit(5);
+        }
+    };
+    let given = value.trim_end_matches('/');
+    if given.is_empty() {
+        eprintln!("Invalid base directory: {value}");
+        std::process::exit(4);
+    }
+    let real = real.to_string_lossy();
+    let real = real.trim_end_matches('/');
+    if given != real {
+        eprintln!(
+            "Base directory (-b) resolved via file system links!\n\
+             Please consult rrdcached '-b' documentation!\n\
+             Consider specifying the real directory ({real})"
+        );
+        std::process::exit(5);
+    }
+    PathBuf::from(given)
+}
+
+/// rrd_mkdir_p: an existing directory is accepted, an existing non-directory
+/// is ENOTDIR, and missing components are created with mode 0777 less the
+/// umask.
+fn rrd_mkdir_p(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    if path.as_os_str().is_empty() {
+        return Err(std::io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(std::io::Error::from_raw_os_error(libc::ENOTDIR)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o777)
+            .create(path),
+        Err(error) => Err(error),
+    }
 }
 
 const RRDCACHED_COMMANDS: &[&str] = &[

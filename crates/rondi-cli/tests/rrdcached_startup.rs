@@ -41,6 +41,14 @@ fn run_unprivileged(command: &mut Command, work: &Path) {
         return;
     }
     use std::os::unix::process::CommandExt;
+    give_to_nobody(work);
+    command.uid(65534).gid(65534);
+}
+
+fn give_to_nobody(work: &Path) {
+    if unsafe { libc::geteuid() } != 0 {
+        return;
+    }
     fn own_fixture(path: &Path) {
         let metadata = std::fs::symlink_metadata(path).unwrap();
         let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
@@ -52,7 +60,6 @@ fn run_unprivileged(command: &mut Command, work: &Path) {
         }
     }
     own_fixture(work);
-    command.uid(65534).gid(65534);
 }
 
 fn wait_for_socket(child: &mut Child, socket: &Path) {
@@ -217,4 +224,122 @@ fn rrdcached_usr1_usr2_and_hup_match_upstream() {
             );
         }
     }
+}
+
+fn startup_outcome(work: &Path, rondi: bool, args: &[&str]) -> common::Outcome {
+    let mut command = Command::new(rrdcached_program(work, rondi));
+    command
+        .arg("-g")
+        .args(args)
+        .arg("-l")
+        .arg(format!("unix:{}", work.join("s.sock").display()))
+        .current_dir(work)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    run_unprivileged(&mut command, work);
+    let mut child = command.spawn().unwrap();
+    // A daemon that wrongly starts is stopped and reported as still running
+    // (no status) instead of hanging the test.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status.code();
+        }
+        if Instant::now() >= deadline {
+            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+            wait_for_exit(&mut child);
+            break None;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+    child
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut stderr)
+        .unwrap();
+    common::Outcome {
+        status,
+        stdout,
+        stderr,
+    }
+}
+
+#[test]
+fn rrdcached_base_directory_validation_matches_upstream() {
+    use std::os::unix::fs::PermissionsExt;
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping rrdcached -b differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::create_dir_all(work.join("real/base")).unwrap();
+    std::os::unix::fs::symlink(work.join("real"), work.join("link")).unwrap();
+    std::fs::write(work.join("file"), b"").unwrap();
+    std::fs::create_dir(work.join("sealed")).unwrap();
+    give_to_nobody(&work);
+    std::fs::set_permissions(work.join("sealed"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let path = |name: &str| work.join(name).to_str().unwrap().to_owned();
+    // Under root both daemons run as nobody, which cannot write to sealed.
+    let cases = [
+        "rel".to_owned(),
+        ".".to_owned(),
+        "/".to_owned(),
+        "//".to_owned(),
+        path("link/base"),
+        path("real/../real/base"),
+        path("file"),
+        path("file/below"),
+        path("sealed/new"),
+    ];
+    for base in &cases {
+        let upstream = startup_outcome(&work, false, &["-b", base]);
+        let observed = startup_outcome(&work, true, &["-b", base]);
+        assert_eq!(observed, upstream, "-b {base}");
+        assert!(
+            matches!(upstream.status, Some(3..=5)),
+            "-b {base}: {upstream:?}"
+        );
+        assert!(!work.join("s.sock").exists(), "-b {base}");
+    }
+}
+
+#[test]
+fn rrdcached_unwritable_base_directory_error_is_plain_and_leaves_no_socket() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let base = work.join("base");
+    std::fs::create_dir(&base).unwrap();
+    give_to_nobody(&work);
+    std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // Rondi's ownership lock needs write access to -b, which upstream does
+    // not, so this is checked against Rondi alone.
+    let pid = work.join("pid");
+    let observed = startup_outcome(
+        &work,
+        true,
+        &["-p", pid.to_str().unwrap(), "-b", base.to_str().unwrap()],
+    );
+    assert_eq!(observed.status, Some(1), "{observed:?}");
+    assert!(
+        observed.stderr.ends_with(&format!(
+            "rrdcached: cannot lock base directory '{}': I/O error: Permission denied (os error 13)\n",
+            base.display()
+        )),
+        "{observed:?}"
+    );
+    assert!(!work.join("s.sock").exists());
+    assert!(!pid.exists());
 }
