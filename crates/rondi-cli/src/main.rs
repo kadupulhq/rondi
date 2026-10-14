@@ -90,13 +90,22 @@ fn invoked_name() -> String {
         .unwrap_or_default()
 }
 
+/// argv after `skip` entries, with invalid UTF-8 replaced by U+FFFD like the
+/// rrdtool path does, so a path option cannot panic `std::env::args`.
+fn lossy_args(skip: usize) -> Vec<String> {
+    std::env::args_os()
+        .skip(skip)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--rrdproxy-launcher"))
         && invoked_name() == "rrdcached"
     {
         // rrdcached binds its sockets and drops privileges before any runtime
         // thread exists, so it starts its own runtime afterwards.
-        return rrdcached_mode(&std::env::args().skip(1).collect::<Vec<_>>());
+        return rrdcached_mode(&lossy_args(1));
     }
     let native = !matches!(
         invoked_name().as_str(),
@@ -138,7 +147,7 @@ async fn async_main(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let invoked_as = invoked_name();
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--rrdproxy-launcher")) {
-        return rrdproxy_mode(&std::env::args().skip(2).collect::<Vec<_>>());
+        return rrdproxy_mode(&lossy_args(2));
     }
     if invoked_as == "rrdtool" {
         initialize_rrdtool_locale();
@@ -163,7 +172,7 @@ async fn async_main(
         || invoked_as == "rrdtool-proxy.php"
         || invoked_as == "rrdproxy"
     {
-        return rrdproxy_mode(&std::env::args().skip(1).collect::<Vec<_>>());
+        return rrdproxy_mode(&lossy_args(1));
     }
     if let Some(prepared) = prepared {
         return rondi_server::run(prepared).await;
