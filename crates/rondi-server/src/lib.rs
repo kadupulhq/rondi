@@ -3570,14 +3570,15 @@ fn rrdcached_create(
     no_overwrite_default: bool,
     allow_recursive_mkdir: bool,
 ) -> Result<(), String> {
-    if fields.len() < 3 {
-        return Err(
-            "Usage: CREATE <filename> [-b start] [-s step] [-O] <DS definitions> <RRA definitions>"
-                .to_owned(),
-        );
-    }
-    let output = base.target(fields[0])?;
-    let display = base.abs(fields[0]);
+    const USAGE: &str =
+        "Usage: CREATE <filename> [-b start] [-s step] [-O] <DS definitions> <RRA definitions>";
+    /// MAX_CREATE_AV in handle_request_create.
+    const MAX_DEFINITIONS: usize = 128;
+    let Some((file, arguments)) = fields.split_first() else {
+        return Err(USAGE.to_owned());
+    };
+    let output = base.target(file)?;
+    let display = base.abs(file);
     let parent = output.parent().ok_or("invalid output path")?;
     let directory =
         rondi::safe_fs::open_directory(parent, allow_recursive_mkdir).map_err(|error| {
@@ -3599,57 +3600,54 @@ fn rrdcached_create(
     {
         return Err(format!("{}: Permission denied", output.display()));
     }
-    let mut step = 300_u64;
-    // handle_request_create passes last_up = -1 and rrd_create_r2 then starts
-    // ten seconds before now.
+    // handle_request_create matches each token by prefix (strncmp), reads
+    // values with atol, and passes step 0 and last_up -1 when they are absent;
+    // rrd_create_r2 then uses 300 and ten seconds before now.
+    let mut step = 0_u64;
     let mut start = -1_i64;
     let mut no_overwrite = no_overwrite_default;
+    let mut unsupported = None;
     let mut definitions = Vec::new();
-    let mut index = 1;
-    while index < fields.len() {
-        match fields[index] {
-            "-s" | "--step" => {
-                index += 1;
-                step = fields
-                    .get(index)
-                    .ok_or("missing step")?
-                    .parse()
-                    .map_err(|_| "invalid step")?;
+    let mut tokens = arguments.iter();
+    while let Some(token) = tokens.next() {
+        if token.starts_with("-b") || token.starts_with("-s") {
+            let value = rondi::c_strtol(tokens.next().ok_or(USAGE)?, 10).0;
+            if token.starts_with("-b") {
+                start = value;
+            } else {
+                // An unsigned long, so a negative step wraps.
+                step = value as u64;
             }
-            "-b" | "--start" => {
-                index += 1;
-                start = fields
-                    .get(index)
-                    .ok_or("missing start")?
-                    .parse()
-                    .map_err(|_| "invalid start")?;
+        } else if token.starts_with("-r") || token.starts_with("-t") {
+            // Upstream reads source and template files by name relative to
+            // its working directory, outside -b. Rondi refuses them (RD-004).
+            tokens.next().ok_or(USAGE)?;
+            unsupported.get_or_insert(&token[..2]);
+        } else if token.starts_with("-O") {
+            no_overwrite = true;
+        } else if token.starts_with("DS:") || token.starts_with("RRA:") {
+            if definitions.len() >= MAX_DEFINITIONS {
+                return Err(format!(
+                    "Too many DS/RRA definitions (max {MAX_DEFINITIONS})"
+                ));
             }
-            "-O" | "--no-overwrite" => no_overwrite = true,
-            option if option.starts_with('-') => {
-                return Err(format!("unsupported CREATE option: {option}"));
-            }
-            definition => definitions.push(definition.to_owned()),
+            definitions.push((*token).to_owned());
+        } else {
+            return Err(USAGE.to_owned());
         }
-        index += 1;
     }
-    let sources = definitions
-        .iter()
-        .filter(|line| line.starts_with("DS:"))
-        .cloned()
-        .collect::<Vec<_>>();
-    let archives = definitions
-        .iter()
-        .filter(|line| line.starts_with("RRA:"))
-        .cloned()
-        .collect::<Vec<_>>();
-    if sources.len() + archives.len() != definitions.len() {
-        return Err("CREATE only supports DS and RRA definitions".to_owned());
+    if start != -1 && start < 3600 * 24 * 365 * 10 {
+        return Err("The first entry must be after 1980.".to_owned());
+    }
+    if let Some(option) = unsupported {
+        return Err(format!("unsupported CREATE option: {option}"));
     }
     let start = if start > 0 {
         start
     } else {
         wall_time_seconds() - 10
     };
+    let step = if step == 0 { 300 } else { step };
     rondi::create_rrd_at(
         &directory,
         filename,
@@ -3664,7 +3662,7 @@ fn rrdcached_create(
         {
             format!("RRD Error: creating '{display}': File exists")
         }
-        error => error.to_string(),
+        error => format!("RRD Error: {error}"),
     })
 }
 

@@ -150,6 +150,12 @@ impl Work {
     }
 }
 
+fn assert_same(observed: &[Vec<String>; 2]) {
+    for (upstream, rondi) in observed[0].iter().zip(&observed[1]) {
+        assert_eq!(rondi, upstream);
+    }
+}
+
 fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -184,4 +190,56 @@ fn create_without_start_uses_ten_seconds_ago() {
             after - 10
         );
     }
+}
+
+#[test]
+fn create_arguments_parse_like_handle_request_create() {
+    let Some(work) = Work::new() else { return };
+    const D: &str = " DS:a:GAUGE:120:U:U RRA:AVERAGE:0.5:1:5";
+    let sessions = [
+        // atol values, prefix-matched options, and the -1 "now" sentinel.
+        format!("CREATE n.rrd -b 1000000007 -s x{D}\nLAST n.rrd\n"),
+        format!("CREATE n.rrd -b 1000000007 -s 5m{D}\nLAST n.rrd\n"),
+        format!("CREATE n.rrd -b 1000000007 -s 60x{D}\nLAST n.rrd\n"),
+        format!("CREATE n.rrd -b 1000000007 -s 0{D}\nLAST n.rrd\n"),
+        format!("CREATE n.rrd -b 1000000007 -s -5{D}\n"),
+        format!("CREATE n.rrd -b 1000000007x{D}\nLAST n.rrd\n"),
+        format!("CREATE n.rrd -bogus 1000000007{D}\nLAST n.rrd\n"),
+        format!("CREATE n.rrd -b 1000000007 -s 60 -step 120{D}\nLAST n.rrd\n"),
+        format!("CREATE n.rrd -b 1000000007 -Ox{D}\nCREATE n.rrd -b 1000000007 -O{D}\n"),
+        format!("CREATE n.rrd -b x{D}\n"),
+        format!("CREATE n.rrd -b 100{D}\n"),
+        format!("CREATE n.rrd -b 0{D}\n"),
+        format!("CREATE n.rrd -b -5{D}\n"),
+        format!("CREATE n.rrd -b 315359999{D}\n"),
+        format!("CREATE n.rrd -b1000000000{D}\n"),
+        format!("CREATE n.rrd -b -1{D}\n"),
+        // Usage replies.
+        format!("CREATE n.rrd --step 60{D}\n"),
+        format!("CREATE n.rrd -z{D}\n"),
+        format!("CREATE n.rrd -b 1000000000{D} junk\n"),
+        format!("CREATE n.rrd -b  1000000000{D}\n"),
+        "CREATE n.rrd -b 1000000000 -s\n".to_owned(),
+        "CREATE n.rrd -b\n".to_owned(),
+        "CREATE n.rrd -b 1000000000 -t\n".to_owned(),
+        // rrd_create_r2 errors carry the RRD Error prefix.
+        "CREATE n.rrd\n".to_owned(),
+        "CREATE n.rrd DS:a:GAUGE:120:U:U\n".to_owned(),
+        "CREATE n.rrd RRA:AVERAGE:0.5:1:5\n".to_owned(),
+        "CREATE a.rrd -O\n".to_owned(),
+        "CREATE n.rrd -b 1000000000 DS:a:BOGUS:1:2:3 RRA:AVERAGE:0.5:1:5\n".to_owned(),
+        "CREATE n.rrd -b 1000000000 DS:a:GAUGE:120:U:U RRA:BOGUS:0.5:1:5\n".to_owned(),
+        "CREATE n.rrd -b 1000000000 DS:a:GAUGE RRA:AVERAGE:0.5:1:5\n".to_owned(),
+        "CREATE n.rrd -b 1000000000 DS:a:GAUGE:120:U:U RRA:AVERAGE:2:1:5\n".to_owned(),
+        format!("CREATE n.rrd -b 1000000000 DS:a:GAUGE:120:U:U{D}\n"),
+        format!("CREATE n.rrd -b 1000000000{D} RRA:\n"),
+    ];
+    let sessions = sessions.iter().map(String::as_bytes).collect::<Vec<_>>();
+    let observed = work.differential(&["-B"], &sessions);
+    assert!(observed[0][9].ends_with("\n-1 The first entry must be after 1980.\n"));
+    assert!(
+        observed[0][23]
+            .ends_with("\n-1 RRD Error: you must define at least one Round Robin Archive\n")
+    );
+    assert_same(&observed);
 }
