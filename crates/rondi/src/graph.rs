@@ -1750,14 +1750,14 @@ fn vdef_parse(gdes: &mut GraphElement, text: &str) -> Result<(), ScriptError> {
     Ok(())
 }
 
-/// Port of `rrd_reduce_data` for a single series.
+/// Port of `rrd_reduce_data` over every column of one fetch.
 fn reduce_data(
     cf: Cf,
     cur_step: u64,
     start: &mut i64,
     end: &mut i64,
     step: &mut u64,
-    data: &mut Vec<f64>,
+    columns: &mut [Vec<f64>],
 ) -> Result<(), StoreError> {
     let reduce_factor = (*step as f64 / cur_step as f64).ceil() as u64;
     *step = cur_step * reduce_factor;
@@ -1765,14 +1765,14 @@ fn reduce_data(
     let mut row_cnt = (*end - *start) / cur;
     let end_offset = end.rem_euclid(new_step);
     let start_offset = start.rem_euclid(new_step);
-    let mut src = 0_usize;
-    let mut reduced = Vec::new();
     let factor = reduce_factor as i64;
+    let mut src = 0_usize;
+    let mut leading = false;
     if start_offset != 0 {
         *start -= start_offset;
         let skiprows = factor - start_offset / cur;
-        src += skiprows as usize;
-        reduced.push(rrd_nan());
+        src = skiprows as usize;
+        leading = true;
         row_cnt -= skiprows;
     }
     if end_offset != 0 {
@@ -1784,41 +1784,51 @@ fn reduce_data(
             "SANITY CHECK: {row_cnt} rows cannot be reduced by {reduce_factor} \n"
         )));
     }
-    while row_cnt >= factor {
-        let mut newval = rrd_nan();
-        let mut validval = 0_u32;
-        for i in 0..reduce_factor as usize {
-            let value = data.get(src + i).copied().unwrap_or_else(rrd_nan);
-            if value.is_nan() {
-                continue;
-            }
-            validval += 1;
-            if newval.is_nan() {
-                newval = value;
-            } else {
-                match cf {
-                    Cf::Minimum => newval = if newval < value { newval } else { value },
-                    Cf::Failures | Cf::Maximum => {
-                        newval = if newval > value { newval } else { value }
+    for data in columns.iter_mut() {
+        let mut reduced = Vec::new();
+        if leading {
+            reduced.push(rrd_nan());
+        }
+        let (mut rows, mut src) = (row_cnt, src);
+        while rows >= factor {
+            let mut newval = rrd_nan();
+            let mut validval = 0_u32;
+            for i in 0..reduce_factor as usize {
+                let value = data
+                    .get(src.wrapping_add(i))
+                    .copied()
+                    .unwrap_or_else(rrd_nan);
+                if value.is_nan() {
+                    continue;
+                }
+                validval += 1;
+                if newval.is_nan() {
+                    newval = value;
+                } else {
+                    match cf {
+                        Cf::Minimum => newval = if newval < value { newval } else { value },
+                        Cf::Failures | Cf::Maximum => {
+                            newval = if newval > value { newval } else { value }
+                        }
+                        Cf::Last => newval = value,
+                        _ => newval += value,
                     }
-                    Cf::Last => newval = value,
-                    _ => newval += value,
                 }
             }
+            if validval == 0 {
+                newval = rrd_nan();
+            } else if !matches!(cf, Cf::Minimum | Cf::Failures | Cf::Maximum | Cf::Last) {
+                newval /= f64::from(validval);
+            }
+            reduced.push(newval);
+            src = src.wrapping_add(reduce_factor as usize);
+            rows -= factor;
         }
-        if validval == 0 {
-            newval = rrd_nan();
-        } else if !matches!(cf, Cf::Minimum | Cf::Failures | Cf::Maximum | Cf::Last) {
-            newval /= f64::from(validval);
+        if end_offset != 0 {
+            reduced.push(rrd_nan());
         }
-        reduced.push(newval);
-        src += reduce_factor as usize;
-        row_cnt -= factor;
+        *data = reduced;
     }
-    if end_offset != 0 {
-        reduced.push(rrd_nan());
-    }
-    *data = reduced;
     Ok(())
 }
 
@@ -1834,110 +1844,183 @@ fn gcd(mut left: u64, mut right: u64) -> u64 {
 /// file through rrdcached first.
 pub type DaemonHook<'a> = &'a mut dyn FnMut(&str, &str) -> Result<(), StoreError>;
 
+/// `gdes_fetch_key`. Every number goes through `%d`, so the 64-bit times
+/// and steps keep only their low 32 bits, as the pinned build reads them.
+fn fetch_key(element: &GraphElement) -> String {
+    format!(
+        "{}:{}:{}:{}:{}:{}:{}:{}",
+        element.rrd,
+        element.daemon,
+        element.cf.map_or(-1, |cf| cf as i32),
+        element.cf_reduce as i32,
+        element.start_orig as i32,
+        element.end_orig as i32,
+        element.step_orig as i32,
+        element.step as i32
+    )
+}
+
+/// The data sources of one fetch and their reduced columns.
+struct Fetched {
+    names: Vec<String>,
+    columns: Vec<Vec<f64>>,
+}
+
 impl GraphImage {
-    /// Port of `data_fetch`.
+    /// Port of `data_fetch`. A DEF whose `gdes_fetch_key` matches an earlier
+    /// one reuses that fetch. The key is looked up with the DEF's requested
+    /// step but stored with the step after reduction, so a later DEF that
+    /// asks for that step directly shares the reduced data, and `reduce=`
+    /// only separates DEFs when it differs from the AVERAGE default.
     pub fn data_fetch(&mut self, daemon: DaemonHook<'_>) -> Result<(), StoreError> {
+        let mut rrd_map = HashMap::<String, (usize, usize)>::new();
+        let mut fetches = Vec::<Fetched>::new();
         for i in 0..self.gdes.len() {
             if self.gdes[i].gf != Gf::Def {
                 continue;
             }
-            let element = &self.gdes[i];
-            let address = if element.daemon.is_empty() {
-                self.daemon_addr.clone()
+            let fetch = if let Some(&(ii, fetch)) = rrd_map.get(&fetch_key(&self.gdes[i])) {
+                let (start, end, step) =
+                    (self.gdes[ii].start, self.gdes[ii].end, self.gdes[ii].step);
+                let element = &mut self.gdes[i];
+                element.start = start;
+                element.end = end;
+                element.step = step;
+                fetch
             } else {
-                Some(element.daemon.clone())
-            };
-            if let Some(address) = address.filter(|address| !address.is_empty()) {
-                daemon(&address, &element.rrd)?;
-            }
-            let cf = element.cf.unwrap_or(Cf::Average);
-            let fetched = if element.rrd.starts_with("cb//") {
-                // rrd_fetch_fn_cb without a registered callback.
-                Err(StoreError::RrdExpression(
-                    "use rrd_fetch_cb_register to register your callback prior to calling rrd_fetch_fn_cb"
-                        .into(),
-                ))
-            } else {
-                fetch_rrd_file(
-                    &element.rrd,
-                    cf.as_str(),
-                    element.start,
-                    element.end,
-                    // A zero step asks rrd_fetch_fn for the finest archive.
-                    element.step.max(1),
-                )
-                .map_err(|error| match error {
-                    StoreError::Io(io) => StoreError::RrdExpression(format!(
-                        "opening '{}': {}",
-                        element.rrd,
-                        crate::rrd_binary::rrd_strerror(&io)
-                    )),
-                    error => error,
-                })
-            };
-            let (mut start, mut end, ft_step, mut data) = match fetched {
-                Ok(fetched) => {
-                    let index = fetched
-                        .data_sources
-                        .iter()
-                        .position(|name| *name == element.ds_nam);
-                    let Some(index) = index.or(self.allow_missing_ds.then_some(usize::MAX)) else {
-                        return Err(StoreError::RrdExpression(format!(
-                            "No DS called '{}' in '{}'",
-                            element.ds_nam, element.rrd
-                        )));
-                    };
-                    let data = fetched
-                        .rows
-                        .iter()
-                        .map(|row| {
-                            row.values
-                                .get(index)
-                                .copied()
-                                .flatten()
-                                .unwrap_or_else(rrd_nan)
-                        })
-                        .collect();
-                    (fetched.start, fetched.end, fetched.step, data)
-                }
-                Err(_) if self.allow_missing_ds => {
-                    // rrd_fetch_empty
-                    let mut step = element.step;
-                    if step == 0 {
-                        // C divides by this step next; a range under 100s
-                        // gives zero and traps there, so use one second.
-                        step = (((element.end - element.start) / 100) as u64).max(1);
-                    }
-                    let step_i64 = step as i64;
-                    let start = element.start - element.start.rem_euclid(step_i64);
-                    let end = element.end + (step_i64 - element.end.rem_euclid(step_i64));
-                    let rows = ((end - start) / step_i64 + 1) as usize;
-                    (start, end, step, vec![rrd_nan(); rows])
-                }
-                Err(error) => return Err(error),
+                fetches.push(self.fetch_def(i, daemon)?);
+                fetches.len() - 1
             };
             let element = &mut self.gdes[i];
-            element.step = element.step.max(self.step);
-            if ft_step < element.step {
-                let reduce_cf = if element.cf_reduce_set {
-                    element.cf_reduce
-                } else {
-                    cf
-                };
-                let mut step = element.step;
-                reduce_data(
-                    reduce_cf, ft_step, &mut start, &mut end, &mut step, &mut data,
-                )?;
-                element.step = step;
-            } else {
-                element.step = ft_step;
+            let fetched = &fetches[fetch];
+            let index = fetched
+                .names
+                .iter()
+                .position(|name| *name == element.ds_nam);
+            if index.is_none() && !self.allow_missing_ds {
+                return Err(StoreError::RrdExpression(format!(
+                    "No DS called '{}' in '{}'",
+                    element.ds_nam, element.rrd
+                )));
             }
-            element.start = start;
-            element.end = end;
-            element.data = data;
+            element.data = match index {
+                Some(index) => fetched.columns[index].clone(),
+                None => vec![rrd_nan(); fetched.columns.first().map_or(0, Vec::len)],
+            };
             element.ds_cnt = 1;
+            rrd_map.insert(fetch_key(element), (i, fetch));
         }
         Ok(())
+    }
+
+    /// The uncached half of `data_fetch` for DEF `i`: fetch, then reduce to
+    /// at least the image step.
+    fn fetch_def(&mut self, i: usize, daemon: DaemonHook<'_>) -> Result<Fetched, StoreError> {
+        let element = &self.gdes[i];
+        let address = if element.daemon.is_empty() {
+            self.daemon_addr.clone()
+        } else {
+            Some(element.daemon.clone())
+        };
+        if let Some(address) = address.filter(|address| !address.is_empty()) {
+            daemon(&address, &element.rrd)?;
+        }
+        let cf = element.cf.unwrap_or(Cf::Average);
+        let fetched = if element.rrd.starts_with("cb//") {
+            // rrd_fetch_fn_cb without a registered callback.
+            Err(StoreError::RrdExpression(
+                "use rrd_fetch_cb_register to register your callback prior to calling rrd_fetch_fn_cb"
+                    .into(),
+            ))
+        } else {
+            fetch_rrd_file(
+                &element.rrd,
+                cf.as_str(),
+                element.start,
+                element.end,
+                // A zero step asks rrd_fetch_fn for the finest archive.
+                element.step.max(1),
+            )
+            .map_err(|error| match error {
+                StoreError::Io(io) => StoreError::RrdExpression(format!(
+                    "opening '{}': {}",
+                    element.rrd,
+                    crate::rrd_binary::rrd_strerror(&io)
+                )),
+                error => error,
+            })
+        };
+        let (mut start, mut end, ft_step, names, mut columns) = match fetched {
+            Ok(fetched) => {
+                let columns = (0..fetched.data_sources.len())
+                    .map(|index| {
+                        fetched
+                            .rows
+                            .iter()
+                            .map(|row| {
+                                row.values
+                                    .get(index)
+                                    .copied()
+                                    .flatten()
+                                    .unwrap_or_else(rrd_nan)
+                            })
+                            .collect()
+                    })
+                    .collect();
+                (
+                    fetched.start,
+                    fetched.end,
+                    fetched.step,
+                    fetched.data_sources,
+                    columns,
+                )
+            }
+            Err(_) if self.allow_missing_ds => {
+                // rrd_fetch_empty
+                let mut step = element.step;
+                if step == 0 {
+                    // C divides by this step next; a range under 100s
+                    // gives zero and traps there, so use one second.
+                    step = (((element.end - element.start) / 100) as u64).max(1);
+                }
+                let step_i64 = step as i64;
+                let start = element.start - element.start.rem_euclid(step_i64);
+                let end = element.end + (step_i64 - element.end.rem_euclid(step_i64));
+                let rows = ((end - start) / step_i64 + 1) as usize;
+                (
+                    start,
+                    end,
+                    step,
+                    vec![element.ds_nam.clone()],
+                    vec![vec![rrd_nan(); rows]],
+                )
+            }
+            Err(error) => return Err(error),
+        };
+        let element = &mut self.gdes[i];
+        element.step = element.step.max(self.step);
+        if ft_step < element.step {
+            let reduce_cf = if element.cf_reduce_set {
+                element.cf_reduce
+            } else {
+                cf
+            };
+            let mut step = element.step;
+            reduce_data(
+                reduce_cf,
+                ft_step,
+                &mut start,
+                &mut end,
+                &mut step,
+                &mut columns,
+            )?;
+            element.step = step;
+        } else {
+            element.step = ft_step;
+        }
+        element.start = start;
+        element.end = end;
+        Ok(Fetched { names, columns })
     }
 
     /// Port of `data_calc`: SHIFT, VDEF and CDEF in definition order.

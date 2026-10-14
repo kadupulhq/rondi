@@ -111,3 +111,23 @@ fn rpn_and_vdef_accumulators_round_like_the_pinned_build() {
         assert_same(&sides, &split(&line), &[]);
     }
 }
+
+// rrd_graph.c:972-987 and 1085 key reused fetches by gdes_fetch_key
+// (rrd_graph.h:50). The lookup uses the requested step and the insert the
+// reduced one, cf_reduce defaults to AVERAGE whether or not reduce= was
+// given, the DS name is not part of the key, and %d keeps only the low 32
+// bits of the window.
+#[test]
+fn data_fetch_reuses_fetches_by_the_c_key() {
+    let Some(sides) = sides() else { return };
+    for line in [
+        "xport -s 1700000000 -e 1700003000 --step 3600 DEF:x=t.rrd:a:AVERAGE:step=300 DEF:y=t.rrd:a:AVERAGE:step=3600 XPORT:x XPORT:y",
+        "xport -s 1700000000 -e 1700030000 DEF:x=t.rrd:a:MAX:step=1200 DEF:y=t.rrd:a:MAX:step=1200:reduce=AVERAGE XPORT:x XPORT:y",
+        "xport -s 1700000000 -e 1700030000 DEF:x=t.rrd:a:MAX:step=1200:reduce=AVERAGE DEF:y=t.rrd:a:MAX:step=1200 XPORT:x XPORT:y",
+        "xport -s 1700000000 -e 1700030000 DEF:x=t.rrd:a:MAX:step=1200 DEF:y=t.rrd:b:MAX:step=1200:reduce=AVERAGE XPORT:x XPORT:y",
+        "xport -s 1700000000 -e 1700030000 DEF:x=t.rrd:a:MAX:step=1200:reduce=MAX DEF:y=t.rrd:a:MAX:step=1200 XPORT:x XPORT:y",
+        "xport -s 1700000000 -e 1700003000 --step 300 DEF:x=t.rrd:a:AVERAGE:step=300 DEF:y=t.rrd:a:AVERAGE:step=300:start=5994967296:end=5994970296 XPORT:x XPORT:y",
+    ] {
+        assert_same(&sides, &split(line), &[]);
+    }
+}
