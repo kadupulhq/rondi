@@ -119,6 +119,8 @@ pub(crate) struct GraphOptions {
     pub(crate) legend_direction: rondi::graph_layout::LegendDirection,
     pub(crate) grid_dash: Vec<f64>,
     pub(crate) border: u32,
+    /// `--zoom`: scales the cairo surface, not the layout.
+    pub(crate) zoom: f64,
     /// Settings `graph_size_location` and `leg_place` read.
     pub(crate) layout: GraphLayout,
     /// `argv[optind..]`: the image filename followed by the script.
@@ -225,6 +227,7 @@ pub(crate) fn rrd_graph_options(args: &[String], now: i64) -> Result<GraphOption
         legend_direction: rondi::graph_layout::LegendDirection::TopDown,
         grid_dash: Vec::new(),
         border: 2,
+        zoom: 1.0,
         layout: GraphLayout::default(),
         positionals: Vec::new(),
     };
@@ -365,11 +368,12 @@ pub(crate) fn rrd_graph_options(args: &[String], now: i64) -> Result<GraphOption
             _ if option == short(b'v') => graph.vertical_label = Some(value),
             _ if option == short(b'u') => {
                 let maxval = rrd_strtodbl(&value, Some("option -u"))?;
-                graph.upper_limit = maxval.is_finite().then_some(maxval);
+                // NaN leaves the limit unset; an infinity is kept.
+                graph.upper_limit = (!maxval.is_nan()).then_some(maxval);
             }
             _ if option == short(b'l') => {
                 minval = rrd_strtodbl(&value, Some("option -l"))?;
-                graph.lower_limit = minval.is_finite().then_some(minval);
+                graph.lower_limit = (!minval.is_nan()).then_some(minval);
             }
             _ if option == short(b'b') => {
                 let base = atol(&value);
@@ -444,6 +448,7 @@ pub(crate) fn rrd_graph_options(args: &[String], now: i64) -> Result<GraphOption
                 if zoom <= 0.0 {
                     return Err(String::from("zoom factor must be > 0"));
                 }
+                graph.zoom = zoom;
             }
             _ if option == short(b't') => graph.title = Some(value),
             _ if option == short(b'R') => {
