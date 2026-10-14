@@ -116,6 +116,42 @@ fn xport_prints_negative_zero_without_a_sign() {
     }
 }
 
+// A numeric constant that is_numeric rejects (`1e3`, `+5`, `inf`) is parsed
+// as a constant, so XPORT has no source series for it. The pinned build reads
+// gdes[-1] there and fails with garbage, so only Rondi's result is checked:
+// the constant is not a column and never exports another element's data.
+#[test]
+fn xport_of_a_non_numeric_looking_constant_exports_nothing() {
+    let Some(fixture) = fixture() else { return };
+    for constant in ["1e3", "+5", "inf"] {
+        let constant_element = format!("XPORT:{constant}:K");
+        let alone = run(
+            &fixture.alias,
+            &xport_args(&fixture, &[], std::slice::from_ref(&constant_element)),
+        );
+        assert_eq!(alone.status.code(), Some(1), "{constant}");
+        assert_eq!(
+            String::from_utf8_lossy(&alone.stderr),
+            "ERROR: no XPORT found, nothing to do\n",
+            "{constant}"
+        );
+        let both = run(
+            &fixture.alias,
+            &xport_args(
+                &fixture,
+                &[],
+                &[constant_element, String::from("XPORT:x:X")],
+            ),
+        );
+        let stdout = String::from_utf8_lossy(&both.stdout);
+        assert!(
+            stdout.contains("<columns>1</columns>"),
+            "{constant}\n{stdout}"
+        );
+        assert!(!stdout.contains("<entry>K</entry>"), "{constant}\n{stdout}");
+    }
+}
+
 #[test]
 fn xport_xml_prints_infinities_and_json_prints_null() {
     let Some(fixture) = fixture() else { return };

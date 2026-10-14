@@ -2140,6 +2140,9 @@ impl GraphImage {
                 Gf::Xport => !is_numeric(&element.vname),
                 _ => false,
             })
+            // A constant that get_double accepts but is_numeric rejects
+            // (`1e3`, `+5`, `inf`) has no source; C reads gdes[-1] for it.
+            .filter(|(_, element)| element.vidx.is_some())
             .map(|(index, _)| index)
             .collect();
         if columns.is_empty() {
