@@ -1149,6 +1149,20 @@ fn rrdcached_unconfined_create_matches_upstream_through_symlinks_and_no_overwrit
     }
     let dir = tempfile::tempdir().unwrap();
     let dir_path = std::fs::canonicalize(dir.path()).unwrap();
+    // Both daemons refuse to serve as root without -B, so a root runner
+    // drops to nobody and hands it the fixtures.
+    let root = unsafe { libc::geteuid() } == 0;
+    fn own_fixture(path: &std::path::Path) {
+        std::os::unix::fs::lchown(path, Some(65534), Some(65534)).unwrap();
+        if std::fs::symlink_metadata(path).unwrap().is_dir() {
+            for entry in std::fs::read_dir(path).unwrap() {
+                own_fixture(&entry.unwrap().path());
+            }
+        }
+    }
+    if root {
+        own_fixture(&dir_path);
+    }
     let mut replies = Vec::new();
     for name in ["upstream", "rondi"] {
         let run_dir = dir_path.join(name);
@@ -1160,20 +1174,26 @@ fn rrdcached_unconfined_create_matches_upstream_through_symlinks_and_no_overwrit
         std::os::unix::fs::symlink(&real, run_dir.join("link")).unwrap();
         let alias = run_dir.join("rrdcached");
         std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
-        let mut child = Command::new(if name == "rondi" {
+        let mut command = Command::new(if name == "rondi" {
             alias.as_os_str()
         } else {
             std::ffi::OsStr::new("rrdcached")
-        })
-        .args(["-g", "-R", "-b", run_dir.to_str().unwrap(), "-l"])
-        .arg(format!("unix:{}", socket.display()))
-        .arg("-p")
-        .arg(run_dir.join("rrdcached.pid"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        });
+        if root {
+            use std::os::unix::process::CommandExt;
+            own_fixture(&run_dir);
+            command.uid(65534).gid(65534);
+        }
+        let mut child = command
+            .args(["-g", "-R", "-b", run_dir.to_str().unwrap(), "-l"])
+            .arg(format!("unix:{}", socket.display()))
+            .arg("-p")
+            .arg(run_dir.join("rrdcached.pid"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
         wait_for_socket(&mut child, &socket);
         let mut stream = UnixStream::connect(&socket).unwrap();
         stream.set_read_timeout(Some(common::io_timeout())).unwrap();
