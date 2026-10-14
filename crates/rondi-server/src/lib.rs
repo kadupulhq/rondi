@@ -241,7 +241,7 @@ impl RrdcachedBase {
             }
             None => Self {
                 root: PathBuf::from("/"),
-                cwd: PathBuf::from("/tmp"),
+                cwd: std::fs::canonicalize("/tmp")?,
                 given: None,
                 base_only,
             },
@@ -267,13 +267,19 @@ impl RrdcachedBase {
 
     /// check_file_access (rrd_daemon.c:1354) and the path the daemon then
     /// uses. Only -B with -b confines, as upstream. Where upstream compares
-    /// strings, Rondi resolves the parent's real path and refuses a final
-    /// symlink, so neither a symlinked directory nor a symlinked file can
-    /// lead outside -b.
+    /// strings, Rondi keeps the confined path beneath its canonical base.
+    /// Actual opens traverse directory descriptors without following links.
     fn target(&self, requested: &str) -> Result<PathBuf, String> {
         let path = self.fs_path(requested);
         if !self.confined() {
-            return Ok(std::fs::canonicalize(&path).unwrap_or(path));
+            return Ok(std::fs::canonicalize(&path).unwrap_or_else(|_| {
+                match (path.parent(), path.file_name()) {
+                    (Some(parent), Some(name)) => std::fs::canonicalize(parent)
+                        .map(|parent| parent.join(name))
+                        .unwrap_or(path),
+                    _ => path,
+                }
+            }));
         }
         let denied = || format!("{}: Permission denied", self.abs(requested));
         if path
@@ -282,27 +288,17 @@ impl RrdcachedBase {
         {
             return Err(denied());
         }
-        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        let (Some(parent), Some(_name)) = (path.parent(), path.file_name()) else {
             return Err(denied());
         };
-        let Ok(parent) = std::fs::canonicalize(parent) else {
-            // A missing directory is confined by its nearest existing one.
-            let confined = path
-                .ancestors()
-                .skip(1)
-                .find_map(|ancestor| std::fs::canonicalize(ancestor).ok())
-                .is_some_and(|ancestor| ancestor.starts_with(&self.root));
-            return if confined { Ok(path) } else { Err(denied()) };
-        };
-        let resolved = parent.join(name);
         if !parent.starts_with(&self.root)
-            || resolved == self.root
-            || std::fs::symlink_metadata(&resolved)
+            || path == self.root
+            || std::fs::symlink_metadata(&path)
                 .is_ok_and(|metadata| metadata.file_type().is_symlink())
         {
             return Err(denied());
         }
-        Ok(resolved)
+        Ok(path)
     }
 
     fn confined(&self) -> bool {
@@ -1353,15 +1349,19 @@ fn rrdcached_rrd_open(
     read_write: bool,
 ) -> Result<std::fs::File, String> {
     use std::os::fd::AsRawFd;
-    use std::os::unix::fs::{FileExt, OpenOptionsExt};
+    use std::os::unix::fs::FileExt;
     let errno = |error: &std::io::Error| rrdcached_strerror(error.raw_os_error().unwrap_or(0));
     // O_NONBLOCK keeps a planted FIFO from blocking; it fails at mmap.
-    let file = OpenOptions::new()
-        .read(true)
-        .write(read_write)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(|error| format!("opening '{display}': {}", errno(&error)))?;
+    let file = rondi::safe_fs::open_file(
+        path,
+        if read_write {
+            libc::O_RDWR
+        } else {
+            libc::O_RDONLY
+        },
+        0,
+    )
+    .map_err(|error| format!("opening '{display}': {}", errno(&error)))?;
     let length = file
         .metadata()
         .map_err(|error| format!("fstat '{display}': {}", errno(&error)))?
@@ -3461,13 +3461,9 @@ fn rrdcached_update_timestamp(value: &str) -> Result<(i64, u64), String> {
 /// and an owner other than root when the daemon is root or root when it is
 /// not. The checks run on the descriptor that is then written.
 fn open_rrdcached_write_target(path: &Path) -> Result<File, String> {
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
-        .open(path)
-        .map_err(|error| error.to_string())?;
+    use std::os::unix::fs::MetadataExt;
+    let file =
+        rondi::safe_fs::open_file(path, libc::O_RDWR, 0).map_err(|error| error.to_string())?;
     let metadata = file.metadata().map_err(|error| error.to_string())?;
     // SAFETY: geteuid has no preconditions.
     let privileged = unsafe { libc::geteuid() } == 0;
@@ -3545,24 +3541,19 @@ fn rrdcached_create(
     }
     let output = base.target(fields[0])?;
     let display = base.abs(fields[0]);
-    if let Some(parent) = output.parent() {
-        if !parent.exists() && !allow_recursive_mkdir {
-            return Err(format!(
-                "No permission to recursively create: {}\nDid you pass -R to the daemon?",
-                Path::new(&display).parent().unwrap_or(parent).display()
-            ));
-        }
-        if allow_recursive_mkdir {
-            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-        }
-    }
-    let canonical_parent = std::fs::canonicalize(output.parent().ok_or("invalid output path")?)
-        .map_err(|error| error.to_string())?;
-    if base.confined() && !canonical_parent.starts_with(&base.root) {
-        return Err(format!("{display}: Permission denied"));
-    }
+    let parent = output.parent().ok_or("invalid output path")?;
+    let directory =
+        rondi::safe_fs::open_directory(parent, allow_recursive_mkdir).map_err(|error| {
+            if !allow_recursive_mkdir && error.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "No permission to recursively create: {}\nDid you pass -R to the daemon?",
+                    Path::new(&display).parent().unwrap_or(parent).display()
+                )
+            } else {
+                error.to_string()
+            }
+        })?;
     let filename = output.file_name().ok_or("invalid output filename")?;
-    let output = canonical_parent.join(filename);
     // The store lock and journal sit beside the RRD files. Replacing one
     // would lose acknowledged updates.
     if filename
@@ -3615,8 +3606,15 @@ fn rrdcached_create(
     if sources.len() + archives.len() != definitions.len() {
         return Err("CREATE only supports DS and RRA definitions".to_owned());
     }
-    rondi::create_rrd_file(output, start, step, &sources, &archives, no_overwrite)
-        .map_err(|error| error.to_string())
+    rondi::create_rrd_at(
+        &directory,
+        filename,
+        start,
+        step,
+        &definitions,
+        no_overwrite,
+    )
+    .map_err(|error| error.to_string())
 }
 
 async fn handle(
@@ -3761,6 +3759,68 @@ fn store_error(error: StoreError) -> Response<Full<Bytes>> {
 #[cfg(test)]
 mod rrdcached_queue_tests {
     use super::*;
+
+    #[test]
+    fn confinement_rejects_parent_swaps_for_reads_writes_and_create() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let base_dir = root.join("base");
+        let parent = base_dir.join("child");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let args = ["DS:value:GAUGE:30:U:U".to_owned()];
+        let archives = ["RRA:AVERAGE:0.5:1:8".to_owned()];
+        rondi::create_rrd_file(
+            outside.join("metric.rrd"),
+            1_100_000_000,
+            10,
+            &args,
+            &archives,
+            true,
+        )
+        .unwrap();
+        let base = test_base(&base_dir);
+        let target = base.target("child/metric.rrd").unwrap();
+        let pinned_parent = rondi::safe_fs::open_directory(&parent, false).unwrap();
+        std::fs::rename(&parent, base_dir.join("original")).unwrap();
+        symlink(&outside, &parent).unwrap();
+        assert!(rrdcached_rrd_open("metric.rrd", &target, false).is_err());
+        assert!(update_rrdcached_file(&target, &["1100000010:7"]).is_err());
+        assert!(
+            rrdcached_create(
+                &base,
+                &[
+                    "child/new.rrd",
+                    "DS:value:GAUGE:30:U:U",
+                    "RRA:AVERAGE:0.5:1:8"
+                ],
+                true,
+                true
+            )
+            .is_err()
+        );
+        assert!(!outside.join("new.rrd").exists());
+        assert_eq!(
+            rondi::inspect_rrd_file(outside.join("metric.rrd"))
+                .unwrap()
+                .last_update,
+            1_100_000_000
+        );
+        let definitions = [args[0].clone(), archives[0].clone()];
+        rondi::create_rrd_at(
+            &pinned_parent,
+            std::ffi::OsStr::new("pinned.rrd"),
+            1_000_000_000,
+            10,
+            &definitions,
+            true,
+        )
+        .unwrap();
+        assert!(base_dir.join("original/pinned.rrd").exists());
+        assert!(!outside.join("pinned.rrd").exists());
+    }
 
     fn test_base(root: &Path) -> RrdcachedBase {
         RrdcachedBase::new(Some(root), true).unwrap()

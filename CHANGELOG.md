@@ -12,6 +12,9 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ### Fixed
 
+- Reject Unix socket paths with ancestors another account can replace, and traverse daemon RRD parents through directory descriptors without following symlinks.
+- Bound RRD CREATE allocations to 64 MiB, including headers, and check archive size arithmetic before allocating.
+- Validate native journal ownership, file type, and link count before recovery, append, or compaction can modify it.
 - Check Unix socket directory ownership and shared-write permissions for unprivileged daemons as well as root.
 - Publish the JSON daemon socket from private staging with mode `0600` already set. JSON library startup now uses `prepare_server` before threads and async `run` afterwards.
 - Keep daemon RRD reads on checked `O_NOFOLLOW` descriptors through inspection, fetch, and dump; reuse checked descriptors for update and tune metadata.

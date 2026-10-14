@@ -150,8 +150,8 @@ impl Store {
                 "idempotency window must be positive".into(),
             ));
         }
-        let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(&root)?;
+        fs::create_dir_all(root.as_ref())?;
+        let root = fs::canonicalize(root.as_ref())?;
         let mut lock_options = OpenOptions::new();
         lock_options
             .read(true)
@@ -256,9 +256,12 @@ impl Store {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            journal_options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+            journal_options
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .mode(0o600);
         }
         let mut journal = journal_options.open(self.root.join(JOURNAL))?;
+        check_native_journal_handle(&journal)?;
         let record = JournalRecord {
             id: id.into(),
             database: name.into(),
@@ -364,13 +367,17 @@ impl Store {
             }
             let tmp = self.root.join(JOURNAL_COMPACT_TMP);
             let mut options = OpenOptions::new();
-            options.write(true).create(true).truncate(true);
+            options.write(true).create(true).truncate(false);
             #[cfg(unix)]
             {
                 use std::os::unix::fs::OpenOptionsExt;
-                options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+                options
+                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                    .mode(0o600);
             }
             let mut file = options.open(&tmp)?;
+            check_native_journal_handle(&file)?;
+            file.set_len(0)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
             drop(file);
@@ -414,13 +421,14 @@ impl Store {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW);
+            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
         }
         let mut journal = match options.open(self.root.join(JOURNAL)) {
             Ok(journal) => journal,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
         };
+        check_native_journal_handle(&journal)?;
         let mut input = Vec::new();
         journal.read_to_end(&mut input)?;
         let complete_length = input
@@ -591,6 +599,30 @@ fn index_journal(records: Vec<JournalRecord>) -> HashMap<String, JournalRecord> 
     ids
 }
 
+fn check_native_journal_handle(file: &File) -> Result<(), StoreError> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(StoreError::InvalidConfig(
+            "journal is not a regular file".into(),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        if metadata.nlink() != 1
+            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.mode() & 0o022 != 0
+        {
+            return Err(StoreError::InvalidConfig(
+                "journal must be owned by the daemon, unshared, and not group/world writable"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_name(name: &str) -> Result<(), StoreError> {
     if name.is_empty()
         || name.len() > 64
@@ -617,6 +649,59 @@ pub(crate) fn open_read_nofollow(path: &Path) -> Result<File, std::io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_rejects_hard_link_without_truncating_external_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("store")).unwrap();
+        let external = temp.path().join("external");
+        let contents = b"outside file without a journal newline";
+        fs::write(&external, contents).unwrap();
+        fs::hard_link(&external, store.root.join(JOURNAL)).unwrap();
+        assert!(store.recover().is_err());
+        assert_eq!(fs::read(&external).unwrap(), contents);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn append_and_compaction_reject_planted_hard_links() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().join("store")).unwrap();
+        store.create("cpu", config()).unwrap();
+        store
+            .update_durable(
+                "cpu",
+                Update {
+                    timestamp: 1_700_000_010,
+                    value: Some(1.0),
+                },
+                "first",
+            )
+            .unwrap();
+        let external = temp.path().join("external");
+        let contents = b"protected outside data";
+        fs::write(&external, contents).unwrap();
+        fs::hard_link(&external, store.root.join(JOURNAL_COMPACT_TMP)).unwrap();
+        let mut index = store.journal_ids().unwrap();
+        assert!(store.compact_journal(&mut index, i64::MAX).is_err());
+        drop(index);
+        fs::remove_file(store.root.join(JOURNAL)).unwrap();
+        fs::hard_link(&external, store.root.join(JOURNAL)).unwrap();
+        assert!(
+            store
+                .update_durable(
+                    "cpu",
+                    Update {
+                        timestamp: 1_700_000_020,
+                        value: Some(2.0)
+                    },
+                    "second"
+                )
+                .is_err()
+        );
+        assert_eq!(fs::read(&external).unwrap(), contents);
+    }
 
     fn config() -> DatabaseConfig {
         DatabaseConfig {
