@@ -22,7 +22,7 @@ pub const MAX_RRD_CREATE_BYTES: usize = 64 * 1024 * 1024;
 /// The C library's single error slot: `rrd_set_error` replaces the text and
 /// `rrd_test_error` asks whether any is set.
 #[derive(Default)]
-struct ErrorSlot(Option<String>);
+pub(crate) struct ErrorSlot(Option<String>);
 
 impl ErrorSlot {
     fn set(&mut self, message: impl Into<String>) {
@@ -31,6 +31,10 @@ impl ErrorSlot {
 
     fn is_set(&self) -> bool {
         self.0.is_some()
+    }
+
+    pub(crate) fn take(&mut self) -> Option<String> {
+        self.0.take()
     }
 }
 
@@ -188,7 +192,12 @@ fn match_ds_re(def: &str) -> Option<(&str, &str, &str)> {
 }
 
 /// rrd_create.c:328 `parseDS`.
-fn parse_ds(def: &str, ds_def: &mut [u8; DS_DEF_LEN], version: &mut &str, error: &mut ErrorSlot) {
+pub(crate) fn parse_ds(
+    def: &str,
+    ds_def: &mut [u8; DS_DEF_LEN],
+    version: &mut &str,
+    error: &mut ErrorSlot,
+) {
     let Some((name, dst, dst_args)) = match_ds_re(def) else {
         error.set("invalid DS format");
         return;
@@ -285,7 +294,12 @@ fn scan_min_max(text: &str) -> Option<(String, String)> {
 }
 
 /// rrd_create.c:480 `parseRRA` for AVERAGE, MIN, MAX and LAST.
-fn parse_rra(def: &str, rra_def: &mut [u8; RRA_DEF_LEN], pdp_step: u64, error: &mut ErrorSlot) {
+pub(crate) fn parse_rra(
+    def: &str,
+    rra_def: &mut [u8; RRA_DEF_LEN],
+    pdp_step: u64,
+    error: &mut ErrorSlot,
+) {
     let mut cf_nam = String::new();
     let mut pdp_cnt = 0_u64;
     let mut token_idx = 0;
@@ -448,7 +462,11 @@ fn rrd_init_data(
 /// rrd_create.c:1406 `write_rrd`: "-" goes to stdout; anything else is
 /// written to `<name>XXXXXX` beside the target, given the target's mode or
 /// 0644 regardless of umask, and renamed over it.
-fn write_rrd(filename: &str, bytes: &[u8], no_overwrite: bool) -> Result<(), StoreError> {
+pub(crate) fn write_rrd(
+    filename: &str,
+    bytes: &[u8],
+    no_overwrite: bool,
+) -> Result<(), StoreError> {
     if filename == "-" {
         let mut stdout = std::io::stdout().lock();
         stdout.write_all(bytes)?;
