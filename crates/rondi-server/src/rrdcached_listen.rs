@@ -220,21 +220,43 @@ fn fstatat(dir: &OwnedFd, name: &CStr) -> Option<libc::stat> {
     (status == 0).then_some(stat)
 }
 
-/// Whether only root, or the daemon itself when unprivileged, can add,
-/// rename, or remove entries in the socket's directory. A root daemon
-/// refuses a directory another account owns, or one writable by a non-root
-/// group or by others unless the sticky bit limits those writers to their
-/// own entries.
+/// Bind the JSON socket before starting runtime threads: staging uses fchdir.
+pub(crate) fn open_json_listener(
+    path: &std::path::Path,
+) -> std::io::Result<std::os::unix::net::UnixListener> {
+    let address = path.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "socket path must be UTF-8",
+        )
+    })?;
+    let mut listeners = Vec::new();
+    let config = RrdcachedListenAddress {
+        address: format!("unix:{address}"),
+        mode: Some(0o600),
+        group: None,
+        commands: None,
+    };
+    if !open_unix(&config, &mut listeners) {
+        return Err(std::io::Error::other(format!(
+            "cannot safely bind socket {}",
+            path.display()
+        )));
+    }
+    match listeners.pop().expect("successful Unix bind").socket {
+        RrdcachedSocket::Unix { listener, .. } => Ok(listener),
+        RrdcachedSocket::Tcp(_) => unreachable!("Unix socket requested"),
+    }
+}
+
+/// Require the binding account to own the directory; shared writers need
+/// the sticky bit so they cannot unlink or replace the daemon's socket.
 fn socket_parent_is_private(stat: &libc::stat) -> bool {
     // SAFETY: geteuid has no preconditions.
-    if unsafe { libc::geteuid() } != 0 {
-        return true;
-    }
-    let mode = stat.st_mode;
-    let sticky = mode & libc::S_ISVTX != 0;
-    let foreign_owner = stat.st_uid != 0;
-    let shared = mode & 0o002 != 0 || (mode & 0o020 != 0 && stat.st_gid != 0);
-    !foreign_owner && (!shared || sticky)
+    let owner = stat.st_uid == unsafe { libc::geteuid() };
+    let sticky = stat.st_mode & libc::S_ISVTX != 0;
+    let shared = stat.st_mode & 0o022 != 0;
+    owner && (!shared || sticky)
 }
 
 /// A fresh mode-0700 directory beside the socket path, created and used only
@@ -735,6 +757,29 @@ pub(crate) fn unblock_shutdown_signals() {
 #[cfg(test)]
 mod tests {
     use super::dirname;
+
+    #[test]
+    fn socket_directory_requires_daemon_owner_and_sticky_shared_writes() {
+        // SAFETY: zero is a valid stat representation; geteuid has no preconditions.
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        stat.st_uid = unsafe { libc::geteuid() };
+        for mode in [0o700, 0o755, 0o1700, 0o1770, 0o1777] {
+            stat.st_mode = mode;
+            assert!(super::socket_parent_is_private(&stat), "mode {mode:o}");
+        }
+        for mode in [0o770, 0o772, 0o777] {
+            stat.st_mode = mode;
+            assert!(!super::socket_parent_is_private(&stat), "mode {mode:o}");
+        }
+        stat.st_uid = stat.st_uid.wrapping_add(1);
+        for mode in [0o700, 0o1777] {
+            stat.st_mode = mode;
+            assert!(
+                !super::socket_parent_is_private(&stat),
+                "foreign owner, mode {mode:o}"
+            );
+        }
+    }
 
     #[test]
     fn dirname_follows_posix() {

@@ -3874,3 +3874,41 @@ fn rrdcached_idle_client_does_not_block_shutdown_flush() {
         1_000_000_010
     );
 }
+
+#[test]
+fn json_daemon_stages_private_socket_and_rejects_unsafe_paths() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("store");
+    let directory = temp.path().join("run");
+    std::fs::create_dir(&directory).unwrap();
+    let socket = directory.join("rondi.sock");
+    let victim = temp.path().join("victim");
+    std::fs::write(&victim, b"unchanged").unwrap();
+    std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o644)).unwrap();
+    symlink(&victim, &socket).unwrap();
+    let mut daemon = start_server(&root, &socket);
+    assert!(!daemon.wait().unwrap().success());
+    assert_eq!(std::fs::read(&victim).unwrap(), b"unchanged");
+    assert_eq!(
+        std::fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+        0o644
+    );
+    std::fs::remove_file(&socket).unwrap();
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o777)).unwrap();
+    let mut daemon = start_server(&root, &socket);
+    assert!(!daemon.wait().unwrap().success());
+    assert!(!socket.exists());
+    std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+    // A stale socket is replaced atomically; its permissions are set in staging.
+    drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+    let mut daemon = start_server(&root, &socket);
+    wait_for_socket(&mut daemon, &socket);
+    assert_eq!(
+        std::fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+}

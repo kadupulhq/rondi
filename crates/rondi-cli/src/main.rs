@@ -98,11 +98,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // thread exists, so it starts its own runtime afterwards.
         return rrdcached_mode(&std::env::args().skip(1).collect::<Vec<_>>());
     }
-    async_main()
+    let native = !matches!(
+        invoked_name().as_str(),
+        "rrdtool"
+            | "rrdupdate"
+            | "rrdcreate"
+            | "rrdinfo"
+            | "rrdtool-proxy"
+            | "rrdtool-proxy.php"
+            | "rrdproxy"
+    ) && std::env::args_os().nth(1).as_deref()
+        != Some(std::ffi::OsStr::new("--rrdproxy-launcher"));
+    let args = native.then(Args::parse);
+    let prepared = match args.as_ref() {
+        Some(args) if args.socket.is_none() => match &args.command {
+            Command::Server {
+                listen,
+                queue_capacity,
+            } => Some(rondi_server::prepare_server(rondi_server::ServerConfig {
+                root: args.root.clone(),
+                socket: listen.clone(),
+                queue_capacity: *queue_capacity,
+                store: StoreOptions {
+                    max_rows: args.max_rows,
+                    idempotency_window: std::time::Duration::from_secs(args.idempotency_window),
+                },
+            })?),
+            _ => None,
+        },
+        _ => None,
+    };
+    async_main(args, prepared)
 }
 
 #[tokio::main]
-async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
+async fn async_main(
+    parsed: Option<Args>,
+    prepared: Option<rondi_server::PreparedServer>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let invoked_as = invoked_name();
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--rrdproxy-launcher")) {
         return rrdproxy_mode(&std::env::args().skip(2).collect::<Vec<_>>());
@@ -132,7 +165,10 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return rrdproxy_mode(&std::env::args().skip(1).collect::<Vec<_>>());
     }
-    let args = Args::parse();
+    if let Some(prepared) = prepared {
+        return rondi_server::run(prepared).await;
+    }
+    let args = parsed.unwrap_or_else(Args::parse);
     if let Some(socket) = args.socket {
         return server_mode(socket, args.command).await;
     }
@@ -142,18 +178,8 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let store = Store::open_with(&args.root, options)?;
     match args.command {
-        Command::Server {
-            listen,
-            queue_capacity,
-        } => {
-            drop(store);
-            return rondi_server::run(rondi_server::ServerConfig {
-                root: args.root,
-                socket: listen,
-                queue_capacity,
-                store: options,
-            })
-            .await;
+        Command::Server { .. } => {
+            return Err("server must be prepared before starting runtime threads".into());
         }
         Command::Create {
             name,

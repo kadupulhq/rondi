@@ -227,6 +227,7 @@ pub(crate) fn inspect_path(path: &Path) -> Result<RrdInfo, StoreError> {
 /// from the descriptor it checked. `path` names it in errors.
 pub fn inspect_rrd_open_file(file: File, path: &Path) -> Result<RrdInfo, StoreError> {
     let mut file = RrdFileLock::shared(file)?;
+    file.seek(SeekFrom::Start(0))?;
     read_info(&mut file, path)
 }
 
@@ -242,7 +243,32 @@ pub(crate) fn fetch_path(
             "RRD fetch requires a positive resolution and end >= start".into(),
         ));
     }
-    let mut file = RrdFileLock::shared(open_rrd_read(path)?)?;
+    fetch_rrd_open_file(
+        open_rrd_read(path)?,
+        path,
+        consolidation,
+        requested_start,
+        requested_end,
+        requested_step,
+    )
+}
+
+/// Fetch from an already opened descriptor under a shared RRD lock.
+pub fn fetch_rrd_open_file(
+    file: File,
+    path: &Path,
+    consolidation: &str,
+    requested_start: i64,
+    requested_end: i64,
+    requested_step: u64,
+) -> Result<RrdFetchResult, StoreError> {
+    if requested_step == 0 || requested_end < requested_start {
+        return Err(StoreError::RrdUnsupported(
+            "RRD fetch requires a positive resolution and end >= start".into(),
+        ));
+    }
+    let mut file = RrdFileLock::shared(file)?;
+    file.seek(SeekFrom::Start(0))?;
     let info = read_info(&mut file, path)?;
     let archive_index = choose_archive(
         &info,
@@ -969,6 +995,7 @@ pub fn update_rrd_raw_batch_file(
     skip_past_updates: bool,
 ) -> Result<Vec<RrdUpdateSummary>, StoreError> {
     let mut file = RrdFileLock::exclusive(file)?;
+    file.seek(SeekFrom::Start(0))?;
     let mut info = read_info(&mut file, path)?;
     let mut state_cache = None;
     let mut summaries = Vec::new();
@@ -1482,6 +1509,7 @@ pub fn tune_rrd_data_sources_file(
     changes: &[RrdDataSourceTune],
 ) -> Result<(), StoreError> {
     let mut file = RrdFileLock::exclusive(file)?;
+    file.seek(SeekFrom::Start(0))?;
     let info = read_info(&mut file, path)?;
     if info.data_sources.iter().any(|source| {
         !matches!(
@@ -1607,6 +1635,11 @@ pub fn inspect_rrd_file(path: impl AsRef<Path>) -> Result<RrdInfo, StoreError> {
 /// Return RRDtool's first-row timestamp for an archive index.
 pub fn first_rrd_time(path: impl AsRef<Path>, archive_index: usize) -> Result<i64, StoreError> {
     let info = inspect_path(path.as_ref())?;
+    first_rrd_time_from_info(&info, archive_index)
+}
+
+/// Compute an archive's first timestamp from its inspected metadata.
+pub fn first_rrd_time_from_info(info: &RrdInfo, archive_index: usize) -> Result<i64, StoreError> {
     let archive = info
         .archives
         .get(archive_index)
@@ -1649,8 +1682,18 @@ pub fn dump_rrd_file_with_header(
     path: impl AsRef<Path>,
     header: RrdDumpHeader,
 ) -> Result<String, StoreError> {
-    let mut file = RrdFileLock::shared(open_rrd_read(path.as_ref())?)?;
-    let info = read_info(&mut file, path.as_ref())?;
+    dump_rrd_open_file(open_rrd_read(path.as_ref())?, path.as_ref(), header)
+}
+
+/// Dump an already opened descriptor under a shared RRD lock.
+pub fn dump_rrd_open_file(
+    file: File,
+    path: &Path,
+    header: RrdDumpHeader,
+) -> Result<String, StoreError> {
+    let mut file = RrdFileLock::shared(file)?;
+    file.seek(SeekFrom::Start(0))?;
+    let info = read_info(&mut file, path)?;
     if info.data_sources.iter().any(|ds| {
         !matches!(
             ds.kind.as_str(),

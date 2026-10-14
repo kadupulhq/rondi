@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::{Duration, timeout};
@@ -1347,7 +1347,11 @@ fn c_strtol_exact(text: &str) -> Option<i64> {
 /// the file, with their error texts: open, fstat, mmap of the whole file, and
 /// the static header. The header is read with pread, not through the mapping,
 /// so a file truncated meanwhile cannot fault the daemon.
-fn rrdcached_rrd_open(display: &str, path: &Path, read_write: bool) -> Result<(), String> {
+fn rrdcached_rrd_open(
+    display: &str,
+    path: &Path,
+    read_write: bool,
+) -> Result<std::fs::File, String> {
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::{FileExt, OpenOptionsExt};
     let errno = |error: &std::io::Error| rrdcached_strerror(error.raw_os_error().unwrap_or(0));
@@ -1355,7 +1359,7 @@ fn rrdcached_rrd_open(display: &str, path: &Path, read_write: bool) -> Result<()
     let file = OpenOptions::new()
         .read(true)
         .write(read_write)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOFOLLOW)
         .open(path)
         .map_err(|error| format!("opening '{display}': {}", errno(&error)))?;
     let length = file
@@ -1391,6 +1395,13 @@ fn rrdcached_rrd_open(display: &str, path: &Path, read_write: bool) -> Result<()
     }
     // SAFETY: `mapped` and `length` come from the successful mmap above.
     unsafe { libc::munmap(mapped, length) };
+    if !file
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .is_file()
+    {
+        return Err(format!("Not a regular file: {display}"));
+    }
     // stat_head_t: cookie[4], version[5], float_cookie at 16, then ds_cnt,
     // rra_cnt, pdp_step and par[10], 128 bytes in all.
     let mut header = [0_u8; 128];
@@ -1421,7 +1432,7 @@ fn rrdcached_rrd_open(display: &str, path: &Path, read_write: bool) -> Result<()
     if number > 5 {
         return Err(format!("can't handle RRD file version {version}"));
     }
-    Ok(())
+    Ok(file)
 }
 
 /// handle_request_update's checks for a file not yet cached
@@ -1452,8 +1463,9 @@ fn rrdcached_update_target(display: &str, path: &Path) -> Result<rondi::RrdInfo,
             rrdcached_strerror(error.raw_os_error().unwrap_or(0))
         ));
     }
-    rrdcached_rrd_open(display, path, false).map_err(|error| format!("RRD Error: {error}"))?;
-    rondi::inspect_rrd_file(path).map_err(|error| format!("RRD Error: {error}"))
+    let file =
+        rrdcached_rrd_open(display, path, false).map_err(|error| format!("RRD Error: {error}"))?;
+    rondi::inspect_rrd_open_file(file, path).map_err(|error| format!("RRD Error: {error}"))
 }
 
 /// Reading the RRD can wait on another process's file lock, so callers do it
@@ -1463,7 +1475,8 @@ fn inspect_rrdcached_target(path: &Path) -> Result<rondi::RrdInfo, String> {
     if !metadata.is_file() {
         return Err(format!("Not a regular file: {}", path.display()));
     }
-    rondi::inspect_rrd_file(path).map_err(|error| error.to_string())
+    let file = rrdcached_rrd_open(&path.display().to_string(), path, false)?;
+    rondi::inspect_rrd_open_file(file, path).map_err(|error| error.to_string())
 }
 
 #[derive(Deserialize)]
@@ -1484,9 +1497,16 @@ struct Pending {
     reply: oneshot::Sender<Result<(), StoreError>>,
 }
 
-/// Run the local HTTP/JSON daemon. The Store's advisory lock owns its root for
-/// this function's lifetime.
-pub async fn run(args: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
+/// A JSON daemon prepared before runtime threads start.
+pub struct PreparedServer {
+    args: ServerConfig,
+    store: Store,
+    listener: std::os::unix::net::UnixListener,
+}
+
+/// Recover the store and publish a mode-0600 socket using a private staging
+/// directory. Call before starting any threads because binding uses fchdir.
+pub fn prepare_server(args: ServerConfig) -> Result<PreparedServer, Box<dyn std::error::Error>> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()
@@ -1505,38 +1525,23 @@ pub async fn run(args: ServerConfig) -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     tracing::info!(root = %args.root.display(), recovered = replayed, "server_started");
-    if let Some(parent) = args.socket.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if args.socket.exists() {
-        use std::os::unix::fs::FileTypeExt;
-        match UnixStream::connect(&args.socket).await {
-            Ok(_) => {
-                return Err(format!(
-                    "socket is already accepting connections: {}",
-                    args.socket.display()
-                )
-                .into());
-            }
-            Err(_)
-                if std::fs::symlink_metadata(&args.socket)?
-                    .file_type()
-                    .is_socket() =>
-            {
-                std::fs::remove_file(&args.socket)?;
-            }
-            Err(error) => {
-                return Err(format!(
-                    "refusing to replace existing non-socket path {}: {error}",
-                    args.socket.display()
-                )
-                .into());
-            }
-        }
-    }
-    let listener = UnixListener::bind(&args.socket)?;
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&args.socket, std::fs::Permissions::from_mode(0o600))?;
+    let listener = rrdcached_listen::open_json_listener(&args.socket)?;
+    listener.set_nonblocking(true)?;
+    Ok(PreparedServer {
+        args,
+        store,
+        listener,
+    })
+}
+
+/// Run the prepared local HTTP/JSON daemon, holding its store lock until exit.
+pub async fn run(prepared: PreparedServer) -> Result<(), Box<dyn std::error::Error>> {
+    let PreparedServer {
+        args,
+        store,
+        listener,
+    } = prepared;
+    let listener = UnixListener::from_std(listener)?;
     let (tx, mut rx) = mpsc::channel::<Pending>(args.queue_capacity);
     let store = Arc::new(store);
     let worker_store = Arc::clone(&store);
@@ -2496,12 +2501,14 @@ fn handle_rrdcached_line(
                 ));
             };
             match rrdcached_rrd_open(&display, &path, false)
-                .and_then(|()| rondi::inspect_rrd_file(&path).map_err(|error| error.to_string()))
+                .and_then(|file| {
+                    rondi::inspect_rrd_open_file(file, &path).map_err(|error| error.to_string())
+                })
                 .and_then(|info| {
                     if index >= info.archives.len() {
                         return Err("invalid rraindex number".to_owned());
                     }
-                    rondi::first_rrd_time(&path, index).map_err(|error| error.to_string())
+                    rondi::first_rrd_time_from_info(&info, index).map_err(|error| error.to_string())
                 }) {
                 Ok(timestamp) => format!("0 {timestamp}\n"),
                 Err(error) => format!("-1 RRD Error: {error}\n"),
@@ -2582,8 +2589,8 @@ fn handle_rrdcached_line(
             // RRDtool 1.11.0's daemon handler reads only the filename and
             // always calls rrd_dump_cb_r with the default DTD header.
             // Trailing header options are therefore ignored on the wire.
-            match rrdcached_rrd_open(&base.abs(given), &path, false).and_then(|()| {
-                rondi::dump_rrd_file_with_header(&path, rondi::RrdDumpHeader::Dtd)
+            match rrdcached_rrd_open(&base.abs(given), &path, false).and_then(|file| {
+                rondi::dump_rrd_open_file(file, &path, rondi::RrdDumpHeader::Dtd)
                     .map_err(|error| error.to_string())
             }) {
                 Ok(xml) => return RrdcachedReply::TextThenClose(xml),
@@ -2768,8 +2775,10 @@ fn rrdcached_help(fields: &[&str]) -> String {
 fn rrdcached_info(base: &RrdcachedBase, filename: &str) -> Result<String, String> {
     let path = base.target(filename)?;
     let echo = base.abs(filename);
-    rrdcached_rrd_open(&echo, &path, false).map_err(|error| format!("RRD Error: {error}"))?;
-    let info = rondi::inspect_rrd_file(&path).map_err(|error| format!("RRD Error: {error}"))?;
+    let file =
+        rrdcached_rrd_open(&echo, &path, false).map_err(|error| format!("RRD Error: {error}"))?;
+    let info =
+        rondi::inspect_rrd_open_file(file, &path).map_err(|error| format!("RRD Error: {error}"))?;
     let mut lines = vec![
         format!("filename 2 {echo}"),
         format!("rrd_version 2 {}", info.version),
@@ -2848,9 +2857,10 @@ fn rrdcached_last(
     queue: &Mutex<RrdcachedQueue>,
 ) -> Result<i64, String> {
     let path = base.target(filename)?;
-    rrdcached_rrd_open(&base.abs(filename), &path, false)
+    let file = rrdcached_rrd_open(&base.abs(filename), &path, false)
         .map_err(|error| format!("RRD Error: {error}"))?;
-    let info = rondi::inspect_rrd_file(&path).map_err(|error| format!("RRD Error: {error}"))?;
+    let info =
+        rondi::inspect_rrd_open_file(file, &path).map_err(|error| format!("RRD Error: {error}"))?;
     // handle_request_last prefers the cache's newest accepted stamp.
     let cached_stamp = queue
         .lock()
@@ -2891,7 +2901,10 @@ fn pending_entry_bytes(samples: &[String]) -> usize {
 }
 
 fn tune_rrdcached_file(path: &Path, arguments: &[&str]) -> Result<(), String> {
-    let info = rondi::inspect_rrd_file(path).map_err(|error| error.to_string())?;
+    let file = open_rrdcached_write_target(path)?;
+    let info =
+        rondi::inspect_rrd_open_file(file.try_clone().map_err(|error| error.to_string())?, path)
+            .map_err(|error| error.to_string())?;
     let mut changes = info
         .data_sources
         .iter()
@@ -2986,8 +2999,7 @@ fn tune_rrdcached_file(path: &Path, arguments: &[&str]) -> Result<(), String> {
         }
         index += 1;
     }
-    rondi::tune_rrd_data_sources_file(open_rrdcached_write_target(path)?, path, &changes)
-        .map_err(|error| error.to_string())
+    rondi::tune_rrd_data_sources_file(file, path, &changes).map_err(|error| error.to_string())
 }
 
 fn rrdcached_list(base: &RrdcachedBase, fields: &[&str]) -> Result<String, String> {
@@ -3154,9 +3166,11 @@ fn rrdcached_fetch_data(
             fields[1]
         ));
     }
-    rrdcached_rrd_open(&base.abs(fields[0]), &path, false)
+    let file = rrdcached_rrd_open(&base.abs(fields[0]), &path, false)
         .map_err(|error| format!("rrd_fetch_r failed: {error}"))?;
-    let info = rondi::inspect_rrd_file(&path).map_err(|error| error.to_string())?;
+    let info =
+        rondi::inspect_rrd_open_file(file.try_clone().map_err(|error| error.to_string())?, &path)
+            .map_err(|error| error.to_string())?;
     let start = fields
         .get(2)
         .map(|value| value.parse::<i64>().map_err(|error| error.to_string()))
@@ -3167,14 +3181,16 @@ fn rrdcached_fetch_data(
         .map(|value| value.parse::<i64>().map_err(|error| error.to_string()))
         .transpose()?
         .unwrap_or(info.last_update);
-    let result = rondi::fetch_rrd_file(&path, fields[1], start, end, 1).map_err(|error| {
-        let error = error.to_string();
-        if error.contains("no archive matching consolidation function") {
-            "rrd_fetch_r failed: the RRD does not contain an RRA matching the chosen CF".to_owned()
-        } else {
-            error
-        }
-    })?;
+    let result =
+        rondi::fetch_rrd_open_file(file, &path, fields[1], start, end, 1).map_err(|error| {
+            let error = error.to_string();
+            if error.contains("no archive matching consolidation function") {
+                "rrd_fetch_r failed: the RRD does not contain an RRA matching the chosen CF"
+                    .to_owned()
+            } else {
+                error
+            }
+        })?;
     let selected = if fields.len() > 4 {
         fields[4..]
             .iter()
@@ -3465,7 +3481,10 @@ fn open_rrdcached_write_target(path: &Path) -> Result<File, String> {
 /// samples applied in turn, and the first failure stops the rest, leaving
 /// earlier ones written.
 fn update_rrdcached_file(path: &Path, samples: &[&str]) -> Result<(), String> {
-    let info = rondi::inspect_rrd_file(path).map_err(|error| error.to_string())?;
+    let file = open_rrdcached_write_target(path)?;
+    let info =
+        rondi::inspect_rrd_open_file(file.try_clone().map_err(|error| error.to_string())?, path)
+            .map_err(|error| error.to_string())?;
     let mut updates = Vec::with_capacity(samples.len());
     let mut failure = None;
     for sample in samples {
@@ -3506,7 +3525,7 @@ fn update_rrdcached_file(path: &Path, samples: &[&str]) -> Result<(), String> {
         }
     }
     if !updates.is_empty() {
-        rondi::update_rrd_raw_batch_file(open_rrdcached_write_target(path)?, path, &updates, false)
+        rondi::update_rrd_raw_batch_file(file, path, &updates, false)
             .map_err(|error| error.to_string())?;
     }
     failure.map_or(Ok(()), Err)
@@ -3773,6 +3792,63 @@ mod rrdcached_queue_tests {
                 RrdcachedReply::Close => String::new(),
             },
         }
+    }
+
+    #[test]
+    fn daemon_reads_reject_replacement_symlinks_and_keep_opened_inode() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let path = root.join("metric.rrd");
+        let other = root.join("other.rrd");
+        for (file, stamp) in [(&path, 1_000_000_000), (&other, 1_100_000_000)] {
+            rondi::create_rrd_file(
+                file,
+                stamp,
+                10,
+                &["DS:value:GAUGE:30:U:U".to_owned()],
+                &["RRA:AVERAGE:0.5:1:8".to_owned()],
+                true,
+            )
+            .unwrap();
+        }
+        rondi::update_rrd_file(&path, 1_000_000_010, Some(3.0)).unwrap();
+        let target = test_base(&root).target("metric.rrd").unwrap();
+        let file = rrdcached_rrd_open("metric.rrd", &target, false).unwrap();
+        let expected_dump = rondi::dump_rrd_file(&path).unwrap();
+        let expected_fetch =
+            rondi::fetch_rrd_file(&path, "AVERAGE", 999_999_920, 1_000_000_010, 10).unwrap();
+        std::fs::rename(&path, root.join("original.rrd")).unwrap();
+        symlink(&other, &path).unwrap();
+        assert!(rrdcached_rrd_open("metric.rrd", &target, false).is_err());
+        assert!(inspect_rrdcached_target(&target).is_err());
+        let info = rondi::inspect_rrd_open_file(file.try_clone().unwrap(), &target).unwrap();
+        assert_eq!(info.last_update, 1_000_000_010);
+        assert_eq!(
+            rondi::first_rrd_time_from_info(&info, 0).unwrap(),
+            999_999_940
+        );
+        assert_eq!(
+            rondi::dump_rrd_open_file(
+                file.try_clone().unwrap(),
+                &target,
+                rondi::RrdDumpHeader::Dtd
+            )
+            .unwrap(),
+            expected_dump
+        );
+        let fetched =
+            rondi::fetch_rrd_open_file(file, &target, "AVERAGE", 999_999_920, 1_000_000_010, 10)
+                .unwrap();
+        assert_eq!(fetched.start, expected_fetch.start);
+        assert_eq!(fetched.end, expected_fetch.end);
+        assert_eq!(fetched.rows, expected_fetch.rows);
+        assert!(
+            fetched
+                .rows
+                .iter()
+                .any(|row| row.values.contains(&Some(3.0)))
+        );
     }
 
     #[test]
