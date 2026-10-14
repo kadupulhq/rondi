@@ -730,14 +730,39 @@ fn apply_update(
         )?;
     }
 
-    // All format and semantic checks precede the first write.
-    for (offset, row) in &row_writes {
-        file.seek(SeekFrom::Start(*offset))?;
-        let mut bytes = Vec::with_capacity(row.len() * VALUE_LEN);
-        for value in row {
+    // All format and semantic checks precede the first write. rrd_write
+    // refuses a value that would end past the mapped file, which a damaged
+    // row_cnt can address; write_RRA_row then fails with errno still 0.
+    // What was written stays, the prep areas and rra_ptr included, but
+    // last_up does not move.
+    let file_len = file.metadata()?.len();
+    let mut written_rows = info
+        .archives
+        .iter()
+        .map(|archive| archive.current_row)
+        .collect::<Vec<_>>();
+    let mut past_end = false;
+    'rows: for write in &row_writes {
+        written_rows[write.archive] = write.current_row;
+        let mut bytes = Vec::with_capacity(write.values.len() * VALUE_LEN);
+        for value in &write.values {
+            let end = write
+                .offset
+                .checked_add((bytes.len() + VALUE_LEN) as u64)
+                .filter(|end| *end <= file_len);
+            if end.is_none() {
+                past_end = true;
+                break;
+            }
             bytes.extend_from_slice(&value.to_le_bytes());
         }
-        file.write_all(&bytes)?;
+        if !bytes.is_empty() {
+            file.seek(SeekFrom::Start(write.offset))?;
+            file.write_all(&bytes)?;
+        }
+        if past_end {
+            break 'rows;
+        }
     }
     let mut state = match state_cache.take() {
         Some(state) => state,
@@ -762,7 +787,7 @@ fn apply_update(
         put_f64(&mut state, offset + 64, scratch.primary_value);
         put_f64(&mut state, offset + 72, scratch.secondary_value);
     }
-    for (index, current_row) in current_rows.iter().enumerate() {
+    for (index, current_row) in written_rows.iter().enumerate() {
         put_u64(
             &mut state,
             pointer_start - pdp_start + index * RRA_PTR_LEN,
@@ -771,6 +796,13 @@ fn apply_update(
     }
     file.seek(SeekFrom::Start(pdp_start as u64))?;
     file.write_all(&state)?;
+    if past_end {
+        *state_cache = None;
+        return Err(StoreError::Rrd(format!(
+            "writing rrd: {}",
+            rrd_strerror(&std::io::Error::from_raw_os_error(0))
+        )));
+    }
     file.seek(SeekFrom::Start(live_start as u64))?;
     file.write_all(&timestamp.to_le_bytes())?;
     // rrd_update.c:2509-2520 writes only the time_t before version 3.
@@ -1327,7 +1359,7 @@ fn write_rra_rows(
     current_rows: &mut [u64],
     row_counts: &[u64],
     current_time: i64,
-    row_writes: &mut Vec<(u64, Vec<f64>)>,
+    row_writes: &mut Vec<RowWrite>,
     summaries: &mut Vec<RrdUpdateSummary>,
 ) -> Result<(), StoreError> {
     let ds_count = info.data_sources.len();
@@ -1336,10 +1368,11 @@ fn write_rra_rows(
         if remaining == 0 {
             continue;
         }
-        let step_time = archive
-            .pdp_per_row
-            .checked_mul(info.step)
-            .ok_or_else(|| rrd_error("RRD archive step overflows"))?;
+        // unsigned long arithmetic, as in write_to_rras.
+        let step_time = archive.pdp_per_row.wrapping_mul(info.step);
+        if step_time == 0 {
+            return Err(divides_by_zero());
+        }
         let time = current_time as u64;
         let base_time = time.wrapping_sub(time % step_time);
         let mut step_subtract = 1_u64;
@@ -1360,10 +1393,9 @@ fn write_rra_rows(
                     }
                 })
                 .collect::<Vec<_>>();
-            let offset = current_row
-                .checked_mul(ds_count as u64 * VALUE_LEN as u64)
-                .and_then(|offset| archive.data_offset.checked_add(offset))
-                .ok_or_else(|| rrd_error("RRD archive row offset overflows"))?;
+            let offset = archive
+                .data_offset
+                .wrapping_add(current_row.wrapping_mul(ds_count as u64 * VALUE_LEN as u64));
             // RRDtool derives the reported time from the count it is
             // decrementing, so rows after the second report later times.
             let row_time = base_time.wrapping_sub(
@@ -1377,12 +1409,25 @@ fn write_rra_rows(
                 pdp_per_row: archive.pdp_per_row,
                 values: row.clone(),
             });
-            row_writes.push((offset, row));
+            row_writes.push(RowWrite {
+                offset,
+                values: row,
+                archive: archive_index,
+                current_row: *current_row,
+            });
             remaining -= 1;
             step_subtract = 2;
         }
     }
     Ok(())
+}
+
+/// One row write_to_rras stores, with the rra_ptr it set just before.
+struct RowWrite {
+    offset: u64,
+    values: Vec<f64>,
+    archive: usize,
+    current_row: u64,
 }
 
 /// One archive row written by a verbose RRDtool-compatible update.
@@ -1723,27 +1768,30 @@ pub fn first_rrd_time_from_info(info: &RrdInfo, archive_index: usize) -> Result<
         .archives
         .get(archive_index)
         .ok_or_else(|| StoreError::Rrd("invalid rraindex number".into()))?;
-    let resolution = info
-        .step
-        .checked_mul(archive.pdp_per_row)
-        .and_then(|value| i64::try_from(value).ok())
-        .ok_or_else(|| rrd_error("RRD archive resolution overflows"))?;
-    let aligned_last = info
-        .last_update
-        .checked_sub(
-            info.last_update
-                .checked_rem_euclid(resolution)
-                .ok_or_else(divides_by_zero)?,
-        )
-        .ok_or_else(|| rrd_error("RRD first timestamp alignment overflows"))?;
     // rrd_first.c:109 negates the unsigned row_cnt - 1, so an empty archive
     // starts one resolution after its end.
-    let retained = (archive.rows.wrapping_sub(1) as i64)
-        .checked_mul(resolution)
-        .ok_or_else(|| rrd_error("RRD archive range overflows"))?;
-    aligned_last
-        .checked_sub(retained)
-        .ok_or_else(|| rrd_error("RRD first timestamp overflows"))
+    rra_row_time(
+        info,
+        archive,
+        (archive.rows.wrapping_sub(1) as i64).wrapping_neg(),
+    )
+}
+
+/// The time of the row `timer` resolutions before an archive's newest one,
+/// computed as rrd_first.c:113 and rrd_dump.c:427 do: `last_up % (pdp_cnt *
+/// pdp_step)` converts last_up to unsigned long, and all of it wraps.
+fn rra_row_time(info: &RrdInfo, archive: &RrdArchiveInfo, timer: i64) -> Result<i64, StoreError> {
+    let resolution = archive.pdp_per_row.wrapping_mul(info.step);
+    if resolution == 0 {
+        return Err(divides_by_zero());
+    }
+    let last = info.last_update as u64;
+    let offset = timer
+        .wrapping_mul(archive.pdp_per_row as i64)
+        .wrapping_mul(info.step as i64);
+    Ok(last
+        .wrapping_sub(last % resolution)
+        .wrapping_add(offset as u64) as i64)
 }
 
 /// Dump a supported v3 RRDtool file in the upstream XML format.
@@ -1872,22 +1920,9 @@ pub fn dump_rrd_open_file_bytes(
         out.extend_from_slice(b"\t</ds>\n\n");
     }
     out.extend_from_slice(b"\t<!-- Round Robin Archives -->\n");
-    let step_i64 = i64::try_from(info.step).map_err(|_| rrd_error("RRD step overflows"))?;
+    let file_len = file.metadata()?.len();
     for archive in &info.archives {
-        let resolution = step_i64
-            .checked_mul(
-                i64::try_from(archive.pdp_per_row)
-                    .map_err(|_| rrd_error("RRA resolution overflows"))?,
-            )
-            .ok_or_else(|| rrd_error("RRA resolution overflows"))?;
-        let aligned_last = info
-            .last_update
-            .checked_sub(
-                info.last_update
-                    .checked_rem_euclid(resolution)
-                    .ok_or_else(divides_by_zero)?,
-            )
-            .ok_or_else(|| rrd_error("RRD last timestamp alignment overflows"))?;
+        let resolution = archive.pdp_per_row.wrapping_mul(info.step);
         out.extend_from_slice(b"\t<rra>\n\t\t<cf>");
         out.extend_from_slice(&archive.raw_consolidation);
         out.extend_from_slice(b"</cf>\n");
@@ -1924,8 +1959,22 @@ pub fn dump_rrd_open_file_bytes(
             out.extend_from_slice(b"\t\t\t</ds>\n");
         }
         out.extend_from_slice(b"\t\t</cdp_prep>\n\t\t<database>\n");
-        let rows =
-            usize::try_from(archive.rows).map_err(|_| rrd_error("RRA row count overflows"))?;
+        // A damaged row_cnt can describe rows past the end of the file.
+        // rrd_dump.c walks them with an unsigned int counter, so above
+        // UINT_MAX rows it never finishes, and below that it reads outside
+        // the mapping. Refuse instead; see docs/COMPATIBILITY_DEFECTS.md.
+        let row_bytes = info.data_sources.len() as u64 * VALUE_LEN as u64;
+        let in_file = archive
+            .rows
+            .checked_mul(row_bytes)
+            .and_then(|length| archive.data_offset.checked_add(length))
+            .is_some_and(|end| end <= file_len);
+        if !in_file {
+            return Err(StoreError::RrdFormat(
+                "RRA rows extend past the end of the file".into(),
+            ));
+        }
+        let rows = archive.rows as usize;
         // rrd_dump.c:330-340 steps past cur_row and wraps to row 0 once it
         // reaches row_cnt, so a cur_row at or past the end starts at row 0.
         let first_row = match archive.current_row.checked_add(1) {
@@ -1943,13 +1992,7 @@ pub fn dump_rrd_open_file_bytes(
                 )
                 .ok_or_else(|| rrd_error("RRD row offset overflows"))?;
             file.seek(SeekFrom::Start(offset))?;
-            let timestamp = aligned_last
-                .checked_add(
-                    (row as i64 - (rows as i64 - 1))
-                        .checked_mul(resolution)
-                        .ok_or_else(|| rrd_error("RRD dump timestamp overflows"))?,
-                )
-                .ok_or_else(|| rrd_error("RRD dump timestamp overflows"))?;
+            let timestamp = rra_row_time(&info, archive, row as i64 - (rows as i64 - 1))?;
             write!(
                 out,
                 "\t\t\t<!-- {} / {} --> <row>",
@@ -2244,7 +2287,11 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
     }
 
     let mut archives = Vec::with_capacity(rra_count);
-    let mut archive_data_start = data_start;
+    // rrd_open.c:560-566 and every reader size the archives in unsigned
+    // long arithmetic that wraps, and check only the wrapped total against
+    // the file length. A huge row_cnt therefore still opens; the readers
+    // below refuse rows that fall outside the file instead of reading them.
+    let mut archive_data_start = data_start as u64;
     for index in 0..rra_count {
         let start = checked_add(rra_start, checked_mul(index, RRA_DEF_LEN)?)?;
         let raw_consolidation = fixed_bytes(bytes, start, 20)?;
@@ -2255,15 +2302,11 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
             bytes,
             checked_add(pointer_start, checked_mul(index, RRA_PTR_LEN)?)?,
         )?;
-        let archive_bytes = checked_mul(
-            checked_mul(
-                usize::try_from(rows).map_err(|_| rrd_error("row count overflows"))?,
-                ds_count,
-            )?,
-            VALUE_LEN,
-        )?;
+        let archive_bytes = rows
+            .wrapping_mul(ds_count as u64)
+            .wrapping_mul(VALUE_LEN as u64);
         let data_offset = archive_data_start;
-        archive_data_start = checked_add(archive_data_start, archive_bytes)?;
+        archive_data_start = archive_data_start.wrapping_add(archive_bytes);
         let mut cdp_prep = Vec::with_capacity(ds_count);
         for ds_index in 0..ds_count {
             let prep_offset = checked_add(
@@ -2288,10 +2331,10 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
             xff,
             current_row,
             cdp_prep,
-            data_offset: data_offset as u64,
+            data_offset,
         });
     }
-    if archive_data_start > file_len {
+    if archive_data_start > file_len as u64 {
         return Err(StoreError::RrdFormat(
             "RRD file is shorter than its declared archive layout".into(),
         ));

@@ -127,3 +127,48 @@ fn fetch_without_matching_rra_uses_rrd_fetch_message() {
     };
     sides.assert_same(&["fetch", "t.rrd", "HWPREDICT", "-s", "1000000000"]);
 }
+
+// rrd_open sizes the archives in wrapping unsigned long arithmetic, so a
+// row_cnt of 2^61 + 10 adds the same 80 bytes as 10 and the file opens.
+// update then runs into the end of the file in rrd_write.
+#[test]
+fn huge_row_count_wraps_like_rrd_open() {
+    let Some(sides) = fixture() else {
+        return;
+    };
+    patch(&sides, rra_def(3) + 24, &((1_u64 << 61) + 10).to_le_bytes());
+    for args in [
+        &["info", "t.rrd"][..],
+        &["first", "t.rrd"],
+        &["last", "t.rrd"],
+        &["lastupdate", "t.rrd"],
+        &[
+            "fetch",
+            "t.rrd",
+            "AVERAGE",
+            "-s",
+            "1000000000",
+            "-e",
+            "1000001200",
+        ],
+        &["tune", "t.rrd", "-h", "g:900"],
+        &["update", "t.rrd", "1000020000:5"],
+    ] {
+        sides.assert_same_bytes(args);
+    }
+    sides.assert_same_file("t.rrd");
+}
+
+// pdp_cnt * pdp_step wraps too: 2^62 + 2 PDPs of 300 s is 600 s, and
+// 2^64 - 1 PDPs is -300 s, which first and dump use as they are.
+#[test]
+fn huge_pdp_count_wraps_like_rrd_first_and_dump() {
+    let Some(sides) = fixture() else {
+        return;
+    };
+    patch(&sides, rra_def(3) + 32, &((1_u64 << 62) + 2).to_le_bytes());
+    sides.assert_same(&["dump", "t.rrd"]);
+    sides.assert_same(&["first", "t.rrd", "--rraindex", "3"]);
+    patch(&sides, rra_def(0) + 32, &u64::MAX.to_le_bytes());
+    sides.assert_same(&["first", "t.rrd"]);
+}
