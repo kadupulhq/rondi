@@ -1,12 +1,29 @@
+/// C library conversions RRDtool's command parsers call, either through
+/// libc itself or as ports of RRDtool's own helpers in rrd_strtod.c.
+mod cparse;
+/// Option parsing for `graph`, `graphv` and `xport`, ported from
+/// `rrd_graph_options` (rrd_graph.c:5042) and `rrd_xport` (rrd_xport.c:76).
+/// Options that only affect Cairo/Pango rendering are validated exactly as
+/// upstream validates them and then left unused.
+mod graph_options;
+/// Port of RRDtool 1.11.0 `src/optparse.c`, the option parser every
+/// `rrdtool` command uses. Non-option words are permuted to the end of
+/// `argv`, so after the loop `argv[optind..]` holds the positionals in their
+/// original order.
+mod optparse;
+
+use optparse::{ArgType, LongOpt, OptParse, opt};
+
 use clap::{Parser, Subcommand};
 use rondi::time::{
     UpdateTimestamp, parse_rrd_update_timestamp, resolve_rrd_range_times, rrd_parsetime,
+    rrd_proc_start_end,
 };
 use rondi::{
     DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, DatabaseConfig, RrdDataSourceTune, RrdDumpHeader,
-    RrdResizeAction, RrdTuneBound, Store, StoreOptions, Update, create_rrd_file,
-    dump_rrd_file_with_header, fetch_rrd_file, first_rrd_time, parse_rrd_scaled_duration,
-    resize_rrd_file, restore_rrd_file, tune_rrd_data_sources, update_rrd_text,
+    RrdResizeAction, RrdTuneBound, Store, StoreOptions, Update, dump_rrd_file_with_header,
+    fetch_rrd_file, first_rrd_time, parse_rrd_scaled_duration, resize_rrd_file, restore_rrd_file,
+    tune_rrd_data_sources, update_rrd_text,
 };
 use std::fmt::Write as FmtWrite;
 use std::io::{BufRead, Read, Write};
@@ -74,7 +91,7 @@ fn invoked_name() -> String {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::args().nth(1).as_deref() != Some("--rrdproxy-launcher")
+    if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--rrdproxy-launcher"))
         && invoked_name() == "rrdcached"
     {
         // rrdcached binds its sockets and drops privileges before any runtime
@@ -87,59 +104,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::main]
 async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let invoked_as = invoked_name();
-    if std::env::args().nth(1).as_deref() == Some("--rrdproxy-launcher") {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--rrdproxy-launcher")) {
         return rrdproxy_mode(&std::env::args().skip(2).collect::<Vec<_>>());
     }
     if invoked_as == "rrdtool" {
         initialize_rrdtool_locale();
-        let args = std::env::args().collect::<Vec<_>>();
-        if args.get(1).is_some_and(|arg| arg == "-") {
-            return rrdtool_batch();
-        }
-        if args.len() == 1 {
-            print!("{}", rrdtool_usage(false));
-            return Ok(());
-        }
-        // `rrdtool help <command>` is the three-argument spelling of
-        // `rrdtool <command>`; both print that command's usage.
-        let command_args = if args.len() == 3 && args[1] == "help" {
-            &args[2..]
-        } else {
-            &args[1..]
-        };
-        if command_args.len() == 1 && !RRDTOOL_COMMANDS.contains(&command_args[0].as_str()) {
-            print!("{}", rrdtool_command_usage(&command_args[0]));
-            return Ok(());
-        }
-        if let Some(text) = rrdtool_builtin_reply(command_args, false) {
-            print!("{text}");
-            return Ok(());
-        }
-        let result = match command_args[0].as_str() {
-            "create" => rrdtool_create(command_args),
-            "fetch" => rrdtool_fetch(command_args),
-            "update" => rrdtool_update(command_args),
-            "updatev" => rrdtool_updatev(command_args),
-            "last" => print_minus_one_on_error(rrdtool_last(command_args)),
-            "lastupdate" => rrdtool_lastupdate(command_args),
-            "first" => print_minus_one_on_error(rrdtool_first(command_args)),
-            "info" => rrdtool_info(command_args),
-            "dump" => rrdtool_dump(command_args),
-            "restore" => rrdtool_restore(command_args),
-            "tune" => rrdtool_tune(command_args),
-            "list" => rrdtool_list(command_args),
-            "resize" => rrdtool_resize(command_args),
-            "xport" => rrdtool_xport(command_args),
-            "graph" => rrdtool_graph(command_args, false),
-            "graphv" => rrdtool_graph(command_args, true),
-            "flushcached" => rrdtool_flushcached(command_args),
-            command => Err(format!("unknown function '{command}'").into()),
-        };
-        if let Err(error) = result {
-            eprintln!("ERROR: {error}");
-            std::process::exit(1);
-        }
-        return Ok(());
+        // RRDtool passes argv bytes through; Rust strings cannot hold
+        // invalid UTF-8, so such bytes become U+FFFD instead of panicking.
+        let args = std::env::args_os()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let status = rrdtool_main(&args);
+        let _ = std::io::stdout().flush();
+        std::process::exit(status);
+    }
+    if matches!(invoked_as.as_str(), "rrdupdate" | "rrdcreate" | "rrdinfo") {
+        let args = std::env::args_os()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let status = rrdupdate_main(&invoked_as, &args);
+        let _ = std::io::stdout().flush();
+        std::process::exit(status);
     }
     if invoked_as == "rrdtool-proxy"
         || invoked_as == "rrdtool-proxy.php"
@@ -899,109 +884,410 @@ fn rrdtool_usage(remote: bool) -> String {
     text
 }
 
-/// Usage for a lone argument that is not a data command. Kadupul reads the
-/// version from this banner, so `-v` and unknown words print it and succeed.
-fn rrdtool_command_usage(command: &str) -> String {
+/// `PrintUsage` (rrd_tool.c:43). Kadupul reads the version from this
+/// banner, so `-v` and unknown words print it and succeed.
+fn print_usage(command: &str, remote: bool) {
+    if RRDTOOL_COMMANDS.contains(&command) {
+        // Each command prints its own usage when given no arguments.
+        let _ = rrdtool_dispatch(&[command.to_owned()]);
+        return;
+    }
     let body = match command {
         "quit" => " * quit - closing a session in remote mode\n\n\trrdtool quit\n",
         "ls" => " * ls - lists all *.rrd files in current directory\n\n\trrdtool ls\n",
         "cd" => " * cd - changes the current directory\n\n\trrdtool cd new directory\n",
         "mkdir" => " * mkdir - creates a new directory\n\n\trrdtool mkdir newdirectoryname\n",
         "pwd" => " * pwd - returns the current working directory\n\n\trrdtool pwd\n",
-        _ => return rrdtool_usage(false),
+        _ => {
+            print!("{}", rrdtool_usage(remote));
+            return;
+        }
     };
-    format!("{RRDTOOL_USAGE_HEADER}{body}\n{RRDTOOL_USAGE_FOOTER}")
+    print!("{RRDTOOL_USAGE_HEADER}{body}\n{RRDTOOL_USAGE_FOOTER}");
 }
 
-/// Replies RRDtool produces before command dispatch once at least a command
-/// and one argument are present.
-fn rrdtool_builtin_reply(args: &[String], remote: bool) -> Option<String> {
-    match args.first()?.as_str() {
-        "help" | "--help" | "-help" | "-?" | "-h" => Some(rrdtool_usage(remote)),
-        "--version" | "version" | "v" | "-v" | "-version" => {
-            Some("RRDtool 1.11.0  Copyright by Tobi Oetiker (1.011000)\n".to_owned())
+/// rrd_tool.c:447 `main` after `setlocale`. Returns the exit status.
+fn rrdtool_main(argv: &[String]) -> i32 {
+    match argv.len() {
+        1 => {
+            print_usage("", false);
+            0
         }
-        _ => None,
+        2 | 3 if argv[1] == "-" => rrdtool_batch(argv),
+        2 => {
+            print_usage(&argv[1], false);
+            0
+        }
+        3 if argv[1] == "help" => {
+            print_usage(&argv[2], false);
+            0
+        }
+        _ => handle_input_line(argv, false),
     }
 }
 
-/// RRDtool's `-` mode accepts one command per input line and flushes a result
-/// marker after every successful command. Cacti keeps this process open while
-/// polling, so commands must be handled without terminating the process.
-fn rrdtool_batch() -> Result<(), Box<dyn std::error::Error>> {
-    let started = std::time::Instant::now();
-    let mut stdin = std::io::stdin().lock();
-    let mut stdout = std::io::stdout().lock();
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if stdin.read_line(&mut line)? == 0 {
-            break;
+/// `rrdupdate.c`: the one executable installed as rrdupdate, rrdcreate and
+/// rrdinfo. `argv[0]` stands where `rrdtool` puts the command name, and
+/// errors go to stdout after the program's usage text.
+fn rrdupdate_main(name: &str, argv: &[String]) -> i32 {
+    // The library parsers fail on a lone argv[0]; Rondi's command functions
+    // print their help there instead.
+    let result = match (name, argv.len()) {
+        ("rrdcreate", 1) => Err("need name of an rrd file to create".into()),
+        ("rrdcreate", _) => rrdtool_create(argv),
+        ("rrdinfo", 1) => Err(format!(
+            "Usage: rrdtool {} [--daemon |-d <addr> [--noflush|-F]] <file>",
+            argv[0]
+        )
+        .into()),
+        ("rrdinfo", _) => rrdtool_info(argv),
+        (_, 1) => Err("Not enough arguments".into()),
+        _ => rrdtool_update(argv),
+    };
+    let Err(error) = result else {
+        return 0;
+    };
+    print!("RRDtool 1.11.0  Copyright by Tobi Oetiker\n\n");
+    match name {
+        "rrdcreate" => print!(
+            "Usage: rrdcreate <filename>\n\t\t\t[--start|-b start time]\n\t\t\t[--step|-s step]\n\t\t\t[--no-overwrite]\n\t\t\t[DS:ds-name:DST:dst arguments]\n\t\t\t[RRA:CF:cf arguments]\n\n"
+        ),
+        "rrdinfo" => println!("Usage: rrdinfo <filename>"),
+        _ => print!(
+            "Usage: rrdupdate <filename>\n\t\t\t[--locking|-L <try|block|none>]\n\t\t\t[--template|-t ds-name[:ds-name]...]\n\t\t\t[--skip-past-updates]\n\t\t\ttime|N:value[:value...]\n\n\t\t\tat-time@value[:value...]\n\n\t\t\t[ time:value[:value...] ..]\n\n"
+        ),
+    }
+    println!("ERROR: {error}");
+    1
+}
+
+/// The command switch in `HandleInputLine` (rrd_tool.c:713), shared by
+/// argv and pipe mode. `args[0]` is the command name.
+fn rrdtool_dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    match args[0].as_str() {
+        "create" => rrdtool_create(args),
+        "dump" => rrdtool_dump(args),
+        "info" => rrdtool_info(args),
+        "updatev" => rrdtool_updatev(args),
+        "list" => rrdtool_list(args),
+        "restore" => rrdtool_restore(args),
+        "resize" => rrdtool_resize(args),
+        "last" => print_minus_one_on_error(rrdtool_last(args)),
+        "lastupdate" => rrdtool_lastupdate(args),
+        "first" => print_minus_one_on_error(rrdtool_first(args)),
+        "update" => rrdtool_update(args),
+        "fetch" => rrdtool_fetch(args),
+        "xport" => rrdtool_xport(args),
+        "graph" => rrdtool_graph(args, false),
+        "graphv" => rrdtool_graph(args, true),
+        "tune" => rrdtool_tune(args),
+        "flushcached" => rrdtool_flushcached(args),
+        command => Err(format!("unknown function '{command}'").into()),
+    }
+}
+
+fn rrd_strerror(errno: libc::c_int) -> String {
+    // SAFETY: strerror returns a pointer to a NUL-terminated message.
+    unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn last_errno() -> libc::c_int {
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(libc::EIO)
+}
+
+/// `HandleInputLine` (rrd_tool.c:579). `argv[0]` is the program name.
+fn handle_input_line(argv: &[String], remote: bool) -> i32 {
+    let argc = argv.len();
+    let word = |index: usize| argv.get(index).map(String::as_str);
+    if remote {
+        match word(1) {
+            Some("quit") => {
+                if argc != 2 {
+                    println!("ERROR: invalid parameter count for quit");
+                    return 1;
+                }
+                let _ = std::io::stdout().flush();
+                std::process::exit(0);
+            }
+            Some("cd") => {
+                if argc != 3 {
+                    println!("ERROR: invalid parameter count for cd");
+                    return 1;
+                }
+                if let Err(errno) = c_path_call(&argv[2], |path| unsafe { libc::chdir(path) }) {
+                    println!("ERROR: chdir {} {}", argv[2], rrd_strerror(errno));
+                    return 1;
+                }
+                return 0;
+            }
+            Some("pwd") => {
+                if argc != 2 {
+                    println!("ERROR: invalid parameter count for pwd");
+                    return 1;
+                }
+                match std::env::current_dir() {
+                    Ok(cwd) => {
+                        let mut stdout = std::io::stdout().lock();
+                        let _ = stdout.write_all(cwd.as_os_str().as_encoded_bytes());
+                        let _ = stdout.write_all(b"\n");
+                    }
+                    Err(error) => {
+                        let errno = error.raw_os_error().unwrap_or(libc::EIO);
+                        println!("ERROR: getcwd {}", rrd_strerror(errno));
+                        return 1;
+                    }
+                }
+                return 0;
+            }
+            Some("mkdir") => {
+                if argc != 3 {
+                    println!("ERROR: invalid parameter count for mkdir");
+                    return 1;
+                }
+                if let Err(errno) =
+                    c_path_call(&argv[2], |path| unsafe { libc::mkdir(path, 0o777) })
+                {
+                    println!("ERROR: mkdir {}: {}", argv[2], rrd_strerror(errno));
+                    return 1;
+                }
+                return 0;
+            }
+            Some("ls") => {
+                if argc != 2 {
+                    println!("ERROR: invalid parameter count for ls");
+                    return 1;
+                }
+                return remote_ls();
+            }
+            _ => {}
         }
-        // RRDtool counts the newline itself as an argument, so only an
-        // unterminated blank final line is "not enough arguments"; a blank
-        // terminated line falls through to the usage text below.
-        let terminated = line.ends_with('\n');
-        let arguments = match shell_words::split(line.trim_end_matches(['\n', '\r'])) {
-            Ok(arguments) if !arguments.is_empty() || terminated => arguments,
-            Ok(_) => {
-                writeln!(stdout, "ERROR: not enough arguments")?;
-                stdout.flush()?;
-                continue;
+    }
+    if argc < 3 || matches!(word(1), Some("help" | "--help" | "-help" | "-?" | "-h")) {
+        print_usage("", remote);
+        return 0;
+    }
+    let result = if matches!(
+        word(1),
+        Some("--version" | "version" | "v" | "-v" | "-version")
+    ) {
+        println!("RRDtool 1.11.0  Copyright by Tobi Oetiker (1.011000)");
+        Ok(())
+    } else {
+        rrdtool_dispatch(&argv[1..])
+    };
+    match result {
+        Ok(()) => 0,
+        Err(error) => {
+            if remote {
+                println!("ERROR: {error}");
+            } else {
+                eprintln!("ERROR: {error}");
             }
-            Err(_) => {
-                writeln!(stdout, "ERROR: creating arguments")?;
-                stdout.flush()?;
-                continue;
-            }
-        };
-        if arguments.first().is_some_and(|command| command == "quit") {
-            if arguments.len() == 1 {
+            1
+        }
+    }
+}
+
+/// Runs a libc call that takes one path and reports `errno` on failure.
+fn c_path_call(
+    path: &str,
+    call: impl FnOnce(*const libc::c_char) -> libc::c_int,
+) -> Result<(), libc::c_int> {
+    let Ok(path) = std::ffi::CString::new(path) else {
+        return Err(libc::ENOENT);
+    };
+    if call(path.as_ptr()) == 0 {
+        Ok(())
+    } else {
+        Err(last_errno())
+    }
+}
+
+/// The remote `ls` command (rrd_tool.c:669), in readdir order with `.`
+/// and `..`.
+fn remote_ls() -> i32 {
+    // SAFETY: opendir/readdir/stat/closedir are used on a directory handle
+    // owned by this function; each entry name is NUL-terminated.
+    unsafe {
+        let directory = libc::opendir(c".".as_ptr());
+        if directory.is_null() {
+            let errno = last_errno();
+            println!("ERROR: opendir .: {}", rrd_strerror(errno));
+            return errno;
+        }
+        let mut stdout = std::io::stdout().lock();
+        loop {
+            let entry = libc::readdir(directory);
+            if entry.is_null() {
                 break;
             }
-            writeln!(stdout, "ERROR: invalid parameter count for quit")?;
-            stdout.flush()?;
-            continue;
+            let name = std::ffi::CStr::from_ptr((*entry).d_name.as_ptr());
+            let mut status = std::mem::zeroed::<libc::stat>();
+            if libc::stat(name.as_ptr(), &mut status) != 0 {
+                continue;
+            }
+            let bytes = name.to_bytes();
+            let kind = status.st_mode & libc::S_IFMT;
+            if kind == libc::S_IFDIR {
+                let _ = stdout.write_all(b"d ");
+                let _ = stdout.write_all(bytes);
+                let _ = stdout.write_all(b"\n");
+            }
+            if bytes.len() > 4
+                && kind == libc::S_IFREG
+                && matches!(&bytes[bytes.len() - 4..], b".rrd" | b".RRD")
+            {
+                let _ = stdout.write_all(b"- ");
+                let _ = stdout.write_all(bytes);
+                let _ = stdout.write_all(b"\n");
+            }
         }
-        // The remote directory commands (ls, cd, mkdir, pwd) are not
-        // implemented, so they report an unknown function instead of usage.
-        let remote_directory_command = arguments
-            .first()
-            .is_some_and(|command| matches!(command.as_str(), "ls" | "cd" | "mkdir" | "pwd"));
-        let builtin = if arguments.len() < 2 && !remote_directory_command {
-            Some(rrdtool_usage(true))
-        } else {
-            rrdtool_builtin_reply(&arguments, true)
-        };
-        if let Some(text) = builtin {
-            write!(stdout, "{text}")?;
-            writeln!(stdout, "{}", rrdtool_batch_ack(started))?;
-            stdout.flush()?;
-            continue;
-        }
-        let result = match arguments[0].as_str() {
-            "create" => rrdtool_create(&arguments),
-            "fetch" => rrdtool_fetch(&arguments),
-            "update" => rrdtool_update(&arguments),
-            "updatev" => rrdtool_updatev(&arguments),
-            "last" => rrdtool_last(&arguments),
-            "lastupdate" => rrdtool_lastupdate(&arguments),
-            "first" => rrdtool_first(&arguments),
-            "info" => rrdtool_info(&arguments),
-            "dump" => rrdtool_dump(&arguments),
-            "restore" => rrdtool_restore(&arguments),
-            "tune" => rrdtool_tune(&arguments),
-            "list" => rrdtool_list(&arguments),
-            "resize" => rrdtool_resize(&arguments),
-            command => Err(format!("unknown function '{command}'").into()),
-        };
-        match result {
-            Ok(()) => writeln!(stdout, "{}", rrdtool_batch_ack(started))?,
-            Err(error) => writeln!(stdout, "ERROR: {error}")?,
-        }
-        stdout.flush()?;
+        libc::closedir(directory);
     }
-    Ok(())
+    0
+}
+
+const MAX_LENGTH: u64 = 10000;
+
+/// `fgetslong` (rrd_tool.c:414): one line of raw bytes. Text after an
+/// embedded NUL is lost and the next `fgets` chunk is appended, as in C.
+fn fgetslong(input: &mut impl BufRead) -> Option<Vec<u8>> {
+    let mut line = Vec::new();
+    loop {
+        let mut chunk = Vec::new();
+        match input.take(MAX_LENGTH - 1).read_until(b'\n', &mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let text = chunk.split(|byte| *byte == 0).next().unwrap_or_default();
+        line.extend_from_slice(text);
+        if line.last() == Some(&b'\n') {
+            return Some(line);
+        }
+    }
+    (!line.is_empty()).then_some(line)
+}
+
+/// `CountArgs` (rrd_tool.c:880): words separated by spaces only.
+fn count_args(line: &[u8]) -> usize {
+    let mut count = 0;
+    let mut in_arg = false;
+    let start = line
+        .iter()
+        .position(|byte| *byte != b' ')
+        .unwrap_or(line.len());
+    for byte in &line[start..] {
+        if *byte == b' ' && in_arg {
+            in_arg = false;
+        }
+        if *byte != b' ' && !in_arg {
+            in_arg = true;
+            count += 1;
+        }
+    }
+    count
+}
+
+/// `CreateArgs` (rrd_tool.c:905): split on spaces, single and double quotes
+/// group (the other kind is literal inside), backslash is literal. `None`
+/// for an unterminated quote.
+fn create_args(line: &[u8]) -> Option<Vec<String>> {
+    // The comparisons use the platform's `char`, so bytes from 0x80 count
+    // as blanks where `char` is signed.
+    let blank = |byte: u8| byte as libc::c_char <= b' ' as libc::c_char;
+    let mut end = line.len();
+    // The trailing-blank loop stops before index 0.
+    while end > 1 && blank(line[end - 1]) {
+        end -= 1;
+    }
+    let mut start = 0;
+    while start < end && blank(line[start]) {
+        start += 1;
+    }
+    let mut args = Vec::<Vec<u8>>::new();
+    let mut quote = 0_u8;
+    let mut in_arg = false;
+    for &byte in &line[start..end] {
+        match byte {
+            b' ' => {
+                if quote != 0 {
+                    args.last_mut()?.push(byte);
+                } else {
+                    in_arg = false;
+                }
+            }
+            b'"' | b'\'' => {
+                if quote != 0 {
+                    if quote == byte {
+                        quote = 0;
+                    } else {
+                        args.last_mut()?.push(byte);
+                    }
+                } else {
+                    if !in_arg {
+                        args.push(Vec::new());
+                        in_arg = true;
+                    }
+                    quote = byte;
+                }
+            }
+            _ => {
+                if !in_arg {
+                    args.push(Vec::new());
+                    in_arg = true;
+                }
+                args.last_mut()?.push(byte);
+            }
+        }
+    }
+    if quote != 0 {
+        return None;
+    }
+    Some(
+        args.iter()
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect(),
+    )
+}
+
+/// The `rrdtool -` loop in rrd_tool.c `main` (rrd_tool.c:473). Cacti and
+/// Kadupul keep this process open while polling.
+fn rrdtool_batch(argv: &[String]) -> i32 {
+    let started = std::time::Instant::now();
+    // rrd_tool.c:491 chroots only under HAVE_GETEUID, which configure.ac
+    // never checks for (it tests getuid), so every build takes the chdir
+    // path, root included.
+    let firstdir = argv.get(2).map_or("", String::as_str);
+    if !firstdir.is_empty()
+        && let Err(errno) = c_path_call(firstdir, |path| unsafe { libc::chdir(path) })
+    {
+        eprintln!("ERROR: chdir {firstdir} {}", rrd_strerror(errno));
+        std::process::exit(errno);
+    }
+    let mut stdin = std::io::stdin().lock();
+    while let Some(line) = fgetslong(&mut stdin) {
+        if count_args(&line) == 0 {
+            println!("ERROR: not enough arguments");
+            continue;
+        }
+        match create_args(&line) {
+            None => println!("ERROR: creating arguments"),
+            Some(words) => {
+                let mut args = Vec::with_capacity(words.len() + 1);
+                args.push(argv[0].clone());
+                args.extend(words);
+                if handle_input_line(&args, true) == 0 {
+                    println!("{}", rrdtool_batch_ack(started));
+                }
+            }
+        }
+        let _ = std::io::stdout().flush();
+    }
+    0
 }
 
 #[cfg(unix)]
@@ -1044,14 +1330,24 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut template_file = None::<String>;
     let mut source_files = Vec::<String>::new();
     let mut daemon_address = None::<String>;
-    let mut positional = Vec::new();
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--start" | "-b" => {
-                index += 1;
-                let value = args.get(index).ok_or("create --start requires a time")?;
-                start = rrd_parsetime(value, now)
+    // rrd_create.c:81.
+    const LONGOPTS: &[LongOpt] = &[
+        opt("start", b'b' as i32, ArgType::Required),
+        opt("step", b's' as i32, ArgType::Required),
+        opt("daemon", b'd' as i32, ArgType::Required),
+        opt("source", b'r' as i32, ArgType::Required),
+        opt("template", b't' as i32, ArgType::Required),
+        opt("no-overwrite", b'O' as i32, ArgType::None),
+    ];
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        let option = options.long(LONGOPTS);
+        let value = options.value().to_owned();
+        match u8::try_from(option).map(char::from) {
+            _ if option == optparse::DONE => break,
+            Ok('d') => daemon_address = Some(value),
+            Ok('b') => {
+                start = rrd_parsetime(&value, now)
                     .map_err(|error| format!("start time: {error}"))?
                     .absolute()
                     .ok_or(
@@ -1062,54 +1358,57 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 start_was_set = true;
             }
-            "--step" | "-s" => {
-                index += 1;
-                step = parse_rrd_scaled_duration(
-                    args.get(index).ok_or("create --step requires a duration")?,
-                    1,
-                )?;
+            Ok('s') => {
+                step = parse_scaled_duration_option(&value, "step size")?;
                 step_was_set = true;
             }
-            "--template" | "-t" => {
-                index += 1;
-                template_file = Some(
-                    args.get(index)
-                        .ok_or("create --template requires a template file")?
-                        .clone(),
-                );
+            Ok('O') => no_overwrite = true,
+            Ok('r') => {
+                match std::fs::metadata(&value) {
+                    Err(error) => {
+                        let errno = error.raw_os_error().unwrap_or(libc::EIO);
+                        return Err(format!(
+                            "error checking for source RRD {value}: {}",
+                            rrd_strerror(errno)
+                        )
+                        .into());
+                    }
+                    Ok(metadata) if !metadata.is_file() => {
+                        return Err(format!("Not a regular file: {value}").into());
+                    }
+                    Ok(_) => {}
+                }
+                source_files.push(value);
             }
-            "--source" | "-r" => {
-                index += 1;
-                source_files.push(
-                    args.get(index)
-                        .ok_or("create --source requires a source file")?
-                        .clone(),
-                );
+            Ok('t') => {
+                if template_file.is_some() {
+                    return Err("template already set".into());
+                }
+                template_file = Some(value);
             }
-            "--no-overwrite" | "-O" => no_overwrite = true,
-            "--daemon" | "-d" => {
-                index += 1;
-                let address = args
-                    .get(index)
-                    .ok_or("create --daemon requires an address")?;
-                daemon_address = Some(address.clone());
-            }
-            value if value.starts_with("--daemon=") => {
-                daemon_address = Some(value["--daemon=".len()..].to_owned());
-            }
-            value if value.starts_with('-') => {
-                return Err(format!("unsupported rrdtool create option: {value}").into());
-            }
-            value => positional.push(value.to_owned()),
+            Ok('?') => return Err(options.errmsg.into()),
+            _ => {}
         }
-        index += 1;
     }
+    let mut positional = options.positionals().to_vec();
     if positional.is_empty() {
-        return Err(
-            "Usage: rrdtool create file.rrd [--start epoch] [--step seconds] DS:... RRA:...".into(),
-        );
+        return Err("need name of an rrd file to create".into());
     }
     let filename = positional.remove(0);
+    let daemon_address = daemon_address
+        .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
+        .filter(|address| !address.is_empty());
+    if source_files.is_empty() && daemon_address.is_none() {
+        rondi::rrd_create_r2(
+            &filename,
+            if step_was_set { step } else { 0 },
+            if start_was_set { start } else { -1 },
+            no_overwrite,
+            template_file.as_deref(),
+            &positional,
+        )?;
+        return Ok(());
+    }
     let extra_data_sources = positional
         .iter()
         .filter(|value| value.starts_with("DS:"))
@@ -1200,35 +1499,8 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 "create --source currently supports one source file and cannot be combined with --template".into(),
             );
         }
-        if daemon_address
-            .as_ref()
-            .is_some_and(|address| !address.is_empty())
-            || std::env::var("RRDCACHED_ADDRESS").is_ok_and(|address| !address.is_empty())
-        {
+        if daemon_address.is_some() {
             return Err("create --source with --daemon is unsupported".into());
-        }
-        let source_path = std::path::Path::new(&source_files[0]);
-        match std::fs::metadata(source_path) {
-            Ok(metadata) if !metadata.is_file() => {
-                return Err(format!("Not a regular file: {}", source_files[0]).into());
-            }
-            Ok(_) => {}
-            Err(error) => {
-                let detail = match error.kind() {
-                    std::io::ErrorKind::NotFound => "No such file or directory".to_owned(),
-                    _ => error
-                        .to_string()
-                        .split(" (os error ")
-                        .next()
-                        .unwrap_or("I/O error")
-                        .to_owned(),
-                };
-                return Err(format!(
-                    "error checking for source RRD {}: {}",
-                    source_files[0], detail
-                )
-                .into());
-            }
         }
         if no_overwrite && std::fs::metadata(&filename).is_ok() {
             return Err(format!("creating '{}': File exists", filename).into());
@@ -1287,39 +1559,28 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         restore_rrd_file(&xml, &filename, !no_overwrite, false)?;
         return Ok(());
     }
-    if let Some(address) = daemon_address
-        .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
-        .filter(|address| !address.is_empty())
-    {
-        let mut fields = vec![
-            "CREATE".to_owned(),
-            filename.clone(),
-            "-b".to_owned(),
-            start.to_string(),
-            "-s".to_owned(),
-            step.to_string(),
-        ];
-        if no_overwrite {
-            fields.push("-O".to_owned());
-        }
-        fields.extend(data_sources);
-        fields.extend(archives);
-        let command = fields
-            .iter()
-            .map(|field| field.replace('\\', "\\\\").replace(' ', "\\ "))
-            .collect::<Vec<_>>()
-            .join(" ");
-        send_rrdcached_command(&address, &command)?;
-    } else {
-        create_rrd_file(
-            filename,
-            start,
-            step,
-            &data_sources,
-            &archives,
-            no_overwrite,
-        )?;
+    let Some(address) = daemon_address else {
+        unreachable!("a local create without --source returned above");
+    };
+    let mut fields = vec![
+        "CREATE".to_owned(),
+        filename.clone(),
+        "-b".to_owned(),
+        start.to_string(),
+        "-s".to_owned(),
+        step.to_string(),
+    ];
+    if no_overwrite {
+        fields.push("-O".to_owned());
     }
+    fields.extend(data_sources);
+    fields.extend(archives);
+    let command = fields
+        .iter()
+        .map(|field| field.replace('\\', "\\\\").replace(' ', "\\ "))
+        .collect::<Vec<_>>()
+        .join(" ");
+    send_rrdcached_command(&address, &command)?;
     Ok(())
 }
 
@@ -1332,14 +1593,58 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/fetch.txt"));
         return Ok(());
     }
-    if args.len() < 3 {
-        return Err(
-            "Usage: rrdtool fetch <file> <CF> [--resolution seconds] [--start epoch] [--end epoch]"
-                .into(),
-        );
+    // rrd_fetch.c:83.
+    const LONGOPTS: &[LongOpt] = &[
+        opt("resolution", b'r' as i32, ArgType::Required),
+        opt("start", b's' as i32, ArgType::Required),
+        opt("end", b'e' as i32, ArgType::Required),
+        opt("align-start", b'a' as i32, ArgType::None),
+        opt("daemon", b'd' as i32, ArgType::Required),
+    ];
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let mut start_tv = rrd_parsetime("end-24h", now)?;
+    let mut end_tv = rrd_parsetime("now", now)?;
+    let mut resolution = 1_u64;
+    let mut align_start = false;
+    let mut daemon_address = None::<String>;
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        let option = options.long(LONGOPTS);
+        match u8::try_from(option).map(char::from) {
+            _ if option == optparse::DONE => break,
+            Ok('s') => {
+                start_tv = rrd_parsetime(options.value(), now)
+                    .map_err(|error| format!("start time: {error}"))?;
+            }
+            Ok('e') => {
+                end_tv = rrd_parsetime(options.value(), now)
+                    .map_err(|error| format!("end time: {error}"))?;
+            }
+            Ok('a') => align_start = true,
+            Ok('r') => resolution = parse_rrd_resolution(options.value())?,
+            Ok('d') => daemon_address = Some(options.value().to_owned()),
+            Ok('?') => return Err(options.errmsg.into()),
+            _ => {}
+        }
     }
-    let filename = PathBuf::from(&args[1]);
-    let cf = &args[2];
+    let (mut start, mut end) = rrd_proc_start_end(&mut start_tv, &mut end_tv)?;
+    if start < 315_360_000 {
+        return Err("the first entry to fetch should be after 1980".into());
+    }
+    if align_start {
+        let delta = start.rem_euclid(i64::try_from(resolution)?);
+        start = start.checked_sub(delta).ok_or("start time overflows")?;
+        end = end.checked_sub(delta).ok_or("end time overflows")?;
+    }
+    if end < start {
+        return Err(format!("start ({start}) should be less than end ({end})").into());
+    }
+    let [filename, cf, ..] = options.positionals() else {
+        return Err("Usage: rrdtool fetch <file> <CF> [options]".into());
+    };
+    let filename = PathBuf::from(filename);
     if !matches!(
         cf.as_str(),
         "AVERAGE"
@@ -1354,68 +1659,6 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             | "FAILURES"
     ) {
         return Err(format!("unknown consolidation function '{cf}'").into());
-    }
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64;
-    let mut start_spec = None::<String>;
-    let mut end_spec = None::<String>;
-    let mut resolution = 1_u64;
-    let mut align_start = false;
-    let mut daemon_address = None::<String>;
-    let mut index = 3;
-    while index < args.len() {
-        let argument = &args[index];
-        match argument.as_str() {
-            "--start" | "-s" | "--end" | "-e" | "--resolution" | "-r" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| format!("option {argument} requires a value"))?;
-                match argument.as_str() {
-                    "--start" | "-s" => start_spec = Some(value.clone()),
-                    "--end" | "-e" => end_spec = Some(value.clone()),
-                    _ => resolution = parse_rrd_resolution(value)?,
-                }
-                index += 2;
-            }
-            "--align-start" | "-a" => {
-                align_start = true;
-                index += 1;
-            }
-            "--daemon" | "-d" => {
-                index += 1;
-                daemon_address = Some(
-                    args.get(index)
-                        .ok_or("fetch --daemon requires an address")?
-                        .clone(),
-                );
-                index += 1;
-            }
-            option if option.starts_with("--daemon=") => {
-                daemon_address = Some(option["--daemon=".len()..].to_owned());
-                index += 1;
-            }
-            unsupported if unsupported.starts_with('-') => {
-                return Err(format!("unsupported fetch option: {unsupported}").into());
-            }
-            positional => return Err(format!("unexpected fetch argument: {positional}").into()),
-        }
-    }
-    let (mut start, mut end) =
-        resolve_rrd_range_times(start_spec.as_deref(), end_spec.as_deref(), now)?;
-    if start < 315_360_000 {
-        return Err("the first entry to fetch should be after 1980".into());
-    }
-    if align_start {
-        if resolution == 0 {
-            return Err("resolution must be positive".into());
-        }
-        let delta = start.rem_euclid(i64::try_from(resolution)?);
-        start = start.checked_sub(delta).ok_or("start time overflows")?;
-        end = end.checked_sub(delta).ok_or("end time overflows")?;
-    }
-    if end < start {
-        return Err(format!("start ({start}) should be less than end ({end})").into());
     }
 
     let daemon_address = daemon_address
@@ -1572,240 +1815,38 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         }
         return Ok(());
     }
-    let filename = args.get(1).ok_or("graph requires an output filename")?;
-    let mut format = String::from("PNG");
-    let mut elements = Vec::<String>::new();
-    let mut image_width = 400_u32;
-    let mut image_height = 100_u32;
-    let mut graph_title = None::<String>;
-    let mut vertical_label = None::<String>;
-    let mut vertical_label_angle = 90.0_f64;
-    let mut imginfo = None::<String>;
-    let mut lower_limit = None::<f64>;
-    let mut upper_limit = None::<f64>;
-    let mut no_legend = false;
-    let mut rigid_scale = false;
-    let mut allow_shrink = false;
-    let mut alt_autoscale = false;
-    let mut alt_autoscale_min = false;
-    let mut alt_autoscale_max = false;
-    let mut only_graph = false;
-    let mut full_size_mode = false;
-    let mut force_rules_legend = false;
-    let mut legend_direction = rondi::graph_layout::LegendDirection::TopDown;
-    let mut graph_colors = GraphColors::default();
-    let mut grid_dash = Vec::<f64>::new();
-    let mut border_width = 2_u32;
-    let mut si_base = 1000_u32;
-    let mut daemon_address = None::<String>;
-    let mut requested_step = 0_i64;
-    let mut graph_start_spec = None::<String>;
-    let mut graph_end_spec = None::<String>;
-    let mut index = 2;
-    while index < args.len() {
-        let argument = &args[index];
-        if let Some(value) = argument.strip_prefix("--imgformat=") {
-            format = value.to_ascii_uppercase();
-            index += 1;
-            continue;
-        }
-        if let Some(value) = argument.strip_prefix("--color=") {
-            graph_colors.parse_override(value)?;
-            index += 1;
-            continue;
-        }
-        if let Some(value) = argument.strip_prefix("--imginfo=") {
-            imginfo = Some(value.to_owned());
-            index += 1;
-            continue;
-        }
-        if let Some(value) = argument.strip_prefix("--base=") {
-            si_base = parse_graph_base(value)?;
-            index += 1;
-            continue;
-        }
-        if let Some(address) = argument.strip_prefix("--daemon=") {
-            daemon_address = Some(address.to_owned());
-            index += 1;
-            continue;
-        }
-        match argument.as_str() {
-            "--imgformat" | "-a" => {
-                format = args
-                    .get(index + 1)
-                    .ok_or("--imgformat requires a value")?
-                    .to_ascii_uppercase();
-                index += 2;
-            }
-            "--start" | "-s" | "--end" | "-e" | "--step" | "-S" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| format!("{argument} requires a value"))?;
-                match argument.as_str() {
-                    "--start" | "-s" => graph_start_spec = Some(value.clone()),
-                    "--end" | "-e" => graph_end_spec = Some(value.clone()),
-                    _ => requested_step = c_atoi(value),
-                }
-                index += 2;
-            }
-            "--base" | "-b" => {
-                si_base = parse_graph_base(args.get(index + 1).ok_or("--base requires a value")?)?;
-                index += 2;
-            }
-            "--width" | "-w" | "--height" | "-h" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| format!("{argument} requires a value"))?
-                    .parse::<u32>()?;
-                match argument.as_str() {
-                    "--width" | "-w" => image_width = value,
-                    _ => image_height = value,
-                }
-                index += 2;
-            }
-            "--title" | "-t" | "--vertical-label" | "-v" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| format!("{argument} requires a value"))?
-                    .clone();
-                if matches!(argument.as_str(), "--title" | "-t") {
-                    graph_title = Some(value);
-                } else {
-                    vertical_label = Some(value);
-                }
-                index += 2;
-            }
-            "--vertical-label-angle" => {
-                vertical_label_angle = args
-                    .get(index + 1)
-                    .ok_or("--vertical-label-angle requires a value")?
-                    .parse()?;
-                if !vertical_label_angle.is_finite() {
-                    return Err("--vertical-label-angle must be finite".into());
-                }
-                index += 2;
-            }
-            "--imginfo" | "-f" => {
-                imginfo = Some(
-                    args.get(index + 1)
-                        .ok_or("--imginfo requires a value")?
-                        .clone(),
-                );
-                index += 2;
-            }
-            "--lower-limit" | "-l" | "--upper-limit" | "-u" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| format!("{argument} requires a value"))?
-                    .parse::<f64>()?;
-                if !value.is_finite() {
-                    return Err(format!("{argument} must be finite").into());
-                }
-                if matches!(argument.as_str(), "--lower-limit" | "-l") {
-                    lower_limit = Some(value);
-                } else {
-                    upper_limit = Some(value);
-                }
-                index += 2;
-            }
-            "--no-legend" | "-g" => {
-                no_legend = true;
-                index += 1;
-            }
-            "--only-graph" | "-j" => {
-                only_graph = true;
-                index += 1;
-            }
-            "--full-size-mode" | "-D" => {
-                full_size_mode = true;
-                index += 1;
-            }
-            "--force-rules-legend" | "-F" => {
-                force_rules_legend = true;
-                index += 1;
-            }
-            "--color" | "-c" => {
-                graph_colors
-                    .parse_override(args.get(index + 1).ok_or("--color requires a value")?)?;
-                index += 2;
-            }
-            "--grid-dash" => {
-                let value = args.get(index + 1).ok_or("--grid-dash requires a value")?;
-                let (on, off) = value.split_once(':').ok_or("--grid-dash expects on:off")?;
-                let on = on.parse::<f64>()?;
-                let off = off.parse::<f64>()?;
-                if !on.is_finite() || !off.is_finite() || on <= 0.0 || off < 0.0 {
-                    return Err(
-                        "--grid-dash requires a positive on length and nonnegative off length"
-                            .into(),
-                    );
-                }
-                grid_dash = vec![on, off];
-                index += 2;
-            }
-            "--border" => {
-                border_width = args
-                    .get(index + 1)
-                    .ok_or("--border requires a value")?
-                    .parse()?;
-                if border_width > 64 {
-                    return Err("--border width exceeds 64 pixels".into());
-                }
-                index += 2;
-            }
-            value if value.starts_with("--legend-direction=") => {
-                match &value["--legend-direction=".len()..] {
-                    "topdown" => {
-                        legend_direction = rondi::graph_layout::LegendDirection::TopDown;
-                    }
-                    "bottomup" => {
-                        legend_direction = rondi::graph_layout::LegendDirection::BottomUp;
-                    }
-                    "bottomup2" => {
-                        legend_direction = rondi::graph_layout::LegendDirection::BottomUp2;
-                    }
-                    direction => {
-                        return Err(format!("invalid legend direction: {direction}").into());
-                    }
-                }
-                index += 1;
-            }
-            "--rigid" | "-r" => {
-                rigid_scale = true;
-                index += 1;
-            }
-            "--allow-shrink" => {
-                allow_shrink = true;
-                index += 1;
-            }
-            "--alt-autoscale" | "-A" => {
-                alt_autoscale = true;
-                index += 1;
-            }
-            "--alt-autoscale-min" | "-J" => {
-                alt_autoscale_min = true;
-                index += 1;
-            }
-            "--alt-autoscale-max" | "-M" => {
-                alt_autoscale_max = true;
-                index += 1;
-            }
-            "--daemon" | "-d" => {
-                let address = args
-                    .get(index + 1)
-                    .ok_or("graph --daemon requires an address")?;
-                daemon_address = Some(address.clone());
-                index += 2;
-            }
-            value if value.starts_with('-') && value.len() > 1 => {
-                return Err(format!("unsupported graph option: {value}").into());
-            }
-            value => {
-                elements.push(value.to_owned());
-                index += 1;
-            }
-        }
-    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let options = graph_options::rrd_graph_options(args, now)?;
+    let Some((filename, elements)) = options.positionals.split_first() else {
+        return Err("missing filename".into());
+    };
+    let format = options.imgformat;
+    let image_width = options.width;
+    let image_height = options.height;
+    let graph_title = options.title;
+    let vertical_label = options.vertical_label;
+    let vertical_label_angle = options.vertical_label_angle;
+    let imginfo = options.imginfo;
+    let lower_limit = options.lower_limit;
+    let upper_limit = options.upper_limit;
+    let no_legend = options.no_legend;
+    let rigid_scale = options.rigid;
+    let allow_shrink = options.allow_shrink;
+    let alt_autoscale = options.alt_autoscale;
+    let alt_autoscale_min = options.alt_autoscale_min;
+    let alt_autoscale_max = options.alt_autoscale_max;
+    let only_graph = options.only_graph;
+    let full_size_mode = options.full_size_mode;
+    let force_rules_legend = options.force_rules_legend;
+    let legend_direction = options.legend_direction;
+    let graph_colors = options.colors;
+    let grid_dash = options.grid_dash;
+    let border_width = options.border;
+    let si_base = options.base;
+    let daemon_address = options.daemon;
+    let requested_step = i64::from(options.step.unwrap_or(0));
     if !matches!(
         format.as_str(),
         "XML" | "JSON" | "XMLENUM" | "JSONTIME" | "CSV" | "TSV" | "SSV" | "PNG"
@@ -1813,13 +1854,14 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         return Err(format!("RRDtool graph format {format} is unsupported").into());
     }
     let (mut im, _) = prepare_graph_image(GraphImageRequest {
-        start: graph_start_spec.as_deref(),
-        end: graph_end_spec.as_deref(),
+        start: options.start,
+        end: options.end,
         step: requested_step,
         xsize: i64::from(image_width),
         daemon: daemon_address,
-        elements: &elements,
+        elements,
     })?;
+    options.layout.apply(&mut im);
     // rrd_graph_v: graph_paint, then image_info and the image itself.
     let mut info = GraphInfo::default();
     let to_memory = filename == "-";
@@ -1846,7 +1888,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             XportFormat::Separated(separator) => (format_xport_sv(separator, &data), None),
         };
         if !to_memory {
-            std::fs::write(filename, output.as_bytes())?;
+            write_output_file(filename, output.as_bytes())?;
         }
         if let Some(error) = error {
             return Err(error.into());
@@ -1974,7 +2016,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             )?;
             let (width, height) = png_dimensions(&png)?;
             if !to_memory {
-                std::fs::write(filename, &png)?;
+                write_output_file(filename, &png)?;
             }
             if let Some(format) = imginfo.as_deref().filter(|format| !format.is_empty()) {
                 let basename = if to_memory {
@@ -2010,25 +2052,6 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         info.print_graph(&mut stdout, to_memory, imginfo_flag)?;
     }
     Ok(())
-}
-
-/// `atoi`: leading whitespace, an optional sign and digits; anything else is
-/// zero.
-fn c_atoi(value: &str) -> i64 {
-    let trimmed = value.trim_start();
-    let (negative, digits) = match trimmed.as_bytes().first() {
-        Some(b'-') => (true, &trimmed[1..]),
-        Some(b'+') => (false, &trimmed[1..]),
-        _ => (false, trimmed),
-    };
-    let magnitude = digits
-        .bytes()
-        .take_while(u8::is_ascii_digit)
-        .fold(0_i64, |total, digit| {
-            total.wrapping_mul(10).wrapping_add(i64::from(digit - b'0'))
-        });
-    let value = if negative { -magnitude } else { magnitude };
-    i64::from(value as i32)
 }
 
 enum XportFormat {
@@ -2118,16 +2141,16 @@ impl GraphInfo {
 }
 
 struct GraphImageRequest<'a> {
-    start: Option<&'a str>,
-    end: Option<&'a str>,
+    start: i64,
+    end: i64,
     step: i64,
     xsize: i64,
     daemon: Option<String>,
     elements: &'a [String],
 }
 
-/// The time checks at the end of `rrd_graph_options`/`rrd_xport`, the image
-/// step, and `rrd_graph_script`. The flag reports a parser that stopped
+/// The image step and `rrd_graph_script`, after the option parser checked
+/// the time range. The flag reports a parser that stopped
 /// without an error, after which RRDtool keeps the elements read so far.
 fn prepare_graph_image(
     request: GraphImageRequest<'_>,
@@ -2135,13 +2158,7 @@ fn prepare_graph_image(
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
-    let (start, end) = resolve_rrd_range_times(request.start, request.end, now)?;
-    if start < 3600 * 24 * 365 * 10 {
-        return Err(format!("the first entry to fetch should be after 1980 ({start})").into());
-    }
-    if end < start {
-        return Err(format!("start ({start}) should be less than end ({end})").into());
-    }
+    let (start, end) = (request.start, request.end);
     let step = request.step.max((end - start) / request.xsize.max(1));
     let mut im = rondi::graph::GraphImage::new(start, end, step.max(0) as u64);
     im.daemon_addr = request
@@ -2192,6 +2209,48 @@ fn flush_and_prepare_data(
     Ok(())
 }
 
+/// Writes a command's output file like `fopen(path, "w")`, except that a
+/// symbolic link as the last component, or a regular file with other hard
+/// links, is refused instead of followed. This is a deliberate safety
+/// deviation from RRDtool: a link planted at an output path cannot redirect
+/// the write to another file.
+#[cfg(unix)]
+fn write_output_file(path: &str, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    // OpenOptions creates with 0666 less the umask, as fopen does.
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)
+        .map_err(|error| -> Box<dyn std::error::Error> {
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                format!("refusing to write '{path}': it is a symbolic link").into()
+            } else {
+                error.into()
+            }
+        })?;
+    let metadata = file.metadata()?;
+    // Devices such as /dev/null keep their contents; only a regular file is
+    // truncated, and only once it is known to have no other names.
+    if metadata.is_file() {
+        if metadata.nlink() > 1 {
+            return Err(
+                format!("refusing to write '{path}': it has more than one hard link").into(),
+            );
+        }
+        file.set_len(0)?;
+    }
+    file.write_all(bytes)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn write_output_file(path: &str, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
 fn rrdtool_xport(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
         print!("{}", include_str!("help/xport.txt"));
@@ -2208,81 +2267,18 @@ fn rrdtool_xport(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 /// The xport document and, when formatting a PRINT failed part way, the
 /// error RRDtool reports after writing the head of the document.
 fn render_xport(args: &[String]) -> Result<(String, Option<String>), Box<dyn std::error::Error>> {
-    let mut start = None::<String>;
-    let mut end = None::<String>;
-    let mut max_rows = 400_i64;
-    let mut requested_step = 0_i64;
-    let mut daemon_address = None::<String>;
-    let mut json = false;
-    let mut show_time = false;
-    let mut enum_ds = false;
-    let mut elements = Vec::<String>::new();
-    let mut index = 1;
-    while index < args.len() {
-        let argument = &args[index];
-        match argument.as_str() {
-            "--start" | "-s" | "--end" | "-e" | "--maxrows" | "-m" | "--step" | "-S" => {
-                let value = args
-                    .get(index + 1)
-                    .ok_or_else(|| format!("option {argument} requires a value"))?;
-                match argument.as_str() {
-                    "--start" | "-s" => start = Some(value.clone()),
-                    "--end" | "-e" => end = Some(value.clone()),
-                    "--maxrows" | "-m" => {
-                        max_rows = value.parse()?;
-                        if max_rows < 10 {
-                            return Err("maxrows below 10 rows".into());
-                        }
-                    }
-                    _ => requested_step = c_atoi(value),
-                }
-                index += 2;
-            }
-            "--json" => {
-                json = true;
-                index += 1;
-            }
-            "--showtime" | "-t" => {
-                show_time = true;
-                index += 1;
-            }
-            "--enumds" => {
-                enum_ds = true;
-                index += 1;
-            }
-            "--daemon" | "-d" => {
-                let address = args
-                    .get(index + 1)
-                    .ok_or("xport --daemon requires an address")?;
-                if daemon_address.is_some() {
-                    return Err("You cannot specify --daemon more than once.".into());
-                }
-                daemon_address = Some(address.clone());
-                index += 2;
-            }
-            option if option.starts_with("--daemon=") => {
-                if daemon_address.is_some() {
-                    return Err("You cannot specify --daemon more than once.".into());
-                }
-                daemon_address = Some(option["--daemon=".len()..].to_owned());
-                index += 1;
-            }
-            value if value.starts_with('-') && value.len() > 1 => {
-                return Err(format!("unsupported xport option: {value}").into());
-            }
-            value => {
-                elements.push(value.to_owned());
-                index += 1;
-            }
-        }
-    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs() as i64;
+    let xport = graph_options::rrd_xport_options(args, now)?;
+    let (json, show_time, enum_ds) = (xport.json, xport.showtime, xport.enumds);
     let (mut im, _) = prepare_graph_image(GraphImageRequest {
-        start: start.as_deref(),
-        end: end.as_deref(),
-        step: requested_step,
-        xsize: max_rows,
-        daemon: daemon_address,
-        elements: &elements,
+        start: xport.start,
+        end: xport.end,
+        step: i64::from(xport.step),
+        xsize: xport.maxrows,
+        daemon: xport.daemon,
+        elements: &xport.positionals,
     })?;
     if im.gdes.is_empty() {
         return Err("can't make an xport without contents".into());
@@ -2738,43 +2734,6 @@ fn time_clean(format: &str) -> String {
     String::from_utf8_lossy(&result).into_owned()
 }
 
-// rrd_graph.c reads --base with atol, so trailing text after the digits is
-// ignored before the 1000/1024 check.
-fn parse_graph_base(value: &str) -> Result<u32, Box<dyn std::error::Error>> {
-    let trimmed = value.trim_start();
-    let negative = trimmed.starts_with('-');
-    let unsigned = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
-    let base = unsigned
-        .bytes()
-        .take_while(u8::is_ascii_digit)
-        .fold(0_u64, |total, digit| {
-            total
-                .saturating_mul(10)
-                .saturating_add(u64::from(digit - b'0'))
-        });
-    match (negative, base) {
-        (false, 1000) => Ok(1000),
-        (false, 1024) => Ok(1024),
-        _ => Err("the only sensible value for base apart from 1000 is 1024".into()),
-    }
-}
-
-fn parse_graph_color(value: &str, definition: &str) -> Result<[u8; 4], Box<dyn std::error::Error>> {
-    if !matches!(value.len(), 6 | 8) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(format!("invalid graph color in {definition}").into());
-    }
-    Ok([
-        u8::from_str_radix(&value[0..2], 16)?,
-        u8::from_str_radix(&value[2..4], 16)?,
-        u8::from_str_radix(&value[4..6], 16)?,
-        if value.len() == 8 {
-            u8::from_str_radix(&value[6..8], 16)?
-        } else {
-            255
-        },
-    ])
-}
-
 #[derive(Clone)]
 struct GraphSeries {
     variable: String,
@@ -2852,30 +2811,6 @@ impl Default for GraphColors {
             frame: [80, 80, 80, 255],
             arrow: [80, 80, 80, 255],
         }
-    }
-}
-
-impl GraphColors {
-    fn parse_override(&mut self, value: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let (tag, color) = value
-            .split_once('#')
-            .ok_or("--color expects TAG#rrggbb[aa]")?;
-        let color = parse_graph_color(color, value)?;
-        let target = match tag {
-            "BACK" => &mut self.back,
-            "CANVAS" => &mut self.canvas,
-            "SHADEA" => &mut self.shade_a,
-            "SHADEB" => &mut self.shade_b,
-            "GRID" => &mut self.grid,
-            "MGRID" => &mut self.mgrid,
-            "FONT" => &mut self.font,
-            "AXIS" => &mut self.axis,
-            "FRAME" => &mut self.frame,
-            "ARROW" => &mut self.arrow,
-            _ => return Err(format!("unknown graph color tag: {tag}").into()),
-        };
-        *target = color;
-        Ok(())
     }
 }
 
@@ -3379,6 +3314,13 @@ fn format_imginfo(
     width: u32,
     height: u32,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    // bad_format_imginfo (rrd_graph.c:5880).
+    let bad_format = || -> Box<dyn std::error::Error> {
+        format!(
+            "invalid format string '{format}' (should match '^(?:[^%]+|%%)*%s(?:[^%]+|%%)*%lu(?:[^%]+|%%)*%lu(?:[^%]+|%%)*$')"
+        )
+        .into()
+    };
     let mut output = String::new();
     let mut chars = format.chars().peekable();
     let mut argument = 0;
@@ -3387,7 +3329,7 @@ fn format_imginfo(
             output.push(character);
             continue;
         }
-        let conversion = chars.next().ok_or("invalid --imginfo format")?;
+        let conversion = chars.next().ok_or_else(bad_format)?;
         if conversion == '%' {
             output.push('%');
             continue;
@@ -3396,13 +3338,13 @@ fn format_imginfo(
             (0, 's') => filename.to_owned(),
             (1, 'l') if chars.next() == Some('u') => width.to_string(),
             (2, 'l') if chars.next() == Some('u') => height.to_string(),
-            _ => return Err("--imginfo format must use %s, %lu, and %lu in that order".into()),
+            _ => return Err(bad_format()),
         };
         output.push_str(&value);
         argument += 1;
     }
     if argument != 3 {
-        return Err("--imginfo format must use %s, %lu, and %lu in that order".into());
+        return Err(bad_format());
     }
     Ok(output)
 }
@@ -4316,56 +4258,59 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
         }
         return Ok(());
     }
-    if args.len() < 3 {
-        return Err("Usage: rrdtool update <file> <timestamp:value>...".into());
-    }
-    let filename = PathBuf::from(&args[1]);
+    // rrd_update.c:304 (updatev) and :679 (update).
+    const UPDATE_LONGOPTS: &[LongOpt] = &[
+        opt("template", b't' as i32, ArgType::Required),
+        opt("daemon", b'd' as i32, ArgType::Required),
+        opt("skip-past-updates", b's' as i32, ArgType::None),
+        opt("locking", b'L' as i32, ArgType::Required),
+    ];
+    const UPDATEV_LONGOPTS: &[LongOpt] = &[
+        opt("template", b't' as i32, ArgType::Required),
+        opt("skip-past-updates", b's' as i32, ArgType::None),
+        opt("locking", b'L' as i32, ArgType::Required),
+    ];
     let mut template = None;
     let mut skip_past_updates = false;
     let mut daemon_address = None;
-    let mut samples = Vec::new();
-    let mut index = 2;
-    while index < args.len() {
-        if args[index] == "--" {
-            samples.extend(args[index + 1..].iter().cloned());
-            break;
-        }
-        match args[index].as_str() {
-            "--template" | "-t" => {
-                index += 1;
+    let mut locking = String::new();
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        let option = options.long(if verbose {
+            UPDATEV_LONGOPTS
+        } else {
+            UPDATE_LONGOPTS
+        });
+        match u8::try_from(option).map(char::from) {
+            _ if option == optparse::DONE => break,
+            Ok('t') => {
                 template = Some(
-                    args.get(index)
-                        .ok_or("update --template requires a colon-separated DS list")?
+                    options
+                        .value()
                         .split(':')
                         .map(str::to_owned)
                         .collect::<Vec<_>>(),
                 );
             }
-            "--daemon" | "-d" if verbose => {
-                return Err(format!(
-                    "invalid option -- '{}'",
-                    args[index].trim_start_matches('-')
-                )
-                .into());
+            Ok('s') => skip_past_updates = true,
+            Ok('d') => daemon_address = Some(options.value().to_owned()),
+            Ok('L') => {
+                if !rondi::is_rrd_locking_mode(options.value()) {
+                    return Err(format!("unsupported locking mode '{}'\n", options.value()).into());
+                }
+                locking = options.value().to_owned();
             }
-            "--daemon" | "-d" => {
-                index += 1;
-                let address = args
-                    .get(index)
-                    .ok_or("update --daemon requires an address")?;
-                daemon_address = Some(address.clone());
-            }
-            option if option.starts_with("--daemon=") => {
-                daemon_address = Some(option["--daemon=".len()..].to_owned());
-            }
-            "--skip-past-updates" | "-s" => skip_past_updates = true,
-            option if option.starts_with('-') => {
-                return Err(format!("unsupported update option: {option}").into());
-            }
-            sample => samples.push(sample.to_owned()),
+            Ok('?') => return Err(options.errmsg.into()),
+            _ => {}
         }
-        index += 1;
     }
+    let [filename_text, samples @ ..] = options.positionals() else {
+        return Err("Not enough arguments".into());
+    };
+    if samples.is_empty() {
+        return Err("Not enough arguments".into());
+    }
+    let filename = PathBuf::from(filename_text);
     let daemon_address = daemon_address.or_else(|| {
         std::env::var("RRDCACHED_ADDRESS")
             .ok()
@@ -4386,16 +4331,18 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
         ensure_rrd_file_exists(&filename)?;
         let template = template.as_ref().map(|names| names.join(":"));
         let arguments = samples.iter().map(String::as_str).collect::<Vec<_>>();
-        let (summaries, result) = update_rrd_text(
-            &filename,
-            template.as_deref(),
-            &arguments,
-            skip_past_updates,
-        );
+        let (summaries, result) = rondi::with_rrd_locking(&locking, || {
+            update_rrd_text(
+                &filename,
+                template.as_deref(),
+                &arguments,
+                skip_past_updates,
+            )
+        });
         if verbose {
             // rrd_update_v reports the rows written before a failure too.
             println!("return_value = {}", if result.is_ok() { 0 } else { -1 });
-            let names = inspect_rrd(&args[1])
+            let names = inspect_rrd(filename_text)
                 .map(|info| info.data_sources)
                 .unwrap_or_default();
             for summary in summaries {
@@ -4415,7 +4362,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
     }
     let mut source_count = None;
     let source_names = if let Some(template) = &template {
-        let info = inspect_rrd(&args[1])?;
+        let info = inspect_rrd(filename_text)?;
         let mut indices = Vec::with_capacity(template.len());
         for name in template {
             indices.push(
@@ -4431,7 +4378,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
         None
     };
     let mut daemon_samples = Vec::new();
-    for sample in &samples {
+    for sample in samples {
         let (timestamp, values, at_style) =
             if let Some((timestamp, values)) = sample.split_once('@') {
                 (timestamp, values, true)
@@ -4459,7 +4406,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
             .enumerate()
             .map(|(value_index, value)| {
                 parse_rrd_update_value(value).map_or_else(|| {
-                    let data_sources = inspect_rrd(&args[1])
+                    let data_sources = inspect_rrd(filename_text)
                         .map(|info| info.data_sources)
                         .unwrap_or_default();
                     let source_index = template
@@ -4505,7 +4452,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
             }
             let source_count = match source_count {
                 Some(count) => count,
-                None => *source_count.insert(inspect_rrd(&args[1])?.data_sources.len()),
+                None => *source_count.insert(inspect_rrd(filename_text)?.data_sources.len()),
             };
             let mut expanded = vec![None; source_count];
             for (source_index, raw_value) in indices.iter().zip(raw_values) {
@@ -4579,36 +4526,40 @@ fn rrdtool_flushcached(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         );
         return Ok(());
     }
+    // rrd_flushcached.c:27.
+    const LONGOPTS: &[LongOpt] = &[opt("daemon", b'd' as i32, ArgType::Required)];
     let mut daemon = None;
-    let mut files = Vec::new();
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "-d" | "--daemon" => {
-                index += 1;
-                daemon = Some(
-                    args.get(index)
-                        .ok_or("flushcached: --daemon requires an address")?
-                        .clone(),
-                );
-            }
-            option if option.starts_with("--daemon=") => {
-                daemon = Some(option["--daemon=".len()..].to_owned());
-            }
-            option if option.starts_with('-') => {
-                return Err(format!("flushcached: unknown option: {option}").into());
-            }
-            filename => files.push(filename.to_owned()),
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            option if option == b'd' as i32 => daemon = Some(options.value().to_owned()),
+            optparse::ERROR => return Err(options.errmsg.into()),
+            _ => {}
         }
-        index += 1;
     }
+    let files = options.positionals().to_vec();
     if files.is_empty() {
-        return Err("Usage: rrdtool flushcached [--daemon|-d <addr>] <file> [<file> ...]".into());
+        return Err(format!(
+            "Usage: rrdtool {} [--daemon|-d <addr>] <file> [<file> ...]",
+            args[0]
+        )
+        .into());
     }
-    let daemon = daemon.or_else(|| std::env::var("RRDCACHED_ADDRESS").ok());
-    let Some(daemon) = daemon.filter(|address| !address.is_empty()) else {
-        return Err("Daemon address \"(null)\" unknown. Please use the \"--daemon\" option to set an address on the command line or set the \"RRDCACHED_ADDRESS\" environment variable.".into());
+    // rrd_client_connect reads RRDCACHED_ADDRESS only when no --daemon was
+    // given, and the message prints opt_daemon with %s.
+    let address = match &daemon {
+        Some(address) => address.clone(),
+        None => std::env::var("RRDCACHED_ADDRESS").unwrap_or_default(),
     };
+    if address.is_empty() {
+        return Err(format!(
+            "Daemon address \"{}\" unknown. Please use the \"--daemon\" option to set an address on the command line or set the \"RRDCACHED_ADDRESS\" environment variable.",
+            daemon.as_deref().unwrap_or("(null)")
+        )
+        .into());
+    }
+    let daemon = address;
     for filename in &files {
         if let Err(error) = send_rrdcached_flush(&daemon, filename) {
             if error.is::<RrdcachedConnectError>() {
@@ -4734,31 +4685,21 @@ fn rrdtool_last(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", rrdtool_last_help());
         return Ok(());
     }
-    let mut filenames = Vec::new();
+    // rrd_last.c:18.
+    const LONGOPTS: &[LongOpt] = &[opt("daemon", b'd' as i32, ArgType::Required)];
     let mut daemon_address = None::<String>;
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--daemon" | "-d" => {
-                index += 1;
-                daemon_address = Some(
-                    args.get(index)
-                        .ok_or("last --daemon requires an address")?
-                        .clone(),
-                );
-            }
-            option if option.starts_with("--daemon=") => {
-                daemon_address = Some(option["--daemon=".len()..].to_owned());
-            }
-            option if option.starts_with('-') => {
-                return Err(format!("unsupported last option: {option}").into());
-            }
-            path => filenames.push(path.to_owned()),
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            option if option == b'd' as i32 => daemon_address = Some(options.value().to_owned()),
+            optparse::ERROR => return Err(options.errmsg.into()),
+            _ => {}
         }
-        index += 1;
     }
-    let [filename] = <[String; 1]>::try_from(filenames)
-        .map_err(|_| "Usage: rrdtool last [--daemon|-d <addr>] <file>")?;
+    let [filename] = options.positionals() else {
+        return Err(format!("Usage: rrdtool {} [--daemon|-d <addr>] <file>", args[0]).into());
+    };
     if let Some(address) = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty())
@@ -4771,7 +4712,7 @@ fn rrdtool_last(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("invalid rrdcached LAST response")?;
         println!("{timestamp}");
     } else {
-        println!("{}", inspect_rrd(&filename)?.last_update);
+        println!("{}", inspect_rrd(filename)?.last_update);
     }
     Ok(())
 }
@@ -4785,11 +4726,29 @@ fn rrdtool_lastupdate(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         print!("{}", include_str!("help/lastupdate.txt"));
         return Ok(());
     }
-    if args.len() != 2 {
-        return Err("Usage: rrdtool lastupdate filename.rrd".into());
+    // rrd_lastupdate.c:19.
+    const LONGOPTS: &[LongOpt] = &[opt("daemon", b'd' as i32, ArgType::Required)];
+    let mut daemon_address = None::<String>;
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            option if option == b'd' as i32 => daemon_address = Some(options.value().to_owned()),
+            optparse::ERROR => return Err(options.errmsg.into()),
+            _ => {}
+        }
     }
-    ensure_rrd_file_exists(std::path::Path::new(&args[1]))?;
-    let info = inspect_rrd(&args[1])?;
+    let [filename] = options.positionals() else {
+        return Err(format!("Usage: rrdtool {} [--daemon|-d <addr>] <file>", args[0]).into());
+    };
+    if let Some(address) = daemon_address
+        .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
+        .filter(|address| !address.is_empty())
+    {
+        send_rrdcached_flush(&address, filename)?;
+    }
+    ensure_rrd_file_exists(std::path::Path::new(filename))?;
+    let info = inspect_rrd(filename)?;
     println!(
         " {}",
         info.data_sources
@@ -4812,42 +4771,36 @@ fn rrdtool_first(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/first.txt"));
         return Ok(());
     }
-    let mut archive_index = 0usize;
+    // rrd_first.c:18.
+    const LONGOPTS: &[LongOpt] = &[
+        opt("rraindex", 129, ArgType::Required),
+        opt("daemon", b'd' as i32, ArgType::Required),
+    ];
+    let mut archive_index = 0_i32;
     let mut daemon_address = None::<String>;
-    let mut filename = None;
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--rraindex" => {
-                index += 1;
-                let raw = args
-                    .get(index)
-                    .ok_or("first --rraindex requires a number")?;
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            129 => {
                 // rrd_first.c:33 stores strtol(optarg, &endptr, 0) in an int.
-                archive_index = usize::try_from(rondi::c_strtol(raw, 0).0 as i32)
-                    .map_err(|_| "invalid rraindex number")?;
+                archive_index = rondi::c_strtol(options.value(), 0).0 as i32;
+                if archive_index < 0 {
+                    return Err("invalid rraindex number".into());
+                }
             }
-            "--daemon" | "-d" => {
-                index += 1;
-                let address = args
-                    .get(index)
-                    .ok_or("first --daemon requires an address")?;
-                daemon_address = Some(address.clone());
-            }
-            option if option.starts_with("--daemon=") => {
-                daemon_address = Some(option["--daemon=".len()..].to_owned());
-            }
-            option if option.starts_with('-') => {
-                return Err(format!("unsupported rrdtool first option: {option}").into());
-            }
-            value => {
-                filename.get_or_insert(value);
-            }
+            option if option == b'd' as i32 => daemon_address = Some(options.value().to_owned()),
+            optparse::ERROR => return Err(options.errmsg.into()),
+            _ => {}
         }
-        index += 1;
     }
-    let filename =
-        filename.ok_or("usage rrdtool first [--rraindex number] [--daemon|-d <addr>] file.rrd")?;
+    let Some(filename) = options.positionals().first() else {
+        return Err(format!(
+            "usage rrdtool {} [--rraindex number] [--daemon|-d <addr>] file.rrd",
+            args[0]
+        )
+        .into());
+    };
     if let Some(address) = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty())
@@ -4864,7 +4817,7 @@ fn rrdtool_first(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         println!("{timestamp}");
         return Ok(());
     }
-    println!("{}", first_rrd_time(filename, archive_index)?);
+    println!("{}", first_rrd_time(filename, archive_index as usize)?);
     Ok(())
 }
 
@@ -4884,37 +4837,31 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/info.txt"));
         return Ok(());
     }
-    let mut filename = None::<String>;
+    // rrd_info.c:72.
+    const LONGOPTS: &[LongOpt] = &[
+        opt("daemon", b'd' as i32, ArgType::Required),
+        opt("noflush", b'F' as i32, ArgType::None),
+    ];
     let mut daemon_address = None::<String>;
     let mut noflush = false;
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--daemon" | "-d" => {
-                index += 1;
-                daemon_address = Some(
-                    args.get(index)
-                        .ok_or("info --daemon requires an address")?
-                        .clone(),
-                );
-            }
-            option if option.starts_with("--daemon=") => {
-                daemon_address = Some(option["--daemon=".len()..].to_owned());
-            }
-            "--noflush" | "-F" => noflush = true,
-            option if option.starts_with('-') => {
-                return Err(format!("unsupported info option: {option}").into());
-            }
-            path => {
-                if filename.replace(path.to_owned()).is_some() {
-                    return Err("rrdtool info accepts one filename".into());
-                }
-            }
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            option if option == b'd' as i32 => daemon_address = Some(options.value().to_owned()),
+            option if option == b'F' as i32 => noflush = true,
+            optparse::ERROR => return Err(options.errmsg.into()),
+            _ => {}
         }
-        index += 1;
     }
-    let filename =
-        filename.ok_or("Usage: rrdtool info [--daemon|-d <addr>] [--noflush|-F] file")?;
+    let [filename] = options.positionals() else {
+        return Err(format!(
+            "Usage: rrdtool {} [--daemon |-d <addr> [--noflush|-F]] <file>",
+            args[0]
+        )
+        .into());
+    };
+    let filename = filename.clone();
     if !noflush {
         if let Some(address) = daemon_address
             .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
@@ -4999,46 +4946,39 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/dump.txt"));
         return Ok(());
     }
+    // rrd_dump.c:556.
+    const LONGOPTS: &[LongOpt] = &[
+        opt("daemon", b'd' as i32, ArgType::Required),
+        opt("header", b'h' as i32, ArgType::Required),
+        opt("no-header", b'n' as i32, ArgType::None),
+    ];
+    let usage = format!(
+        "usage rrdtool {} [--header|-h {{none,xsd,dtd}}]\n[--no-header|-n]\n[--daemon|-d address]\nfile.rrd [file.xml]",
+        args[0]
+    );
     let mut header = RrdDumpHeader::Dtd;
-    let mut positional = Vec::new();
     let mut daemon_address = None::<String>;
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--no-header" | "-n" => header = RrdDumpHeader::None,
-            "--header" | "-h" => {
-                index += 1;
-                header = match args.get(index).map(String::as_str) {
-                    Some("none") => RrdDumpHeader::None,
-                    Some("dtd") => RrdDumpHeader::Dtd,
-                    Some("xsd") => RrdDumpHeader::Xsd,
-                    Some(value) => return Err(format!("invalid dump header: {value}").into()),
-                    None => return Err("dump --header requires none, dtd, or xsd".into()),
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            option if option == b'd' as i32 => daemon_address = Some(options.value().to_owned()),
+            option if option == b'n' as i32 => header = RrdDumpHeader::None,
+            // parse_opt_xmlheader returns -1 for other words, which
+            // rrd_dump_opt_r writes like "none".
+            option if option == b'h' as i32 => {
+                header = match options.value() {
+                    "dtd" => RrdDumpHeader::Dtd,
+                    "xsd" => RrdDumpHeader::Xsd,
+                    _ => RrdDumpHeader::None,
                 };
             }
-            "--daemon" | "-d" => {
-                index += 1;
-                daemon_address = Some(
-                    args.get(index)
-                        .ok_or("dump --daemon requires an address")?
-                        .clone(),
-                );
-            }
-            option if option.starts_with("--daemon=") => {
-                daemon_address = Some(option["--daemon=".len()..].to_owned());
-            }
-            value if value.starts_with('-') => {
-                return Err(format!("unsupported rrdtool dump option: {value}").into());
-            }
-            value => positional.push(value.to_owned()),
+            _ => return Err(usage.into()),
         }
-        index += 1;
     }
+    let positional = options.positionals().to_vec();
     if !(1..=2).contains(&positional.len()) {
-        return Err(
-            "Usage: rrdtool dump [--header {none,xsd,dtd}] [--no-header] file.rrd [file.xml]"
-                .into(),
-        );
+        return Err(usage.into());
     }
     if let Some(address) = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
@@ -5049,7 +4989,7 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     ensure_rrd_file_exists(std::path::Path::new(&positional[0]))?;
     let xml = dump_rrd_file_with_header(&positional[0], header)?;
     if let Some(output) = positional.get(1) {
-        std::fs::write(output, xml)?;
+        write_output_file(output, xml.as_bytes())?;
     } else {
         print!("{xml}");
     }
@@ -5061,26 +5001,39 @@ fn rrdtool_restore(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/restore.txt"));
         return Ok(());
     }
-    let mut force_overwrite = false;
-    let mut range_check = false;
-    let mut positional = Vec::new();
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--force-overwrite" => force_overwrite = true,
-            "--range-check" => range_check = true,
-            value if value.starts_with('-') && value != "-" => {
-                return Err(format!("unsupported rrdtool restore option: {value}").into());
+    // rrd_restore.c:1383. Upstream keeps both flags in file statics that
+    // nothing resets, so in pipe mode they stay set for later restores.
+    static RANGE_CHECK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static FORCE_OVERWRITE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    const LONGOPTS: &[LongOpt] = &[
+        opt("range-check", b'r' as i32, ArgType::None),
+        opt("force-overwrite", b'f' as i32, ArgType::None),
+    ];
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            option if option == b'r' as i32 => {
+                RANGE_CHECK.store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            value => positional.push(value.to_owned()),
+            option if option == b'f' as i32 => {
+                FORCE_OVERWRITE.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+            optparse::ERROR => return Err(options.errmsg.into()),
+            _ => {}
         }
-        index += 1;
     }
+    let positional = options.positionals();
     if positional.len() != 2 {
-        return Err(
-            "Usage: rrdtool restore [--range-check] [--force-overwrite] file.xml file.rrd".into(),
-        );
+        return Err(format!(
+            "usage rrdtool {} [--range-check|-r] [--force-overwrite|-f] file.xml file.rrd",
+            args[0]
+        )
+        .into());
     }
+    let range_check = RANGE_CHECK.load(std::sync::atomic::Ordering::Relaxed);
+    let force_overwrite = FORCE_OVERWRITE.load(std::sync::atomic::Ordering::Relaxed);
     let xml = if positional[0] == "-" {
         let mut xml = String::new();
         std::io::stdin().read_to_string(&mut xml)?;
@@ -5097,80 +5050,47 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/tune.txt"));
         return Ok(());
     }
-    let mut filename = None;
+    // rrd_tune.c:78. rrd_tune reads only --daemon in a first pass that
+    // ignores errors; rrd_tune_r then applies every option in order.
+    const LONGOPTS: &[LongOpt] = &[
+        opt("heartbeat", b'h' as i32, ArgType::Required),
+        opt("minimum", b'i' as i32, ArgType::Required),
+        opt("maximum", b'a' as i32, ArgType::Required),
+        opt("data-source-type", b'd' as i32, ArgType::Required),
+        opt("data-source-rename", b'r' as i32, ArgType::Required),
+        opt("deltapos", b'p' as i32, ArgType::Required),
+        opt("deltaneg", b'n' as i32, ArgType::Required),
+        opt("window-length", b'w' as i32, ArgType::Required),
+        opt("failure-threshold", b'f' as i32, ArgType::Required),
+        opt("alpha", b'x' as i32, ArgType::Required),
+        opt("beta", b'y' as i32, ArgType::Required),
+        opt("gamma", b'z' as i32, ArgType::Required),
+        opt("gamma-deviation", b'v' as i32, ArgType::Required),
+        opt("smoothing-window", b's' as i32, ArgType::Required),
+        opt("smoothing-window-deviation", b'S' as i32, ArgType::Required),
+        opt("aberrant-reset", b'b' as i32, ArgType::Required),
+        opt("step", b't' as i32, ArgType::Required),
+        opt("daemon", b'D' as i32, ArgType::Required),
+    ];
     let mut daemon_address = None::<String>;
-    let mut settings = Vec::<(&'static str, String)>::new();
-    let mut raw_settings = Vec::<String>::new();
-    let mut index = 1;
-    while index < args.len() {
-        let argument = args[index].as_str();
-        let (setting, inline_value) = if let Some(value) = argument.strip_prefix("--heartbeat=") {
-            (Some("heartbeat"), Some(value))
-        } else if let Some(value) = argument.strip_prefix("--data-source-type=") {
-            (Some("type"), Some(value))
-        } else if let Some(value) = argument.strip_prefix("--data-source-rename=") {
-            (Some("rename"), Some(value))
-        } else if let Some(value) = argument.strip_prefix("--minimum=") {
-            (Some("minimum"), Some(value))
-        } else if let Some(value) = argument.strip_prefix("--maximum=") {
-            (Some("maximum"), Some(value))
-        } else {
-            match argument {
-                "--heartbeat" | "-h" => (Some("heartbeat"), None),
-                "--data-source-type" | "-d" => (Some("type"), None),
-                "--data-source-rename" | "-r" => (Some("rename"), None),
-                "--minimum" | "-i" => (Some("minimum"), None),
-                "--maximum" | "-a" => (Some("maximum"), None),
-                "--daemon" | "-D" => {
-                    index += 1;
-                    daemon_address = Some(
-                        args.get(index)
-                            .ok_or("tune --daemon requires an address")?
-                            .clone(),
-                    );
-                    index += 1;
-                    continue;
-                }
-                option if option.starts_with("--daemon=") => {
-                    daemon_address = Some(option["--daemon=".len()..].to_owned());
-                    index += 1;
-                    continue;
-                }
-                value if value.starts_with('-') => {
-                    return Err(format!("unsupported rrdtool tune option: {value}").into());
-                }
-                value => {
-                    if filename.replace(value.to_owned()).is_some() {
-                        return Err("rrdtool tune expects one RRD filename".into());
-                    }
-                    index += 1;
-                    continue;
+    // The settings in long form, for the daemon's TUNE command.
+    let mut raw_settings = Vec::new();
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            option if option == b'D' as i32 => daemon_address = Some(options.value().to_owned()),
+            option => {
+                if let Some(longopt) = LONGOPTS.iter().find(|longopt| longopt.short == option) {
+                    raw_settings.push(format!("--{}", longopt.name));
+                    raw_settings.push(options.value().to_owned());
                 }
             }
-        };
-        if let Some(name) = setting {
-            let value = if let Some(value) = inline_value {
-                raw_settings.push(argument.to_owned());
-                value.to_owned()
-            } else {
-                raw_settings.push(argument.to_owned());
-                index += 1;
-                let value = args
-                    .get(index)
-                    .ok_or_else(|| format!("tune --{name} requires a value"))?
-                    .clone();
-                raw_settings.push(value.clone());
-                value
-            };
-            settings.push((name, value));
         }
-        index += 1;
     }
-
-    let filename = filename.ok_or("Usage: rrdtool tune file.rrd [--heartbeat DS:VALUE] [--minimum DS:VALUE] [--maximum DS:VALUE]")?;
-    if settings.is_empty() {
-        return Ok(());
-    }
+    let Some(filename) = options.positionals().first().cloned() else {
+        return Err("missing file name".into());
+    };
     if let Some(address) = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty())
@@ -5195,7 +5115,6 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     ensure_rrd_file_exists(std::path::Path::new(&filename))?;
     let info = rondi::inspect_rrd_file(&filename)?;
-
     let mut changes = info
         .data_sources
         .iter()
@@ -5213,55 +5132,212 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|source| source.name.clone())
         .collect::<Vec<_>>();
-    for (setting, value) in settings {
-        if setting == "rename" {
-            let (old_name, new_name) = value
-                .split_once(':')
-                .ok_or("invalid arguments for data source rename")?;
-            let ds_index = current_names
-                .iter()
-                .position(|source| source == old_name)
-                .ok_or_else(|| format!("No DS called {old_name}"))?;
-            changes[ds_index].new_name = Some(new_name.to_owned());
-            current_names[ds_index] = new_name.to_owned();
-            continue;
-        }
-        let (name, value) = value
-            .split_once(':')
-            .ok_or_else(|| format!("invalid arguments for {setting}"))?;
-        let ds_index = current_names
+    let ds_match = |names: &[String], name: &str| {
+        names
             .iter()
             .position(|source| source == name)
-            .ok_or_else(|| format!("No DS called {name}"))?;
-        match setting {
-            "type" => changes[ds_index].kind = Some(value.to_owned()),
-            "heartbeat" => {
-                let heartbeat = value
-                    .parse::<i64>()
-                    .map_err(|_| "invalid arguments for heartbeat")?;
-                changes[ds_index].heartbeat = Some(heartbeat as u64);
+            .ok_or_else(|| format!("unknown data source name '{name}'"))
+    };
+    let mut options = OptParse::new(args.to_vec());
+    // rrd_tune_r edits the header through the file mapping, so settings
+    // applied before a failing option stay written.
+    let applied = (|| -> Result<(), Box<dyn std::error::Error>> {
+        loop {
+            let option = options.long(LONGOPTS);
+            if option == optparse::DONE {
+                break;
             }
-            "minimum" | "maximum" => {
-                let bound = if value == "U" {
-                    RrdTuneBound::Unbounded
-                } else {
-                    RrdTuneBound::Value(
-                        value
-                            .parse::<f64>()
-                            .map_err(|_| format!("invalid arguments for {setting} ds value"))?,
-                    )
-                };
-                if setting == "minimum" {
-                    changes[ds_index].minimum = Some(bound);
-                } else {
-                    changes[ds_index].maximum = Some(bound);
+            let value = options.value();
+            match u8::try_from(option).map(char::from) {
+                Ok('h') => {
+                    let Some((name, heartbeat)) = tune_scan_heartbeat(value) else {
+                        return Err("invalid arguments for heartbeat".into());
+                    };
+                    let ds = ds_match(&current_names, &name)?;
+                    changes[ds].heartbeat = Some(heartbeat as u64);
                 }
+                Ok(kind @ ('i' | 'a')) => {
+                    let which = if kind == 'i' { "minimum" } else { "maximum" };
+                    let bound = tune_scan_pair(value, c"%19[a-zA-Z0-9_-]:%40[U0-9.e+-]").and_then(
+                        |(name, text)| {
+                            let bound = if text == "U" {
+                                RrdTuneBound::Unbounded
+                            } else {
+                                let value = cparse::rrd_strtodbl(&text, None).ok()?;
+                                if value.is_nan() {
+                                    RrdTuneBound::Unbounded
+                                } else {
+                                    RrdTuneBound::Value(value)
+                                }
+                            };
+                            Some((name, bound))
+                        },
+                    );
+                    let Some((name, bound)) = bound else {
+                        return Err(format!("invalid arguments for {which} ds value").into());
+                    };
+                    let ds = ds_match(&current_names, &name)?;
+                    if kind == 'i' {
+                        changes[ds].minimum = Some(bound);
+                    } else {
+                        changes[ds].maximum = Some(bound);
+                    }
+                }
+                Ok('d') => {
+                    let Some((name, kind)) = tune_scan_pair(value, c"%19[a-zA-Z0-9_-]:%19[A-Z]")
+                    else {
+                        return Err("invalid arguments for data source type".into());
+                    };
+                    let ds = ds_match(&current_names, &name)?;
+                    if !matches!(
+                        kind.as_str(),
+                        "COUNTER"
+                            | "ABSOLUTE"
+                            | "GAUGE"
+                            | "DERIVE"
+                            | "COMPUTE"
+                            | "DCOUNTER"
+                            | "DDERIVE"
+                    ) {
+                        return Err(format!("unknown data acquisition function '{kind}'").into());
+                    }
+                    changes[ds].kind = Some(kind);
+                }
+                Ok('r') => {
+                    let Some((name, new_name)) =
+                        tune_scan_pair(value, c"%19[a-zA-Z0-9_-]:%19[a-zA-Z0-9_-]")
+                    else {
+                        return Err("invalid arguments for data source type".into());
+                    };
+                    let ds = ds_match(&current_names, &name)?;
+                    changes[ds].new_name = Some(new_name.clone());
+                    current_names[ds] = new_name;
+                }
+                // Rondi opens no Holt-Winters file, so after the value checks
+                // these always find their RRA missing (rrd_tune.c:475-640).
+                Ok('p' | 'n') => {
+                    let (status, parsed) = cparse::rrd_strtodbl_status(value, None);
+                    let param = parsed.unwrap_or_else(|_| cparse::rrd_strtod_prefix(value));
+                    if matches!(status, 1 | 2) && param < 0.1 {
+                        return Err("Parameter specified is too small".into());
+                    }
+                    if status == 1 {
+                        return Err("Unable to parse parameter in set_deltaarg".into());
+                    }
+                    return Err("Failures RRA does not exist in this RRD".into());
+                }
+                Ok('f' | 'w') => {
+                    let param = cparse::atoi(value) as libc::c_ulong;
+                    if !(1..=28).contains(&param) {
+                        return Err("Parameter must be between 1 and 28".into());
+                    }
+                    return Err("Failures RRA does not exist in this RRD".into());
+                }
+                Ok(kind @ ('x' | 'y' | 'z' | 'v' | 's' | 'S')) => {
+                    let (status, parsed) = cparse::rrd_strtodbl_status(value, None);
+                    let param = parsed.unwrap_or_else(|_| cparse::rrd_strtod_prefix(value));
+                    let out_of_range = if matches!(kind, 's' | 'S') {
+                        !(0.0..=1.0).contains(&param)
+                    } else {
+                        param <= 0.0 || param >= 1.0
+                    };
+                    if matches!(status, 1 | 2) && out_of_range {
+                        return Err("Holt-Winters parameter must be between 0 and 1".into());
+                    }
+                    if status == 0 {
+                        return Err("Unable to parse Holt-Winters parameter".into());
+                    }
+                    return Err("Holt-Winters RRA does not exist in this RRD".into());
+                }
+                Ok('b') => {
+                    let Some(name) = tune_scan_name(value) else {
+                        return Err("invalid argument for aberrant-reset".into());
+                    };
+                    // reset_aberrant_coefficients does nothing without
+                    // Holt-Winters archives.
+                    ds_match(&current_names, &name)?;
+                }
+                Ok('?') => return Err(options.errmsg.clone().into()),
+                _ => {}
             }
-            _ => unreachable!(),
+        }
+        Ok(())
+    })();
+    let changed = changes.iter().any(|change| {
+        change.kind.is_some()
+            || change.new_name.is_some()
+            || change.heartbeat.is_some()
+            || change.minimum.is_some()
+            || change.maximum.is_some()
+    });
+    if changed {
+        tune_rrd_data_sources(&filename, &changes)?;
+    }
+    applied?;
+
+    // handle_modify (rrd_modify.c:1299) takes the words after the file name.
+    for argument in &options.positionals()[1..] {
+        let known = ["DEL:", "DS:", "RRA#", "RRA:"]
+            .iter()
+            .any(|prefix| argument.starts_with(prefix) && argument.len() > prefix.len())
+            || (argument.starts_with("DELRRA:") && argument.len() > 7);
+        if !known {
+            return Err(format!("unparsable argument: {argument}").into());
         }
     }
-    tune_rrd_data_sources(&filename, &changes)?;
+    if options.positionals().len() > 1 {
+        return Err("rrdtool tune DS/RRA modification (rrd_modify) is not implemented".into());
+    }
     Ok(())
+}
+
+/// `sscanf(value, DS_NAM_FMT ":%ld", ...) == 2` (rrd_tune.c:258).
+fn tune_scan_heartbeat(value: &str) -> Option<(String, libc::c_long)> {
+    let input = cparse::c_string(value);
+    let mut name = [0_u8; 20];
+    let mut heartbeat: libc::c_long = 0;
+    // SAFETY: %19[ writes at most 20 bytes and %ld a long.
+    let matched = unsafe {
+        libc::sscanf(
+            input.as_ptr(),
+            c"%19[a-zA-Z0-9_-]:%ld".as_ptr(),
+            name.as_mut_ptr(),
+            &mut heartbeat as *mut libc::c_long,
+        )
+    };
+    (matched == 2).then(|| (cparse::buffer_text(&name), heartbeat))
+}
+
+/// Two string conversions of at most 40 bytes each.
+fn tune_scan_pair(value: &str, format: &std::ffi::CStr) -> Option<(String, String)> {
+    let input = cparse::c_string(value);
+    let mut first = [0_u8; 41];
+    let mut second = [0_u8; 41];
+    // SAFETY: every format passed has two %N[ conversions with N <= 40.
+    let matched = unsafe {
+        libc::sscanf(
+            input.as_ptr(),
+            format.as_ptr(),
+            first.as_mut_ptr(),
+            second.as_mut_ptr(),
+        )
+    };
+    (matched == 2).then(|| (cparse::buffer_text(&first), cparse::buffer_text(&second)))
+}
+
+/// `sscanf(value, DS_NAM_FMT, ds_nam) == 1`.
+fn tune_scan_name(value: &str) -> Option<String> {
+    let input = cparse::c_string(value);
+    let mut name = [0_u8; 20];
+    // SAFETY: %19[ writes at most 20 bytes.
+    let matched = unsafe {
+        libc::sscanf(
+            input.as_ptr(),
+            c"%19[a-zA-Z0-9_-]".as_ptr(),
+            name.as_mut_ptr(),
+        )
+    };
+    (matched == 1).then(|| cparse::buffer_text(&name))
 }
 
 fn rrdtool_resize(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -5301,40 +5377,46 @@ fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/list.txt"));
         return Ok(());
     }
+    // rrd_list.c:256.
+    const LONGOPTS: &[LongOpt] = &[
+        opt("daemon", b'd' as i32, ArgType::Required),
+        opt("noflush", b'F' as i32, ArgType::None),
+        opt("recursive", b'r' as i32, ArgType::None),
+    ];
     let mut recursive = false;
-    let mut directory = None;
     let mut daemon = None;
     let mut noflush = false;
-    let mut index = 1;
-    while index < args.len() {
-        match args[index].as_str() {
-            "--recursive" | "-r" => recursive = true,
-            "--noflush" | "-F" => noflush = true,
-            "--daemon" | "-d" => {
-                daemon = Some(
-                    args.get(index + 1)
-                        .ok_or("rrdtool list --daemon requires an address")?
-                        .clone(),
-                );
-            }
-            value if value.starts_with("--daemon=") => daemon = Some(value[9..].to_owned()),
-            value if value.starts_with('-') => {
-                return Err(format!("unsupported rrdtool list option: {value}").into());
-            }
-            value => {
-                if directory.replace(PathBuf::from(value)).is_some() {
-                    return Err("rrdtool list expects one directory".into());
-                }
+    let mut options = OptParse::new(args.to_vec());
+    loop {
+        match options.long(LONGOPTS) {
+            optparse::DONE => break,
+            option if option == b'd' as i32 => daemon = Some(options.value().to_owned()),
+            option if option == b'F' as i32 => noflush = true,
+            option if option == b'r' as i32 => recursive = true,
+            optparse::ERROR => return Err(options.errmsg.into()),
+            _ => {
+                return Err(format!(
+                    "Usage: rrdtool {} [--daemon <addr> [--noflush]] <file>",
+                    args[0]
+                )
+                .into());
             }
         }
-        index += if matches!(args[index].as_str(), "--daemon" | "-d") {
-            2
-        } else {
-            1
-        };
     }
-    let directory = directory.ok_or("Usage: rrdtool list [--recursive] <dirname>")?;
-    if let Some(address) = daemon.or_else(|| std::env::var("RRDCACHED_ADDRESS").ok()) {
+    let [directory] = options.positionals() else {
+        return Err(format!(
+            "Usage: rrdtool {} [--daemon <addr> [--noflush]] [--recursive] <directory>",
+            args[0]
+        )
+        .into());
+    };
+    let directory = PathBuf::from(directory);
+    // rrdc_connect treats an empty address as none (rrd_client.c:956).
+    if let Some(address) = daemon
+        .clone()
+        .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
+        .filter(|address| !address.is_empty())
+    {
         let path = directory.to_string_lossy();
         let protocol_path = if path.starts_with('/') {
             path.to_string()
@@ -5353,8 +5435,18 @@ fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{response}");
         return Ok(());
     }
-    let text = list_rrd_entries(&directory, recursive)?;
-    print!("{text}");
+    if daemon.is_some() {
+        // rrd_list.c:340: an explicit address that did not connect.
+        eprintln!("Error connecting to rrdcached");
+        return Ok(());
+    }
+    // rrd_list.c:350: a failed listing prints strerror(errno) without a
+    // newline and the command still succeeds.
+    match rrd_list_r(recursive, &directory.to_string_lossy()) {
+        Ok(Some(text)) => print!("{text}"),
+        Ok(None) => eprint!("{}", rrd_strerror(0)),
+        Err(errno) => eprint!("{}", rrd_strerror(errno)),
+    }
     Ok(())
 }
 
@@ -5509,91 +5601,145 @@ fn send_rrdcached_multiline_command(
     Err("rrdcached Unix socket commands are unavailable on this platform".into())
 }
 
-fn list_rrd_entries(
-    directory: &std::path::Path,
-    recursive: bool,
-) -> Result<String, Box<dyn std::error::Error>> {
-    use std::fmt::Write as _;
-    let input = directory.to_string_lossy();
-    if input.contains("..") {
-        return Err("path traversal is not allowed".into());
+/// `rrd_list_r` (rrd_list.c:150). `Ok(None)` is an empty listing, which
+/// upstream reports through errno 0; `Err` carries errno.
+#[cfg(unix)]
+fn rrd_list_r(recursive: bool, dirname: &str) -> Result<Option<String>, libc::c_int> {
+    // Prevent moving up the directory tree.
+    if dirname.contains("..") {
+        return Err(libc::EACCES);
     }
-    if input.contains('*') || input.contains('?') {
+    let c_dirname = std::ffi::CString::new(dirname).map_err(|_| libc::ENOENT)?;
+    if dirname.contains(['*', '?']) {
         if recursive {
-            print_list_error(libc::EINVAL);
-            return Ok(String::new());
+            return Err(libc::EINVAL);
         }
-        let matches = match glob::glob(input.as_ref()) {
-            Ok(paths) => match paths.collect::<Result<Vec<_>, _>>() {
-                Ok(matches) => matches,
-                Err(_) => {
-                    print_list_error(libc::ENOENT);
-                    return Ok(String::new());
+        let mut out = String::new();
+        // SAFETY: glob fills `buffer`, its paths are read while it is alive,
+        // and globfree releases it on every path.
+        unsafe {
+            let mut buffer = std::mem::zeroed::<libc::glob_t>();
+            if libc::glob(c_dirname.as_ptr(), 0, None, &mut buffer) != 0 {
+                libc::globfree(&mut buffer);
+                return Err(libc::ENOENT);
+            }
+            for index in 0..buffer.gl_pathc as usize {
+                let path = std::ffi::CStr::from_ptr(*buffer.gl_pathv.add(index)).to_bytes();
+                if let Some(slash) = path.iter().rposition(|byte| *byte == b'/') {
+                    out.push_str(&String::from_utf8_lossy(&path[slash + 1..]));
+                    out.push('\n');
                 }
-            },
-            Err(_) => {
-                print_list_error(libc::ENOENT);
-                return Ok(String::new());
             }
+            libc::globfree(&mut buffer);
+        }
+        return if out.is_empty() {
+            Err(libc::ENOENT)
+        } else {
+            Ok(Some(out))
         };
-        if matches.is_empty() {
-            print_list_error(libc::ENOENT);
-            return Ok(String::new());
-        }
-        let mut output = String::new();
-        for matched in matches {
-            if let Some(name) = matched.file_name() {
-                writeln!(output, "{}", name.to_string_lossy()).unwrap();
-            }
-        }
-        return Ok(output);
     }
-    if input.ends_with(".rrd") {
-        let metadata = std::fs::metadata(directory)?;
-        if !metadata.is_file() {
-            return Err("RRD path is not a regular file".into());
+    // A name whose first ".rrd" ends it (strstr) is one file.
+    if dirname
+        .find(".rrd")
+        .is_some_and(|index| index + 4 == dirname.len())
+    {
+        let metadata = c_stat(&c_dirname)?;
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(libc::ENXIO);
         }
-        let name = directory.file_name().ok_or("RRD path has no filename")?;
-        return Ok(format!("{}\n", name.to_string_lossy()));
+        return match dirname.rfind('/') {
+            Some(slash) => Ok(Some(format!("{}\n", &dirname[slash + 1..]))),
+            None => Err(libc::EINVAL),
+        };
     }
-    if !std::fs::metadata(directory)?.is_dir() {
-        return Err("list path is not a directory".into());
+    let metadata = c_stat(&c_dirname)?;
+    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err(libc::ENOTDIR);
     }
-    fn walk(
-        root: &std::path::Path,
-        path: &std::path::Path,
-        recursive: bool,
-        out: &mut String,
-    ) -> std::io::Result<()> {
-        for entry in std::fs::read_dir(path)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            if name == "." || name == ".." {
-                continue;
-            }
-            let current = entry.path();
-            let metadata = std::fs::metadata(&current)?;
-            if metadata.is_dir() && recursive {
-                walk(root, &current, recursive, out)?;
-                continue;
-            }
-            if metadata.is_file() && !name.to_string_lossy().ends_with(".rrd") {
-                continue;
-            }
-            let relative = current.strip_prefix(root).unwrap_or(&current);
-            writeln!(out, "{}", relative.to_string_lossy().replace('\\', "/")).unwrap();
-        }
-        Ok(())
-    }
-    let mut out = String::new();
-    walk(directory, directory, recursive, &mut out)?;
-    Ok(out)
+    rrd_list_rec(recursive, dirname.as_bytes(), dirname.as_bytes())
 }
 
-fn print_list_error(errno: libc::c_int) {
-    // RRDtool writes strerror(errno) without a trailing newline for list errors.
-    let message = unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)).to_string_lossy() };
-    eprint!("{message}");
+#[cfg(unix)]
+fn c_stat(path: &std::ffi::CStr) -> Result<libc::stat, libc::c_int> {
+    // SAFETY: stat writes one struct into the zeroed buffer.
+    unsafe {
+        let mut status = std::mem::zeroed::<libc::stat>();
+        if libc::stat(path.as_ptr(), &mut status) != 0 {
+            return Err(last_errno());
+        }
+        Ok(status)
+    }
+}
+
+/// `rrd_list_rec` (rrd_list.c:39): readdir order, directories listed unless
+/// recursing, regular files only with an `.rrd` suffix.
+#[cfg(unix)]
+fn rrd_list_rec(
+    recursive: bool,
+    root: &[u8],
+    dirname: &[u8],
+) -> Result<Option<String>, libc::c_int> {
+    let c_dirname = std::ffi::CString::new(dirname).map_err(|_| libc::ENOENT)?;
+    let mut out = None::<String>;
+    // SAFETY: the directory handle is owned here and closed before return;
+    // each entry name is NUL-terminated.
+    unsafe {
+        let dir = libc::opendir(c_dirname.as_ptr());
+        if dir.is_null() {
+            return Err(last_errno());
+        }
+        loop {
+            let entry = libc::readdir(dir);
+            if entry.is_null() {
+                break;
+            }
+            let name = std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()).to_bytes();
+            if name == b"." || name == b".." {
+                continue;
+            }
+            if dirname.len() + name.len() + 1 >= libc::PATH_MAX as usize {
+                continue;
+            }
+            let current = [dirname, b"/", name].concat();
+            let Ok(c_current) = std::ffi::CString::new(current.clone()) else {
+                continue;
+            };
+            let Ok(status) = c_stat(&c_current) else {
+                continue;
+            };
+            let kind = status.st_mode & libc::S_IFMT;
+            if kind == libc::S_IFDIR && recursive {
+                if let Ok(Some(nested)) = rrd_list_rec(recursive, root, &current) {
+                    out.get_or_insert_with(String::new).push_str(&nested);
+                }
+                continue;
+            }
+            if kind == libc::S_IFREG {
+                let suffix = name.windows(4).position(|window| window == b".rrd");
+                if suffix.is_none_or(|index| index + 4 != name.len()) {
+                    continue;
+                }
+            }
+            // move_past_prefix: skip the characters shared with the root.
+            let mut short = &current[..];
+            if root.len() <= current.len() {
+                let shared = root
+                    .iter()
+                    .zip(&current)
+                    .take_while(|(left, right)| left == right)
+                    .count();
+                short = &current[shared..];
+            }
+            if short.first() == Some(&b'/') {
+                short = &short[1..];
+            }
+            let out = out.get_or_insert_with(String::new);
+            out.push_str(&String::from_utf8_lossy(short));
+            out.push('\n');
+        }
+        libc::closedir(dir);
+    }
+    Ok(out)
 }
 
 fn format_info_float(value: f64) -> String {
@@ -5652,21 +5798,15 @@ fn parse_value(value: &str) -> Result<Option<f64>, Box<dyn std::error::Error>> {
 }
 
 fn parse_rrd_resolution(value: &str) -> Result<u64, Box<dyn std::error::Error>> {
-    match parse_rrd_scaled_duration(value, 1) {
-        Ok(resolution) => Ok(resolution),
-        Err(_) if is_rrd_zero_duration(value) => Err("resolution: value must be positive".into()),
-        Err(error) => {
-            let message = error.to_string();
-            let detail = if message.contains("duration must be a positive integer") {
-                "value must be (suffixed) positive number"
-            } else if message.contains("duration has trailing garbage") {
-                "value has trailing garbage"
-            } else {
-                return Err(error.into());
-            };
-            Err(format!("resolution: {detail}").into())
-        }
-    }
+    parse_scaled_duration_option(value, "resolution")
+}
+
+/// `rrd_scaled_duration(value, 1, ...)` with its message after `label: `.
+fn parse_scaled_duration_option(
+    value: &str,
+    label: &str,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    Ok(parse_rrd_scaled_duration(value, 1).map_err(|error| format!("{label}: {error}"))?)
 }
 
 fn is_rrd_zero_duration(value: &str) -> bool {

@@ -120,6 +120,11 @@ impl Sides {
         })
     }
 
+    /// The Rondi binary under the `rrdtool` name.
+    pub fn rondi(&self) -> &std::path::Path {
+        &self.rondi
+    }
+
     /// Writes the same file into both sides.
     pub fn write(&self, name: &str, contents: &[u8]) {
         std::fs::write(self.up.join(name), contents).unwrap();

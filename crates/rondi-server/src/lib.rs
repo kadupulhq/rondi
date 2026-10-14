@@ -3082,7 +3082,7 @@ fn rrdcached_fetch_reply(
         line.clear();
         line.push_str(&format!("{:10}:", row.timestamp));
         for index in selected {
-            let value = row.values[*index].map_or_else(|| "nan".to_owned(), format_c_exponent17);
+            let value = format_c_exponent17(row.values[*index].unwrap_or_else(rrd_nan));
             line.push(' ');
             line.push_str(&value);
         }
@@ -3110,6 +3110,14 @@ fn handle_rrdcached_fetch(
 
 /// C `%0.17e`: Rust omits the exponent sign and padding that clients parse.
 fn format_c_exponent17(value: f64) -> String {
+    if value.is_nan() {
+        return if value.is_sign_negative() {
+            "-nan"
+        } else {
+            "nan"
+        }
+        .to_owned();
+    }
     if !value.is_finite() {
         return value.to_string();
     }
@@ -3246,6 +3254,20 @@ fn rrd_nan() -> f64 {
     {
         f64::NAN
     }
+}
+
+#[test]
+fn fetch_unknown_values_preserve_the_rrd_nan_sign() {
+    assert_eq!(format_c_exponent17(f64::NAN), "nan");
+    assert_eq!(format_c_exponent17(-f64::NAN), "-nan");
+    assert_eq!(format_c_exponent17(f64::INFINITY), "inf");
+    assert_eq!(format_c_exponent17(f64::NEG_INFINITY), "-inf");
+    let expected = if cfg!(target_arch = "x86_64") {
+        "-nan"
+    } else {
+        "nan"
+    };
+    assert_eq!(format_c_exponent17(rrd_nan()), expected);
 }
 
 fn resolve_rrdcached_path(base: &RrdcachedBase, requested: &str) -> Result<PathBuf, String> {
