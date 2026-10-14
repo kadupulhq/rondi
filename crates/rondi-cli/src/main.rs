@@ -1928,6 +1928,23 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         elements,
     })?;
     options.layout.apply(&mut im);
+    // The renderer enforces the same limit on the final canvas, but only after
+    // data_proc has allocated per-pixel buffers sized by --width. Print-only
+    // graphs draw nothing and keep the unbounded behavior of rrdtool.
+    if format == "PNG"
+        && (10..).contains(&image_width)
+        && (10..).contains(&image_height)
+        && (image_width > PNG_MAX_DIMENSION || image_height > PNG_MAX_DIMENSION)
+        && im.gdes.iter().any(|element| {
+            use rondi::graph::Gf;
+            matches!(
+                element.gf,
+                Gf::Gprint | Gf::Line | Gf::Area | Gf::Tick | Gf::Hrule | Gf::Vrule | Gf::Stack
+            )
+        })
+    {
+        return Err(PNG_DIMENSION_LIMIT_MESSAGE.into());
+    }
     // rrd_graph_v: graph_paint, then image_info and the image itself.
     let mut info = GraphInfo::default();
     let to_memory = filename == "-";
@@ -2888,6 +2905,9 @@ impl Default for GraphColors {
     }
 }
 
+const PNG_MAX_DIMENSION: u32 = 4096;
+const PNG_DIMENSION_LIMIT_MESSAGE: &str = "PNG graph dimensions exceed the 4096 pixel safety limit";
+
 fn render_graph_png(
     graph: &RenderedGraphXport,
     series: &[GraphSeries],
@@ -2914,8 +2934,8 @@ fn render_graph_png(
         minimum,
         maximum,
     } = canvas;
-    if canvas_width > 4096 || canvas_height > 4096 {
-        return Err("PNG graph dimensions exceed the 4096 pixel safety limit".into());
+    if canvas_width > PNG_MAX_DIMENSION || canvas_height > PNG_MAX_DIMENSION {
+        return Err(PNG_DIMENSION_LIMIT_MESSAGE.into());
     }
     let pixel_count = usize::try_from(canvas_width)
         .ok()
