@@ -460,3 +460,42 @@ fn nul_separates_fields_like_a_space() {
     assert!(observed[0][0].ends_with("]\n0 PONG\n"));
     assert_same(&observed);
 }
+
+#[test]
+fn tune_parses_options_like_rrd_tune_r() {
+    let Some(work) = Work::new() else { return };
+    let sessions: [&[u8]; 27] = [
+        b"TUNE a.rrd 2 tune -h\n",
+        b"TUNE a.rrd 3 tune -h z:1\n",
+        b"TUNE a.rrd 2 tune -bogus\n",
+        b"TUNE a.rrd 2 tune --bogus\n",
+        b"TUNE a.rrd 2 tune --bogus=1\n",
+        b"TUNE a.rrd 2 tune -q\n",
+        b"TUNE a.rrd 2 tune --heartbeat\n",
+        b"TUNE a.rrd 2 tune --heartbeat=z:5\n",
+        b"TUNE a.rrd 3 tune --heartbeat z:5\n",
+        b"TUNE a.rrd 3 tune -h x\n",
+        b"TUNE a.rrd 3 tune -d z:GAUGE\n",
+        b"TUNE a.rrd 3 tune -d x:BOGUS\n",
+        b"TUNE a.rrd 3 tune -d x:gauge\n",
+        b"TUNE a.rrd 3 tune -r z:q\n",
+        b"TUNE a.rrd 3 tune -r x\n",
+        b"TUNE a.rrd 3 tune -i z:1\n",
+        b"TUNE a.rrd 3 tune -i x:abc\n",
+        b"TUNE a.rrd 3 tune -a x\n",
+        b"TUNE a.rrd 3 tune junk -h\n",
+        b"TUNE a.rrd 2 tune junk\nINFO a.rrd\n",
+        b"TUNE a.rrd 2 tune -hx:900\nINFO a.rrd\n",
+        b"TUNE a.rrd 3 tune -h x:900abc\nINFO a.rrd\n",
+        b"TUNE a.rrd 3 tune -i x:1abc\nINFO a.rrd\n",
+        b"TUNE a.rrd 2 tune --maximum=y:5e3\nINFO a.rrd\n",
+        b"TUNE a.rrd 5 tune -r x:q -h q:77\nINFO a.rrd\n",
+        b"TUNE a.rrd 3 tune -- -h\nINFO a.rrd\n",
+        b"TUNE a.rrd 4 tune -h x:900 -h z:1\nINFO a.rrd\n",
+    ];
+    let observed = work.differential(&["-B"], &sessions);
+    assert!(observed[0][0].ends_with("]\n-1 Got error option requires an argument -- 'h'\n"));
+    assert!(observed[0][1].ends_with("]\n-1 Got error unknown data source name 'z'\n"));
+    assert!(observed[0][3].ends_with("]\n-1 Got error invalid option -- 'bogus'\n"));
+    assert_same(&observed);
+}
