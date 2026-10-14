@@ -5257,6 +5257,8 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             .ok_or_else(|| format!("unknown data source name '{name}'"))
     };
     let mut options = OptParse::new(args.to_vec());
+    // rrd_tune.c:423: --step feeds handle_modify's stretch.
+    let mut newstep: libc::c_int = -1;
     // rrd_tune_r edits the header through the file mapping, so settings
     // applied before a failing option stay written.
     let applied = (|| -> Result<(), Box<dyn std::error::Error>> {
@@ -5375,6 +5377,7 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     // Holt-Winters archives.
                     ds_match(&current_names, &name)?;
                 }
+                Ok('t') => newstep = cparse::atoi(value),
                 Ok('?') => return Err(options.errmsg.clone().into()),
                 _ => {}
             }
@@ -5393,20 +5396,86 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     applied?;
 
-    // handle_modify (rrd_modify.c:1299) takes the words after the file name.
+    // handle_modify (rrd_modify.c:1299) takes the words after the file name
+    // and parses all of them before changing anything.
+    let mut remove = Vec::new();
+    let mut add = Vec::new();
+    let mut rra_ops = Vec::new();
     for argument in &options.positionals()[1..] {
-        let known = ["DEL:", "DS:", "RRA#", "RRA:"]
-            .iter()
-            .any(|prefix| argument.starts_with(prefix) && argument.len() > prefix.len())
-            || (argument.starts_with("DELRRA:") && argument.len() > 7);
-        if !known {
+        if let Some(name) = argument
+            .strip_prefix("DEL:")
+            .filter(|name| !name.is_empty())
+        {
+            remove.push(name.to_owned());
+        } else if argument.starts_with("DS:") && argument.len() > 3 {
+            add.push(argument.clone());
+        } else if let Some(spec) = argument
+            .strip_prefix("RRA#")
+            .filter(|spec| !spec.is_empty())
+        {
+            let Some((index, sign, row_count)) = tune_scan_rra_op(spec) else {
+                return Err("Failed to parse RRA# command".into());
+            };
+            if !matches!(sign, b'=' | b'-' | b'+') {
+                let sign = String::from_utf8_lossy(&[sign]).into_owned();
+                return Err(
+                    format!("Failed to parse RRA# command: invalid operation: {sign}").into(),
+                );
+            }
+            rra_ops.push(rondi::RrdRraOp {
+                index: index as i32,
+                op: sign,
+                row_count,
+                def: None,
+            });
+        } else if argument.starts_with("RRA:") && argument.len() > 4 {
+            rra_ops.push(rondi::RrdRraOp {
+                index: -1,
+                op: b'a',
+                row_count: 0,
+                def: Some(argument.clone()),
+            });
+        } else if let Some(index) = argument
+            .strip_prefix("DELRRA:")
+            .filter(|index| !index.is_empty())
+        {
+            let index = cparse::atoi(index);
+            if index < 0 {
+                return Err("DELRRA requires a non-negative, integer argument".into());
+            }
+            rra_ops.push(rondi::RrdRraOp {
+                index,
+                op: b'=',
+                row_count: 0,
+                def: None,
+            });
+        } else {
             return Err(format!("unparsable argument: {argument}").into());
         }
     }
-    if options.positionals().len() > 1 {
-        return Err("rrdtool tune DS/RRA modification (rrd_modify) is not implemented".into());
+    if !remove.is_empty() || !add.is_empty() || !rra_ops.is_empty() {
+        rondi::modify_rrd_file(&filename, &remove, &add, &rra_ops, i64::from(newstep))?;
     }
     Ok(())
+}
+
+/// `sscanf(spec, "%u:%c%u", &idx, &sign, &number) == 3` (rrd_modify.c:1352).
+fn tune_scan_rra_op(spec: &str) -> Option<(libc::c_uint, u8, libc::c_uint)> {
+    let input = cparse::c_string(spec);
+    let mut index: libc::c_uint = 0;
+    let mut sign: libc::c_char = 0;
+    let mut number: libc::c_uint = 0;
+    // SAFETY: each conversion writes the object its argument points to.
+    let matched = unsafe {
+        libc::sscanf(
+            input.as_ptr(),
+            c"%u:%c%u".as_ptr(),
+            &mut index as *mut libc::c_uint,
+            &mut sign as *mut libc::c_char,
+            &mut number as *mut libc::c_uint,
+        )
+    };
+    (matched == 3).then_some((index, sign as u8, number))
 }
 
 /// `sscanf(value, DS_NAM_FMT ":%ld", ...) == 2` (rrd_tune.c:258).
