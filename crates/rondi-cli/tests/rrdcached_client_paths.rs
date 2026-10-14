@@ -114,7 +114,9 @@ fn unix_case(
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        stream.set_read_timeout(Some(common::io_timeout())).unwrap();
+        // A client that fails realpath connects and hangs up at once, and
+        // macOS then rejects setsockopt with EINVAL; the read still sees EOF.
+        let _ = stream.set_read_timeout(Some(common::io_timeout()));
         let mut line = String::new();
         BufReader::new(&mut stream).read_line(&mut line).unwrap();
         if !line.is_empty() {
