@@ -1654,7 +1654,7 @@ pub async fn run_rrdcached(mut args: RrdcachedConfig) -> Result<(), Box<dyn std:
     if unsafe { libc::geteuid() } == 0 && !base.confined() {
         // Upstream logs nothing here; a root daemon without -B lets any
         // client name any file.
-        tracing::warn!("rrdcached_running_as_root_without_base_only");
+        return Err("rrdcached refuses to run as root without -B and -b".into());
     }
     let stats = Arc::new(RrdcachedStats::default());
     let (mut queue, had_journal) = RrdcachedQueue::open(

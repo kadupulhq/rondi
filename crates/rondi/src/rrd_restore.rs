@@ -293,6 +293,7 @@ struct Rrd {
     cdp_preps: Vec<[u8; CDP_PREP_LEN]>,
     rra_ptrs: Vec<u64>,
     values: Vec<f64>,
+    rows: usize,
 }
 
 struct Restore<'a> {
@@ -303,6 +304,12 @@ struct Restore<'a> {
     errno: i32,
     range_check: bool,
 }
+
+// Bound XML-driven allocations before growing any vectors.
+const MAX_RESTORE_DATA_SOURCES: usize = 4096;
+const MAX_RESTORE_ROWS: usize = 1_000_000;
+const MAX_RESTORE_VALUES: usize = 1_000_000;
+const MAX_RESTORE_ARCHIVES: usize = 4096;
 
 type Status = Result<(), ()>;
 
@@ -524,7 +531,18 @@ impl Restore<'_> {
         while let Some(element) = self.get_xml_element() {
             if element.eq_ignore_ascii_case("row") {
                 let row_start = rrd.values.len();
+                if rrd.rows >= MAX_RESTORE_ROWS
+                    || ds_cnt > MAX_RESTORE_VALUES.saturating_sub(row_start)
+                {
+                    self.set_error("restore row or value safety limit exceeded".into());
+                    return Err(());
+                }
+                if rrd.values.try_reserve(ds_cnt).is_err() {
+                    self.set_error("cannot allocate restore values".into());
+                    return Err(());
+                }
                 rrd.values.resize(row_start + ds_cnt, 0.0);
+                rrd.rows += 1;
                 row_cnt += 1;
                 put(&mut rrd.rra_defs[rra], 24, row_cnt);
                 status = self.parse_tag_rra_database_row(rrd, row_start);
@@ -681,6 +699,12 @@ impl Restore<'_> {
 
     fn parse_tag_rra(&mut self, rrd: &mut Rrd) -> Status {
         let ds_cnt = rrd.ds_defs.len();
+        if rrd.rra_defs.len() >= MAX_RESTORE_ARCHIVES
+            || ds_cnt > MAX_RESTORE_VALUES.saturating_sub(rrd.cdp_preps.len())
+        {
+            self.set_error("restore archive safety limit exceeded".into());
+            return Err(());
+        }
         rrd.rra_defs.push([0; RRA_DEF_LEN]);
         rrd.cdp_preps
             .extend(std::iter::repeat_n([0; CDP_PREP_LEN], ds_cnt));
@@ -758,6 +782,10 @@ impl Restore<'_> {
                 "parse_tag_ds: All data source definitions MUST precede the RRA definitions!"
                     .into(),
             );
+            return Err(());
+        }
+        if rrd.ds_defs.len() >= MAX_RESTORE_DATA_SOURCES {
+            self.set_error("restore data source safety limit exceeded".into());
             return Err(());
         }
         rrd.ds_defs.push([0; DS_DEF_LEN]);
@@ -934,7 +962,7 @@ fn layout(rrd: &Rrd) -> Vec<u8> {
 /// `rrd_restore` after option parsing: parse `xml` like `parse_file` and
 /// write the result like `write_file` (rrd_restore.c:1340-1384). The target
 /// is opened O_WRONLY|O_CREAT (|O_EXCL without `force_overwrite`) with mode
-/// 0666 and written in place; "-" is stdout. Unlike RRDtool, a longer
+/// 0600 and written in place; "-" is stdout. Unlike RRDtool, a longer
 /// existing file is truncated to the new length. An error that the parse
 /// recorded without failing is returned after the file is written, as
 /// rrd_tool.c reports it, and a parse that fails without one writes nothing
@@ -973,19 +1001,28 @@ pub fn restore_rrd_file(
         stdout.write_all(&bytes)?;
         stdout.flush()?;
     } else {
-        let mut file =
-            crate::rrd_binary::open_output_file(path, !force_overwrite).map_err(|error| {
-                StoreError::Rrd(format!(
+        // Try exclusive creation first even with -f so cleanup never guesses
+        // whether the destination belonged to this invocation.
+        let (mut file, created) = match crate::rrd_binary::open_output_file(path, true) {
+            Ok(file) => (file, true),
+            Err(error) if force_overwrite && error.kind() == std::io::ErrorKind::AlreadyExists => {
+                (crate::rrd_binary::open_output_file(path, false)?, false)
+            }
+            Err(error) => {
+                return Err(StoreError::Rrd(format!(
                     "creating '{}': {}",
                     path.display(),
                     crate::rrd_binary::rrd_strerror(&error)
-                ))
-            })?;
+                )));
+            }
+        };
         let written = file
             .write_all(&bytes)
             .and_then(|()| file.set_len(bytes.len() as u64));
         if let Err(error) = written {
-            let _ = std::fs::remove_file(path);
+            if created {
+                remove_created_output(path, &file);
+            }
             return Err(StoreError::Rrd(format!(
                 "a file error occurred while creating '{}': {}",
                 path.display(),
@@ -999,9 +1036,83 @@ pub fn restore_rrd_file(
     }
 }
 
+fn remove_created_output(path: &std::path::Path, file: &std::fs::File) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(opened), Ok(named)) = (file.metadata(), std::fs::symlink_metadata(path)) {
+            if opened.dev() == named.dev() && opened.ino() == named.ino() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (path, file); // Preserve the path when inode identity is unavailable.
+}
+
 #[cfg(test)]
 mod tests {
-    use super::XmlReader;
+    use super::*;
+
+    fn parser(xml: &str) -> Restore<'_> {
+        Restore {
+            reader: XmlReader::new(xml.as_bytes()),
+            error: None,
+            errno: 0,
+            range_check: false,
+        }
+    }
+
+    #[test]
+    fn restore_caps_data_sources_and_archives_before_growing_vectors() {
+        let mut rrd = Rrd {
+            ds_defs: vec![[0; DS_DEF_LEN]; MAX_RESTORE_DATA_SOURCES],
+            ..Rrd::default()
+        };
+        let mut restore = parser("");
+        assert!(restore.parse_tag_ds(&mut rrd).is_err());
+        assert_eq!(rrd.ds_defs.len(), MAX_RESTORE_DATA_SOURCES);
+        assert!(rrd.pdp_preps.is_empty());
+        rrd.rra_defs = vec![[0; RRA_DEF_LEN]; MAX_RESTORE_ARCHIVES];
+        assert!(restore.parse_tag_rra(&mut rrd).is_err());
+        assert_eq!(rrd.rra_defs.len(), MAX_RESTORE_ARCHIVES);
+        assert!(rrd.cdp_preps.is_empty());
+    }
+
+    #[test]
+    fn restore_caps_values_before_allocating_the_next_xml_row() {
+        let mut rrd = Rrd {
+            ds_defs: vec![[0; DS_DEF_LEN]],
+            rra_defs: vec![[0; RRA_DEF_LEN]],
+            rra_ptrs: vec![0],
+            values: vec![0.0; MAX_RESTORE_VALUES],
+            ..Rrd::default()
+        };
+        let mut restore = parser("<database><row><v>1</v></row></database>");
+        restore.expect_element("database").unwrap();
+        assert!(restore.parse_tag_rra_database(&mut rrd).is_err());
+        assert_eq!(rrd.values.len(), MAX_RESTORE_VALUES);
+        assert_eq!(
+            restore.error.as_deref(),
+            Some("restore row or value safety limit exceeded")
+        );
+    }
+
+    #[test]
+    fn restore_row_budget_is_shared_by_all_archives() {
+        let mut rrd = Rrd {
+            ds_defs: vec![[0; DS_DEF_LEN]],
+            rra_defs: vec![[0; RRA_DEF_LEN]],
+            rra_ptrs: vec![0],
+            rows: MAX_RESTORE_ROWS,
+            ..Rrd::default()
+        };
+        let mut restore = parser("<database><row><v>1</v></row></database>");
+        restore.expect_element("database").unwrap();
+        assert!(restore.parse_tag_rra_database(&mut rrd).is_err());
+        assert!(rrd.values.is_empty());
+        assert_eq!(rrd.rows, MAX_RESTORE_ROWS);
+    }
 
     #[test]
     fn line_follows_the_parser_chunks() {

@@ -353,11 +353,11 @@ fn xport_option_forms() {
 }
 
 /// Graph PNG bytes follow Cairo/Pango (RD-006); graph cases write to
-/// /dev/null and compare the size line, PRINT output, stderr and status.
+/// graph-output.png and compare the size line, PRINT output, stderr and status.
 fn graph_status(extra: &[&str]) {
     let mut args = vec![
         "graph",
-        "/dev/null",
+        "graph-output.png",
         "--start",
         "1700000000",
         "--end",
@@ -520,14 +520,14 @@ fn graph_option_placement() {
             "graph",
             "--start",
             "1700000000",
-            "/dev/null",
+            "graph-output.png",
             "--end=1700000600",
             DEF,
             "LINE1:x#ff0000",
         ],
         &[
             "graph",
-            "/dev/null",
+            "graph-output.png",
             "-s1700000000",
             "-e1700000600",
             DEF,
@@ -541,7 +541,7 @@ fn graph_option_placement() {
             "-e",
             "1700000600",
             "--",
-            "/dev/null",
+            "graph-output.png",
             DEF,
             "LINE1:x#ff0000",
         ],

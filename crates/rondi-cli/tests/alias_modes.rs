@@ -7432,14 +7432,18 @@ fn rrdtool_resize_grow_and_shrink_match_upstream_byte_for_byte() {
             std::fs::read(rondi_dir.join("resize.rrd")).unwrap(),
             "{action} output differs byte-for-byte"
         );
-        // rrd_open's RRD_CREAT truncates an existing resize.rrd.
+        // Upstream overwrites; Rondi preserves an existing destination.
         for (program, dir) in [(Path::new("rrdtool"), &upstream_dir), (&*alias, &rondi_dir)] {
             let second_resize = Command::new(program)
                 .current_dir(dir)
                 .args(["resize", "sample.rrd", "0", action, "2"])
                 .output()
                 .unwrap();
-            assert!(second_resize.status.success(), "{second_resize:?}");
+            assert_eq!(
+                second_resize.status.success(),
+                program == Path::new("rrdtool"),
+                "{second_resize:?}"
+            );
         }
         assert_eq!(
             std::fs::read(upstream_dir.join("resize.rrd")).unwrap(),

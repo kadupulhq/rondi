@@ -200,11 +200,11 @@ fn locale_decimal_point_follows_the_printf_used() {
     graph_json.extend(["--imgformat", "JSON", "LINE1:x#ff0000:x"].map(String::from));
     let mut graph_csv = base("graph", Some("-"));
     graph_csv.extend(["--imgformat", "CSV", "LINE1:x#ff0000:x"].map(String::from));
-    let mut graph_print = base("graph", Some("/dev/null"));
+    let mut graph_print = base("graph", Some("graph-output.png"));
     graph_print.extend(["--imgformat", "XML", "LINE1:x#ff0000:x"].map(String::from));
     // PNG graphv: print[n], value_min/value_max (rrd_info_print's printf)
     // and the GPRINT legend.
-    let mut graphv_png = base("graphv", Some("/dev/null"));
+    let mut graphv_png = base("graphv", Some("graph-output.png"));
     graphv_png.extend(["-l", "-0.5", "LINE1:x#ff0000:x"].map(String::from));
     let cases = [
         xport_json,

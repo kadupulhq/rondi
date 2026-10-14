@@ -3,7 +3,7 @@
 //! forms and the full long-option table with each option's validation.
 //! Each test compares the pinned RRDtool 1.11.0 executable with the Rondi
 //! alias on identical arguments in TZ=UTC. PNG bytes are never compared;
-//! `graph` writes to /dev/null so stdout carries only the WxH line and PRINT
+//! `graph` writes to graph-output.png so stdout carries only the WxH line and PRINT
 //! output, and `graphv` comparisons stop at the `image = BLOB_SIZE` key.
 
 #[macro_use]
@@ -105,9 +105,9 @@ impl Fixture {
             .unwrap()
     }
 
-    /// `graph /dev/null <range> DEF:x DEF:z <elements>`.
+    /// `graph graph-output.png <range> DEF:x DEF:z <elements>`.
     fn graph(&self, elements: &[&str]) -> Vec<String> {
-        let mut args = vec![String::from("graph"), String::from("/dev/null")];
+        let mut args = vec![String::from("graph"), String::from("graph-output.png")];
         args.extend(RANGE.iter().map(|s| s.to_string()));
         args.push(String::from("DEF:x=a.rrd:x:AVERAGE"));
         args.push(String::from("DEF:z=b.rrd:z:AVERAGE"));
@@ -163,7 +163,7 @@ fn graph_options_use_optparse_semantics() {
     f.assert_all_same(&[
         args(&[
             "graph",
-            "/dev/null",
+            "graph-output.png",
             "--start=1000000000",
             "--end=1000001500",
             "DEF:x=a.rrd:x:AVERAGE",
@@ -171,7 +171,7 @@ fn graph_options_use_optparse_semantics() {
         ]),
         args(&[
             "graph",
-            "/dev/null",
+            "graph-output.png",
             "-s1000000000",
             "-e1000001500",
             "DEF:x=a.rrd:x:AVERAGE",
@@ -183,13 +183,13 @@ fn graph_options_use_optparse_semantics() {
             "1000000000",
             "--end",
             "1000001500",
-            "/dev/null",
+            "graph-output.png",
             "DEF:x=a.rrd:x:AVERAGE",
             p,
         ]),
         args(&[
             "graph",
-            "/dev/null",
+            "graph-output.png",
             "-gj",
             "--start",
             "1000000000",
@@ -200,7 +200,7 @@ fn graph_options_use_optparse_semantics() {
         ]),
         args(&[
             "graph",
-            "/dev/null",
+            "graph-output.png",
             "--start",
             "1000000000",
             "--end",
@@ -211,7 +211,7 @@ fn graph_options_use_optparse_semantics() {
         ]),
         args(&[
             "graph",
-            "/dev/null",
+            "graph-output.png",
             "--sta",
             "1000000000",
             "--end",
@@ -221,7 +221,7 @@ fn graph_options_use_optparse_semantics() {
         ]),
         args(&[
             "graph",
-            "/dev/null",
+            "graph-output.png",
             "--start",
             "1000000000",
             "--end",

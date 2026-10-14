@@ -12,6 +12,9 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ### Fixed
 
+- Refuse root rrdcached startup without effective `-B -b` confinement and default Unix sockets to `0600` unless explicitly configured.
+- Restrict output writes to owned, singly linked regular files and create new outputs with mode `0600`.
+- Require a new `resize.rrd` destination, preserve existing forced-restore destinations on write failure, and bound XML restore allocations.
 - Check Unix socket directory ownership and shared-write permissions for unprivileged daemons as well as root.
 - Publish the JSON daemon socket from private staging with mode `0600` already set. JSON library startup now uses `prepare_server` before threads and async `run` afterwards.
 - Keep daemon RRD reads on checked `O_NOFOLLOW` descriptors through inspection, fetch, and dump; reuse checked descriptors for update and tune metadata.

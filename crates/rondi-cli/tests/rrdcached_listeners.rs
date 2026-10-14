@@ -186,7 +186,7 @@ fn rrdcached_bracketed_ipv6_listener_matches_upstream() {
         std::fs::create_dir_all(&run).unwrap();
         let port = free_tcp_port();
         let mut child = Command::new(daemon(name, &run))
-            .args(["-g", "-b", run.to_str().unwrap(), "-P", "PING"])
+            .args(["-g", "-B", "-b", run.to_str().unwrap(), "-P", "PING"])
             .args(["-l", &format!("[::1]:{port}"), "-p"])
             .arg(run.join("rrdcached.pid"))
             .stdin(Stdio::null())
@@ -237,7 +237,7 @@ fn rrdcached_dash_capital_l_listens_on_every_interface_like_upstream() {
         let root = run.join("data");
         std::fs::create_dir_all(&root).unwrap();
         let mut child = Command::new(daemon(name, &run))
-            .args(["-g", "-b", root.to_str().unwrap()])
+            .args(["-g", "-B", "-b", root.to_str().unwrap()])
             .arg("-p")
             .arg(run.join("rrdcached.pid"))
             .args(["-P", "PING", "-L"])
@@ -288,7 +288,7 @@ fn rrdcached_listener_address_errors_match_upstream() {
             std::fs::create_dir_all(&run).unwrap();
             let pid_file = run.join("rrdcached.pid");
             let output = Command::new(daemon(name, &run))
-                .args(["-g", "-b", run.to_str().unwrap()])
+                .args(["-g", "-B", "-b", run.to_str().unwrap()])
                 .arg("-p")
                 .arg(&pid_file)
                 .args(&listeners)
@@ -328,7 +328,7 @@ fn rrdcached_valid_permission_clears_an_earlier_option_error_like_upstream() {
         // read_options stores each permission's result in its one status,
         // so the valid PING clears both the -w error and the unknown FOO.
         let mut child = Command::new(daemon(name, &run))
-            .args(["-g", "-b", root.to_str().unwrap(), "-w", "bad"])
+            .args(["-g", "-B", "-b", root.to_str().unwrap(), "-w", "bad"])
             .args(["-P", "FOO,PING", "-l"])
             .arg(&socket)
             .arg("-p")
@@ -401,7 +401,7 @@ fn rrdcached_failed_privilege_change_exits_without_serving_like_upstream() {
             // this fixture reaches the privilege-change failure under test.
             std::os::unix::fs::chown(&run, Some(uid), Some(gid)).unwrap();
             let output = command
-                .args(["-g", "-b", run.to_str().unwrap()])
+                .args(["-g", "-B", "-b", run.to_str().unwrap()])
                 .args(option)
                 .arg("-l")
                 .arg(&socket)
@@ -443,7 +443,7 @@ fn rrdcached_refuses_to_start_when_a_later_listener_fails() {
     let socket = run.join("first.sock");
     let pid_file = run.join("rrdcached.pid");
     let output = Command::new(daemon("rondi", &run))
-        .args(["-g", "-b", run.to_str().unwrap(), "-l"])
+        .args(["-g", "-B", "-b", run.to_str().unwrap(), "-l"])
         .arg(&socket)
         .args(["-l", &format!("127.0.0.1:{port}"), "-p"])
         .arg(&pid_file)
@@ -571,7 +571,7 @@ fn rrdcached_socket_setup_never_follows_a_swapped_path() {
     };
     for attempt in 0..20 {
         let mut child = Command::new(daemon("rondi", &run))
-            .args(["-g", "-b", run.to_str().unwrap(), "-m", "0666", "-l"])
+            .args(["-g", "-B", "-b", run.to_str().unwrap(), "-m", "0666", "-l"])
             .arg(&socket)
             .arg("-p")
             .arg(run.join(format!("rrdcached-{attempt}.pid")))
@@ -602,7 +602,7 @@ fn rrdcached_refuses_linked_pid_and_log_files() {
     let pid_file = run.join("hard.pid");
     std::fs::hard_link(&victim, &pid_file).unwrap();
     let output = Command::new(daemon("rondi", &run))
-        .args(["-g", "-b", run.to_str().unwrap(), "-l"])
+        .args(["-g", "-B", "-b", run.to_str().unwrap(), "-l"])
         .arg(&socket)
         .arg("-p")
         .arg(&pid_file)
@@ -622,7 +622,7 @@ fn rrdcached_refuses_linked_pid_and_log_files() {
     let pid_link = run.join("link.pid");
     std::os::unix::fs::symlink(&victim, &pid_link).unwrap();
     let output = Command::new(daemon("rondi", &run))
-        .args(["-g", "-b", run.to_str().unwrap(), "-l"])
+        .args(["-g", "-B", "-b", run.to_str().unwrap(), "-l"])
         .arg(&socket)
         .arg("-p")
         .arg(&pid_link)
@@ -692,7 +692,7 @@ fn rrdcached_pid_file_diagnostics_match_upstream() {
             std::fs::write(&pid_file, &contents).unwrap();
             let socket = run.join("rrdcached.sock");
             let mut child = Command::new(daemon(name, &run))
-                .args(["-g", "-b", run.to_str().unwrap(), "-l"])
+                .args(["-g", "-B", "-b", run.to_str().unwrap(), "-l"])
                 .arg(&socket)
                 .arg("-p")
                 .arg(&pid_file)
@@ -738,7 +738,7 @@ fn unprivileged_rrdcached_requires_sticky_shared_socket_directory() {
         std::fs::set_permissions(&run, std::fs::Permissions::from_mode(permissions)).unwrap();
         let socket = run.join("rrdcached.sock");
         let mut child = command
-            .args(["-g", "-b", run.to_str().unwrap(), "-l"])
+            .args(["-g", "-B", "-b", run.to_str().unwrap(), "-l"])
             .arg(&socket)
             .arg("-p")
             .arg(run.join("rrdcached.pid"))
