@@ -2095,7 +2095,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                 "Could not save png to '{}'",
                 if to_memory { "memory" } else { filename }
             );
-            let surface = |size: i64| (size as f64 * zoom) as i32;
+            let surface = |size: i64| c_double_to_int(size as f64 * zoom);
             let (surface_width, surface_height) = (surface(im.ximg), surface(im.yimg));
             let surface_valid = |size: i32| (0..=CAIRO_MAX_IMAGE_SIZE).contains(&size);
             if !surface_valid(surface_width) || !surface_valid(surface_height) {
@@ -2172,7 +2172,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                 .and_then(std::ffi::OsStr::to_str)
                 .unwrap_or(filename)
         };
-        let scaled = |size: i64| (zoom * size as f64) as i64;
+        let scaled = |size: i64| c_double_to_long(zoom * size as f64);
         info.push(
             "image_info",
             InfoValue::Str(format_imginfo(
@@ -3467,6 +3467,27 @@ fn render_graph_png(
         writer.write_image_data(&pixels)?;
     }
     Ok(output)
+}
+
+/// C's `(int)` conversion of a double as the pinned build compiles it. An
+/// out-of-range or NaN value is undefined behaviour in C: aarch64 FCVTZS
+/// saturates and maps NaN to 0 like Rust's `as`, while x86-64 CVTTSD2SI
+/// returns the minimum ("integer indefinite").
+fn c_double_to_int(value: f64) -> i32 {
+    if cfg!(target_arch = "x86_64") && !(-2_147_483_648.0..2_147_483_648.0).contains(&value) {
+        return i32::MIN;
+    }
+    value as i32
+}
+
+/// C's `(long)` conversion of a double; see [`c_double_to_int`].
+fn c_double_to_long(value: f64) -> i64 {
+    if cfg!(target_arch = "x86_64")
+        && !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&value)
+    {
+        return i64::MIN;
+    }
+    value as i64
 }
 
 /// Nearest-neighbour resampling of an RGB canvas onto `to`.
