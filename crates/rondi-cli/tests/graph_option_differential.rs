@@ -297,3 +297,33 @@ fn graph_accepts_the_full_rrd_graph_option_table() {
     .collect();
     f.assert_all_same(&cases);
 }
+
+// Output goes to a file in the fixture directory because Rondi refuses to
+// open /dev/null for writing when it is owned by another user.
+// rrd_fetch_empty divides by (end - start) / 100, which is zero for a range
+// under 100 seconds and traps in the pinned build, so only Rondi's result is
+// checked: the graph is drawn from NaN data.
+#[test]
+fn use_nan_for_all_missing_data_survives_a_short_range() {
+    let Some(f) = fixture() else { return };
+    let output = f.run(
+        &f.alias,
+        &args(&[
+            "graph",
+            "out.png",
+            "--use-nan-for-all-missing-data",
+            "--start",
+            "1000000000",
+            "--end",
+            "1000000050",
+            "DEF:x=missing.rrd:x:AVERAGE",
+            "LINE1:x#ff0000",
+        ]),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).ends_with("x141\n"),
+        "{output:?}"
+    );
+}

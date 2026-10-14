@@ -1904,7 +1904,9 @@ impl GraphImage {
                     // rrd_fetch_empty
                     let mut step = element.step;
                     if step == 0 {
-                        step = ((element.end - element.start) / 100) as u64;
+                        // C divides by this step next; a range under 100s
+                        // gives zero and traps there, so use one second.
+                        step = (((element.end - element.start) / 100) as u64).max(1);
                     }
                     let step_i64 = step as i64;
                     let start = element.start - element.start.rem_euclid(step_i64);
