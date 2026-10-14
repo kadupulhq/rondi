@@ -299,3 +299,33 @@ fn fetch_times_parse_like_handle_request_fetch_parse() {
         }
     }
 }
+
+#[test]
+fn fetch_columns_select_like_handle_request_fetch_parse() {
+    let Some(work) = Work::new() else { return };
+    let sessions: [&[u8]; 8] = [
+        b"FETCH a.rrd AVERAGE 1000000000 1000000600 x x\n",
+        b"FETCH a.rrd AVERAGE 1000000000 1000000600 x y x\n",
+        b"FETCH a.rrd AVERAGE 1000000000 1000000600 x y \n",
+        b"FETCH a.rrd AVERAGE 1000000000 1000000600  y\n",
+        b"FETCH a.rrd AVERAGE 1000000000 1000000600 y x\n",
+        b"FETCH a.rrd AVERAGE 1000000000 1000000600 \n",
+        b"FETCHBIN a.rrd AVERAGE 1000000000 1000000600 x x\n",
+        b"FETCHBIN a.rrd AVERAGE 1000000000 1000000600 x y y\n",
+    ];
+    let observed = work.differential(&["-B"], &sessions);
+    assert!(observed[0][0].ends_with("\n-1 field x already used\n"));
+    assert!(observed[0][1].ends_with("\n-1 too many fields given - duplicates!\n"));
+    assert_same(&observed);
+
+    // Upstream prints the file name after freeing it, so only the prefix is
+    // stable; Rondi prints the name it meant to.
+    let observed = work.differential(&["-B"], &[b"FETCH a.rrd AVERAGE 1000000000 1000000600 z\n"]);
+    let prefix = "\n-1 field z not found in ";
+    assert!(observed[0][0].contains(prefix), "{:?}", observed[0][0]);
+    assert!(
+        observed[1][0].ends_with(&format!("{prefix}{}/a.rrd\n", work.base().display())),
+        "{:?}",
+        observed[1][0]
+    );
+}

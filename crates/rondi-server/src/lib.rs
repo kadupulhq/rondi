@@ -3243,20 +3243,30 @@ fn rrdcached_fetch_data(
                 }
             }
         })?;
-    let selected = if fields.len() > 4 {
-        fields[4..]
+    // The field index loop of handle_request_fetch_parse: the bound is checked
+    // before an empty field is skipped, and no field selects every source.
+    let mut selected = Vec::new();
+    for name in fields.iter().skip(4) {
+        if selected.len() >= result.data_sources.len() {
+            return Err("too many fields given - duplicates!".to_owned());
+        }
+        if name.is_empty() {
+            continue;
+        }
+        // Upstream formats the file name after freeing it; Rondi prints it.
+        let found = result
+            .data_sources
             .iter()
-            .map(|name| {
-                result
-                    .data_sources
-                    .iter()
-                    .position(|source| source == name)
-                    .ok_or_else(|| format!("Unknown data source: {name}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    } else {
-        (0..result.data_sources.len()).collect::<Vec<_>>()
-    };
+            .position(|source| source == name)
+            .ok_or_else(|| format!("field {name} not found in {}", base.abs(fields[0])))?;
+        if selected.contains(&found) {
+            return Err(format!("field {name} already used"));
+        }
+        selected.push(found);
+    }
+    if selected.is_empty() {
+        selected = (0..result.data_sources.len()).collect();
+    }
     Ok((result, selected))
 }
 
