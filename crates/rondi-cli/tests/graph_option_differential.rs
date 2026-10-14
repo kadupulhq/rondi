@@ -43,12 +43,7 @@ fn fixture() -> Option<Fixture> {
     let temp = tempfile::tempdir().unwrap();
     let a = temp.path().join("a.rrd").display().to_string();
     let b = temp.path().join("b.rrd").display().to_string();
-    let owned = |items: &[&str]| {
-        items
-            .iter()
-            .map(|item| item.to_string())
-            .collect::<Vec<_>>()
-    };
+    let owned = |items: &[&str]| items.iter().map(ToString::to_string).collect::<Vec<_>>();
     upstream_ok(&owned(&[
         "create",
         &a,
@@ -108,10 +103,10 @@ impl Fixture {
     /// `graph graph-output.png <range> DEF:x DEF:z <elements>`.
     fn graph(&self, elements: &[&str]) -> Vec<String> {
         let mut args = vec![String::from("graph"), String::from("graph-output.png")];
-        args.extend(RANGE.iter().map(|s| s.to_string()));
+        args.extend(RANGE.iter().map(ToString::to_string));
         args.push(String::from("DEF:x=a.rrd:x:AVERAGE"));
         args.push(String::from("DEF:z=b.rrd:z:AVERAGE"));
-        args.extend(elements.iter().map(|s| s.to_string()));
+        args.extend(elements.iter().map(ToString::to_string));
         args
     }
 
@@ -151,7 +146,7 @@ impl Fixture {
 }
 
 fn args(items: &[&str]) -> Vec<String> {
-    items.iter().map(|item| item.to_string()).collect()
+    items.iter().map(ToString::to_string).collect()
 }
 
 // rrd_graph.c:5042 uses optparse_long: `--opt=value`, attached short values,

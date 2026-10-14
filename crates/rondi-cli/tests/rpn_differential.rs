@@ -41,7 +41,7 @@ fn fixture() -> Option<Fixture> {
         let mut args = vec!["create", file, "--start", "1000000000", "--step", step];
         args.extend(sources);
         args.push("RRA:AVERAGE:0.5:1:100");
-        rrdtool(&args.iter().map(|arg| arg.to_string()).collect::<Vec<_>>());
+        rrdtool(&args.iter().map(ToString::to_string).collect::<Vec<_>>());
     };
     create(&fine, "10", &["DS:x:GAUGE:30:U:U", "DS:y:GAUGE:30:U:U"]);
     create(&coarse, "30", &["DS:z:GAUGE:90:U:U"]);
@@ -101,7 +101,7 @@ impl Fixture {
             format!("DEF:x={}:x:AVERAGE", self.file("fine.rrd")),
             String::from("LINE1:x#ff0000"),
         ];
-        args.extend(elements.iter().map(|element| element.to_string()));
+        args.extend(elements.iter().map(ToString::to_string));
         args
     }
 
