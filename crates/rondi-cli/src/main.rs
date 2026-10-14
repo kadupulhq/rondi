@@ -1895,6 +1895,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     let vertical_label = options.vertical_label;
     let vertical_label_angle = options.vertical_label_angle;
     let imginfo = options.imginfo;
+    let zoom = options.zoom;
     let lower_limit = options.lower_limit;
     let upper_limit = options.upper_limit;
     let no_legend = options.no_legend;
@@ -2080,59 +2081,98 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                     gdes_index: index,
                 });
             }
-            let (rendered, series) = graph_render_input(&im);
-            let png = render_graph_png(
-                &rendered,
-                &series,
-                GraphPngOptions {
-                    canvas: GraphCanvas {
-                        width: u32::try_from(im.ximg)?,
-                        height: u32::try_from(im.yimg)?,
-                        left: u32::try_from(im.xorigin)?,
-                        top: u32::try_from(im.yorigin - im.ysize)?,
-                        plot_width: u32::try_from(im.xsize)?,
-                        plot_height: u32::try_from(im.ysize)?,
-                        minimum: im.minval,
-                        maximum: im.maxval,
+            // graph_cairo_setup sizes the surface as int(ximg * zoom). cairo
+            // refuses a negative or oversized surface and a zero-sized one
+            // cannot be written; graph_cairo_finish then fails the save
+            // while rrd_graph_v still reports image_info.
+            let save_failed = format!(
+                "Could not save png to '{}'",
+                if to_memory { "memory" } else { filename }
+            );
+            let surface = |size: i64| (size as f64 * zoom) as i32;
+            let (surface_width, surface_height) = (surface(im.ximg), surface(im.yimg));
+            let surface_valid = |size: i32| (0..=CAIRO_MAX_IMAGE_SIZE).contains(&size);
+            if !surface_valid(surface_width) || !surface_valid(surface_height) {
+                eprintln!(
+                    "OOPS: Cairo has issues it can't even die: invalid value (typically too big) for the size of the input (surface, pattern, etc.)"
+                );
+                save_error = Some(save_failed);
+            } else if surface_width == 0 || surface_height == 0 {
+                // rrd_strtodbl accepts "nan", which cairo_scale rejects.
+                if zoom.is_nan() {
+                    eprintln!(
+                        "OOPS: Cairo has issues it can't even die: invalid matrix (not invertible)"
+                    );
+                }
+                if !to_memory {
+                    if let Err(OutputError::Refused(message)) = write_output_file(filename, &[]) {
+                        return Err(message.into());
+                    }
+                }
+                save_error = Some(save_failed);
+            } else {
+                let (rendered, series) = graph_render_input(&im);
+                let png = render_graph_png(
+                    &rendered,
+                    &series,
+                    GraphPngOptions {
+                        canvas: GraphCanvas {
+                            width: u32::try_from(im.ximg)?,
+                            height: u32::try_from(im.yimg)?,
+                            surface_width: surface_width.unsigned_abs(),
+                            surface_height: surface_height.unsigned_abs(),
+                            left: u32::try_from(im.xorigin)?,
+                            top: u32::try_from(im.yorigin - im.ysize)?,
+                            plot_width: u32::try_from(im.xsize)?,
+                            plot_height: u32::try_from(im.ysize)?,
+                            minimum: im.minval,
+                            maximum: im.maxval,
+                        },
+                        legends: &legends,
+                        title: graph_title.as_deref(),
+                        vertical_label: vertical_label.as_deref(),
+                        vertical_label_angle,
+                        only_graph,
+                        colors: graph_colors,
+                        grid_dash,
+                        border_width,
                     },
-                    legends: &legends,
-                    title: graph_title.as_deref(),
-                    vertical_label: vertical_label.as_deref(),
-                    vertical_label_angle,
-                    only_graph,
-                    colors: graph_colors,
-                    grid_dash,
-                    border_width,
-                },
-            )?;
-            let (width, height) = png_dimensions(&png)?;
-            if !to_memory {
-                // rrd_graph_v keeps building the result after a failed save
-                // and rrdtool reports the error once it has printed it.
-                match write_output_file(filename, &png) {
-                    Ok(()) => {}
-                    Err(OutputError::Refused(message)) => return Err(message.into()),
-                    Err(_) => save_error = Some(format!("Could not save png to '{filename}'")),
+                )?;
+                if to_memory {
+                    image = Some(png);
+                } else {
+                    // rrd_graph_v keeps building the result after a failed
+                    // save and rrdtool reports the error once it has printed it.
+                    match write_output_file(filename, &png) {
+                        Ok(()) => {}
+                        Err(OutputError::Refused(message)) => return Err(message.into()),
+                        Err(_) => save_error = Some(save_failed),
+                    }
                 }
             }
-            if let Some(format) = imginfo.as_deref().filter(|format| !format.is_empty()) {
-                let basename = if to_memory {
-                    "memory"
-                } else {
-                    Path::new(filename)
-                        .file_name()
-                        .and_then(std::ffi::OsStr::to_str)
-                        .unwrap_or(filename)
-                };
-                info.push(
-                    "image_info",
-                    InfoValue::Str(format_imginfo(format, basename, width, height)?),
-                );
-            }
-            if to_memory {
-                image = Some(png);
-            }
         }
+    }
+    // rrd_graph_v adds image_info for every format once graph_paint
+    // succeeds; ximg and yimg stay 0 when nothing was drawn.
+    if let Some(format) = imginfo.as_deref().filter(|format| !format.is_empty()) {
+        let basename = if to_memory {
+            "memory"
+        } else {
+            Path::new(filename)
+                .file_name()
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or(filename)
+        };
+        let scaled = |size: i64| (zoom * size as f64) as i64;
+        info.push(
+            "image_info",
+            InfoValue::Str(format_imginfo(
+                format,
+                basename,
+                scaled(im.ximg),
+                scaled(im.yimg),
+            )?),
+        );
     }
     if let Some(image) = image {
         info.push("image", InfoValue::Blob(image));
@@ -2856,6 +2896,9 @@ struct GraphSeries {
 struct GraphCanvas {
     width: u32,
     height: u32,
+    /// The written image: the canvas scaled by `--zoom`.
+    surface_width: u32,
+    surface_height: u32,
     left: u32,
     top: u32,
     plot_width: u32,
@@ -2915,6 +2958,8 @@ impl Default for GraphColors {
     }
 }
 
+/// cairo_image_surface_create rejects larger surfaces (MAX_IMAGE_SIZE).
+const CAIRO_MAX_IMAGE_SIZE: i32 = 32767;
 const PNG_MAX_DIMENSION: u32 = 4096;
 const PNG_DIMENSION_LIMIT_MESSAGE: &str = "PNG graph dimensions exceed the 4096 pixel safety limit";
 
@@ -2937,6 +2982,8 @@ fn render_graph_png(
     let GraphCanvas {
         width: canvas_width,
         height: canvas_height,
+        surface_width,
+        surface_height,
         left: plot_left,
         top: plot_top,
         plot_width: width,
@@ -2944,7 +2991,10 @@ fn render_graph_png(
         minimum,
         maximum,
     } = canvas;
-    if canvas_width > PNG_MAX_DIMENSION || canvas_height > PNG_MAX_DIMENSION {
+    if [canvas_width, canvas_height, surface_width, surface_height]
+        .iter()
+        .any(|&size| size > PNG_MAX_DIMENSION)
+    {
         return Err(PNG_DIMENSION_LIMIT_MESSAGE.into());
     }
     let pixel_count = usize::try_from(canvas_width)
@@ -3381,15 +3431,40 @@ fn render_graph_png(
             colors.arrow,
         );
     }
+    // graph_cairo_setup draws through cairo_scale(zoom); the renderer draws
+    // at 1:1 and samples the canvas onto the zoomed surface instead.
+    if (surface_width, surface_height) != (canvas_width, canvas_height) {
+        pixels = zoom_pixels(
+            &pixels,
+            (canvas_width, canvas_height),
+            (surface_width, surface_height),
+        );
+    }
     let mut output = Vec::new();
     {
-        let mut encoder = png::Encoder::new(&mut output, canvas_width, canvas_height);
+        let mut encoder = png::Encoder::new(&mut output, surface_width, surface_height);
         encoder.set_color(png::ColorType::Rgb);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header()?;
         writer.write_image_data(&pixels)?;
     }
     Ok(output)
+}
+
+/// Nearest-neighbour resampling of an RGB canvas onto `to`.
+fn zoom_pixels(pixels: &[u8], from: (u32, u32), to: (u32, u32)) -> Vec<u8> {
+    let source = |target: u32, from: u32, to: u32| {
+        ((u64::from(target) * u64::from(from)) / u64::from(to)) as usize
+    };
+    let mut output = Vec::with_capacity(to.0 as usize * to.1 as usize * 3);
+    for y in 0..to.1 {
+        let row = source(y, from.1, to.1) * from.0 as usize;
+        for x in 0..to.0 {
+            let offset = (row + source(x, from.0, to.0)) * 3;
+            output.extend_from_slice(&pixels[offset..offset + 3]);
+        }
+    }
+    output
 }
 
 fn interpolate_graph_color(first: [u8; 4], second: [u8; 4], ratio: f64) -> [u8; 4] {
@@ -3407,16 +3482,11 @@ fn composite_rgb(foreground: [u8; 4], background: [u8; 3]) -> [u8; 3] {
     })
 }
 
-fn png_dimensions(bytes: &[u8]) -> Result<(u32, u32), Box<dyn std::error::Error>> {
-    let reader = png::Decoder::new(std::io::Cursor::new(bytes)).read_info()?;
-    Ok((reader.info().width, reader.info().height))
-}
-
 fn format_imginfo(
     format: &str,
     filename: &str,
-    width: u32,
-    height: u32,
+    width: i64,
+    height: i64,
 ) -> Result<String, Box<dyn std::error::Error>> {
     // bad_format_imginfo (rrd_graph.c:5880).
     let bad_format = || -> Box<dyn std::error::Error> {
@@ -3440,8 +3510,9 @@ fn format_imginfo(
         }
         let value = match (argument, conversion) {
             (0, 's') => filename.to_owned(),
-            (1, 'l') if chars.next() == Some('u') => width.to_string(),
-            (2, 'l') if chars.next() == Some('u') => height.to_string(),
+            // The (long) sizes print through %lu.
+            (1, 'l') if chars.next() == Some('u') => (width as u64).to_string(),
+            (2, 'l') if chars.next() == Some('u') => (height as u64).to_string(),
             _ => return Err(bad_format()),
         };
         output.push_str(&value);
@@ -6542,6 +6613,8 @@ mod graph_stroke_tests {
                     canvas: GraphCanvas {
                         width: 121,
                         height: 71,
+                        surface_width: 121,
+                        surface_height: 71,
                         left: 51,
                         top: 15,
                         plot_width: 40,

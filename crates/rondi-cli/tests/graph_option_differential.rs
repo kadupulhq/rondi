@@ -128,11 +128,52 @@ impl Fixture {
         assert_eq!(text(&rondi), text(&upstream), "{args:?}");
     }
 
+    /// Compares status, stdout, stderr and the written file of a command
+    /// whose output file is graph-output.png. PNG files compare by their
+    /// IHDR size, anything else byte for byte.
+    fn assert_same_output(&self, args: &[String]) {
+        let file = self.temp.path().join("graph-output.png");
+        let outcome = |program: &Path| {
+            let _ = std::fs::remove_file(&file);
+            let output = self.run(program, args);
+            let written = std::fs::read(&file).ok().map(|bytes| {
+                if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.len() >= 24 {
+                    let size =
+                        |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+                    format!("png {}x{}", size(16), size(20))
+                } else {
+                    format!("{bytes:?}")
+                }
+            });
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let head: Vec<_> = stdout
+                .lines()
+                .take_while(|l| !l.starts_with("image = "))
+                .collect();
+            (
+                output.status.code(),
+                head.join("\n"),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+                written,
+            )
+        };
+        let upstream = outcome(Path::new("rrdtool"));
+        let rondi = outcome(&self.alias);
+        assert_eq!(rondi, upstream, "{args:?}");
+    }
+
     fn assert_all_same(&self, cases: &[Vec<String>]) {
+        self.assert_all(cases, Self::assert_same);
+    }
+
+    fn assert_all_same_output(&self, cases: &[Vec<String>]) {
+        self.assert_all(cases, Self::assert_same_output);
+    }
+
+    fn assert_all(&self, cases: &[Vec<String>], check: fn(&Self, &[String])) {
         let mut failures = Vec::new();
         for args in cases {
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.assert_same(args)))
-                .is_err()
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(self, args))).is_err()
             {
                 failures.push(format!("{args:?}"));
             }
@@ -353,4 +394,45 @@ fn png_dimension_limit_applies_before_data_processing() {
         &["LINE1:x#ff0000"],
     );
     assert_eq!(xml.status.code(), Some(0));
+}
+
+// graph_cairo_setup sizes the surface as int(ximg * zoom) and image_info
+// reports (long)(zoom * ximg), while graphv's image_width stays unscaled.
+// A surface cairo cannot create or write fails the save after image_info.
+#[test]
+fn zoom_scales_the_written_image_and_image_info() {
+    let Some(f) = fixture() else { return };
+    let info = ["--imginfo", "%s %lu %lu"];
+    let line = "LINE1:x#ff0000";
+    let cases: Vec<Vec<String>> = [
+        vec!["--zoom", "2", line],
+        vec!["--zoom", "2", info[0], info[1], line],
+        vec!["--zoom", "1.5", info[0], info[1], line],
+        vec!["--zoom", "0.333", info[0], info[1], line],
+        vec!["--zoom", "2", "--only-graph", line],
+        vec![
+            "--zoom",
+            "2",
+            "--full-size-mode",
+            "-w",
+            "300",
+            "-h",
+            "200",
+            line,
+        ],
+        vec!["--zoom", "0.001", info[0], info[1], line],
+        vec!["--zoom", "100", info[0], info[1], line],
+        vec!["--zoom", "1e30", info[0], info[1], line],
+        vec!["--zoom", "nan", info[0], info[1], line],
+        vec!["--zoom", "2", info[0], info[1], "PRINT:x:AVERAGE:%lf"],
+        vec![info[0], info[1], "-a", "CSV", line],
+    ]
+    .iter()
+    .flat_map(|extra| {
+        let mut graphv = f.graph(extra);
+        graphv[0] = String::from("graphv");
+        [f.graph(extra), graphv]
+    })
+    .collect();
+    f.assert_all_same_output(&cases);
 }
