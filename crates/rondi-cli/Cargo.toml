@@ -19,7 +19,6 @@ doc = false
 rondi = { path = "../rondi" }
 rondi-server = { path = "../rondi-server" }
 clap.workspace = true
-glob.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 bytes.workspace = true
