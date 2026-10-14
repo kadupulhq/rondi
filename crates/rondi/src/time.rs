@@ -421,9 +421,61 @@ impl Parser<'_> {
         Ok(())
     }
 
-    fn day(&mut self) -> Result<(), String> {
+    fn numeric_day(&mut self) -> Result<(), String> {
         let mut mday: c_long = 0;
         let mut year = c_long::from(self.tv.tm.tm_year);
+        let mut mon = atol(&self.sc_token);
+        if mon > 10 * 365 * 24 * 60 * 60 {
+            localtime(mon as time_t, &mut self.tv.tm);
+            self.token();
+            return Ok(());
+        }
+        if mon > 19_700_101 && mon < 24_000_101 {
+            year = atol(&self.sc_token[..4]);
+            mon = atol(&self.sc_token[4..6]);
+            mday = atol(&self.sc_token[6..8]);
+            self.token();
+        } else {
+            self.token();
+            if mon <= 31 && matches!(self.sc_tokid, Token::Slash | Token::Dot) {
+                let sep = self.sc_tokid;
+                let (name, separator) = if sep == Token::Dot {
+                    ("month", '.')
+                } else {
+                    ("day", '/')
+                };
+                self.expect2(Token::Number, || {
+                    format!("there should be {name} number after '{separator}'")
+                })?;
+                mday = atol(&self.sc_token);
+                if self.token() == sep {
+                    self.expect2(Token::Number, || {
+                        format!("there should be year number after '{separator}'")
+                    })?;
+                    year = atol(&self.sc_token);
+                    self.token();
+                }
+                // European DD.MM.YYYY.
+                if sep == Token::Dot {
+                    std::mem::swap(&mut mday, &mut mon);
+                }
+            }
+        }
+        mon -= 1;
+        if !(0..=11).contains(&mon) {
+            return Err(format!("did you really mean month {}?", (mon + 1) as c_int));
+        }
+        if !(1..=31).contains(&mday) {
+            return Err(format!(
+                "I'm afraid that {} is not a valid day of the month",
+                mday as c_int
+            ));
+        }
+        self.assign_date(mday, mon, year)?;
+        Ok(())
+    }
+
+    fn day(&mut self) -> Result<(), String> {
         match self.sc_tokid {
             Token::Yesterday | Token::Today => {
                 if self.sc_tokid == Token::Yesterday {
@@ -436,10 +488,11 @@ impl Parser<'_> {
                 self.token();
             }
             Token::Month(mon) => {
+                let year;
                 self.expect2(Token::Number, || {
                     String::from("the day of the month should follow month name")
                 })?;
-                mday = atol(&self.sc_token);
+                let mday = atol(&self.sc_token);
                 if self.token() == Token::Number {
                     year = atol(&self.sc_token);
                     self.token();
@@ -452,63 +505,64 @@ impl Parser<'_> {
                 self.tv.tm.tm_mday += wday - self.tv.tm.tm_wday;
                 self.token();
             }
-            Token::Number => {
-                let mut mon = atol(&self.sc_token);
-                if mon > 10 * 365 * 24 * 60 * 60 {
-                    localtime(mon as time_t, &mut self.tv.tm);
-                    self.token();
-                    return Ok(());
-                }
-                if mon > 19_700_101 && mon < 24_000_101 {
-                    year = atol(&self.sc_token[..4]);
-                    mon = atol(&self.sc_token[4..6]);
-                    mday = atol(&self.sc_token[6..8]);
-                    self.token();
-                } else {
-                    self.token();
-                    if mon <= 31 && matches!(self.sc_tokid, Token::Slash | Token::Dot) {
-                        let sep = self.sc_tokid;
-                        let (name, separator) = if sep == Token::Dot {
-                            ("month", '.')
-                        } else {
-                            ("day", '/')
-                        };
-                        self.expect2(Token::Number, || {
-                            format!("there should be {name} number after '{separator}'")
-                        })?;
-                        mday = atol(&self.sc_token);
-                        if self.token() == sep {
-                            self.expect2(Token::Number, || {
-                                format!("there should be year number after '{separator}'")
-                            })?;
-                            year = atol(&self.sc_token);
-                            self.token();
-                        }
-                        // European DD.MM.YYYY.
-                        if sep == Token::Dot {
-                            std::mem::swap(&mut mday, &mut mon);
-                        }
-                    }
-                }
-                mon -= 1;
-                if !(0..=11).contains(&mon) {
-                    return Err(format!("did you really mean month {}?", (mon + 1) as c_int));
-                }
-                if !(1..=31).contains(&mday) {
-                    return Err(format!(
-                        "I'm afraid that {} is not a valid day of the month",
-                        mday as c_int
-                    ));
-                }
-                self.assign_date(mday, mon, year)?;
-            }
+            Token::Number => self.numeric_day()?,
             _ => {}
         }
         Ok(())
     }
 
+    fn reference_time(&mut self) -> Result<(), String> {
+        let time_reference = self.sc_tokid;
+        if time_reference != Token::Now {
+            self.tv.kind = match time_reference {
+                Token::Epoch => TimeType::RelativeToEpoch,
+                Token::Start => TimeType::RelativeToStart,
+                _ => TimeType::RelativeToEnd,
+            };
+            let tm = &mut self.tv.tm;
+            tm.tm_sec = 0;
+            tm.tm_min = 0;
+            tm.tm_hour = 0;
+            tm.tm_mday = 0;
+            tm.tm_mon = 0;
+            tm.tm_year = 0;
+        }
+        self.token();
+        if !matches!(self.sc_tokid, Token::Plus | Token::Minus) {
+            if time_reference != Token::Now {
+                return Err(String::from(
+                    "'start' or 'end' MUST be followed by +|- offset",
+                ));
+            } else if self.sc_tokid != Token::Eof {
+                return Err(String::from(
+                    "if 'now' is followed by a token it must be +|- offset",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn numeric_date_or_time(&mut self) -> Result<(), String> {
+        let hour_sv = self.tv.tm.tm_hour;
+        let year_sv = self.tv.tm.tm_year;
+        // Sentinels show whether tod() and day() set anything.
+        self.tv.tm.tm_hour = 30;
+        self.tv.tm.tm_year = 30000;
+        self.tod()?;
+        self.day()?;
+        if self.tv.tm.tm_hour == 30 && self.tv.tm.tm_year != 30000 {
+            self.tod()?;
+        }
+        if self.tv.tm.tm_hour == 30 {
+            self.tv.tm.tm_hour = hour_sv;
+        }
+        if self.tv.tm.tm_year == 30000 {
+            self.tv.tm.tm_year = year_sv;
+        }
+        Ok(())
+    }
+
     fn parse(&mut self, now: time_t) -> Result<(), String> {
-        let mut hr = 0;
         self.tv.kind = TimeType::Absolute;
         self.tv.offset = 0;
         localtime(now, &mut self.tv.tm);
@@ -517,53 +571,8 @@ impl Parser<'_> {
         self.token();
         match self.sc_tokid {
             Token::Plus | Token::Minus => {}
-            Token::Epoch | Token::Start | Token::End | Token::Now => {
-                let time_reference = self.sc_tokid;
-                if time_reference != Token::Now {
-                    self.tv.kind = match time_reference {
-                        Token::Epoch => TimeType::RelativeToEpoch,
-                        Token::Start => TimeType::RelativeToStart,
-                        _ => TimeType::RelativeToEnd,
-                    };
-                    let tm = &mut self.tv.tm;
-                    tm.tm_sec = 0;
-                    tm.tm_min = 0;
-                    tm.tm_hour = 0;
-                    tm.tm_mday = 0;
-                    tm.tm_mon = 0;
-                    tm.tm_year = 0;
-                }
-                self.token();
-                if !matches!(self.sc_tokid, Token::Plus | Token::Minus) {
-                    if time_reference != Token::Now {
-                        return Err(String::from(
-                            "'start' or 'end' MUST be followed by +|- offset",
-                        ));
-                    } else if self.sc_tokid != Token::Eof {
-                        return Err(String::from(
-                            "if 'now' is followed by a token it must be +|- offset",
-                        ));
-                    }
-                }
-            }
-            Token::Number => {
-                let hour_sv = self.tv.tm.tm_hour;
-                let year_sv = self.tv.tm.tm_year;
-                // Sentinels show whether tod() and day() set anything.
-                self.tv.tm.tm_hour = 30;
-                self.tv.tm.tm_year = 30000;
-                self.tod()?;
-                self.day()?;
-                if self.tv.tm.tm_hour == 30 && self.tv.tm.tm_year != 30000 {
-                    self.tod()?;
-                }
-                if self.tv.tm.tm_hour == 30 {
-                    self.tv.tm.tm_hour = hour_sv;
-                }
-                if self.tv.tm.tm_year == 30000 {
-                    self.tv.tm.tm_year = year_sv;
-                }
-            }
+            Token::Epoch | Token::Start | Token::End | Token::Now => self.reference_time()?,
+            Token::Number => self.numeric_date_or_time()?,
             Token::Month(_) => {
                 self.day()?;
                 if self.sc_tokid == Token::Number {
@@ -571,6 +580,7 @@ impl Parser<'_> {
                 }
             }
             Token::Teatime | Token::Noon | Token::Midnight => {
+                let mut hr = 0;
                 if self.sc_tokid == Token::Teatime {
                     hr += 4;
                 }
