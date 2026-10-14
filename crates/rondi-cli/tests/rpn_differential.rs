@@ -181,6 +181,26 @@ fn rpn_errors_use_rrdtool_wording() {
     }
 }
 
+// match_op_param (rrd_rpncalc.c:373) takes the PREV( branch whenever sscanf
+// reads a name, even without the closing parenthesis. A failed length check
+// leaves expr on the token, so the separator test reports it as garbage.
+#[test]
+fn malformed_prev_parameter_is_garbage_in_rpn() {
+    let Some(fixture) = fixture() else { return };
+    for cdef in [
+        "x,PREV(x,+",
+        "PREV(x)y",
+        "PREV(x)),1,+",
+        "x,PREV(x)junk,+",
+        "x,PREV(nope,+",
+        "x,PREV(x,,+",
+        "x,PREV(,+",
+        "x,PREV(),+",
+    ] {
+        fixture.assert_matches(&fixture.xport_args(cdef));
+    }
+}
+
 // rrd_graph.c data_calc rejects a CDEF whose expression names no DEF or CDEF.
 #[test]
 fn constant_cdef_is_rejected_like_rrdtool() {
