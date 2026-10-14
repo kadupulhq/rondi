@@ -545,6 +545,10 @@ fn apply_update(
         )));
     }
     let step = i64::try_from(info.step).map_err(|_| rrd_error("RRD PDP step overflows"))?;
+    // update_all_cdp_prep and write_to_rras take pdp_cnt as a modulus.
+    if info.archives.iter().any(|archive| archive.pdp_per_row == 0) {
+        return Err(divides_by_zero());
+    }
     let interval = (timestamp
         .checked_sub(last_update)
         .ok_or_else(|| rrd_error("RRD update interval overflows"))? as f64)

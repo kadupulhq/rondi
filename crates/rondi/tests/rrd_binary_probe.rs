@@ -1365,3 +1365,44 @@ fn dderive_previous_sample_is_parsed_like_rrdtool() {
         std::fs::read(&oracle).unwrap()
     );
 }
+
+// Header offsets for a one-source, one-archive file: the archive definition
+// starts after the 128-byte static head and one 120-byte source definition,
+// and the row pointer follows the live head, one prep area and one CDP prep.
+const RRA_ROWS_OFFSET: u64 = 248 + 24;
+const RRA_PDP_OFFSET: u64 = 248 + 32;
+const RRA_CUR_ROW_OFFSET: u64 = 576;
+
+fn poke_u64(path: &std::path::Path, offset: u64, value: u64) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.write_all(&value.to_le_bytes()).unwrap();
+}
+
+fn create_geometry_probe(path: &std::path::Path) {
+    create_single_source(
+        path,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:20:U:U",
+        "RRA:AVERAGE:0.5:1:8",
+    );
+}
+
+#[test]
+fn update_with_zero_pdp_per_row_is_an_error_instead_of_a_division_panic() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("pdp.rrd");
+    create_geometry_probe(&path);
+    poke_u64(&path, RRA_PDP_OFFSET, 0);
+    let before = std::fs::read(&path).unwrap();
+    let result =
+        std::panic::catch_unwind(|| rondi::update_rrd_file(&path, 1_000_000_010, Some(1.0)));
+    let error = result.expect("update panicked").unwrap_err().to_string();
+    assert!(
+        error.contains("RRD step, pdp_cnt or row_cnt is zero"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
