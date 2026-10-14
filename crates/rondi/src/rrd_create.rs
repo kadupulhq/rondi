@@ -240,10 +240,10 @@ fn parse_generic_ds(def: &str, ds_def: &mut [u8; DS_DEF_LEN], error: &mut ErrorS
             put_u64(ds_def, offset, value.to_bits());
             Some(value)
         };
-        let Some(min) = parse_bound(min, 48, "parsing min val") else {
+        let Some(min) = parse_bound(&min, 48, "parsing min val") else {
             return Ok(());
         };
-        let Some(max) = parse_bound(max, 56, "parsing max val") else {
+        let Some(max) = parse_bound(&max, 56, "parsing max val") else {
             return Ok(());
         };
         if min >= max {
@@ -257,14 +257,22 @@ fn parse_generic_ds(def: &str, ds_def: &mut [u8; DS_DEF_LEN], error: &mut ErrorS
 }
 
 /// `sscanf(text, "%18[^:]:%18[^:]", min, max) == 2`.
-fn scan_min_max(text: &str) -> Option<(&str, &str)> {
+///
+/// sscanf counts bytes, so a field can end inside a multibyte character; the
+/// cut bytes are kept lossily because the error text only echoes them.
+fn scan_min_max(text: &str) -> Option<(String, String)> {
     let field = |from: usize| {
         let length = text.as_bytes()[from..]
             .iter()
             .take(18)
             .take_while(|byte| **byte != b':')
             .count();
-        (length > 0).then(|| (&text[from..from + length], from + length))
+        (length > 0).then(|| {
+            (
+                String::from_utf8_lossy(&text.as_bytes()[from..from + length]).into_owned(),
+                from + length,
+            )
+        })
     };
     let (min, end) = field(0)?;
     if text.as_bytes().get(end) != Some(&b':') {
@@ -703,13 +711,24 @@ mod tests {
 
     #[test]
     fn min_max_scan_stops_at_eighteen_bytes() {
-        assert_eq!(scan_min_max("U:U:extra"), Some(("U", "U")));
+        let pair = |min: &str, max: &str| Some((min.to_owned(), max.to_owned()));
+        assert_eq!(scan_min_max("U:U:extra"), pair("U", "U"));
         assert_eq!(scan_min_max("U"), None);
         assert_eq!(scan_min_max(":U"), None);
         assert_eq!(scan_min_max("1234567890123456789:U"), None);
         assert_eq!(
             scan_min_max("1:1234567890123456789"),
-            Some(("1", "123456789012345678"))
+            pair("1", "123456789012345678")
         );
+    }
+
+    #[test]
+    fn min_max_scan_cut_inside_a_character_does_not_panic() {
+        // Byte 18 falls inside the two-byte "\u{e9}". A cut min no longer
+        // meets its ':' separator, and a cut max keeps the partial byte.
+        assert_eq!(scan_min_max("00000000000000000\u{e9}:U"), None);
+        let (min, max) = scan_min_max("U:00000000000000000\u{e9}").unwrap();
+        assert_eq!(min, "U");
+        assert_eq!(max, "00000000000000000\u{fffd}");
     }
 }
