@@ -802,6 +802,9 @@ fn rrdupdate_main(name: &str, argv: &[String]) -> i32 {
     let Err(error) = result else {
         return 0;
     };
+    if error.downcast_ref::<RrdcachedPathUnavailable>().is_some() {
+        return 0;
+    }
     print!("RRDtool 1.11.0  Copyright by Tobi Oetiker\n\n");
     match name {
         "rrdcreate" => print!(
@@ -819,7 +822,7 @@ fn rrdupdate_main(name: &str, argv: &[String]) -> i32 {
 /// The command switch in `HandleInputLine` (rrd_tool.c:713), shared by
 /// argv and pipe mode. `args[0]` is the command name.
 fn rrdtool_dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    match args[0].as_str() {
+    let result: Result<(), Box<dyn std::error::Error>> = match args[0].as_str() {
         "create" => rrdtool_create(args),
         "dump" => rrdtool_dump(args),
         "info" => rrdtool_info(args),
@@ -838,6 +841,12 @@ fn rrdtool_dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         "tune" => rrdtool_tune(args),
         "flushcached" => rrdtool_flushcached(args),
         command => Err(format!("unknown function '{command}'").into()),
+    };
+    // HandleInputLine checks rrd_test_error, not the command's return code.
+    // get_path's silent refusals therefore end the command with status 0.
+    match result {
+        Err(error) if error.downcast_ref::<RrdcachedPathUnavailable>().is_some() => Ok(()),
+        result => result,
     }
 }
 
@@ -4352,11 +4361,11 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
     if let Some(address) = daemon_address {
         if !daemon_samples.is_empty() {
             #[cfg(unix)]
-            send_rrdcached_update_on_stream(
-                connect_rrdcached(&address)?,
-                PathBuf::from(&args[1]).as_path(),
-                &daemon_samples,
-            )?;
+            {
+                let stream = connect_rrdcached(&address)?;
+                let path = rrdcached_client_path(&address, &filename.to_string_lossy())?;
+                send_rrdcached_update_on_stream(stream, Path::new(&path), &daemon_samples)?;
+            }
             #[cfg(not(unix))]
             return Err("rrdcached updates are unavailable on this platform".into());
         }
@@ -4423,8 +4432,13 @@ fn rrdtool_flushcached(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             // RRDtool 1.11.0 reports the number of filenames after the
             // command name, independent of the point at which flushing failed.
             let remaining = files.len().saturating_sub(1);
+            let detail = if error.downcast_ref::<RrdcachedPathUnavailable>().is_some() {
+                "unknown error".to_owned()
+            } else {
+                format!("rrdcached@{daemon}: {error}")
+            };
             return Err(format!(
-                "Flushing of file \"{filename}\" failed: rrdcached@{daemon}: {error}. Skipping remaining {remaining} file{}.",
+                "Flushing of file \"{filename}\" failed: {detail}. Skipping remaining {remaining} file{}.",
                 if remaining == 1 { "" } else { "s" }
             )
             .into());
@@ -4449,6 +4463,7 @@ fn send_rrdcached_command(
         return Err("invalid rrdcached socket or filename".into());
     }
     let mut stream = connect_rrdcached(address)?;
+    let command = translate_rrdcached_file_command(address, command)?;
     writeln!(stream, "{command}")?;
     let mut response = String::new();
     read_bounded_line(
@@ -4487,13 +4502,14 @@ fn send_rrdcached_update_on_stream(
     filename: &std::path::Path,
     samples: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if filename.to_string_lossy().chars().any(char::is_whitespace) {
+    let filename = filename.to_string_lossy();
+    if filename.contains(['\n', '\r', '\0']) {
         return Err("rrdtool update: invalid rrdcached socket or filename".into());
     }
     writeln!(
         stream,
         "UPDATE {} {}",
-        filename.display(),
+        escape_rrdcached_field(&filename),
         samples.join(" ")
     )?;
     let mut response = String::new();
@@ -4560,11 +4576,7 @@ fn rrdtool_last(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .filter(|address| !address.is_empty())
     {
         let escaped_filename = filename.replace('\\', "\\\\").replace(' ', "\\ ");
-        let response = send_rrdcached_command(&address, &format!("LAST {escaped_filename}"))?;
-        let timestamp = response
-            .split_whitespace()
-            .nth(1)
-            .ok_or("invalid rrdcached LAST response")?;
+        let timestamp = rrdcached_time_value(&address, &format!("LAST {escaped_filename}"))?;
         println!("{timestamp}");
     } else {
         println!("{}", inspect_rrd(filename)?.last_update);
@@ -4661,14 +4673,10 @@ fn rrdtool_first(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .filter(|address| !address.is_empty())
     {
         let escaped_filename = filename.replace('\\', "\\\\").replace(' ', "\\ ");
-        let response = send_rrdcached_command(
+        let timestamp = rrdcached_time_value(
             &address,
             &format!("FIRST {escaped_filename} {archive_index}"),
         )?;
-        let timestamp = response
-            .split_whitespace()
-            .nth(1)
-            .ok_or("invalid rrdcached FIRST response")?;
         println!("{timestamp}");
         return Ok(());
     }
@@ -5309,12 +5317,130 @@ fn escape_rrdcached_field(value: &str) -> String {
     value.replace('\\', "\\\\").replace(' ', "\\ ")
 }
 
+/// get_path can return NULL without setting rrd_error (empty local paths
+/// and a remote strip-prefix mismatch). FIRST and LAST then print -1
+/// without making rrd_tool.c's final rrd_test_error check fail.
+#[derive(Debug)]
+struct RrdcachedPathUnavailable;
+
+impl std::fmt::Display for RrdcachedPathUnavailable {
+    fn fmt(&self, _: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        Ok(())
+    }
+}
+
+impl std::error::Error for RrdcachedPathUnavailable {}
+
+fn rrdcached_time_value(
+    address: &str,
+    command: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let response = send_rrdcached_command(address, command)?;
+    let verb = command.split_whitespace().next().unwrap_or_default();
+    response
+        .split_whitespace()
+        .nth(1)
+        .map(str::to_owned)
+        .ok_or_else(|| format!("invalid rrdcached {verb} response").into())
+}
+
+/// Port of RRDtool 1.11.0 rrd_client.c `get_path` (105-193). A local
+/// daemon receives a canonical absolute path; a remote daemon receives its
+/// own relative path after the configured literal prefix is stripped.
+fn rrdcached_client_path(
+    address: &str,
+    filename: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if address.starts_with('/') || address.starts_with("unix:") {
+        if filename.is_empty() {
+            return Err(RrdcachedPathUnavailable.into());
+        }
+        if let Ok(path) = std::fs::canonicalize(filename) {
+            return Ok(path.to_string_lossy().into_owned());
+        }
+        // get_path also handles files that CREATE has not made yet. Keep
+        // its last-slash rule, including its "." directory for /new.rrd.
+        let slash = filename.rfind('/');
+        let directory = match slash {
+            Some(index) if index > 0 => &filename[..index],
+            _ => ".",
+        };
+        let directory = std::fs::canonicalize(directory).map_err(|error| {
+            let text = error.to_string();
+            let detail = text.split(" (os error ").next().unwrap_or(&text);
+            format!("realpath({filename}): {detail}")
+        })?;
+        let suffix = slash.map_or_else(
+            || format!("/{filename}"),
+            |index| filename[index..].to_owned(),
+        );
+        return Ok(format!("{}{suffix}", directory.display()));
+    }
+    if filename.starts_with('/') {
+        return match std::env::var("RRDCACHED_STRIPPATH") {
+            Ok(prefix) => filename
+                .strip_prefix(&prefix)
+                .map(|path| path.trim_start_matches('/').to_owned())
+                .ok_or_else(|| RrdcachedPathUnavailable.into()),
+            Err(_) => Err("absolute path names not allowed when talking to a remote daemon".into()),
+        };
+    }
+    Ok(filename.to_owned())
+}
+
+/// Translate the file field after connecting, preserving rrd_client.c's
+/// connection-error precedence. LIST uses daemon-relative directory names
+/// directly upstream and deliberately does not pass through get_path.
+fn translate_rrdcached_file_command(
+    address: &str,
+    command: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let Some((verb, fields)) = command.split_once(' ') else {
+        return Ok(command.to_owned());
+    };
+    if !matches!(
+        verb,
+        "CREATE" | "FETCH" | "FIRST" | "FLUSH" | "FORGET" | "INFO" | "LAST" | "TUNE"
+    ) {
+        return Ok(command.to_owned());
+    }
+    let mut filename = String::new();
+    let mut escaped = false;
+    let mut end = fields.len();
+    for (index, character) in fields.char_indices() {
+        if escaped {
+            filename.push(character);
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if character == ' ' {
+            end = index;
+            break;
+        } else {
+            filename.push(character);
+        }
+    }
+    if escaped {
+        return Err("invalid rrdcached filename escape".into());
+    }
+    let path = rrdcached_client_path(address, &filename)?;
+    if path.contains(['\n', '\r', '\0']) {
+        return Err("invalid rrdcached socket or filename".into());
+    }
+    Ok(format!(
+        "{verb} {}{}",
+        escape_rrdcached_field(&path),
+        &fields[end..]
+    ))
+}
+
 #[cfg(unix)]
 fn send_rrdcached_multiline_command(
     address: &str,
     command: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     let mut stream = connect_rrdcached(address)?;
+    let command = translate_rrdcached_file_command(address, command)?;
     writeln!(stream, "{command}")?;
     let mut reader = std::io::BufReader::new(stream);
     let mut header = String::new();
