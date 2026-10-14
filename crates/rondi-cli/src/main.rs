@@ -4863,20 +4863,19 @@ fn rrdtool_lastupdate(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     }
     ensure_rrd_file_exists(std::path::Path::new(filename))?;
     let info = inspect_rrd(filename)?;
-    println!(
-        " {}",
-        info.data_sources
-            .iter()
-            .map(|ds| ds.name.as_str())
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-    println!();
-    print!("{:>10}:", info.last_update);
-    for source in info.data_sources {
-        print!(" {}", source.last_value);
+    // rrd_tool.c prints the names and last_ds text with %s, byte for byte.
+    let mut out = Vec::new();
+    for source in &info.data_sources {
+        out.push(b' ');
+        out.extend_from_slice(&source.raw_name);
     }
-    println!();
+    write!(out, "\n\n{:>10}:", info.last_update)?;
+    for source in &info.data_sources {
+        out.push(b' ');
+        out.extend_from_slice(&source.raw_last_value);
+    }
+    out.push(b'\n');
+    std::io::stdout().write_all(&out)?;
     Ok(())
 }
 
@@ -4998,56 +4997,64 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
-    println!("filename = \"{}\"", filename);
-    println!("rrd_version = \"{}\"", info.version);
-    println!("step = {}", info.step);
-    println!("last_update = {}", info.last_update);
-    println!("header_size = {}", info.header_size);
+    // rrd_info_print writes names and strings with %s, byte for byte.
+    let mut out = Vec::new();
+    writeln!(out, "filename = \"{filename}\"")?;
+    writeln!(out, "rrd_version = \"{}\"", info.version)?;
+    writeln!(out, "step = {}", info.step)?;
+    writeln!(out, "last_update = {}", info.last_update)?;
+    writeln!(out, "header_size = {}", info.header_size)?;
     for (index, source) in info.data_sources.iter().enumerate() {
-        println!("ds[{}].index = {index}", source.name);
-        println!("ds[{}].type = \"{}\"", source.name, source.kind);
-        println!(
-            "ds[{}].minimal_heartbeat = {}",
-            source.name, source.heartbeat
-        );
-        println!(
-            "ds[{}].min = {}",
-            source.name,
-            format_info_value(source.minimum)
-        );
-        println!(
-            "ds[{}].max = {}",
-            source.name,
-            format_info_value(source.maximum)
-        );
-        println!("ds[{}].last_ds = \"{}\"", source.name, source.last_value);
-        println!(
-            "ds[{}].value = {}",
-            source.name,
-            format_info_float(source.pdp_value)
-        );
-        println!(
-            "ds[{}].unknown_sec = {}",
-            source.name, source.unknown_seconds
-        );
+        let key = |out: &mut Vec<u8>, field: &str| {
+            out.extend_from_slice(b"ds[");
+            out.extend_from_slice(&source.raw_name);
+            out.extend_from_slice(b"].");
+            out.extend_from_slice(field.as_bytes());
+            out.extend_from_slice(b" = ");
+        };
+        let quoted = |out: &mut Vec<u8>, field: &str, value: &[u8]| {
+            key(out, field);
+            out.push(b'"');
+            out.extend_from_slice(value);
+            out.extend_from_slice(b"\"\n");
+        };
+        key(&mut out, "index");
+        writeln!(out, "{index}")?;
+        quoted(&mut out, "type", &source.raw_kind);
+        key(&mut out, "minimal_heartbeat");
+        writeln!(out, "{}", source.heartbeat)?;
+        key(&mut out, "min");
+        writeln!(out, "{}", format_info_value(source.minimum))?;
+        key(&mut out, "max");
+        writeln!(out, "{}", format_info_value(source.maximum))?;
+        quoted(&mut out, "last_ds", &source.raw_last_value);
+        key(&mut out, "value");
+        writeln!(out, "{}", format_info_float(source.pdp_value))?;
+        key(&mut out, "unknown_sec");
+        writeln!(out, "{}", source.unknown_seconds)?;
     }
     for (index, archive) in info.archives.iter().enumerate() {
-        println!("rra[{index}].cf = \"{}\"", archive.consolidation);
-        println!("rra[{index}].rows = {}", archive.rows);
-        println!("rra[{index}].cur_row = {}", archive.current_row);
-        println!("rra[{index}].pdp_per_row = {}", archive.pdp_per_row);
-        println!("rra[{index}].xff = {}", format_rrd_float(archive.xff));
+        write!(out, "rra[{index}].cf = \"")?;
+        out.extend_from_slice(&archive.raw_consolidation);
+        out.extend_from_slice(b"\"\n");
+        writeln!(out, "rra[{index}].rows = {}", archive.rows)?;
+        writeln!(out, "rra[{index}].cur_row = {}", archive.current_row)?;
+        writeln!(out, "rra[{index}].pdp_per_row = {}", archive.pdp_per_row)?;
+        writeln!(out, "rra[{index}].xff = {}", format_rrd_float(archive.xff))?;
         for (ds_index, prep) in archive.cdp_prep.iter().enumerate() {
-            println!(
+            writeln!(
+                out,
                 "rra[{index}].cdp_prep[{ds_index}].value = {}",
                 format_info_float(prep.value)
-            );
-            println!(
+            )?;
+            writeln!(
+                out,
                 "rra[{index}].cdp_prep[{ds_index}].unknown_datapoints = {}",
                 prep.unknown_datapoints
-            );
+            )?;
         }
     }
+    std::io::stdout().write_all(&out)?;
     Ok(())
 }
 

@@ -195,6 +195,11 @@ pub struct RrdDataSourceInfo {
     pub minimum: Option<f64>,
     pub maximum: Option<f64>,
     pub last_value: String,
+    /// The on-disk bytes behind `name`, `kind` and `last_value`, which
+    /// RRDtool prints as they are even when they are not UTF-8.
+    pub raw_name: Vec<u8>,
+    pub raw_kind: Vec<u8>,
+    pub raw_last_value: Vec<u8>,
     pub pdp_value: f64,
     pub unknown_seconds: u64,
 }
@@ -202,6 +207,8 @@ pub struct RrdDataSourceInfo {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RrdArchiveInfo {
     pub consolidation: String,
+    /// The on-disk bytes behind `consolidation`.
+    pub raw_consolidation: Vec<u8>,
     pub rows: u64,
     pub pdp_per_row: u64,
     pub xff: f64,
@@ -783,6 +790,7 @@ fn apply_update(
             .position(|byte| *byte == 0)
             .unwrap_or(last_ds.len());
         source.last_value = String::from_utf8_lossy(&last_ds[..length]).into_owned();
+        source.raw_last_value = last_ds[..length].to_vec();
         source.unknown_seconds = unknown;
         source.pdp_value = value;
     }
@@ -2117,26 +2125,28 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
     let mut data_sources = Vec::with_capacity(ds_count);
     for index in 0..ds_count {
         let start = checked_add(ds_start, checked_mul(index, DS_DEF_LEN)?)?;
-        let name = fixed_string(bytes, start, 20)?;
-        let kind = fixed_string(bytes, checked_add(start, 20)?, 20)?;
+        let raw_name = fixed_bytes(bytes, start, 20)?;
+        let raw_kind = fixed_bytes(bytes, checked_add(start, 20)?, 20)?;
         let heartbeat = u64_at(bytes, checked_add(start, 40)?)?;
         // NaN means unbounded; infinite bounds are kept as RRDtool prints them.
         let minimum = Some(f64_at(bytes, checked_add(start, 48)?)?).filter(|v| !v.is_nan());
         let maximum = Some(f64_at(bytes, checked_add(start, 56)?)?).filter(|v| !v.is_nan());
+        // last_ds holds raw sample text that RRDtool cut at 29 bytes.
+        let raw_last_value = fixed_bytes(
+            bytes,
+            checked_add(pdp_start, checked_mul(index, PDP_PREP_LEN)?)?,
+            30,
+        )?;
         data_sources.push(RrdDataSourceInfo {
-            name,
-            kind,
+            name: String::from_utf8_lossy(&raw_name).into_owned(),
+            kind: String::from_utf8_lossy(&raw_kind).into_owned(),
             heartbeat,
             minimum,
             maximum,
-            // last_ds holds raw sample text that RRDtool cut at 29 bytes.
-            last_value: {
-                let offset = checked_add(pdp_start, checked_mul(index, PDP_PREP_LEN)?)?;
-                require(bytes, offset, 30)?;
-                let field = &bytes[offset..offset + 30];
-                let end = field.iter().position(|byte| *byte == 0).unwrap_or(30);
-                String::from_utf8_lossy(&field[..end]).into_owned()
-            },
+            last_value: String::from_utf8_lossy(&raw_last_value).into_owned(),
+            raw_name,
+            raw_kind,
+            raw_last_value,
             pdp_value: f64_at(
                 bytes,
                 checked_add(
@@ -2158,7 +2168,7 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
     let mut archive_data_start = data_start;
     for index in 0..rra_count {
         let start = checked_add(rra_start, checked_mul(index, RRA_DEF_LEN)?)?;
-        let consolidation = fixed_string(bytes, start, 20)?;
+        let raw_consolidation = fixed_bytes(bytes, start, 20)?;
         let rows = u64_at(bytes, checked_add(start, 24)?)?;
         let pdp_per_row = u64_at(bytes, checked_add(start, 32)?)?;
         let xff = f64_at(bytes, checked_add(start, 40)?)?;
@@ -2192,7 +2202,8 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
             });
         }
         archives.push(RrdArchiveInfo {
-            consolidation,
+            consolidation: String::from_utf8_lossy(&raw_consolidation).into_owned(),
+            raw_consolidation,
             rows,
             pdp_per_row,
             xff,
@@ -2498,13 +2509,18 @@ impl Drop for RrdFileLock {
 }
 
 fn fixed_string(bytes: &[u8], offset: usize, length: usize) -> Result<String, StoreError> {
+    Ok(String::from_utf8_lossy(&fixed_bytes(bytes, offset, length)?).into_owned())
+}
+
+/// A NUL-terminated fixed-width header field, up to its first NUL.
+fn fixed_bytes(bytes: &[u8], offset: usize, length: usize) -> Result<Vec<u8>, StoreError> {
     require(bytes, offset, length)?;
     let field = &bytes[offset..offset + length];
     let end = field
         .iter()
         .position(|byte| *byte == 0)
         .unwrap_or(field.len());
-    Ok(String::from_utf8_lossy(&field[..end]).into_owned())
+    Ok(field[..end].to_vec())
 }
 
 fn xml_escape_text(value: &str) -> String {
