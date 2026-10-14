@@ -18,3 +18,32 @@ fn foreign_architecture_file_fails_on_the_float_cookie() {
         "This RRD was created on another architecture"
     );
 }
+
+/// rrd_create.c:1136 reads `%18[^:]` as bytes, so a bound whose 18th byte
+/// falls inside a multibyte character is cut mid-character. A cut min no
+/// longer meets its ':' and a cut max fails strtod; both are errors, not a
+/// slice panic.
+#[test]
+fn create_with_bound_cut_inside_a_character_is_an_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("cut.rrd");
+    let create = |bounds: &str| {
+        rondi::create_rrd_file(
+            &path,
+            1_000_000_000,
+            10,
+            &[format!("DS:x:GAUGE:20:{bounds}")],
+            &["RRA:AVERAGE:0.5:1:8".to_owned()],
+            true,
+        )
+        .unwrap_err()
+        .to_string()
+    };
+    assert_eq!(
+        create("00000000000000000\u{e9}:U"),
+        "failed to parse data source 20:00000000000000000\u{e9}:U: failed to extract min:max"
+    );
+    let error = create("U:00000000000000000\u{e9}");
+    assert!(error.contains("parsing max val"), "{error}");
+    assert!(!path.exists());
+}
