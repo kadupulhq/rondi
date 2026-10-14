@@ -322,3 +322,91 @@ fn vdef_percentiles_with_infinities_match_pinned_rrdtool_qsort() {
         );
     }
 }
+
+/// An all-unknown VDEF prints DNAN through host printf, which on glibc shows
+/// the target's NaN sign: "-nan" on x86-64, "nan" on AArch64.
+#[cfg(unix)]
+#[test]
+fn all_unknown_vdef_prints_match_pinned_rrdtool_nan_sign() {
+    let version = Command::new("rrdtool").arg("--version").output();
+    if !version.is_ok_and(|output| {
+        output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1.11.0")
+    }) {
+        oracle_skip!("skipping unknown VDEF differential: pinned RRDtool 1.11.0 is not installed");
+        return;
+    }
+
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("vdef-unknown.rrd");
+    let created = Command::new("rrdtool")
+        .args([
+            "create",
+            database.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:x:GAUGE:30:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let mut args = vec![
+        "graphv".to_owned(),
+        temp.path().join("unknown.png").display().to_string(),
+        "--start".to_owned(),
+        "1000000010".to_owned(),
+        "--end".to_owned(),
+        "1000000050".to_owned(),
+        format!("DEF:x={}:x:AVERAGE", database.display()),
+    ];
+    let functions = [
+        "MAXIMUM",
+        "MINIMUM",
+        "AVERAGE",
+        "STDEV",
+        "TOTAL",
+        "FIRST",
+        "LAST",
+        "50,PERCENTNAN",
+        "LSLSLOPE",
+        "LSLINT",
+        "LSLCORREL",
+    ];
+    for (index, function) in functions.iter().enumerate() {
+        args.push(format!("VDEF:v{index}=x,{function}"));
+        args.push(format!("PRINT:v{index}:%lf"));
+    }
+    let upstream = Command::new("rrdtool").args(&args).output().unwrap();
+    let rondi = Command::new(&alias).args(&args).output().unwrap();
+    assert!(
+        upstream.status.success(),
+        "{}",
+        String::from_utf8_lossy(&upstream.stderr)
+    );
+    assert!(
+        rondi.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rondi.stderr)
+    );
+    let print_lines = |output: &[u8]| {
+        String::from_utf8_lossy(output)
+            .lines()
+            .filter(|line| line.starts_with("print["))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let expected = print_lines(&upstream.stdout);
+    assert_eq!(expected.len(), functions.len(), "{expected:?}");
+    assert_eq!(print_lines(&rondi.stdout), expected);
+    assert_eq!(rondi.stderr, upstream.stderr);
+}

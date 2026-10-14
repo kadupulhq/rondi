@@ -293,12 +293,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_unknown_aggregates_preserve_rrdtool_nan_bits() {
-        let expected = if cfg!(target_arch = "x86_64") {
-            0xfff8_0000_0000_0000
-        } else {
-            f64::NAN.to_bits()
-        };
+    fn generated_unknown_aggregates_use_rrdtool_dnan_bits() {
+        // vdef_calc stores DNAN, the runtime 0.0/0.0 from rrd_nan_inf.c. That
+        // is the target's default NaN: sign set on x86-64 SSE, clear on AArch64.
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(rrd_nan().to_bits(), 0xfff8_0000_0000_0000);
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(rrd_nan().to_bits(), 0x7ff8_0000_0000_0000);
+        let expected = rrd_nan().to_bits();
+        // Unknown inputs carry the other sign and a payload, so passing an
+        // input NaN through instead of generating DNAN fails on every target.
+        let foreign = f64::from_bits((expected ^ (1 << 63)) | 1);
+        assert!(foreign.is_nan());
         for function in [
             VdefFunction::Maximum,
             VdefFunction::Minimum,
@@ -313,7 +319,7 @@ mod tests {
             VdefFunction::LslCorrelation,
         ] {
             let percentile = (function == VdefFunction::PercentNan).then_some(50.0);
-            for values in [&[][..], &[f64::NAN, f64::NAN][..]] {
+            for values in [&[][..], &[foreign, foreign][..]] {
                 let result = evaluate_vdef(function, percentile, values, 100, 10).unwrap();
                 assert_eq!(result.value.to_bits(), expected, "{function:?}");
                 assert_eq!(result.timestamp, None);
