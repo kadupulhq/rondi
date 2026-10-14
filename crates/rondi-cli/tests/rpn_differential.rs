@@ -206,6 +206,27 @@ fn rpn_percent_rank_and_count_edges_match_rrdtool() {
     }
 }
 
+// rrd_rpncalc.c OP_MEDIAN and OP_PERCENT index the stack with a negative
+// count, which is undefined behavior in the pinned build (it crashes), so
+// only Rondi's result is checked: a stack error instead of a multi-gigabyte
+// stack allocation.
+#[test]
+fn rpn_negative_element_count_is_a_stack_error() {
+    let Some(fixture) = fixture() else { return };
+    for cdef in ["x,-2000000000,MEDIAN", "x,50,-2000000000,PERCENT"] {
+        let output = Command::new(&fixture.alias)
+            .args(fixture.xport_args(cdef))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{cdef}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "ERROR: RPN stack underflow\n",
+            "{cdef}"
+        );
+    }
+}
+
 // RRDtool's AVG and PREDICT sums start at +0.0, so averaging negative zeros
 // yields +0.0; dividing by it shows the sign without printing a zero.
 #[test]
