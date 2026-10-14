@@ -35,7 +35,7 @@ Recorded 2026-10-14 on macOS 27.0.1, Mac15,10 / M3 Max (arm64, 14 logical CPUs),
 | Arithmetic graph, 7,200 rows | 968.22 µs | 959.02–978.16 µs |
 | PREV graph, 7,200 rows | 839.33 µs | 833.67–844.84 µs |
 
-This is one cached-file, single-request run on a shared development machine. It excludes PNG rendering, CLI startup, daemon traffic, and concurrent graphs, and is not a capacity claim. The `rrd_workload` benchmark separately times single and batched updates and 1,440-row fetches.
+This is one cached-file, single-request run on a shared development machine. It excludes PNG rendering, CLI startup, daemon traffic, and concurrent graphs, and is not a capacity claim. The `rrd_workload` benchmark separately times single and batched updates and 1,440-row fetches. On the same host, `RONDI_REQUIRE_ORACLE=1 cargo test --workspace --no-fail-fast` at commit `7fb2ea3` passed all 496 tests against Homebrew RRDtool 1.11.0.
 
 ### Historical: pre-merge engine measurements
 
@@ -43,6 +43,6 @@ The measurements below were recorded on the compatibility branch before `main` w
 
 The native `.rrd` fetch loop then sought and read each row separately. A five-second macOS `sample` profile attributed 3,445 of 3,577 samples (96%) to `read` and `lseek`. A 64 KiB read buffer that sought initially and at the ring boundary changed a four-source, 7,200-row fetch of 7,201 rows from 220.9 to 5,058.9 fetches/s over 200 fetches (905,386 µs to 39,534 µs), recorded 2026-10-13 on the macOS host above.
 
-Graph calculation through the shared-grid engine split each CDEF into tokens and allocated a new stack for every row. Splitting once per CDEF and reusing the stack changed the median of three 1,000-calculation runs from 2,866,374 µs to 1,852,547 µs. The disposable Linux ARM64 `rondi-ci-core` container also completed that benchmark with Rust 1.98.0 and RRDtool 1.11.0: 300 RRD updates in 191,000 µs, 200 fetches in 45,034 µs, and 200 graph calculations in 338,417 µs. The complete 194-test workspace suite passed on both hosts after the optimizations.
+Graph calculation through the shared-grid engine split each CDEF into tokens and allocated a new stack for every row. Splitting once per CDEF and reusing the stack changed the median of three 1,000-calculation runs from 2,866,374 µs to 1,852,547 µs. The disposable Linux ARM64 `rondi-ci-core` container also completed that benchmark with Rust 1.98.0 and RRDtool 1.11.0: 300 RRD updates in 191,000 µs, 200 fetches in 45,034 µs, and 200 graph calculations in 338,417 µs.
 
 The first Criterion baseline on that engine, recorded 2026-10-13 on the macOS host above, estimated 18.374 µs and 193.47 µs for 120-row and 7,200-row fetches, 97.435 µs and 1.7361 ms for the arithmetic graph, and 89.477 µs and 1.2985 ms for the PREV graph.
