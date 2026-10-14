@@ -1686,8 +1686,16 @@ pub async fn run_rrdcached(mut args: RrdcachedConfig) -> Result<(), Box<dyn std:
         })
         .collect::<Result<Vec<_>, _>>()?;
     rrdcached_listen::unblock_shutdown_signals();
+    // Without -o, do_log writes to stderr in the foreground, and only at
+    // upstream's default LOG_ERR level, so stdout stays empty and stderr
+    // carries no lifecycle chatter.
+    let default_level = if args.log_file.is_some() {
+        "info"
+    } else {
+        "error"
+    };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
     if let Some(file) = args.log_file.take() {
         let _ = tracing_subscriber::fmt()
             .json()
@@ -1698,6 +1706,7 @@ pub async fn run_rrdcached(mut args: RrdcachedConfig) -> Result<(), Box<dyn std:
         let _ = tracing_subscriber::fmt()
             .json()
             .with_env_filter(filter)
+            .with_writer(std::io::stderr)
             .try_init();
     }
     // Without -b upstream has no base directory, so nothing is locked or

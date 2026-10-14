@@ -390,3 +390,56 @@ fn rrdcached_pid_directory_failure_matches_upstream() {
         assert!(!work.join("s.sock").exists());
     }
 }
+
+#[test]
+fn rrdcached_foreground_writes_nothing_to_stdout_like_upstream() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping rrdcached -g stdout differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let mut outputs = Vec::new();
+    for rondi in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let work = std::fs::canonicalize(dir.path()).unwrap();
+        let base = work.join("b");
+        std::fs::create_dir(&base).unwrap();
+        create_rrd(&base.join("a.rrd"));
+        let socket = work.join("s.sock");
+        let mut command = Command::new(rrdcached_program(&work, rondi));
+        command
+            .arg("-g")
+            .arg("-p")
+            .arg(work.join("pid"))
+            .arg("-b")
+            .arg(&base)
+            .arg("-l")
+            .arg(format!("unix:{}", socket.display()))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        run_unprivileged(&mut command, &work);
+        let mut child = command.spawn().unwrap();
+        wait_for_socket(&mut child, &socket);
+        let replies = exchange(
+            &socket,
+            "PING\nUPDATE a.rrd 1000000600:2\nFLUSH a.rrd\nSTATS\nQUIT\n",
+        );
+        assert!(replies.starts_with("0 PONG\n"), "{replies}");
+        assert_eq!(
+            unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) },
+            0
+        );
+        wait_for_exit(&mut child);
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .unwrap()
+            .read_to_string(&mut stdout)
+            .unwrap();
+        outputs.push(stdout);
+    }
+    assert_eq!(outputs[1], outputs[0]);
+    assert_eq!(outputs[0], "");
+}

@@ -30,3 +30,4 @@ follows [Semantic Versioning](VERSIONING.md).
 - Validate rrdcached `-b` during option parsing with upstream messages and exit statuses, and report an unusable base directory without Rust debug formatting.
 - Repeat an unknown rrdcached `-P` permission name as given instead of uppercased.
 - Report an uncreatable rrdcached pid file directory twice and end with `FATAL: Fail to create/open PID file`, as check_pidfile does.
+- Without `-o`, write only error-level rrdcached log lines, to stderr instead of stdout, matching upstream's default foreground logging.
