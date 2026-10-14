@@ -442,3 +442,21 @@ fn empty_file_name_names_the_base_directory() {
     );
     assert!(work.base().join("a.rrd").is_file());
 }
+
+#[test]
+fn nul_separates_fields_like_a_space() {
+    let Some(work) = Work::new() else { return };
+    let sessions: [&[u8]; 8] = [
+        b"PING\0junk\n",
+        b"PING\0\n",
+        b"HELP\0PING\n",
+        b"HELP\0\0PING\n",
+        b"\0PING\n",
+        b"PI\\\0NG\n",
+        b"LAST\0a.rrd\n",
+        b"BATCH\nPING\0x\nNOPE\0x\n.\n",
+    ];
+    let observed = work.differential(&["-B"], &sessions);
+    assert!(observed[0][0].ends_with("]\n0 PONG\n"));
+    assert_same(&observed);
+}
