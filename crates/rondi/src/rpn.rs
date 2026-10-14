@@ -220,18 +220,24 @@ pub(crate) fn rpn_parse(
         }) {
             node.op = *op;
             expr = &expr[name.len()..];
-        } else if expr.starts_with(b"PREV(") && vname_len(&expr[5..]) > 0 && {
+        } else if expr.starts_with(b"PREV(") && vname_len(&expr[5..]) > 0 {
             // sscanf("PREV(%255[...])") succeeds on the name alone; the
-            // closing parenthesis is only implied by the length check.
-            let length = 4 + vname_len(&expr[5..]) + 2;
-            matches!(at(expr, length), b',' | 0)
-        } {
+            // closing parenthesis is only implied by the length check. When
+            // that check fails match_op_param still owns the token but leaves
+            // expr in place, so the separator test below reports garbage.
             let name_len = vname_len(&expr[5..]);
+            let length = 4 + name_len + 2;
+            if !matches!(at(expr, length), b',' | 0) {
+                return Err(error(format!(
+                    "garbage in RPN: '{}'",
+                    String::from_utf8_lossy(expr)
+                )));
+            }
             let name = String::from_utf8_lossy(&expr[5..5 + name_len]).into_owned();
             node.op = Op::PrevOther;
             node.ptr =
                 lookup(&name).ok_or_else(|| error(format!("variable '{name}' not found")))?;
-            expr = &expr[(4 + name_len + 2).min(expr.len())..];
+            expr = &expr[length.min(expr.len())..];
         } else if let Some(ptr) = Some(vname_len(expr))
             .filter(|len| *len > 0 && matches!(at(expr, *len), b',' | 0))
             .and_then(|len| lookup(&String::from_utf8_lossy(&expr[..len])).map(|ptr| (ptr, len)))
