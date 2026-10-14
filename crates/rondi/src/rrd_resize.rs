@@ -173,9 +173,8 @@ pub fn resize_rrd_file(
             rrd_strerror(&error)
         ))
     };
-    // O_CREAT|O_TRUNC as rrd_open.c:284-293, truncating only once the
-    // path is known to be a regular file.
-    let output_file = open_output_file(output_path, false).map_err(create_error)?;
+    // Deliberately require a new destination instead of upstream O_TRUNC.
+    let output_file = open_output_file(output_path, true).map_err(create_error)?;
     let mut output_file = RrdFileLock::exclusive(output_file)?;
     output_file.set_len(0).map_err(create_error)?;
     output_file.set_len(newfile_size).map_err(create_error)?;

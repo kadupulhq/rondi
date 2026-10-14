@@ -113,11 +113,11 @@ impl Fixture {
         args
     }
 
-    /// `graphv /dev/null` over a 1500-second window with x and z defined.
+    /// `graphv graph-output.png` over a 1500-second window with x and z defined.
     fn graphv(&self, elements: &[&str]) -> Vec<String> {
         let mut args = owned(&[
             "graphv",
-            "/dev/null",
+            "graph-output.png",
             "--start",
             "1000000000",
             "--end",
@@ -687,9 +687,10 @@ fn infinities_survive_into_exports() {
 fn start_daemon(dir: &Path, socket: &Path) -> Child {
     let alias = dir.join("rrdcached");
     symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
-    let child = Command::new(&alias)
+    let mut child = Command::new(&alias)
         .args([
             "-g",
+            "-B",
             "-b",
             dir.to_str().unwrap(),
             "-l",
@@ -701,11 +702,15 @@ fn start_daemon(dir: &Path, socket: &Path) -> Child {
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .spawn()
         .unwrap();
     let deadline = std::time::Instant::now() + common::io_timeout();
     while std::os::unix::net::UnixStream::connect(socket).is_err() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "Rondi daemon exited before binding"
+        );
         assert!(
             std::time::Instant::now() < deadline,
             "Rondi rrdcached did not open its socket"
