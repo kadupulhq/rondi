@@ -90,13 +90,22 @@ fn invoked_name() -> String {
         .unwrap_or_default()
 }
 
+/// argv after `skip` entries, with invalid UTF-8 replaced by U+FFFD like the
+/// rrdtool path does, so a path option cannot panic `std::env::args`.
+fn lossy_args(skip: usize) -> Vec<String> {
+    std::env::args_os()
+        .skip(skip)
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--rrdproxy-launcher"))
         && invoked_name() == "rrdcached"
     {
         // rrdcached binds its sockets and drops privileges before any runtime
         // thread exists, so it starts its own runtime afterwards.
-        return rrdcached_mode(&std::env::args().skip(1).collect::<Vec<_>>());
+        return rrdcached_mode(&lossy_args(1));
     }
     let native = !matches!(
         invoked_name().as_str(),
@@ -138,7 +147,7 @@ async fn async_main(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let invoked_as = invoked_name();
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--rrdproxy-launcher")) {
-        return rrdproxy_mode(&std::env::args().skip(2).collect::<Vec<_>>());
+        return rrdproxy_mode(&lossy_args(2));
     }
     if invoked_as == "rrdtool" {
         initialize_rrdtool_locale();
@@ -163,7 +172,7 @@ async fn async_main(
         || invoked_as == "rrdtool-proxy.php"
         || invoked_as == "rrdproxy"
     {
-        return rrdproxy_mode(&std::env::args().skip(1).collect::<Vec<_>>());
+        return rrdproxy_mode(&lossy_args(1));
     }
     if let Some(prepared) = prepared {
         return rondi_server::run(prepared).await;
@@ -1678,9 +1687,11 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err("the first entry to fetch should be after 1980".into());
     }
     if align_start {
-        let delta = start.rem_euclid(i64::try_from(resolution)?);
-        start = start.checked_sub(delta).ok_or("start time overflows")?;
-        end = end.checked_sub(delta).ok_or("end time overflows")?;
+        // rrd_fetch.c takes start % step in unsigned long, so a step above
+        // i64::MAX is valid and leaves delta equal to start.
+        let delta = (start as u64) % resolution;
+        start = start.wrapping_sub(delta as i64);
+        end = end.wrapping_sub(delta as i64);
     }
     if end < start {
         return Err(format!("start ({start}) should be less than end ({end})").into());
@@ -1921,6 +1932,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     let mut info = GraphInfo::default();
     let to_memory = filename == "-";
     let mut image = None::<Vec<u8>>;
+    let mut save_error = None::<String>;
     if format != "PNG" {
         let xport_format = match format.as_str() {
             "XML" => XportFormat::Xml { flags: 2 },
@@ -2071,7 +2083,13 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             )?;
             let (width, height) = png_dimensions(&png)?;
             if !to_memory {
-                write_output_file(filename, &png)?;
+                // rrd_graph_v keeps building the result after a failed save
+                // and rrdtool reports the error once it has printed it.
+                match write_output_file(filename, &png) {
+                    Ok(()) => {}
+                    Err(OutputError::Refused(message)) => return Err(message.into()),
+                    Err(_) => save_error = Some(format!("Could not save png to '{filename}'")),
+                }
             }
             if let Some(format) = imginfo.as_deref().filter(|format| !format.is_empty()) {
                 let basename = if to_memory {
@@ -2106,7 +2124,10 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             .any(|argument| argument == "--imginfo" || argument == "-f");
         info.print_graph(&mut stdout, to_memory, imginfo_flag)?;
     }
-    Ok(())
+    match save_error {
+        Some(message) => Err(message.into()),
+        None => Ok(()),
+    }
 }
 
 enum XportFormat {
@@ -2264,12 +2285,44 @@ fn flush_and_prepare_data(
     Ok(())
 }
 
+/// Why an output file could not be written. `Refused` is Rondi's own
+/// safety check; the others carry the errno RRDtool would report through
+/// `rrd_strerror`.
+#[derive(Debug)]
+enum OutputError {
+    Refused(String),
+    Open(libc::c_int),
+    Write(libc::c_int),
+}
+
+impl std::fmt::Display for OutputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(message) => f.write_str(message),
+            Self::Open(errno) | Self::Write(errno) => f.write_str(&rrd_strerror(*errno)),
+        }
+    }
+}
+
+impl std::error::Error for OutputError {}
+
+fn errno_of(error: &std::io::Error) -> libc::c_int {
+    error.raw_os_error().unwrap_or(libc::EIO)
+}
+
 /// Write only an owned, singly linked regular file.
-fn write_output_file(path: &str, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = rondi::open_output_file(std::path::Path::new(path), false)?;
-    file.set_len(0)?;
-    file.write_all(bytes)?;
-    Ok(())
+fn write_output_file(path: &str, bytes: &[u8]) -> Result<(), OutputError> {
+    // Errors without an errno are the refusals open_output_file raises.
+    let mut file = rondi::open_output_file(std::path::Path::new(path), false).map_err(|error| {
+        error.raw_os_error().map_or_else(
+            || OutputError::Refused(error.to_string()),
+            OutputError::Open,
+        )
+    })?;
+    file.set_len(0)
+        .map_err(|error| OutputError::Write(errno_of(&error)))?;
+    file.write_all(bytes)
+        .map_err(|error| OutputError::Write(errno_of(&error)))
 }
 
 fn rrdtool_xport(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -5009,7 +5062,16 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     ensure_rrd_file_exists(std::path::Path::new(&positional[0]))?;
     let xml = dump_rrd_file_with_header(&positional[0], header)?;
     if let Some(output) = positional.get(1) {
-        write_output_file(output, xml.as_bytes())?;
+        match write_output_file(output, xml.as_bytes()) {
+            Ok(()) => {}
+            // rrd_dump_opt_r returns -1 from a failed fopen without setting
+            // an error, so rrdtool reports nothing and exits 0.
+            Err(OutputError::Open(_)) => {}
+            Err(OutputError::Write(errno)) => {
+                return Err(format!("error writing output file: {}", rrd_strerror(errno)).into());
+            }
+            Err(error) => return Err(error.into()),
+        }
     } else {
         print!("{xml}");
     }

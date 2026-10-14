@@ -767,3 +767,21 @@ fn unprivileged_rrdcached_requires_sticky_shared_socket_directory() {
         }
     }
 }
+
+#[test]
+fn rrdcached_accepts_non_utf8_argv() {
+    use std::os::unix::ffi::OsStrExt;
+    let dir = tempfile::tempdir().unwrap();
+    let alias = dir.path().join("rrdcached");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    // RRDtool passes argv bytes through, so a path option must not panic
+    // the process on bytes that Rust strings cannot hold.
+    let output = Command::new(&alias)
+        .arg("-b")
+        .arg(std::ffi::OsStr::from_bytes(b"/nonexistent/\xff"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("panicked"), "{output:?}");
+    assert_ne!(output.status.code(), Some(101), "{output:?}");
+}
