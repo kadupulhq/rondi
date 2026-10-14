@@ -346,3 +346,19 @@ fn help_reads_only_its_first_field() {
     );
     assert_same(&observed);
 }
+
+#[test]
+fn suspend_and_resume_usage_close_the_connection() {
+    let Some(work) = Work::new() else { return };
+    let sessions: [&[u8]; 3] = [
+        b"SUSPEND\nPING\n",
+        b"RESUME\nPING\n",
+        b"BATCH\nSUSPEND\nPING\n.\nPING\n",
+    ];
+    let observed = work.differential(&[], &sessions);
+    assert_eq!(
+        observed[0][0],
+        "[SUSPEND\nPING\n]\n-1 Usage: SUSPEND <filename>\n"
+    );
+    assert_same(&observed);
+}

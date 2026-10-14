@@ -2471,6 +2471,9 @@ fn handle_rrdcached_line(
                 }
             }
         }
+        // buffer_get_cache_item's syntax error still leaves no cache item,
+        // so the handler returns -1 and the connection closes.
+        "SUSPEND" | "RESUME" => return RrdcachedReply::TextThenClose(usage()),
         "SUSPENDALL" if fields.is_empty() => {
             let count = suspend_all_rrdcached_paths(queue);
             format!("0 {count} rrds suspend\n")
