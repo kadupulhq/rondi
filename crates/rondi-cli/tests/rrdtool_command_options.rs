@@ -451,6 +451,51 @@ fn tune_options() {
     ]);
 }
 
+// rrd_tune.c:113 and 239 parse argv twice. The first pass permutes the file
+// name behind a trailing option that lacks a value, so the second pass
+// reads the file name as that value; a long option there also pushes the
+// file name past argc. When the file name is consumed, rrd_tune.c:427
+// prints the data sources.
+#[test]
+fn tune_trailing_option_takes_the_permuted_file_name() {
+    // -s and -S are left out: rrd_tune.c:402 also raises the file to
+    // version 0004 before they fail, which Rondi does not do yet.
+    let mut cases = [
+        "h", "i", "a", "d", "r", "p", "n", "w", "f", "x", "y", "z", "v", "b", "t", "D",
+    ]
+    .map(|short| vec!["tune".to_owned(), "a.rrd".to_owned(), format!("-{short}")])
+    .to_vec();
+    for long in [
+        "heartbeat",
+        "minimum",
+        "step",
+        "daemon",
+        "alpha",
+        "window-length",
+    ] {
+        cases.push(vec!["tune".into(), "a.rrd".into(), format!("--{long}")]);
+    }
+    for case in [
+        &["tune", "a.rrd", "sub/b.rrd", "-h"][..],
+        &["tune", "a.rrd", "sub/b.rrd", "--heartbeat"],
+        &["tune", "a.rrd", "sub/b.rrd", "a.xml", "--heartbeat"],
+        &["tune", "a.rrd", "-h", "x:700", "--heartbeat"],
+        &["tune", "a.rrd", "-h", "x:700", "-i"],
+        &["tune", "a.rrd", "-i", "x:5", "-t"],
+        &["tune", "a.rrd", "-hx:700", "-a", "x:9", "-D"],
+        &["tune", "--minimum=x:3", "a.rrd", "-t"],
+        &["tune", "-t", "a.rrd"],
+        &["tune", "a.rrd", "-Z", "-h"],
+    ] {
+        cases.push(case.iter().map(|word| word.to_string()).collect());
+    }
+    let cases = cases
+        .iter()
+        .map(|case| case.iter().map(String::as_str).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    each(&cases.iter().map(Vec::as_slice).collect::<Vec<_>>());
+}
+
 // rrd_list.c:256 and rrd_flushcached.c:27.
 #[test]
 fn list_and_flushcached_options() {

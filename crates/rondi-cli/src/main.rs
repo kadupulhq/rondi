@@ -5366,7 +5366,9 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             .position(|source| source == name)
             .ok_or_else(|| format!("unknown data source name '{name}'"))
     };
-    let mut options = OptParse::new(args.to_vec());
+    // rrd_tune_r re-parses the argv the first pass permuted, so a trailing
+    // option without a value takes the file name as its value there.
+    let mut options = OptParse::new(options.permuted_argv().to_vec());
     // rrd_tune.c:423: --step feeds handle_modify's stretch.
     let mut newstep: libc::c_int = -1;
     // rrd_tune_r edits the header through the file mapping, so settings
@@ -5506,12 +5508,32 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     applied?;
 
+    // rrd_tune.c:427. Only reached when an option consumed the file name.
+    if options.positionals().is_empty() {
+        for source in rondi::inspect_rrd_file(&filename)?.data_sources {
+            if source.kind == "COMPUTE" {
+                return Err(
+                    "rrdtool tune output for COMPUTE data sources is not implemented".into(),
+                );
+            }
+            let bound = |value: Option<f64>| c_printf_double("%1.4f", value.unwrap_or(f64::NAN));
+            println!(
+                "DS[{}] typ: {}\thbt: {}\tmin: {}\tmax: {}",
+                source.name,
+                source.kind,
+                source.heartbeat,
+                bound(source.minimum),
+                bound(source.maximum)
+            );
+        }
+    }
+
     // handle_modify (rrd_modify.c:1299) takes the words after the file name
     // and parses all of them before changing anything.
     let mut remove = Vec::new();
     let mut add = Vec::new();
     let mut rra_ops = Vec::new();
-    for argument in &options.positionals()[1..] {
+    for argument in options.positionals().get(1..).unwrap_or_default() {
         if let Some(name) = argument
             .strip_prefix("DEL:")
             .filter(|name| !name.is_empty())
