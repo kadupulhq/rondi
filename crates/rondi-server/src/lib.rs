@@ -3600,7 +3600,9 @@ fn rrdcached_create(
         return Err(format!("{}: Permission denied", output.display()));
     }
     let mut step = 300_u64;
-    let mut start = 1_000_000_000_i64;
+    // handle_request_create passes last_up = -1 and rrd_create_r2 then starts
+    // ten seconds before now.
+    let mut start = -1_i64;
     let mut no_overwrite = no_overwrite_default;
     let mut definitions = Vec::new();
     let mut index = 1;
@@ -3643,6 +3645,11 @@ fn rrdcached_create(
     if sources.len() + archives.len() != definitions.len() {
         return Err("CREATE only supports DS and RRA definitions".to_owned());
     }
+    let start = if start > 0 {
+        start
+    } else {
+        wall_time_seconds() - 10
+    };
     rondi::create_rrd_at(
         &directory,
         filename,
