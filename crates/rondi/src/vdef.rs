@@ -5,6 +5,8 @@
 
 use thiserror::Error;
 
+use crate::rrd_binary::rrd_mul_add;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VdefFunction {
     Maximum,
@@ -161,16 +163,21 @@ pub fn evaluate_vdef(
                     count += 1.0;
                     sum_x += x;
                     sum_y += value;
-                    sum_xy += x * value;
-                    sum_xx += x * x;
-                    sum_yy += value * value;
+                    sum_xy = rrd_mul_add(x, value, sum_xy);
+                    // C squares the unsigned step index before converting it.
+                    sum_xx += index.wrapping_mul(index) as f64;
+                    sum_yy = rrd_mul_add(value, value, sum_yy);
                 }
             }
             if count == 0.0 {
                 no_time(f64::NAN)
             } else {
-                let slope = (sum_x * sum_y - count * sum_xy) / (sum_x * sum_x - count * sum_xx);
-                let intercept = (sum_y - slope * sum_x) / count;
+                // The pinned Clang build rounds the count products and fuses
+                // the others; the correlation below stays unfused because
+                // each product feeds a division first.
+                let slope = rrd_mul_add(sum_x, sum_y, -(count * sum_xy))
+                    / rrd_mul_add(sum_x, sum_x, -(count * sum_xx));
+                let intercept = rrd_mul_add(-slope, sum_x, sum_y) / count;
                 let correlation = (sum_xy - sum_x * sum_y / count)
                     / ((sum_xx - sum_x * sum_x / count) * (sum_yy - sum_y * sum_y / count)).sqrt();
                 no_time(match function {
