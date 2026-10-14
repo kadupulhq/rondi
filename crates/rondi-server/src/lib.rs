@@ -3043,33 +3043,74 @@ fn tune_rrdcached_file(path: &Path, arguments: &[&str]) -> Result<(), String> {
     rondi::tune_rrd_data_sources_file(file, path, &changes).map_err(|error| error.to_string())
 }
 
+/// rrd_list's test for an RRD name: the first `.rrd` ends the string.
+fn rrdcached_list_names_rrd(name: &str) -> bool {
+    name.find(".rrd")
+        .is_some_and(|index| index + 4 == name.len())
+}
+
+/// handle_request_list over rrd_list_r: names are relative to the listed
+/// path, and a path naming an RRD lists that file alone.
 fn rrdcached_list(base: &RrdcachedBase, fields: &[&str]) -> Result<String, String> {
-    let (recursive, requested) = match fields {
-        [path] => (false, *path),
-        ["RECURSIVE", path] => (true, *path),
-        _ => return Err("Usage: LIST [RECURSIVE] /[<path>]".to_owned()),
-    };
-    if !requested.starts_with('/') {
-        return Err("Usage: LIST [RECURSIVE] /[<path>]".to_owned());
-    }
-    if base.given.is_none() {
+    const USAGE: &str = "Usage: LIST [RECURSIVE] /[<path>]";
+    let Some(given) = &base.given else {
         return Err("No base directory defined".to_owned());
+    };
+    let mut fields = fields.iter();
+    let mut recursive = false;
+    let mut requested = None;
+    if let Some(first) = fields.next() {
+        if first.starts_with('/') {
+            requested = Some(*first);
+        } else if *first == "RECURSIVE" {
+            recursive = true;
+        } else {
+            return Err(USAGE.to_owned());
+        }
     }
-    let root = base.root.clone();
-    let relative = requested.trim_start_matches('/');
-    let directory = root.join(relative);
-    let canonical = std::fs::canonicalize(&directory).map_err(|error| {
+    let requested = match requested {
+        Some(requested) => requested,
+        None => fields.next().ok_or(USAGE)?,
+    };
+    let fullpath = format!(
+        "{}{}{requested}",
+        given.display(),
+        if requested.starts_with('/') { "" } else { "/" }
+    );
+    let failed = |error: std::io::Error| {
         format!(
-            "List {}: {}",
-            directory.display(),
+            "List {fullpath}: {}",
             rrdcached_strerror(error.raw_os_error().unwrap_or(0))
         )
-    })?;
-    if !canonical.starts_with(&root) {
-        return Err(format!("Cannot read: {}", directory.display()));
+    };
+    let root = &base.root;
+    let path = root.join(requested.trim_start_matches('/'));
+    if rrdcached_list_names_rrd(&fullpath) {
+        let metadata = std::fs::metadata(&path).map_err(failed)?;
+        if !metadata.is_file() {
+            return Err(failed(std::io::Error::from_raw_os_error(libc::ENXIO)));
+        }
+        let name = fullpath.rsplit('/').next().unwrap_or_default();
+        // As for directory entries, a symlink or a file outside -b is
+        // skipped rather than reported.
+        let inside = std::fs::symlink_metadata(&path)
+            .is_ok_and(|metadata| !metadata.file_type().is_symlink())
+            && std::fs::canonicalize(&path).is_ok_and(|canonical| canonical.starts_with(root));
+        return Ok(if inside {
+            format!("1 RRDs\n{name}\n")
+        } else {
+            "0 RRDs\n".to_owned()
+        });
+    }
+    let canonical = std::fs::canonicalize(&path).map_err(failed)?;
+    if !canonical.starts_with(root) {
+        return Err(format!("Cannot read: {fullpath}"));
+    }
+    if !canonical.is_dir() {
+        return Err(failed(std::io::Error::from_raw_os_error(libc::ENOTDIR)));
     }
     let mut entries = Vec::new();
-    collect_rrdcached_list(&root, &canonical, recursive, &mut entries)?;
+    collect_rrdcached_list(&canonical, &canonical, recursive, &mut entries)?;
     let body = entries
         .iter()
         .map(|path| format!("{path}\n"))
@@ -3077,8 +3118,11 @@ fn rrdcached_list(base: &RrdcachedBase, fields: &[&str]) -> Result<String, Strin
     Ok(format!("{} RRDs\n{body}", entries.len()))
 }
 
+/// rrd_list_rec: a regular file is listed only with an RRD name, and any
+/// other entry, including a directory when not recursing, is listed by name.
+/// Rondi skips symlinks rather than following them.
 fn collect_rrdcached_list(
-    root: &Path,
+    listed: &Path,
     directory: &Path,
     recursive: bool,
     entries: &mut Vec<String>,
@@ -3090,22 +3134,17 @@ fn collect_rrdcached_list(
         if metadata.file_type().is_symlink() {
             continue;
         }
-        if metadata.is_dir() {
-            if recursive {
-                collect_rrdcached_list(root, &path, recursive, entries)?;
-            } else {
-                let relative = path.strip_prefix(root).map_err(|error| error.to_string())?;
-                entries.push(relative.to_string_lossy().replace('\\', "/"));
-            }
-        } else if metadata.is_file() && path.extension().is_some_and(|ext| ext == "rrd") {
-            let canonical = std::fs::canonicalize(&path).map_err(|error| error.to_string())?;
-            if canonical.starts_with(root) {
-                let relative = canonical
-                    .strip_prefix(root)
-                    .map_err(|error| error.to_string())?;
-                entries.push(relative.to_string_lossy().replace('\\', "/"));
-            }
+        if metadata.is_dir() && recursive {
+            collect_rrdcached_list(listed, &path, recursive, entries)?;
+            continue;
         }
+        if metadata.is_file() && !rrdcached_list_names_rrd(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(listed)
+            .map_err(|error| error.to_string())?;
+        entries.push(relative.to_string_lossy().into_owned());
     }
     Ok(())
 }

@@ -52,13 +52,16 @@ impl Work {
         self.root.join("b")
     }
 
-    /// `b/a.rrd`, `b/sub/d.rrd` and a fresh socket path.
+    /// `b/a.rrd`, `b/sub/d.rrd`, `b/sub/deep/f.rrd`, a directory named
+    /// `b/dir.rrd`, and a fresh socket path.
     fn reset(&self) {
         let base = self.base();
         let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(base.join("sub")).unwrap();
-        std::fs::copy(self.root.join("baseline.rrd"), base.join("a.rrd")).unwrap();
-        std::fs::copy(self.root.join("baseline.rrd"), base.join("sub/d.rrd")).unwrap();
+        std::fs::create_dir_all(base.join("sub/deep")).unwrap();
+        std::fs::create_dir_all(base.join("dir.rrd")).unwrap();
+        for name in ["a.rrd", "sub/d.rrd", "sub/deep/f.rrd"] {
+            std::fs::copy(self.root.join("baseline.rrd"), base.join(name)).unwrap();
+        }
         let _ = std::fs::remove_file(self.root.join("s.sock"));
     }
 
@@ -361,4 +364,35 @@ fn suspend_and_resume_usage_close_the_connection() {
         "[SUSPEND\nPING\n]\n-1 Usage: SUSPEND <filename>\n"
     );
     assert_same(&observed);
+}
+
+#[test]
+fn list_names_entries_relative_to_the_listed_path() {
+    let Some(work) = Work::new() else { return };
+    let sessions: [&[u8]; 14] = [
+        b"LIST /sub\n",
+        b"LIST /sub/\n",
+        b"LIST RECURSIVE /sub\n",
+        b"LIST RECURSIVE sub\n",
+        b"LIST /sub/deep\n",
+        b"LIST /a.rrd\n",
+        b"LIST /sub/d.rrd\n",
+        b"LIST RECURSIVE /sub/d.rrd\n",
+        b"LIST /missing.rrd\n",
+        b"LIST /dir.rrd\n",
+        b"LIST /a.rrd/x\n",
+        b"LIST /sub extra\n",
+        b"LIST RECURSIVE\n",
+        b"LIST sub\n",
+    ];
+    for options in [&["-B"][..], &[][..]] {
+        let observed = work.differential(options, &sessions);
+        let sub = &observed[0][0];
+        assert!(
+            sub.contains("]\n2 RRDs\n") && sub.contains("\nd.rrd\n"),
+            "{sub:?}"
+        );
+        assert!(observed[0][5].ends_with("]\n1 RRDs\na.rrd\n"));
+        assert_same(&observed);
+    }
 }
