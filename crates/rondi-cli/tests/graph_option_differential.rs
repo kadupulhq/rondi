@@ -472,3 +472,33 @@ fn infinite_limits_abandon_the_graph_silently() {
     .collect();
     f.assert_all_same_output(&cases);
 }
+
+// --units-length is an atoi value; a negative one shrinks the y-label space
+// below zero. graph_left and image_width are unsigned longs in graphv while
+// the graph WxH line prints them signed, and a negative image is a cairo
+// surface error.
+#[test]
+fn negative_units_length_moves_the_graph_origin() {
+    let Some(f) = fixture() else { return };
+    let line = "LINE1:x#ff0000:legend";
+    let cases: Vec<Vec<String>> = [
+        vec!["--units-length", "-3", line],
+        vec!["--units-length", "-60", line],
+        vec!["--units-length", "-1000", line],
+        vec!["--units-length", "-1000", "--imginfo", "%s %lu %lu", line],
+        vec!["--units-length", "-3", "--right-axis", "1:0", line],
+        vec!["--units-length", "-3", "--legend-position", "west", line],
+        vec!["--units-length", "-3", "--legend-position", "east", line],
+        vec!["--units-length", "-3", "--full-size-mode", line],
+        vec!["--units-length", "-3", "--zoom", "2", line],
+        vec!["--units-length", "-3", "PRINT:x:AVERAGE:%lf"],
+    ]
+    .iter()
+    .flat_map(|extra| {
+        let mut graphv = f.graph(extra);
+        graphv[0] = String::from("graphv");
+        [f.graph(extra), graphv]
+    })
+    .collect();
+    f.assert_all_same_output(&cases);
+}

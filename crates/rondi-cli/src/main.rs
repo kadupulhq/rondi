@@ -2117,20 +2117,23 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                 }
                 save_error = Some(save_failed);
             } else {
+                // A negative --units-length moves the graph origin left of
+                // the image; cairo clips whatever falls outside the surface.
+                let clamp = |value: i64| u32::try_from(value.max(0));
                 let (rendered, series) = graph_render_input(&im);
                 let png = render_graph_png(
                     &rendered,
                     &series,
                     GraphPngOptions {
                         canvas: GraphCanvas {
-                            width: u32::try_from(im.ximg)?,
-                            height: u32::try_from(im.yimg)?,
+                            width: clamp(im.ximg)?,
+                            height: clamp(im.yimg)?,
                             surface_width: surface_width.unsigned_abs(),
                             surface_height: surface_height.unsigned_abs(),
-                            left: u32::try_from(im.xorigin)?,
-                            top: u32::try_from(im.yorigin - im.ysize)?,
-                            plot_width: u32::try_from(im.xsize)?,
-                            plot_height: u32::try_from(im.ysize)?,
+                            left: clamp(im.xorigin)?,
+                            top: clamp(im.yorigin - im.ysize)?,
+                            plot_width: clamp(im.xsize)?,
+                            plot_height: clamp(im.ysize)?,
                             minimum: im.minval,
                             maximum: im.maxval,
                         },
@@ -2231,7 +2234,8 @@ impl GraphInfo {
             match value {
                 InfoValue::Val(value) if value.is_nan() => writeln!(out, "NaN")?,
                 InfoValue::Val(value) => writeln!(out, "{}", c_printf_double("%0.10e", *value))?,
-                InfoValue::Count(value) => writeln!(out, "{value}")?,
+                // u_cnt is an unsigned long printed with %lu.
+                InfoValue::Count(value) => writeln!(out, "{}", *value as u64)?,
                 InfoValue::Str(value) => writeln!(out, "\"{value}\"")?,
                 InfoValue::Blob(value) => {
                     writeln!(out, "BLOB_SIZE:{}", value.len())?;
