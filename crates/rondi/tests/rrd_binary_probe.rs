@@ -1365,3 +1365,94 @@ fn dderive_previous_sample_is_parsed_like_rrdtool() {
         std::fs::read(&oracle).unwrap()
     );
 }
+
+// Header offsets for a one-source, one-archive file: the archive definition
+// starts after the 128-byte static head and one 120-byte source definition,
+// and the row pointer follows the live head, one prep area and one CDP prep.
+const RRA_ROWS_OFFSET: u64 = 248 + 24;
+const RRA_PDP_OFFSET: u64 = 248 + 32;
+const RRA_CUR_ROW_OFFSET: u64 = 576;
+
+fn poke_u64(path: &std::path::Path, offset: u64, value: u64) {
+    use std::io::{Seek, SeekFrom, Write};
+    let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.seek(SeekFrom::Start(offset)).unwrap();
+    file.write_all(&value.to_le_bytes()).unwrap();
+}
+
+fn create_geometry_probe(path: &std::path::Path) {
+    create_single_source(
+        path,
+        1_000_000_000,
+        10,
+        "DS:x:GAUGE:20:U:U",
+        "RRA:AVERAGE:0.5:1:8",
+    );
+}
+
+#[test]
+fn update_with_zero_pdp_per_row_is_an_error_instead_of_a_division_panic() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("pdp.rrd");
+    create_geometry_probe(&path);
+    poke_u64(&path, RRA_PDP_OFFSET, 0);
+    let before = std::fs::read(&path).unwrap();
+    let result =
+        std::panic::catch_unwind(|| rondi::update_rrd_file(&path, 1_000_000_010, Some(1.0)));
+    let error = result.expect("update panicked").unwrap_err().to_string();
+    assert!(
+        error.contains("RRD step, pdp_cnt or row_cnt is zero"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+// RRDtool 1.11.0 on the same file: `first` prints 1000000010, and a fetch
+// that ends before the archive pads with NaN rows. A fetch that reaches the
+// archive takes `% row_cnt` with a zero row count, which is undefined in C.
+#[test]
+fn zero_row_archive_first_and_out_of_range_fetch_match_rrdtool() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("rows.rrd");
+    create_geometry_probe(&path);
+    poke_u64(&path, RRA_ROWS_OFFSET, 0);
+    let first = std::panic::catch_unwind(|| rondi::first_rrd_time(&path, 0));
+    assert_eq!(first.expect("first panicked").unwrap(), 1_000_000_010);
+    let fetched = std::panic::catch_unwind(|| {
+        rondi::fetch_rrd_file(&path, "AVERAGE", 999_999_900, 999_999_950, 10)
+    });
+    let rows = fetched
+        .expect("fetch panicked")
+        .unwrap()
+        .rows
+        .iter()
+        .map(|row| (row.timestamp, row.values[0]))
+        .collect::<Vec<_>>();
+    let expected = (999_999_910..=999_999_960)
+        .step_by(10)
+        .map(|timestamp| (timestamp, None))
+        .collect::<Vec<_>>();
+    assert_eq!(rows, expected);
+    let reaching = std::panic::catch_unwind(|| {
+        rondi::fetch_rrd_file(&path, "AVERAGE", 999_999_990, 1_000_000_000, 10)
+    });
+    let error = reaching.expect("fetch panicked").unwrap_err().to_string();
+    assert!(error.contains("row_cnt is zero"), "{error}");
+}
+
+// RRDtool 1.11.0 increments cur_row as an unsigned long, so u64::MAX wraps
+// to 0 and the pointer is stored as 0.
+#[test]
+fn update_wraps_a_maximal_row_pointer_like_rrdtool() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("cur_row.rrd");
+    create_geometry_probe(&path);
+    poke_u64(&path, RRA_CUR_ROW_OFFSET, u64::MAX);
+    let result =
+        std::panic::catch_unwind(|| rondi::update_rrd_file(&path, 1_000_000_010, Some(5.0)));
+    result.expect("update panicked").unwrap();
+    assert_eq!(
+        rondi::inspect_rrd_file(&path).unwrap().archives[0].current_row,
+        0
+    );
+}

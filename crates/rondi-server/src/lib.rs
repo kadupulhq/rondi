@@ -1372,7 +1372,9 @@ fn rrdcached_rrd_open(
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::FileExt;
     let errno = |error: &std::io::Error| rrdcached_strerror(error.raw_os_error().unwrap_or(0));
-    // O_NONBLOCK keeps a planted FIFO from blocking; it fails at mmap.
+    // safe_fs opens with O_NONBLOCK, which keeps a planted FIFO from blocking
+    // the open, and O_NOCTTY, which keeps a terminal device from becoming the
+    // controlling terminal.
     let file = rondi::safe_fs::open_file(
         path,
         if read_write {
@@ -1383,10 +1385,20 @@ fn rrdcached_rrd_open(
         0,
     )
     .map_err(|error| format!("opening '{display}': {}", errno(&error)))?;
-    let length = file
+    let metadata = file
         .metadata()
-        .map_err(|error| format!("fstat '{display}': {}", errno(&error)))?
-        .len();
+        .map_err(|error| format!("fstat '{display}': {}", errno(&error)))?;
+    // Mapping a character or block device can run driver code, so refuse
+    // those before mmap. Directories, FIFOs and sockets cannot be mapped;
+    // their mmap failure carries the text rrdcached reports.
+    {
+        use std::os::unix::fs::FileTypeExt;
+        let kind = metadata.file_type();
+        if kind.is_char_device() || kind.is_block_device() {
+            return Err(format!("Not a regular file: {display}"));
+        }
+    }
+    let length = metadata.len();
     let length = usize::try_from(length).map_err(|_| {
         format!(
             "mmaping file '{display}': {}",
@@ -1416,11 +1428,7 @@ fn rrdcached_rrd_open(
     }
     // SAFETY: `mapped` and `length` come from the successful mmap above.
     unsafe { libc::munmap(mapped, length) };
-    if !file
-        .metadata()
-        .map_err(|error| error.to_string())?
-        .is_file()
-    {
+    if !metadata.is_file() {
         return Err(format!("Not a regular file: {display}"));
     }
     // stat_head_t: cookie[4], version[5], float_cookie at 16, then ds_cnt,
@@ -3845,6 +3853,43 @@ mod rrdcached_queue_tests {
 
     fn test_base(root: &Path) -> RrdcachedBase {
         RrdcachedBase::new(Some(root), true).unwrap()
+    }
+
+    #[test]
+    fn rrd_open_refuses_a_fifo_without_blocking() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let fifo = root.join("pipe.rrd");
+        let c_fifo = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: the CString is NUL terminated and outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+        for read_write in [false, true] {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let path = fifo.clone();
+            std::thread::spawn(move || {
+                let _ = sender.send(rrdcached_rrd_open("pipe.rrd", &path, read_write));
+            });
+            let result = receiver
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("opening a FIFO must not block");
+            let error = result.expect_err("a FIFO is not an RRD file");
+            // A read-write open fails with ENXIO on macOS; otherwise mmap
+            // refuses the FIFO with rrdcached's text.
+            assert!(
+                error.starts_with("opening 'pipe.rrd'")
+                    || error.starts_with("mmaping file 'pipe.rrd'"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rrd_open_refuses_a_character_device_before_mapping_it() {
+        // /dev/null is zero length, so a mapping attempt would fail with
+        // EINVAL instead of reporting the file type.
+        let error =
+            rrdcached_rrd_open("/dev/null", Path::new("/dev/null"), false).expect_err("device");
+        assert_eq!(error, "Not a regular file: /dev/null");
     }
 
     /// One request outside BATCH, as serve_rrdcached_connection routes it.

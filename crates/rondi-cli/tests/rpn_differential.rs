@@ -206,6 +206,41 @@ fn rpn_percent_rank_and_count_edges_match_rrdtool() {
     }
 }
 
+// rrd_rpncalc.c OP_MEDIAN and OP_PERCENT index the stack with a negative
+// count, which is undefined behavior in the pinned build (it crashes), so
+// only Rondi's result is checked: a stack error instead of a multi-gigabyte
+// stack allocation.
+#[test]
+fn rpn_negative_element_count_is_a_stack_error() {
+    let Some(fixture) = fixture() else { return };
+    for cdef in ["x,-2000000000,MEDIAN", "x,50,-2000000000,PERCENT"] {
+        let output = Command::new(&fixture.alias)
+            .args(fixture.xport_args(cdef))
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1), "{cdef}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "ERROR: RPN stack underflow\n",
+            "{cdef}"
+        );
+    }
+}
+
+// rrd_rpncalc.c OP_ROLL computes j = base + step in int and then j--; a step
+// of INT_MAX wraps instead of trapping. Each row spins about 2^31 times
+// normalizing j, so the range is cut to a few rows.
+#[test]
+fn rpn_roll_wraps_int_arithmetic_like_rrdtool() {
+    let Some(fixture) = fixture() else { return };
+    for cdef in ["x,1,2147483647,ROLL", "x,2,2147483647,ROLL"] {
+        let mut args = fixture.xport_args(cdef);
+        let end = args.iter().position(|arg| arg == "1000000600").unwrap();
+        args[end] = String::from("1000000020");
+        fixture.assert_matches(&args);
+    }
+}
+
 // RRDtool's AVG and PREDICT sums start at +0.0, so averaging negative zeros
 // yields +0.0; dividing by it shows the sign without printing a zero.
 #[test]

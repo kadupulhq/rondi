@@ -262,6 +262,7 @@ impl Store {
         }
         let mut journal = journal_options.open(self.root.join(JOURNAL))?;
         check_native_journal_handle(&journal)?;
+        let created = journal.metadata()?.len() == 0;
         let record = JournalRecord {
             id: id.into(),
             database: name.into(),
@@ -270,7 +271,17 @@ impl Store {
         };
         let mut line = serde_json::to_vec(&record)?;
         line.push(b'\n');
-        if let Err(error) = journal.write_all(&line).and_then(|()| journal.sync_all()) {
+        // A new journal's directory entry must be durable too, or a crash can
+        // lose a record that was already acknowledged.
+        let synced = journal.write_all(&line).and_then(|()| journal.sync_all());
+        let synced = synced.and_then(|()| {
+            if created {
+                File::open(&self.root)?.sync_all()
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(error) = synced {
             // A failed append can leave a partial line. Reloading the index
             // truncates it before the next record is appended.
             *journal_ids = None;
@@ -1328,6 +1339,40 @@ mod tests {
         let store = Store::open(dir.path()).unwrap();
         assert_eq!(store.recover().unwrap(), 0);
         assert_eq!(journal_lines(dir.path()), 0);
+    }
+
+    // A directory that can be searched and written but not read lets the
+    // journal be created while File::open on the directory itself fails, which
+    // is how a failed directory fsync surfaces here.
+    #[cfg(unix)]
+    #[test]
+    fn durable_update_syncs_the_directory_after_creating_the_journal() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        store.create("cpu", config()).unwrap();
+        let unreadable = fs::Permissions::from_mode(0o300);
+        fs::set_permissions(dir.path(), unreadable).unwrap();
+        // root ignores the mode, which leaves nothing to observe.
+        let enforced = File::open(dir.path()).is_err();
+        let result = store.update_durable(
+            "cpu",
+            Update {
+                timestamp: 1_700_000_010,
+                value: Some(7.0),
+            },
+            "req-1",
+        );
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        if !enforced {
+            return;
+        }
+        assert!(result.is_err());
+        // The record was acknowledged before the sync failed, so the database
+        // write waits for recovery rather than landing unsynced.
+        assert_eq!(journal_lines(dir.path()), 1);
+        let points = store.fetch("cpu").unwrap().points;
+        assert!(points.iter().all(|point| point.value.is_none()));
     }
 
     #[test]

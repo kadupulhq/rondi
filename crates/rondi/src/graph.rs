@@ -1904,7 +1904,9 @@ impl GraphImage {
                     // rrd_fetch_empty
                     let mut step = element.step;
                     if step == 0 {
-                        step = ((element.end - element.start) / 100) as u64;
+                        // C divides by this step next; a range under 100s
+                        // gives zero and traps there, so use one second.
+                        step = (((element.end - element.start) / 100) as u64).max(1);
                     }
                     let step_i64 = step as i64;
                     let start = element.start - element.start.rem_euclid(step_i64);
@@ -1949,17 +1951,19 @@ impl GraphImage {
                         Some(shidx) => rpn::c_long(self.gdes[shidx].vf.val),
                         None => self.gdes[gdi].shval,
                     };
+                    // time_t arithmetic wraps in the pinned build; a huge
+                    // shift must not panic in debug builds.
                     let vdp = &mut self.gdes[vidx];
-                    vdp.start -= vdp.shift;
-                    vdp.end -= vdp.shift;
+                    vdp.start = vdp.start.wrapping_sub(vdp.shift);
+                    vdp.end = vdp.end.wrapping_sub(vdp.shift);
                     let step = vdp.step as i64;
                     vdp.shift = if step == 0 {
                         shift
                     } else {
                         shift / step * step
                     };
-                    vdp.start += vdp.shift;
-                    vdp.end += vdp.shift;
+                    vdp.start = vdp.start.wrapping_add(vdp.shift);
+                    vdp.end = vdp.end.wrapping_add(vdp.shift);
                 }
                 Gf::Vdef => {
                     self.gdes[gdi].ds_cnt = 0;
@@ -2140,6 +2144,9 @@ impl GraphImage {
                 Gf::Xport => !is_numeric(&element.vname),
                 _ => false,
             })
+            // A constant that get_double accepts but is_numeric rejects
+            // (`1e3`, `+5`, `inf`) has no source; C reads gdes[-1] for it.
+            .filter(|(_, element)| element.vidx.is_some())
             .map(|(index, _)| index)
             .collect();
         if columns.is_empty() {
@@ -2195,8 +2202,8 @@ impl GraphImage {
         // C division truncates toward zero, so a row up to one step before
         // the source start still reads index 0.
         let source_step = source.step as i64;
-        let idx = (now - source.start) / source_step;
-        let count = (source.end - source.start) / source_step;
+        let idx = now.wrapping_sub(source.start) / source_step;
+        let count = source.end.wrapping_sub(source.start) / source_step;
         if idx >= 0 && idx < count {
             source
                 .data

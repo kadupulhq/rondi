@@ -297,3 +297,65 @@ fn graph_accepts_the_full_rrd_graph_option_table() {
     .collect();
     f.assert_all_same(&cases);
 }
+
+// Output goes to a file in the fixture directory because Rondi refuses to
+// open /dev/null for writing when it is owned by another user.
+// rrd_fetch_empty divides by (end - start) / 100, which is zero for a range
+// under 100 seconds and traps in the pinned build, so only Rondi's result is
+// checked: the graph is drawn from NaN data.
+#[test]
+fn use_nan_for_all_missing_data_survives_a_short_range() {
+    let Some(f) = fixture() else { return };
+    let output = f.run(
+        &f.alias,
+        &args(&[
+            "graph",
+            "out.png",
+            "--use-nan-for-all-missing-data",
+            "--start",
+            "1000000000",
+            "--end",
+            "1000000050",
+            "DEF:x=missing.rrd:x:AVERAGE",
+            "LINE1:x#ff0000",
+        ]),
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).ends_with("x141\n"),
+        "{output:?}"
+    );
+}
+
+// rrdtool has no size limit, so only PNG output with something to draw is
+// bounded, and the limit applies before --width sizes any per-pixel buffer.
+// Print-only graphs and other formats keep working at any width.
+#[test]
+fn png_dimension_limit_applies_before_data_processing() {
+    let Some(f) = fixture() else { return };
+    let graph = |extra: &[&str], elements: &[&str]| {
+        let mut command = vec!["graph", "out.png"];
+        command.extend(RANGE);
+        command.extend(extra);
+        command.push("DEF:x=a.rrd:x:AVERAGE");
+        command.extend(elements);
+        f.run(&f.alias, &args(&command))
+    };
+    for extra in [&["--width", "2000000000"][..], &["--height", "2000000000"]] {
+        let output = graph(extra, &["LINE1:x#ff0000"]);
+        assert_eq!(output.status.code(), Some(1), "{extra:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "ERROR: PNG graph dimensions exceed the 4096 pixel safety limit\n",
+            "{extra:?}"
+        );
+    }
+    let print_only = graph(&["--width", "2000000000"], &["PRINT:x:AVERAGE:%lf"]);
+    assert_eq!(print_only.status.code(), Some(0));
+    let xml = graph(
+        &["--imgformat", "XML", "--width", "5000"],
+        &["LINE1:x#ff0000"],
+    );
+    assert_eq!(xml.status.code(), Some(0));
+}

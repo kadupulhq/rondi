@@ -259,6 +259,9 @@ pub(crate) fn rpn_parse(
     Ok(nodes)
 }
 
+/// Upper bound on stack slots, far above anything a real expression needs.
+const MAX_STACK_SLOTS: i64 = 1 << 24;
+
 /// The RPN stack, kept for the whole `data_calc` run like `rpnstack_t`.
 /// Slots above the stack pointer keep their previous values, which some
 /// operators read; slots never written read as zero.
@@ -477,6 +480,11 @@ pub(crate) fn rpn_calc<'a>(
         };
     }
     for rpi in 0..rpnp.len() {
+        // C reallocates the stack in blocks as stptr grows; bound it so a
+        // corrupt pointer cannot turn into an unbounded allocation.
+        if stptr + 5 > MAX_STACK_SLOTS {
+            return Err(error("RPN stack overflow"));
+        }
         match rpnp[rpi].op {
             Op::Number => {
                 stptr += 1;
@@ -893,6 +901,11 @@ pub(crate) fn rpn_calc<'a>(
                 underflow!(0);
                 let elements = c_int(s!(stptr));
                 stptr -= 1;
+                // C continues with a window above the stack top (undefined);
+                // a negative count would also drag stptr up by up to 2^31.
+                if elements < 0 {
+                    return Err(error("RPN stack underflow"));
+                }
                 let mut final_elements = elements;
                 let element_ptr = stptr - i64::from(elements) + 1;
                 let mut goodvals = element_ptr;
@@ -964,6 +977,10 @@ pub(crate) fn rpn_calc<'a>(
                 if !(0.0..=100.0).contains(&percent) {
                     return Err(error("percentile argument must be between 0 and 100"));
                 }
+                // Same undefined window as MEDIAN; see there.
+                if elements < 0 {
+                    return Err(error("RPN stack underflow"));
+                }
                 underflow!(elements.wrapping_sub(1));
                 qsort(stack.slice_mut(stptr - i64::from(elements) + 1, i64::from(elements)));
                 stptr -= i64::from(elements);
@@ -1013,7 +1030,7 @@ pub(crate) fn rpn_calc<'a>(
                 let tmp: Vec<f64> = (0..i64::from(base)).map(|k| s!(stptr + k)).collect();
                 while i != 0 {
                     i -= 1;
-                    j -= 1;
+                    j = j.wrapping_sub(1);
                     while j < 0 {
                         j += base;
                     }

@@ -124,7 +124,7 @@ pub fn open_at(directory: &File, name: &CStr, flags: i32, mode: libc::mode_t) ->
         libc::openat(
             directory.as_raw_fd(),
             name.as_ptr(),
-            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY,
             mode as libc::c_uint,
         )
     };

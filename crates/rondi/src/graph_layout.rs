@@ -392,6 +392,12 @@ impl GraphImage {
             self.yorigin = self.ysize;
             return Ok(());
         }
+        // The layout works in i32 like C's int; margins are a few thousand
+        // pixels at most, so this bound keeps every sum below from wrapping.
+        let limit = i64::from(i32::MAX / 4);
+        if !(0..=limit).contains(&self.xsize) || !(0..=limit).contains(&self.ysize) {
+            return Err(String::from("graph dimensions overflow"));
+        }
         let watermark = self
             .watermark
             .as_deref()
@@ -892,6 +898,27 @@ mod tests {
             im.expand_range();
         }
         (im.minval, im.maxval)
+    }
+
+    #[test]
+    fn layout_rejects_dimensions_that_would_overflow_int() {
+        for (xsize, ysize) in [
+            (i64::from(i32::MAX), 100),
+            (400, i64::from(i32::MAX)),
+            (-1, 100),
+        ] {
+            let mut im = GraphImage::new(1_000_000_000, 1_000_000_400, 1);
+            im.xsize = xsize;
+            im.ysize = ysize;
+            assert_eq!(
+                im.graph_size_location(true),
+                Err(String::from("graph dimensions overflow"))
+            );
+        }
+        let mut im = GraphImage::new(1_000_000_000, 1_000_000_400, 1);
+        im.xsize = 400;
+        im.ysize = 100;
+        assert!(im.graph_size_location(true).is_ok());
     }
 
     const TWO_TO_EIGHT: [&str; 2] = ["LINE1:2#ff0000", "LINE1:8#00ff00"];

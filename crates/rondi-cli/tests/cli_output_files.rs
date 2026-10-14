@@ -4,6 +4,8 @@
 //! RRDtool follows both; Rondi deviates on purpose so a planted link cannot
 //! redirect the write.
 
+mod common;
+
 use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -124,4 +126,75 @@ fn csv_graph_and_dump_refuse_a_symlinked_output_path() {
         std::fs::read(dir.path().join("victim")).unwrap(),
         b"keep me"
     );
+}
+
+fn sides() -> Option<common::Sides> {
+    common::Sides::new(
+        &[&[
+            "create",
+            "a.rrd",
+            "--start",
+            "1700000000",
+            "--step",
+            "300",
+            "DS:x:GAUGE:600:U:U",
+            "RRA:AVERAGE:0.5:1:10",
+        ]],
+        &[],
+    )
+}
+
+#[test]
+fn unwritable_output_paths_report_like_rrdtool() {
+    let Some(sides) = sides() else { return };
+    // rrd_dump_opt_r returns -1 from a failed fopen without setting an
+    // error, so dump is silent; the cairo PNG writer reports its own text.
+    sides.assert_same(&["dump", "a.rrd", "/nonexistent/x"]);
+    for command in ["graph", "graphv"] {
+        let mut args = vec![command, "/nonexistent/x.png"];
+        args.extend(GRAPH);
+        sides.assert_same(&args);
+    }
+}
+
+#[test]
+fn fetch_resolution_beyond_i64_aligns_like_rrdtool() {
+    let Some(sides) = sides() else { return };
+    // rrd_fetch.c computes start % step in unsigned long.
+    for resolution in ["9999999999999999999", "18446744073709551615"] {
+        sides.assert_same(&[
+            "fetch",
+            "a.rrd",
+            "AVERAGE",
+            "-a",
+            "-s",
+            "1700000000",
+            "-e",
+            "1700000600",
+            "-r",
+            resolution,
+        ]);
+    }
+}
+
+#[test]
+fn data_graphs_to_an_unwritable_path_print_the_data() {
+    let Some(sides) = sides() else { return };
+    // rrd_graph_xport keeps the buffer when rrd_fopen fails, so the data
+    // goes to stdout, followed by 0x0 for graph, and the exit status is 0.
+    for command in ["graph", "graphv"] {
+        for format in ["CSV", "TSV", "SSV", "XML", "XMLENUM", "JSON", "JSONTIME"] {
+            let mut args = vec![command, "/nonexistent/x", "--imgformat", format];
+            args.extend(GRAPH);
+            sides.assert_same(&args);
+        }
+    }
+}
+
+#[test]
+fn fetch_align_rejects_a_zero_resolution_like_rrdtool() {
+    let Some(sides) = sides() else { return };
+    for resolution in ["0", "0s", "0m"] {
+        sides.assert_same(&["fetch", "a.rrd", "AVERAGE", "-a", "-r", resolution]);
+    }
 }
