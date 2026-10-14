@@ -2121,7 +2121,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                 } else {
                     Path::new(filename)
                         .file_name()
-                        .and_then(|value| value.to_str())
+                        .and_then(std::ffi::OsStr::to_str)
                         .unwrap_or(filename)
                 };
                 info.push(
