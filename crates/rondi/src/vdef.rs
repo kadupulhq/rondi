@@ -110,27 +110,7 @@ pub fn evaluate_vdef(
                 no_time(sorted[index])
             }
         }
-        VdefFunction::Maximum | VdefFunction::Minimum => {
-            let Some(mut index) = values.iter().position(|value| !value.is_nan()) else {
-                return Ok(no_time(f64::NAN));
-            };
-            let mut best = values[index];
-            for (next_index, value) in values.iter().copied().enumerate().skip(index + 1) {
-                // The initial value is accepted even if infinite; later values
-                // are considered only when finite, matching RRDtool's source.
-                if value.is_finite()
-                    && ((function == VdefFunction::Maximum && value > best)
-                        || (function == VdefFunction::Minimum && value < best))
-                {
-                    best = value;
-                    index = next_index;
-                }
-            }
-            VdefResult {
-                value: best,
-                timestamp: Some(interval_timestamp(start, index, step)?),
-            }
-        }
+        VdefFunction::Maximum | VdefFunction::Minimum => extrema(function, values, start, step)?,
         VdefFunction::First => match values.iter().position(|value| !value.is_nan()) {
             Some(index) => VdefResult {
                 value: values[index],
@@ -203,6 +183,36 @@ pub fn evaluate_vdef(
         }
     };
     Ok(result)
+}
+
+fn extrema(
+    function: VdefFunction,
+    values: &[f64],
+    start: i64,
+    step: u64,
+) -> Result<VdefResult, VdefError> {
+    let Some(mut index) = values.iter().position(|value| !value.is_nan()) else {
+        return Ok(VdefResult {
+            value: f64::NAN,
+            timestamp: None,
+        });
+    };
+    let mut best = values[index];
+    for (next_index, value) in values.iter().copied().enumerate().skip(index + 1) {
+        // The initial value is accepted even if infinite; later values
+        // are considered only when finite, matching RRDtool's source.
+        if value.is_finite()
+            && ((function == VdefFunction::Maximum && value > best)
+                || (function == VdefFunction::Minimum && value < best))
+        {
+            best = value;
+            index = next_index;
+        }
+    }
+    Ok(VdefResult {
+        value: best,
+        timestamp: Some(interval_timestamp(start, index, step)?),
+    })
 }
 
 impl VdefFunction {
