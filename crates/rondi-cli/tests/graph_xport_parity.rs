@@ -152,6 +152,17 @@ fn xport_of_a_non_numeric_looking_constant_exports_nothing() {
     }
 }
 
+// rrd_graph.c data_calc adds the normalized shift to time_t start and end,
+// which wraps for a shift near the type's limits.
+#[test]
+fn shift_by_a_huge_offset_wraps_like_rrdtool() {
+    let Some(fixture) = fixture() else { return };
+    for shift in ["9223372036854775807", "-9223372036854775807"] {
+        let elements = vec![format!("SHIFT:x:{shift}"), String::from("XPORT:x:x")];
+        assert_same_stdout(&fixture, &xport_args(&fixture, &[], &elements));
+    }
+}
+
 #[test]
 fn xport_xml_prints_infinities_and_json_prints_null() {
     let Some(fixture) = fixture() else { return };
