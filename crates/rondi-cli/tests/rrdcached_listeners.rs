@@ -390,14 +390,16 @@ fn rrdcached_failed_privilege_change_exits_without_serving_like_upstream() {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(dir.join(case), std::fs::Permissions::from_mode(0o777))
                     .unwrap();
-                std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o777)).unwrap();
+                std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
             let socket = run.join("rrdcached.sock");
             let pid_file = run.join("rrdcached.pid");
             let mut command = Command::new(daemon(name, &run));
-            if unprivileged(&mut command).is_none() {
-                panic!("running as root needs the rondi-test user from docker/Dockerfile.test");
-            }
+            let (uid, gid) = unprivileged(&mut command)
+                .expect("running as root needs the rondi-test user from docker/Dockerfile.test");
+            // The listener directory must belong to the startup account, so
+            // this fixture reaches the privilege-change failure under test.
+            std::os::unix::fs::chown(&run, Some(uid), Some(gid)).unwrap();
             let output = command
                 .args(["-g", "-b", run.to_str().unwrap()])
                 .args(option)
@@ -714,5 +716,54 @@ fn rrdcached_pid_file_diagnostics_match_upstream() {
             assert_eq!(outputs[0].0, Some(1), "{case}");
         }
         assert_eq!(outputs[1], outputs[0], "{case}");
+    }
+}
+
+#[test]
+fn unprivileged_rrdcached_requires_sticky_shared_socket_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temp.path()).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Keep the executable alias outside sticky directories: Linux protects
+    // root-owned symlinks there from traversal by the dropped account.
+    let executable = daemon("rondi", &root);
+    for permissions in [0o777, 0o770, 0o1777] {
+        let run = root.join(format!("run-{permissions:o}"));
+        std::fs::create_dir(&run).unwrap();
+        let mut command = Command::new(&executable);
+        let (uid, gid) =
+            unprivileged(&mut command).expect("root tests need the rondi-test account");
+        std::os::unix::fs::chown(&run, Some(uid), Some(gid)).unwrap();
+        std::fs::set_permissions(&run, std::fs::Permissions::from_mode(permissions)).unwrap();
+        let socket = run.join("rrdcached.sock");
+        let mut child = command
+            .args(["-g", "-b", run.to_str().unwrap(), "-l"])
+            .arg(&socket)
+            .arg("-p")
+            .arg(run.join("rrdcached.pid"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let endpoint = Endpoint::Unix(socket.clone());
+        if permissions == 0o1777 {
+            wait_until_serving(&mut child, &endpoint);
+            assert_eq!(endpoint.first_line("PING\n"), Some("0 PONG\n".to_owned()));
+            assert!(stop(child).status.success());
+        } else {
+            let deadline = Instant::now() + common::io_timeout();
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline || endpoint.first_line("PING\n").is_some() {
+                    stop(child);
+                    panic!("daemon accepted unsafe mode {permissions:o}");
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            let output = child.wait_with_output().unwrap();
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("refusing socket directory"));
+            assert!(!socket.exists());
+        }
     }
 }

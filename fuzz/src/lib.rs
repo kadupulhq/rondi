@@ -141,7 +141,7 @@ pub mod server {
             Ok((queue, _)) => Arc::new(Mutex::new(queue)),
             Err(_) => return Vec::new(),
         };
-        let (client, server) = UnixStream::pair().expect("socketpair");
+        let (client, server) = tokio::net::UnixStream::pair().expect("socketpair");
         let (_stop, stop_rx) = tokio::sync::watch::channel(false);
         let serve = serve_rrdcached_connection(
             Box::new(server),
