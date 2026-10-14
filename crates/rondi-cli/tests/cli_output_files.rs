@@ -145,6 +145,19 @@ fn sides() -> Option<common::Sides> {
 }
 
 #[test]
+fn unwritable_output_paths_report_like_rrdtool() {
+    let Some(sides) = sides() else { return };
+    // rrd_dump_opt_r returns -1 from a failed fopen without setting an
+    // error, so dump is silent; the cairo PNG writer reports its own text.
+    sides.assert_same(&["dump", "a.rrd", "/nonexistent/x"]);
+    for command in ["graph", "graphv"] {
+        let mut args = vec![command, "/nonexistent/x.png"];
+        args.extend(GRAPH);
+        sides.assert_same(&args);
+    }
+}
+
+#[test]
 fn fetch_resolution_beyond_i64_aligns_like_rrdtool() {
     let Some(sides) = sides() else { return };
     // rrd_fetch.c computes start % step in unsigned long.

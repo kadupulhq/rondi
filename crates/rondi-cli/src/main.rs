@@ -1932,6 +1932,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     let mut info = GraphInfo::default();
     let to_memory = filename == "-";
     let mut image = None::<Vec<u8>>;
+    let mut save_error = None::<String>;
     if format != "PNG" {
         let xport_format = match format.as_str() {
             "XML" => XportFormat::Xml { flags: 2 },
@@ -2082,7 +2083,13 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             )?;
             let (width, height) = png_dimensions(&png)?;
             if !to_memory {
-                write_output_file(filename, &png)?;
+                // rrd_graph_v keeps building the result after a failed save
+                // and rrdtool reports the error once it has printed it.
+                match write_output_file(filename, &png) {
+                    Ok(()) => {}
+                    Err(OutputError::Refused(message)) => return Err(message.into()),
+                    Err(_) => save_error = Some(format!("Could not save png to '{filename}'")),
+                }
             }
             if let Some(format) = imginfo.as_deref().filter(|format| !format.is_empty()) {
                 let basename = if to_memory {
@@ -2117,7 +2124,10 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             .any(|argument| argument == "--imginfo" || argument == "-f");
         info.print_graph(&mut stdout, to_memory, imginfo_flag)?;
     }
-    Ok(())
+    match save_error {
+        Some(message) => Err(message.into()),
+        None => Ok(()),
+    }
 }
 
 enum XportFormat {
@@ -2275,12 +2285,44 @@ fn flush_and_prepare_data(
     Ok(())
 }
 
+/// Why an output file could not be written. `Refused` is Rondi's own
+/// safety check; the others carry the errno RRDtool would report through
+/// `rrd_strerror`.
+#[derive(Debug)]
+enum OutputError {
+    Refused(String),
+    Open(libc::c_int),
+    Write(libc::c_int),
+}
+
+impl std::fmt::Display for OutputError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(message) => f.write_str(message),
+            Self::Open(errno) | Self::Write(errno) => f.write_str(&rrd_strerror(*errno)),
+        }
+    }
+}
+
+impl std::error::Error for OutputError {}
+
+fn errno_of(error: &std::io::Error) -> libc::c_int {
+    error.raw_os_error().unwrap_or(libc::EIO)
+}
+
 /// Write only an owned, singly linked regular file.
-fn write_output_file(path: &str, bytes: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = rondi::open_output_file(std::path::Path::new(path), false)?;
-    file.set_len(0)?;
-    file.write_all(bytes)?;
-    Ok(())
+fn write_output_file(path: &str, bytes: &[u8]) -> Result<(), OutputError> {
+    // Errors without an errno are the refusals open_output_file raises.
+    let mut file = rondi::open_output_file(std::path::Path::new(path), false).map_err(|error| {
+        error.raw_os_error().map_or_else(
+            || OutputError::Refused(error.to_string()),
+            OutputError::Open,
+        )
+    })?;
+    file.set_len(0)
+        .map_err(|error| OutputError::Write(errno_of(&error)))?;
+    file.write_all(bytes)
+        .map_err(|error| OutputError::Write(errno_of(&error)))
 }
 
 fn rrdtool_xport(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -5020,7 +5062,16 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     ensure_rrd_file_exists(std::path::Path::new(&positional[0]))?;
     let xml = dump_rrd_file_with_header(&positional[0], header)?;
     if let Some(output) = positional.get(1) {
-        write_output_file(output, xml.as_bytes())?;
+        match write_output_file(output, xml.as_bytes()) {
+            Ok(()) => {}
+            // rrd_dump_opt_r returns -1 from a failed fopen without setting
+            // an error, so rrdtool reports nothing and exits 0.
+            Err(OutputError::Open(_)) => {}
+            Err(OutputError::Write(errno)) => {
+                return Err(format!("error writing output file: {}", rrd_strerror(errno)).into());
+            }
+            Err(error) => return Err(error.into()),
+        }
     } else {
         print!("{xml}");
     }
