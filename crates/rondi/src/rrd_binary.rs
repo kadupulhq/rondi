@@ -1802,15 +1802,7 @@ pub fn dump_rrd_open_file(
         )
         .unwrap();
         out.push_str("\t\t<params>\n");
-        writeln!(
-            out,
-            "\t\t<xff>{}</xff>",
-            crate::rrd_snprintf::rrd_snprintf(
-                "%0.10e",
-                &[crate::rrd_snprintf::Arg::Double(archive.xff)]
-            )
-        )
-        .unwrap();
+        writeln!(out, "\t\t<xff>{}</xff>", format_rrd_float(archive.xff)).unwrap();
         out.push_str("\t\t</params>\n\t\t<cdp_prep>\n");
         for prep in &archive.cdp_prep {
             out.push_str("\t\t\t<ds>\n");
@@ -1895,21 +1887,10 @@ fn format_rrd_optional(value: Option<f64>) -> String {
     value.map_or_else(|| "NaN".to_owned(), format_rrd_float)
 }
 
+// rrd_dump.c formats every value with CB_FMTS, i.e. rrd_snprintf("%0.10e"),
+// whose fmtflt drops the sign of -0 and renders subnormals unnormalized.
 fn format_rrd_float(value: f64) -> String {
-    if value.is_infinite() {
-        return if value.is_sign_negative() {
-            "-inf"
-        } else {
-            "inf"
-        }
-        .to_owned();
-    }
-    let formatted = format!("{value:.10e}");
-    let (mantissa, exponent) = formatted
-        .split_once('e')
-        .expect("scientific format has exponent");
-    let exponent = exponent.parse::<i32>().unwrap_or_default();
-    format!("{mantissa}e{exponent:+03}")
+    crate::rrd_snprintf::rrd_snprintf("%0.10e", &[crate::rrd_snprintf::Arg::Double(value)])
 }
 
 fn rrd_local_timestamp(timestamp: i64) -> Result<String, StoreError> {
