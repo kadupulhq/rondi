@@ -5981,31 +5981,152 @@ impl std::fmt::Display for RrdcachedConnectError {
 
 impl std::error::Error for RrdcachedConnectError {}
 
+/// Port of RRDtool 1.11.0 rrd_client.c `client_connect` (868-878). Only a
+/// `unix:` prefix or a leading slash names a socket path; everything else,
+/// including a bare host, is a network address.
 #[cfg(unix)]
 fn open_rrdcached_stream(
     address: &str,
 ) -> Result<Box<dyn RrdcachedStream>, Box<dyn std::error::Error>> {
-    use std::os::unix::net::UnixStream;
-
     if let Some(path) = address.strip_prefix("unix:") {
-        if path.is_empty() {
-            return Err("empty rrdcached Unix socket path".into());
-        }
-        return Ok(Box::new(UnixStream::connect(path)?));
+        return Ok(Box::new(connect_rrdcached_unix(path)?));
     }
     if address.starts_with('/') {
-        return Ok(Box::new(UnixStream::connect(address)?));
+        return Ok(Box::new(connect_rrdcached_unix(address)?));
     }
-    if let Some(endpoint) = address
-        .strip_prefix("tcp:")
-        .or_else(|| address.contains(':').then_some(address))
-    {
-        if endpoint.is_empty() {
-            return Err("empty rrdcached TCP endpoint".into());
+    let (host, port) = split_rrdcached_network_address(address)?;
+    Ok(Box::new(connect_rrdcached_network(&host, &port)?))
+}
+
+/// `connect_unix` (782-814). The path is truncated to `sun_path` and the
+/// whole structure goes to connect(2), so an empty or overlong path fails
+/// the way the kernel reports it rather than being rejected here.
+#[cfg(unix)]
+fn connect_rrdcached_unix(path: &str) -> std::io::Result<std::os::unix::net::UnixStream> {
+    use std::os::fd::FromRawFd;
+
+    // SAFETY: the descriptor is owned by `stream` as soon as it exists, so
+    // every return closes it, and `address` is a fully initialised
+    // sockaddr_un whose size is passed to connect.
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
         }
-        return Ok(Box::new(std::net::TcpStream::connect(endpoint)?));
+        let stream = std::os::unix::net::UnixStream::from_raw_fd(fd);
+        libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        let mut address = std::mem::zeroed::<libc::sockaddr_un>();
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let capacity = address.sun_path.len() - 1;
+        for (slot, byte) in address.sun_path.iter_mut().zip(path.bytes().take(capacity)) {
+            *slot = byte as libc::c_char;
+        }
+        let status = libc::connect(
+            fd,
+            std::ptr::addr_of!(address).cast::<libc::sockaddr>(),
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        );
+        if status != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(stream)
     }
-    Err(format!("unsupported rrdcached address: {address}").into())
+}
+
+/// The host and service `connect_network` (816-856) hands to getaddrinfo:
+/// `[v6]` or `[v6]:port`, otherwise a split at the last colon, with port
+/// 42217 when none is given.
+#[cfg(unix)]
+fn split_rrdcached_network_address(
+    address: &str,
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
+    // addr_copy is NI_MAXHOST bytes including its terminator.
+    const NI_MAXHOST: usize = 1025;
+    const RRDCACHED_DEFAULT_PORT: &[u8] = b"42217";
+
+    let bytes = address.as_bytes();
+    let bytes = &bytes[..bytes.len().min(NI_MAXHOST - 1)];
+    let (host, port) = if let Some(rest) = bytes.strip_prefix(b"[") {
+        let Some(close) = rest.iter().position(|byte| *byte == b']') else {
+            return Err(format!("malformed address: {address}").into());
+        };
+        let after = &rest[close + 1..];
+        let port = match after.first() {
+            None => None,
+            Some(b':') => Some(&after[1..]),
+            Some(_) => {
+                return Err(
+                    format!("garbage after address: {}", String::from_utf8_lossy(after)).into(),
+                );
+            }
+        };
+        (&rest[..close], port)
+    } else if let Some(colon) = bytes.iter().rposition(|byte| *byte == b':') {
+        (&bytes[..colon], Some(&bytes[colon + 1..]))
+    } else {
+        (bytes, None)
+    };
+    Ok((
+        host.to_vec(),
+        port.unwrap_or(RRDCACHED_DEFAULT_PORT).to_vec(),
+    ))
+}
+
+/// `connect_network` (857-896): try each resolved address in turn and
+/// report the errno of the last failed attempt.
+#[cfg(unix)]
+fn connect_rrdcached_network(
+    host: &[u8],
+    port: &[u8],
+) -> Result<std::net::TcpStream, Box<dyn std::error::Error>> {
+    use std::ffi::{CStr, CString};
+    use std::os::fd::FromRawFd;
+
+    let c_host = CString::new(host)?;
+    let c_port = CString::new(port)?;
+    // SAFETY: getaddrinfo receives NUL-terminated strings and zeroed hints,
+    // its list is only walked while alive and is freed after a successful
+    // call, and each descriptor is owned by a TcpStream as soon as it
+    // exists.
+    unsafe {
+        let mut hints = std::mem::zeroed::<libc::addrinfo>();
+        hints.ai_flags = libc::AI_ADDRCONFIG;
+        hints.ai_family = libc::AF_UNSPEC;
+        hints.ai_socktype = libc::SOCK_STREAM;
+        let mut list: *mut libc::addrinfo = std::ptr::null_mut();
+        let status = libc::getaddrinfo(c_host.as_ptr(), c_port.as_ptr(), &hints, &mut list);
+        if status != 0 {
+            let reason = CStr::from_ptr(libc::gai_strerror(status)).to_string_lossy();
+            return Err(format!(
+                "failed to resolve address '{}' (port {}): {reason} ({status})",
+                String::from_utf8_lossy(host),
+                String::from_utf8_lossy(port)
+            )
+            .into());
+        }
+        let mut last_error = std::io::Error::from_raw_os_error(0);
+        let mut entry = list;
+        let mut connected = None;
+        while !entry.is_null() {
+            let info = &*entry;
+            entry = info.ai_next;
+            let fd = libc::socket(info.ai_family, info.ai_socktype, info.ai_protocol);
+            if fd < 0 {
+                last_error = std::io::Error::last_os_error();
+                continue;
+            }
+            let stream = std::net::TcpStream::from_raw_fd(fd);
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            if libc::connect(fd, info.ai_addr, info.ai_addrlen) != 0 {
+                last_error = std::io::Error::last_os_error();
+                continue;
+            }
+            connected = Some(stream);
+            break;
+        }
+        libc::freeaddrinfo(list);
+        connected.ok_or_else(|| last_error.into())
+    }
 }
 
 #[cfg(not(unix))]
@@ -6873,6 +6994,31 @@ mod rrdcached_response_tests {
             message == "rrdcached response line exceeds 1 MiB",
             "{message:.80}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn network_daemon_addresses_split_like_connect_network() {
+        let split = |address: &str| {
+            super::split_rrdcached_network_address(address)
+                .map(|(host, port)| {
+                    (
+                        String::from_utf8(host).unwrap(),
+                        String::from_utf8(port).unwrap(),
+                    )
+                })
+                .map_err(|error| error.to_string())
+        };
+        let pair = |host: &str, port: &str| Ok((host.to_owned(), port.to_owned()));
+        assert_eq!(split("127.0.0.1"), pair("127.0.0.1", "42217"));
+        assert_eq!(split("localhost"), pair("localhost", "42217"));
+        assert_eq!(split("[::1]"), pair("::1", "42217"));
+        assert_eq!(split("[::1]:9"), pair("::1", "9"));
+        assert_eq!(split("host:"), pair("host", ""));
+        assert_eq!(split("tcp:host:9"), pair("tcp:host", "9"));
+        assert_eq!(split("::1"), pair(":", "1"));
+        assert_eq!(split("[::1"), Err("malformed address: [::1".to_owned()));
+        assert_eq!(split("[::1]x"), Err("garbage after address: x".to_owned()));
     }
 
     #[cfg(unix)]
