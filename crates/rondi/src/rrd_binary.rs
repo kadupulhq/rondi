@@ -714,26 +714,31 @@ fn apply_update(
                 proc_pdp_count += 1;
             }
         }
-        let pdp_temp = process_pdp_steps(
-            info,
-            &mut pdp_prep,
-            interval,
-            pre_interval,
-            post_interval,
-            elapsed,
-            &pdp_new,
-        );
-        let row_counts = update_cdp_preps(info, &mut cdp_prep, elapsed, proc_pdp_count, &pdp_temp);
-        write_rra_rows(
-            info,
-            &cdp_prep,
-            &mut current_rows,
-            &row_counts,
-            timestamp,
-            file_len,
-            &mut row_writes,
-            &mut summaries,
-        )?;
+        // A failed write in the open-PDP pass returns from process_arg
+        // before the remaining PDPs touch the prep areas.
+        if !ends_past(&row_writes, file_len) {
+            let pdp_temp = process_pdp_steps(
+                info,
+                &mut pdp_prep,
+                interval,
+                pre_interval,
+                post_interval,
+                elapsed,
+                &pdp_new,
+            );
+            let row_counts =
+                update_cdp_preps(info, &mut cdp_prep, elapsed, proc_pdp_count, &pdp_temp);
+            write_rra_rows(
+                info,
+                &cdp_prep,
+                &mut current_rows,
+                &row_counts,
+                timestamp,
+                file_len,
+                &mut row_writes,
+                &mut summaries,
+            )?;
+        }
     }
 
     // All format and semantic checks precede the first write. rrd_write
@@ -1400,13 +1405,7 @@ fn write_rra_rows(
         let base_time = time.wrapping_sub(time % step_time);
         let mut step_subtract = 1_u64;
         while remaining > 0 {
-            if row_writes.last().is_some_and(|write| {
-                let length = (write.values.len() * VALUE_LEN) as u64;
-                write
-                    .offset
-                    .checked_add(length)
-                    .is_none_or(|end| end > file_len)
-            }) {
+            if ends_past(row_writes, file_len) {
                 return Ok(());
             }
             let current_row = &mut current_rows[archive_index];
@@ -1476,6 +1475,17 @@ pub(crate) fn require_rows_in_file(
             "RRA rows extend past the end of the file".into(),
         ))
     }
+}
+
+/// Whether the last queued row ends past the file, where rrd_write fails.
+fn ends_past(row_writes: &[RowWrite], file_len: u64) -> bool {
+    row_writes.last().is_some_and(|write| {
+        let length = (write.values.len() * VALUE_LEN) as u64;
+        write
+            .offset
+            .checked_add(length)
+            .is_none_or(|end| end > file_len)
+    })
 }
 
 /// One row write_to_rras stores, with the rra_ptr it set just before.

@@ -12,6 +12,8 @@ const STAT_HEAD: usize = 128;
 const DS_DEF: usize = 120;
 const RRA_DEF: usize = 120;
 const LIVE_HEAD: usize = 16;
+const PDP_PREP: usize = 112;
+const CDP_PREP: usize = 80;
 
 /// One GAUGE `g` and the AVERAGE, MAX, MIN and LAST archives, updated a
 /// few times so every field has content.
@@ -49,6 +51,10 @@ fn patch(sides: &Sides, offset: usize, bytes: &[u8]) {
     let mut file = std::fs::read(sides.up.join("t.rrd")).unwrap();
     file[offset..offset + bytes.len()].copy_from_slice(bytes);
     sides.write("t.rrd", &file);
+}
+
+fn rra_ptr(index: usize) -> usize {
+    last_ds() + PDP_PREP + 4 * CDP_PREP + index * 8
 }
 
 fn last_ds() -> usize {
@@ -178,12 +184,19 @@ fn huge_pdp_count_wraps_like_rrd_first_and_dump() {
 // must stop queuing rows there too rather than allocate for all of them.
 #[test]
 fn huge_row_count_update_stops_at_end_of_file() {
-    let Some(sides) = fixture() else {
-        return;
-    };
-    patch(&sides, rra_def(3) + 24, &((1_u64 << 61) + 10).to_le_bytes());
-    sides.assert_same_bytes(&["update", "t.rrd", "600001001200:5"]);
-    sides.assert_same_file("t.rrd");
+    // last_up is mid-PDP, so the update first closes that PDP on its own.
+    // With rra_ptr at 9 the write past the end comes in that pass, which
+    // returns before the remaining PDPs touch the prep areas; at 8 it comes
+    // in the main pass.
+    for current_row in [8_u64, 9] {
+        let Some(sides) = fixture() else {
+            return;
+        };
+        patch(&sides, rra_def(3) + 24, &((1_u64 << 61) + 10).to_le_bytes());
+        patch(&sides, rra_ptr(3), &current_row.to_le_bytes());
+        sides.assert_same_bytes(&["update", "t.rrd", "600001001200:5"]);
+        sides.assert_same_file("t.rrd");
+    }
 }
 
 // rrd_resize copies once per stored value of the unwrapped row count, so
