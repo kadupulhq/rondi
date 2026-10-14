@@ -1030,7 +1030,7 @@ pub(crate) fn rpn_calc<'a>(
                 let tmp: Vec<f64> = (0..i64::from(base)).map(|k| s!(stptr + k)).collect();
                 while i != 0 {
                     i -= 1;
-                    j -= 1;
+                    j = j.wrapping_sub(1);
                     while j < 0 {
                         j += base;
                     }
