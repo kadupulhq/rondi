@@ -21,6 +21,11 @@ const CDP_PRIMARY_VAL: usize = 8;
 const CDP_SECONDARY_VAL: usize = 9;
 const PDP_SCRATCH: usize = 32;
 
+/// glibc's `realloc(ptr, 0)` frees a non-NULL `ptr` and returns NULL, which
+/// rrd_modify.c reports as an allocation failure; macOS returns a new
+/// minimum-size block. Only data-source-less results reach that case.
+const REALLOC_ZERO_FAILS: bool = cfg!(all(target_os = "linux", target_env = "gnu"));
+
 /// One `rra_mod_op_t`: `op` is `=`, `-` or `+` for an existing archive
 /// (`DELRRA:n` is `=` with zero rows) and `a` for an added `RRA:` whose
 /// definition is `def`.
@@ -259,6 +264,17 @@ fn find_candidate_rras(input: &Rrd, tofill: &[u8; RRA_DEF_LEN]) -> Vec<Candidate
     candidates
 }
 
+/// `tmp + v * cand_timeslot` in populate_row (rrd_modify.c:530). Its
+/// product also appears in the other arm of the conditional; GCC computes it
+/// once and adds separately, while Clang fuses the add into it.
+fn populate_mul_add(v: f64, slot: f64, tmp: f64) -> f64 {
+    if cfg!(all(target_arch = "aarch64", target_vendor = "apple")) {
+        v.mul_add(slot, tmp)
+    } else {
+        v * slot + tmp
+    }
+}
+
 /// Where populate_row writes: the output step, last update and DS count.
 #[derive(Clone, Copy)]
 struct OutShape {
@@ -343,7 +359,7 @@ fn populate_row(
                             tmp = if tmp.is_nan() {
                                 v * slot
                             } else {
-                                rrd_mul_add(v, slot, tmp)
+                                populate_mul_add(v, slot, tmp)
                             };
                             covered = covered.wrapping_add(cand_timeslot);
                             last = tmp / f64::from(covered);
@@ -507,6 +523,11 @@ fn modify_structure(
         if final_row_count == 0 {
             continue;
         }
+        // With no data sources the cdp_prep realloc asks for zero bytes;
+        // the second such call frees the block and fails under glibc.
+        if out_ds == 0 && !out.rra_defs.is_empty() && REALLOC_ZERO_FAILS {
+            return Err(StoreError::Rrd("Cannot allocate memory".into()));
+        }
         let mut new_def = *def;
         put_word(&mut new_def, 24, final_row_count as i64 as u64);
         out.rra_defs.push(new_def);
@@ -621,6 +642,18 @@ fn modify_structure(
 
     // add_rras (rrd_modify.c:1171).
     let last_rra_cnt = out.rra_defs.len();
+    // Without data sources, either the cdp_prep or the rrd_value realloc
+    // of an added archive is a zero-byte realloc of a live block.
+    if out_ds == 0 && REALLOC_ZERO_FAILS && ops.iter().any(|(op, _)| op.op == b'a') {
+        for (op, _) in ops.iter().filter(|(op, _)| op.op == b'a') {
+            let mut def = [0_u8; RRA_DEF_LEN];
+            parse_rra(op.def.as_deref().unwrap_or_default(), &mut def, step, error);
+            if let Some(message) = error.take() {
+                return Err(StoreError::Rrd(message));
+            }
+        }
+        return Err(StoreError::Rrd("out of memory".into()));
+    }
     for (op, _) in ops.iter().filter(|(op, _)| op.op == b'a') {
         let mut def = [0_u8; RRA_DEF_LEN];
         parse_rra(op.def.as_deref().unwrap_or_default(), &mut def, step, error);
