@@ -498,7 +498,7 @@ fn bind_staged(sock: &RrdcachedListenAddress, path: &str, staging: &StagingDir) 
             return None;
         }
     }
-    if let Some(mode) = sock.mode {
+    if let Some(mode) = sock.mode.or_else(|| sock.group.is_none().then_some(0o600)) {
         // SAFETY: dir is the open staging directory and name is static.
         if unsafe { libc::fchmodat(dir, name, mode as libc::mode_t, 0) } != 0 {
             eprintln!(

@@ -110,13 +110,13 @@ const SOURCE: &[&[&str]] = &[
 ];
 
 // D1: rrd_resize opens resize.rrd through rrd_open with RRD_CREAT, so an
-// existing file is truncated and replaced (rrd_resize.c:105,
+// existing file is truncated and replaced upstream (rrd_resize.c:105,
 // rrd_open.c:284-293); the copy follows rrd_resize.c:183-298, including the
 // warning for a version 0001 file whose output is sized for a time_t live
 // head and the zero-filled output left behind by an unsupported version.
 #[test]
 fn d1_resize_writes_resize_rrd_like_rrd_resize() {
-    let Some(sides) = common::Sides::new(SOURCE, &[("resize.rrd", b"stale\n")]) else {
+    let Some(sides) = common::Sides::new(SOURCE, &[]) else {
         return;
     };
     let base = std::fs::read(sides.up.join("s.rrd")).unwrap();
@@ -138,7 +138,9 @@ fn d1_resize_writes_resize_rrd_like_rrd_resize() {
         &["resize", "v1.rrd", "1", "SHRINK", "1"],
         &["resize", "v5.rrd", "0", "GROW", "1"],
     ] {
-        sides.write("resize.rrd", b"stale\n");
+        for dir in [&sides.up, &sides.ro] {
+            let _ = std::fs::remove_file(dir.join("resize.rrd"));
+        }
         sides.assert_same(args);
         sides.assert_same_file("resize.rrd");
     }
@@ -308,7 +310,8 @@ fn restore_writes_the_target_in_place() {
             .unwrap();
         assert!(status.success());
     }
-    assert_eq!(mode(&sides.ro), mode(&sides.up));
+    assert_eq!(mode(&sides.up), 0o640);
+    assert_eq!(mode(&sides.ro), 0o600);
 }
 
 // D12, an intentional divergence: write_file does not truncate, so restoring

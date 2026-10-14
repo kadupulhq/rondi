@@ -2531,7 +2531,7 @@ pub(crate) fn open_rrd_write(path: &Path) -> Result<File, StoreError> {
     options.open(path).map_err(|error| open_error(path, &error))
 }
 
-/// Open an output file for writing, creating it with mode 0666 (less the
+/// Open an output file for writing, creating it with mode 0600 (less the
 /// umask) or, with `exclusive`, only if it does not exist. RRDtool follows a
 /// symbolic link at the final component and writes through any inode; Rondi
 /// refuses a symbolic link, anything but a regular file and a file with more
@@ -2548,8 +2548,10 @@ pub fn open_output_file(path: &Path, exclusive: bool) -> std::io::Result<File> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-        // The default creation mode is already 0666 less the umask.
-        options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+        // Private output and nonblocking opens keep FIFO destinations from waiting.
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK);
         let file = options.open(path).map_err(|error| {
             if error.raw_os_error() == Some(libc::ELOOP) {
                 std::io::Error::other("refusing to follow a symbolic link")
@@ -2558,6 +2560,12 @@ pub fn open_output_file(path: &Path, exclusive: bool) -> std::io::Result<File> {
             }
         })?;
         let metadata = file.metadata()?;
+        // SAFETY: geteuid has no preconditions.
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(std::io::Error::other(
+                "refusing to write a file owned by another user",
+            ));
+        }
         if !metadata.is_file() {
             return Err(std::io::Error::other("not a regular file"));
         }

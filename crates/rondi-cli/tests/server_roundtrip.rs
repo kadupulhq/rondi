@@ -1247,7 +1247,7 @@ fn rrdcached_socket_mode_matches_upstream() {
 }
 
 #[test]
-fn rrdcached_default_socket_mode_matches_upstream_umask() {
+fn rrdcached_default_socket_mode_is_private_even_with_umask_zero() {
     if !Command::new("rrdcached")
         .arg("--version")
         .output()
@@ -1275,26 +1275,34 @@ fn rrdcached_default_socket_mode_matches_upstream_umask() {
         if name == "rondi" {
             std::os::unix::fs::symlink(executable, &alias).unwrap();
         }
-        let mut child = Command::new(if name == "rondi" {
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new(if name == "rondi" {
             alias.as_os_str()
         } else {
             executable
-        })
-        .args(["-g", "-B", "-b", root.to_str().unwrap(), "-l"])
-        .arg(format!("unix:{}", socket.display()))
-        .arg("-p")
-        .arg(run_dir.join("rrdcached.pid"))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        });
+        unsafe {
+            command.pre_exec(|| {
+                libc::umask(0);
+                Ok(())
+            });
+        }
+        let mut child = command
+            .args(["-g", "-B", "-b", root.to_str().unwrap(), "-l"])
+            .arg(format!("unix:{}", socket.display()))
+            .arg("-p")
+            .arg(run_dir.join("rrdcached.pid"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
         wait_for_socket(&mut child, &socket);
         modes.push(std::fs::metadata(&socket).unwrap().permissions().mode() & 0o7777);
         unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
         child.wait().unwrap();
     }
-    assert_eq!(modes[0], modes[1]);
+    assert_eq!(modes, [0o777, 0o600]);
 }
 
 #[test]
@@ -1447,6 +1455,7 @@ fn rrdcached_pid_file_tracks_owner_and_prevents_a_second_instance() {
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
     let arguments = |listen: &std::path::Path| {
         vec![
+            "-B".to_owned(),
             "-b".to_owned(),
             root.to_string_lossy().into_owned(),
             "-l".to_owned(),
@@ -1543,6 +1552,7 @@ fn rrdcached_log_option_appends_structured_lifecycle_events() {
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
     let mut child = Command::new(&alias)
         .args([
+            "-B",
             "-b",
             root.to_str().unwrap(),
             "-l",
@@ -2768,7 +2778,7 @@ fn rrdcached_fractional_update_timestamps_flush_byte_for_byte_like_rrdtool() {
     std::fs::copy(&cached_file, &oracle_file).unwrap();
 
     let mut child = Command::new(&alias)
-        .args(["-g", "-b"])
+        .args(["-g", "-B", "-b"])
         .arg(&root)
         .args(["-f", "2h", "-w", "5m", "-p"])
         .arg(dir.path().join("rrdcached.pid"))
@@ -2878,11 +2888,13 @@ fn rrdtool_update_daemon_and_environment_route_writes_through_rrdcached() {
         "{}",
         String::from_utf8_lossy(&created.stderr)
     );
+    // rrd_client.c canonicalizes Unix-daemon filenames; query its actual key.
+    let file = std::fs::canonicalize(&file).unwrap();
     let oracle_file = root.join("oracle.rrd");
     std::fs::copy(&file, &oracle_file).unwrap();
 
     let mut daemon = Command::new(&rrdcached)
-        .args(["-b", root.to_str().unwrap(), "-l"])
+        .args(["-B", "-b", root.to_str().unwrap(), "-l"])
         .arg(format!("unix:{}", socket.display()))
         .args(["-w", "3600"])
         .stdin(Stdio::null())
@@ -3080,7 +3092,25 @@ fn start_journaled_rrdcached(work: &std::path::Path, rondi: bool, options: &[&st
     } else {
         "rrdcached".into()
     };
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    // Exercise both confined and unconfined protocol semantics as the same
+    // unprivileged account. Root confinement is tested separately.
+    if unsafe { libc::geteuid() } == 0 {
+        use std::os::unix::process::CommandExt;
+        fn own_fixture(path: &std::path::Path) {
+            let metadata = std::fs::symlink_metadata(path).unwrap();
+            let name = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+            assert_eq!(unsafe { libc::lchown(name.as_ptr(), 65534, 65534) }, 0);
+            if metadata.is_dir() {
+                for entry in std::fs::read_dir(path).unwrap() {
+                    own_fixture(&entry.unwrap().path());
+                }
+            }
+        }
+        own_fixture(work);
+        command.uid(65534).gid(65534);
+    }
+    let mut child = command
         .arg("-g")
         .arg("-p")
         .arg(work.join("rrdcached.pid"))
@@ -3540,7 +3570,15 @@ fn rrdcached_without_base_directory_matches_upstream_and_writes_nothing_to_tmp()
         } else {
             "rrdcached".into()
         };
-        let mut daemon = Command::new(program)
+        let mut command = Command::new(program);
+        if unsafe { libc::geteuid() } == 0 {
+            use std::os::unix::process::CommandExt;
+            for path in [&work, &rrd, &baseline] {
+                std::os::unix::fs::chown(path, Some(65534), Some(65534)).unwrap();
+            }
+            command.uid(65534).gid(65534);
+        }
+        let mut daemon = command
             .arg("-g")
             .arg("-p")
             .arg(work.join("pid"))
@@ -3548,7 +3586,7 @@ fn rrdcached_without_base_directory_matches_upstream_and_writes_nothing_to_tmp()
             .arg(format!("unix:{}", socket.display()))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .unwrap();
         wait_for_socket(&mut daemon, &socket);
@@ -3751,7 +3789,7 @@ fn rrdcached_update_waiting_on_an_rrd_lock_does_not_stall_other_clients() {
     std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
     let mut child = Command::new(&alias)
-        .args(["-b", root.to_str().unwrap(), "-l"])
+        .args(["-B", "-b", root.to_str().unwrap(), "-l"])
         .arg(format!("unix:{}", socket.display()))
         .env("RRD_LOCKING", "block")
         .stdin(Stdio::null())
@@ -3827,7 +3865,7 @@ fn rrdcached_idle_client_does_not_block_shutdown_flush() {
     std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
     let mut child = Command::new(&alias)
-        .args(["-b", root.to_str().unwrap(), "-w", "3600", "-l"])
+        .args(["-B", "-b", root.to_str().unwrap(), "-w", "3600", "-l"])
         .arg(format!("unix:{}", socket.display()))
         .stdin(Stdio::null())
         .stdout(Stdio::null())

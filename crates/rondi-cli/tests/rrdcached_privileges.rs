@@ -242,7 +242,15 @@ fn rrdcached_group_only_drop_replaces_root_supplementary_groups() {
     let run = std::fs::canonicalize(dir.path()).unwrap();
     let socket = run.join("rrdcached.sock");
     let mut child = Command::new(daemon("rondi", &run))
-        .args(["-g", "-b", run.to_str().unwrap(), "-G", "rondi-test", "-l"])
+        .args([
+            "-g",
+            "-B",
+            "-b",
+            run.to_str().unwrap(),
+            "-G",
+            "rondi-test",
+            "-l",
+        ])
         .arg(&socket)
         .arg("-p")
         .arg(run.join("rrdcached.pid"))
@@ -277,7 +285,7 @@ fn rrdcached_unknown_account_exits_before_binding_like_upstream() {
             std::fs::create_dir_all(&run).unwrap();
             let socket = run.join("rrdcached.sock");
             let output = Command::new(daemon(name, &run))
-                .args(["-g", "-b", run.to_str().unwrap(), option, value, "-l"])
+                .args(["-g", "-B", "-b", run.to_str().unwrap(), option, value, "-l"])
                 .arg(&socket)
                 .arg("-p")
                 .arg(run.join("rrdcached.pid"))
@@ -389,7 +397,7 @@ fn rrdcached_root_refuses_a_socket_directory_another_user_can_write() {
         std::fs::set_permissions(&sockets, std::fs::Permissions::from_mode(mode)).unwrap();
         let socket = sockets.join("rrdcached.sock");
         let mut child = Command::new(daemon("rondi", &run))
-            .args(["-g", "-b", run.to_str().unwrap(), "-m", "0660", "-l"])
+            .args(["-g", "-B", "-b", run.to_str().unwrap(), "-m", "0660", "-l"])
             .arg(&socket)
             .arg("-p")
             .arg(run.join("rrdcached.pid"))
@@ -440,7 +448,15 @@ fn rrdcached_user_without_group_uses_the_accounts_primary_group() {
     std::os::unix::fs::chown(&data, Some(account.uid), Some(account.gid)).unwrap();
     let socket = run.join("rrdcached.sock");
     let mut child = Command::new(daemon("rondi", &run))
-        .args(["-g", "-b", data.to_str().unwrap(), "-U", "rondi-test", "-l"])
+        .args([
+            "-g",
+            "-B",
+            "-b",
+            data.to_str().unwrap(),
+            "-U",
+            "rondi-test",
+            "-l",
+        ])
         .arg(&socket)
         .arg("-p")
         .arg(run.join("rrdcached.pid"))

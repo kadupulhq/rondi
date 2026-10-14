@@ -259,6 +259,20 @@ impl RrdcachedBase {
     fn fs_path(&self, requested: &str) -> PathBuf {
         let requested = Path::new(requested);
         if requested.is_absolute() {
+            if self.confined() {
+                if let Some(given) = &self.given {
+                    let given = if given.is_absolute() {
+                        given.clone()
+                    } else {
+                        std::env::current_dir().unwrap_or_default().join(given)
+                    };
+                    // Normalize only the configured base alias (e.g. /var on
+                    // macOS), never request-controlled descendant symlinks.
+                    if let Ok(relative) = requested.strip_prefix(given) {
+                        return self.root.join(relative);
+                    }
+                }
+            }
             requested.to_path_buf()
         } else {
             self.cwd.join(requested)
@@ -1654,7 +1668,7 @@ pub async fn run_rrdcached(mut args: RrdcachedConfig) -> Result<(), Box<dyn std:
     if unsafe { libc::geteuid() } == 0 && !base.confined() {
         // Upstream logs nothing here; a root daemon without -B lets any
         // client name any file.
-        tracing::warn!("rrdcached_running_as_root_without_base_only");
+        return Err("rrdcached refuses to run as root without -B and -b".into());
     }
     let stats = Arc::new(RrdcachedStats::default());
     let (mut queue, had_journal) = RrdcachedQueue::open(
