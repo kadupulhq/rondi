@@ -343,6 +343,23 @@ fn restore_integer_fields_follow_the_libc_errno() {
     }
 }
 
+// libxml2 detects a UTF-8 byte order mark and skips it, so a dump saved
+// with one restores like the plain file.
+#[test]
+fn restore_skips_a_utf8_byte_order_mark() {
+    let Some(sides) = common::Sides::new(SOURCE, &[]) else {
+        return;
+    };
+    let mut xml = b"\xef\xbb\xbf".to_vec();
+    xml.extend_from_slice(&std::fs::read(sides.up.join("s.xml")).unwrap());
+    assert_same_restore(&sides, "bom", &xml);
+    let bare = std::fs::read_to_string(sides.up.join("s.xml")).unwrap();
+    let bare = &bare[bare.find("<rrd>").unwrap()..];
+    let mut xml = b"\xef\xbb\xbf".to_vec();
+    xml.extend_from_slice(bare.as_bytes());
+    assert_same_restore(&sides, "bom-bare", &xml);
+}
+
 // write_file (rrd_restore.c:1318-1336) opens the target O_WRONLY|O_CREAT,
 // adding O_EXCL without -f, with mode 0666, and writes it in place.
 #[test]

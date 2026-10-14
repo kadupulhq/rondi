@@ -41,9 +41,16 @@ struct XmlReader<'a> {
 
 impl<'a> XmlReader<'a> {
     fn new(data: &'a [u8]) -> Self {
+        // libxml2 skips a UTF-8 byte order mark (xmlSwitchEncoding); the
+        // chunk offsets still count its bytes.
+        let position = if data.starts_with(b"\xef\xbb\xbf") {
+            3
+        } else {
+            0
+        };
         Self {
             data,
-            position: 0,
+            position,
             parsed: 0,
             node: NodeType::Other,
             name: String::new(),
