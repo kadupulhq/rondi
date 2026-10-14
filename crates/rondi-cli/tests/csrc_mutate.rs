@@ -311,7 +311,7 @@ fn assert_same_restore(sides: &common::Sides, name: &str, xml: &[u8]) {
         (
             output.status.code(),
             String::from_utf8_lossy(&output.stdout).into_owned(),
-            without_line_numbers(&String::from_utf8_lossy(&output.stderr)),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
         )
     });
     assert_eq!(ro, up, "{input} from stdin");
@@ -358,6 +358,36 @@ fn restore_skips_a_utf8_byte_order_mark() {
     let mut xml = b"\xef\xbb\xbf".to_vec();
     xml.extend_from_slice(bare.as_bytes());
     assert_same_restore(&sides, "bom-bare", &xml);
+}
+
+// Content after </rrd> is a libxml2 parse error ("Extra content at the end
+// of the document"), raised when the reader pushes the chunk holding it. A
+// named file reaches that chunk while still inside the last RRA, so the
+// reader fails mid-archive, keeps walking and parse_tag_rra trips over the
+// next row; stdin arrives a line at a time and fails only after </rra>,
+// leaving the error set on a parse that succeeds, so the file is written.
+// Trailing white space and comments are allowed.
+#[test]
+fn restore_rejects_content_after_the_root_element() {
+    let Some(sides) = common::Sides::new(SOURCE, &[]) else {
+        return;
+    };
+    let xml = std::fs::read(sides.up.join("s.xml")).unwrap();
+    let root = String::from_utf8_lossy(&xml);
+    let root = &root[root.find("<rrd>").unwrap()..];
+    for (name, tail) in [
+        ("ws", "\n\n  \n".to_owned()),
+        ("comment", "<!-- c -->\n".to_owned()),
+        ("pi", "<?pi x?>\n".to_owned()),
+        ("element", "<x/>\n".to_owned()),
+        ("text", "junk\n".to_owned()),
+        ("char", "x".to_owned()),
+        ("second", root.to_owned()),
+    ] {
+        let mut variant = xml.clone();
+        variant.extend_from_slice(tail.as_bytes());
+        assert_same_restore(&sides, &format!("tail-{name}"), &variant);
+    }
 }
 
 // write_file (rrd_restore.c:1318-1336) opens the target O_WRONLY|O_CREAT,
