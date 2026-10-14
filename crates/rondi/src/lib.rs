@@ -27,6 +27,6 @@ pub use rrd_number::parse_rrd_number;
 pub use storage::{Store, StoreError};
 pub use vdef::{VdefError, VdefFunction, VdefResult, evaluate_vdef};
 pub use xport::{
-    RrdXportCdef, RrdXportColumn, RrdXportDefinition, RrdXportResult, fetch_xport,
-    fetch_xport_with_cdefs,
+    RrdXportCdef, RrdXportColumn, RrdXportDefinition, RrdXportOperation, RrdXportResult,
+    RrdXportShift, fetch_xport, fetch_xport_with_cdefs, fetch_xport_with_operations,
 };

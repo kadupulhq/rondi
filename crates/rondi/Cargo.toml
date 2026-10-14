@@ -19,8 +19,17 @@ libc.workspace = true
 roxmltree.workspace = true
 
 [dev-dependencies]
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support", "plotters", "html_reports"] }
 tempfile = "3"
 
 [[bench]]
 name = "workload"
+harness = false
+
+[[bench]]
+name = "rrd_workload"
+harness = false
+
+[[bench]]
+name = "rrd_queries"
 harness = false

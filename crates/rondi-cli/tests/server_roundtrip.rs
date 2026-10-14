@@ -2690,7 +2690,10 @@ fn rrdcached_fractional_update_timestamps_flush_byte_for_byte_like_rrdtool() {
     );
     assert_eq!(
         rrdcached_request(&mut reader, "FLUSH fractional.rrd\n"),
-        format!("0 Successfully flushed {}.\n", cached_file.display())
+        format!(
+            "0 Successfully flushed {}.\n",
+            std::fs::canonicalize(&cached_file).unwrap().display()
+        )
     );
 
     let updated = Command::new("rrdtool")
@@ -3037,4 +3040,78 @@ fn rrdcached_recovers_journaled_update_after_crash() {
     drop(stream);
     restarted.kill().unwrap();
     restarted.wait().unwrap();
+}
+
+#[test]
+fn rrdtool_daemon_fetch_preserves_wire_numbers_like_upstream() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping FETCH numeric differential: rrdtool is not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let alias = dir.path().join("rrdtool");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    for values in [
+        "nan -nan inf -inf 1.00000000005",
+        "NaN -NaN Infinity -Infinity 9.999999999949999",
+    ] {
+        let run = |program: &std::path::Path, name: &str| {
+            let socket = dir.path().join(name);
+            let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+            let response = format!(
+                "7 rows follow\nFlushVersion: 1\nStart: 1000000000\nEnd: 1000000010\nStep: 10\nDSCount: 5\nDSName: a b c d e\n1000000010: {values}\n"
+            );
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut request = String::new();
+                BufReader::new(&mut stream).read_line(&mut request).unwrap();
+                assert!(request.starts_with("FETCH "), "{request}");
+                stream.write_all(response.as_bytes()).unwrap();
+            });
+            let output = Command::new(program)
+                .args([
+                    "fetch",
+                    "sample.rrd",
+                    "AVERAGE",
+                    "--start",
+                    "1000000000",
+                    "--end",
+                    "1000000010",
+                    "--daemon",
+                ])
+                .arg(format!("unix:{}", socket.display()))
+                .env_remove("RRDCACHED_ADDRESS")
+                .output()
+                .unwrap();
+            server.join().unwrap();
+            std::fs::remove_file(socket).unwrap();
+            output
+        };
+        let expected = run(std::path::Path::new("rrdtool"), "upstream.sock");
+        let actual = run(&alias, "rondi.sock");
+        assert!(
+            expected.status.success(),
+            "{}",
+            String::from_utf8_lossy(&expected.stderr)
+        );
+        assert!(
+            actual.status.success(),
+            "{}",
+            String::from_utf8_lossy(&actual.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stdout),
+            String::from_utf8_lossy(&expected.stdout),
+            "{values}"
+        );
+        assert_eq!(actual.stderr, expected.stderr);
+        assert_eq!(actual.status.code(), expected.status.code());
+    }
 }

@@ -297,6 +297,94 @@ fn fetch_uses_rrdtool_resolution_choice_across_archives() {
 }
 
 #[test]
+fn buffered_fetch_matches_rrdtool_across_buffer_and_ring_boundaries() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping buffered fetch differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("buffered.rrd");
+    let sources = (0..4)
+        .map(|index| format!("DS:x{index}:GAUGE:10000:U:U"))
+        .collect::<Vec<_>>();
+    rondi::create_rrd_file(
+        &path,
+        1_000_000_000,
+        1,
+        &sources,
+        &["RRA:AVERAGE:0.5:1:5000".into()],
+        true,
+    )
+    .unwrap();
+    let output = Command::new("rrdtool")
+        .arg("update")
+        .arg(&path)
+        .args([
+            "1000002000:1:2:3:4",
+            "1000004000:10:20:30:40",
+            "1000006000:100:200:300:400",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        rondi::inspect_rrd_file(&path).unwrap().archives[0].current_row,
+        1000
+    );
+    let original = std::fs::read(&path).unwrap();
+    for (start, end) in [
+        (999_999_000, 1_000_007_000),
+        (1_000_003_000, 1_000_006_000),
+        (1_000_007_000, 1_000_008_000),
+    ] {
+        let oracle = Command::new("rrdtool")
+            .arg("fetch")
+            .arg(&path)
+            .arg("AVERAGE")
+            .arg("--start")
+            .arg(start.to_string())
+            .arg("--end")
+            .arg(end.to_string())
+            .output()
+            .unwrap();
+        assert!(oracle.status.success());
+        let expected = String::from_utf8(oracle.stdout)
+            .unwrap()
+            .lines()
+            .filter_map(|line| {
+                let (timestamp, values) = line.trim().split_once(':')?;
+                Some((
+                    timestamp.parse::<i64>().ok()?,
+                    values
+                        .split_whitespace()
+                        .map(|value| {
+                            let value = value.parse::<f64>().unwrap();
+                            value.is_finite().then_some(value)
+                        })
+                        .collect::<Vec<_>>(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let fetched = rondi::fetch_rrd_file(&path, "AVERAGE", start, end, 1).unwrap();
+        let actual = fetched
+            .rows
+            .into_iter()
+            .map(|row| (row.timestamp, row.values))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "range {start}..{end}");
+    }
+    assert_eq!(std::fs::read(path).unwrap(), original);
+}
+
+#[test]
 fn in_place_gauge_update_is_byte_compatible_and_upstream_can_continue() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {

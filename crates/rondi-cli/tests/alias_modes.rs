@@ -2427,7 +2427,15 @@ fn rrdtool_xport_prediction_matches_mixed_resolution_history() {
                 .args([
                     "update",
                     coarse_file.to_str().unwrap(),
-                    &format!("{}:{}", 1_000_000_000 + index * 10, index * 11),
+                    &format!(
+                        "{}:{}",
+                        1_000_000_000 + index * 10,
+                        if index == 6 {
+                            "U".to_string()
+                        } else {
+                            (index * 11).to_string()
+                        }
+                    ),
                 ])
                 .output()
                 .unwrap();
@@ -2437,42 +2445,65 @@ fn rrdtool_xport_prediction_matches_mixed_resolution_history() {
 
     let fine = format!("DEF:fine={}:value:AVERAGE", fine_file.display());
     let coarse = format!("DEF:coarse={}:value:MAX", coarse_file.display());
-    let args = [
-        "xport",
-        "--start",
-        "1000000000",
-        "--end",
-        "1000000100",
-        "--step",
-        "10",
-    ];
-    let run = |program: &std::path::Path| {
-        Command::new(program)
-            .args(args)
-            .arg(&fine)
-            .arg(&coarse)
-            .arg("CDEF:forecast=0,10,2,20,coarse,PREDICT")
-            .arg("XPORT:forecast:Forecast")
-            .output()
-            .unwrap()
-    };
-    let upstream = run(std::path::Path::new("rrdtool"));
     let alias = temp.path().join("rrdtool");
     symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
-    let actual = run(&alias);
-    assert!(
-        upstream.status.success(),
-        "{}",
-        String::from_utf8_lossy(&upstream.stderr)
-    );
-    assert!(
-        actual.status.success(),
-        "{}",
-        String::from_utf8_lossy(&actual.stderr)
-    );
-    assert_eq!(actual.status.code(), upstream.status.code());
-    assert_eq!(actual.stdout, upstream.stdout);
-    assert_eq!(actual.stderr, upstream.stderr);
+    // Exporting the fine DEF must not change the coarse CDEF's evaluation
+    // interval. Also force a fine CDEF with a coarse prediction input to check
+    // rrd_rpncalc.c's source-pointer advancement between coarse boundaries.
+    for (start, end) in [("1000000000", "1000000100"), ("1000000005", "1000000100")] {
+        for expression in [
+            "0,10,2,20,coarse,PREDICT",
+            "0,10,2,20,coarse,PREDICTSIGMA",
+            "0,10,2,20,50,coarse,PREDICTPERC",
+            "0,10,2,20,-50,coarse,PREDICTPERC",
+            "10,-2,20,coarse,PREDICT",
+            "fine,POP,0,10,2,20,coarse,PREDICT",
+            "fine,POP,0,10,2,20,coarse,PREDICTSIGMA",
+            "fine,POP,0,10,2,20,50,coarse,PREDICTPERC",
+            "coarse,COUNT,+",
+            "coarse,PREV,ADDNAN",
+            "PREV(coarse)",
+            "0,10,2,20,history,PREDICT",
+            "history,PREV,ADDNAN",
+        ] {
+            for export_fine in [false, true] {
+                let run = |program: &std::path::Path| {
+                    let mut command = Command::new(program);
+                    command
+                        .args(["xport", "--start", start, "--end", end, "--step", "10"])
+                        .arg(&fine)
+                        .arg(&coarse)
+                        .arg("CDEF:history=coarse,2,*")
+                        .arg(format!("CDEF:forecast={expression}"))
+                        .arg("XPORT:forecast:Forecast");
+                    if export_fine {
+                        command.arg("XPORT:fine:Fine");
+                    }
+                    command.output().unwrap()
+                };
+                let upstream = run(std::path::Path::new("rrdtool"));
+                let actual = run(&alias);
+                let context = format!("{expression}, range={start}..{end}, fine={export_fine}");
+                assert!(
+                    upstream.status.success(),
+                    "{context}: {}",
+                    String::from_utf8_lossy(&upstream.stderr)
+                );
+                assert!(
+                    actual.status.success(),
+                    "{context}: {}",
+                    String::from_utf8_lossy(&actual.stderr)
+                );
+                assert_eq!(actual.status.code(), upstream.status.code(), "{context}");
+                assert_eq!(
+                    String::from_utf8_lossy(&actual.stdout),
+                    String::from_utf8_lossy(&upstream.stdout),
+                    "{context}"
+                );
+                assert_eq!(actual.stderr, upstream.stderr, "{context}");
+            }
+        }
+    }
 }
 
 #[test]
@@ -3965,10 +3996,44 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
             String::from_utf8_lossy(&result.stderr)
         );
     }
-    assert_ne!(
-        std::fs::read(&direction_paths[0]).unwrap(),
-        std::fs::read(&direction_paths[1]).unwrap()
-    );
+    // C reverses vertical row positions, preserving order within a row.
+    // Compare the same-row case with the oracle, then exercise two rows.
+    for (case, elements) in [
+        (
+            "same-row",
+            vec!["LINE1:x#ff0000:first", "LINE1:x#0000ff:second"],
+        ),
+        (
+            "two-rows",
+            vec!["LINE1:x#ff0000:first\\l", "LINE1:x#0000ff:second\\l"],
+        ),
+    ] {
+        let mut equality = Vec::new();
+        for (program, label) in [
+            (std::path::Path::new("rrdtool"), "oracle"),
+            (alias.as_path(), "rondi"),
+        ] {
+            let mut images = Vec::new();
+            for direction in ["topdown", "bottomup"] {
+                let path = temp.path().join(format!("{label}-{case}-{direction}.png"));
+                let result = render_options(
+                    program,
+                    &path,
+                    &[&format!("--legend-direction={direction}")],
+                    &elements,
+                );
+                assert!(
+                    result.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                images.push(std::fs::read(path).unwrap());
+            }
+            equality.push(images[0] == images[1]);
+        }
+        assert_eq!(equality[1], equality[0], "{case}");
+        assert_eq!(equality[0], case == "same-row", "oracle {case}");
+    }
     let baseline_path = temp.path().join("color-baseline.png");
     let baseline = render_options(
         alias.as_path(),
@@ -7075,4 +7140,1238 @@ fn rrdtool_updatev_matches_upstream_output_and_file_changes() {
 
 fn upstream_path(directory: &std::path::Path) -> std::path::PathBuf {
     directory.join("upstream-dump.xml")
+}
+
+#[test]
+fn graph_vdef_rules_match_literal_rules_and_upstream_validation() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping VDEF rule differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("rules.rrd");
+    let created = Command::new("rrdtool")
+        .args([
+            "create",
+            file.to_str().unwrap(),
+            "--start",
+            "1000000000",
+            "--step",
+            "10",
+            "DS:x:GAUGE:30:U:U",
+            "RRA:AVERAGE:0.5:1:8",
+        ])
+        .output()
+        .unwrap();
+    assert!(created.status.success());
+    let updated = Command::new("rrdtool")
+        .args([
+            "update",
+            file.to_str().unwrap(),
+            "1000000010:3",
+            "1000000020:5",
+            "1000000030:9",
+            "1000000040:4",
+            "1000000050:2",
+        ])
+        .output()
+        .unwrap();
+    assert!(updated.status.success());
+    let def = format!("DEF:x={}:x:AVERAGE", file.display());
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let run =
+        |program: &std::path::Path, path: &std::path::Path, rules: &[&str], before_line: bool| {
+            let mut command = Command::new(program);
+            command
+                .args([
+                    "graph",
+                    path.to_str().unwrap(),
+                    "--start",
+                    "1000000000",
+                    "--end",
+                    "1000000050",
+                    "--only-graph",
+                    "--width",
+                    "100",
+                    "--height",
+                    "50",
+                    "--lower-limit",
+                    "0",
+                    "--upper-limit",
+                    "10",
+                    "--rigid",
+                ])
+                .arg(&def)
+                .args([
+                    "CDEF:missing=x,POP,UNKN",
+                    "VDEF:peak=x,MAXIMUM",
+                    "VDEF:first=x,FIRST",
+                    "VDEF:average=x,AVERAGE",
+                    "VDEF:unknown=missing,MAXIMUM",
+                ]);
+            if before_line {
+                command.args(rules).arg("LINE1:x#0000ff");
+            } else {
+                command.arg("LINE1:x#0000ff").args(rules);
+            }
+            command.output().unwrap()
+        };
+    for (program, name) in [
+        (std::path::Path::new("rrdtool"), "oracle"),
+        (alias.as_path(), "rondi"),
+    ] {
+        for (index, (named, literal)) in [
+            (
+                vec![
+                    "HRULE:peak#ff0000:Peak:dashes=2,4",
+                    "VRULE:peak#00ff00:Peak time",
+                    "VRULE:first#ff00ff:First",
+                ],
+                vec![
+                    "HRULE:9#ff0000:Peak:dashes=2,4",
+                    "VRULE:1000000030#00ff00:Peak time",
+                    "VRULE:1000000000#ff00ff:First",
+                ],
+            ),
+            (
+                vec![
+                    "HRULE:unknown#ff0000",
+                    "VRULE:unknown#00ff00",
+                    "VRULE:average#ff00ff",
+                ],
+                vec![],
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let named_path = temp.path().join(format!("{name}-{index}-named.png"));
+            let literal_path = temp.path().join(format!("{name}-{index}-literal.png"));
+            let actual = run(program, &named_path, &named, true);
+            let expected = run(program, &literal_path, &literal, false);
+            assert!(
+                actual.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&actual.stderr)
+            );
+            assert!(
+                expected.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&expected.stderr)
+            );
+            assert_eq!(actual.status.code(), expected.status.code());
+            assert_eq!(actual.stderr, expected.stderr);
+            assert_eq!(
+                std::fs::read(named_path).unwrap(),
+                std::fs::read(literal_path).unwrap(),
+                "{name}, case {index}"
+            );
+        }
+    }
+    for invalid in [
+        "HRULE:x#ff0000",
+        "VRULE:missing#ff0000",
+        "HRULE:absent#ff0000",
+        "VRULE:absent#ff0000",
+    ] {
+        let path = temp.path().join("invalid.png");
+        let expected = run(std::path::Path::new("rrdtool"), &path, &[invalid], false);
+        let actual = run(&alias, &path, &[invalid], false);
+        assert!(!expected.status.success(), "{invalid}");
+        assert_eq!(actual.status.code(), expected.status.code(), "{invalid}");
+        assert_eq!(actual.stdout, expected.stdout, "{invalid}");
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stderr),
+            String::from_utf8_lossy(&expected.stderr),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn graph_comments_and_alignment_preserve_upstream_metadata_order() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping graph comment differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("comments.rrd");
+    assert!(
+        Command::new("rrdtool")
+            .args([
+                "create",
+                file.to_str().unwrap(),
+                "--start",
+                "1000000000",
+                "--step",
+                "10",
+                "DS:x:GAUGE:30:U:U",
+                "RRA:AVERAGE:0.5:1:8"
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        Command::new("rrdtool")
+            .args([
+                "update",
+                file.to_str().unwrap(),
+                "1000000010:3",
+                "1000000020:5",
+                "1000000030:9",
+                "1000000040:4"
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let def = format!("DEF:x={}:x:AVERAGE", file.display());
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let run = |program: &std::path::Path,
+               path: &std::path::Path,
+               format: &str,
+               elements: &[&str],
+               only_graph: bool| {
+        let mut command = Command::new(program);
+        command
+            .args([
+                "graphv",
+                path.to_str().unwrap(),
+                "--imgformat",
+                format,
+                "--start",
+                "1000000000",
+                "--end",
+                "1000000040",
+            ])
+            .arg(&def)
+            .arg("VDEF:mean=x,AVERAGE");
+        if only_graph {
+            command.arg("--only-graph");
+        }
+        command.args(elements).output().unwrap()
+    };
+    let elements = [
+        "TEXTALIGN:align=center",
+        "COMMENT:",
+        "COMMENT:legend=Named",
+        "COMMENT:From 10\\:20 to 10\\:40\\c",
+        "LINE1:x#0000ff:Value",
+        "GPRINT:mean:Mean %0.2lf",
+        "COMMENT:Between",
+        "AREA:x#ff0000:Area",
+        "GPRINT:mean:Again %0.2lf",
+        "TEXTALIGN:right",
+        "COMMENT:End\\l",
+    ];
+    for format in ["XML", "JSON"] {
+        let oracle_path = temp.path().join(format!("oracle.{format}"));
+        let actual_path = temp.path().join(format!("actual.{format}"));
+        let expected = run(
+            std::path::Path::new("rrdtool"),
+            &oracle_path,
+            format,
+            &elements,
+            false,
+        );
+        let actual = run(&alias, &actual_path, format, &elements, false);
+        assert!(
+            expected.status.success(),
+            "{}",
+            String::from_utf8_lossy(&expected.stderr)
+        );
+        assert!(
+            actual.status.success(),
+            "{}",
+            String::from_utf8_lossy(&actual.stderr)
+        );
+        assert_eq!(actual.status.code(), expected.status.code());
+        assert_eq!(actual.stdout, expected.stdout);
+        assert_eq!(actual.stderr, expected.stderr);
+        assert_eq!(
+            String::from_utf8_lossy(&std::fs::read(actual_path).unwrap()),
+            String::from_utf8_lossy(&std::fs::read(oracle_path).unwrap()),
+            "{format}"
+        );
+    }
+    for invalid in [
+        "TEXTALIGN:",
+        "TEXTALIGN:diagonal",
+        "TEXTALIGN:left:extra",
+        "COMMENT:one:two",
+        "COMMENT:legend=",
+    ] {
+        let path = temp.path().join("invalid.json");
+        let expected = run(
+            std::path::Path::new("rrdtool"),
+            &path,
+            "JSON",
+            &["LINE1:x#0000ff:Value", invalid],
+            false,
+        );
+        let actual = run(
+            &alias,
+            &path,
+            "JSON",
+            &["LINE1:x#0000ff:Value", invalid],
+            false,
+        );
+        assert!(!expected.status.success(), "{invalid}");
+        assert_eq!(actual.status.code(), expected.status.code(), "{invalid}");
+        assert_eq!(actual.stdout, expected.stdout, "{invalid}");
+        assert_eq!(actual.stderr, expected.stderr, "{invalid}");
+    }
+    // Native text rendering is approximate; only-graph must suppress comments.
+    for only_graph in [false, true] {
+        let with = temp.path().join("with.png");
+        let without = temp.path().join("without.png");
+        let output = run(
+            &alias,
+            &with,
+            "PNG",
+            &["COMMENT:Header", "LINE1:x#0000ff:Value"],
+            only_graph,
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            run(
+                &alias,
+                &without,
+                "PNG",
+                &["LINE1:x#0000ff:Value"],
+                only_graph
+            )
+            .status
+            .success()
+        );
+        assert_eq!(
+            std::fs::read(with).unwrap() == std::fs::read(without).unwrap(),
+            only_graph
+        );
+    }
+}
+
+#[test]
+fn graph_and_xport_shift_match_ordered_upstream_calculations() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping SHIFT differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("shift.rrd");
+    assert!(
+        Command::new("rrdtool")
+            .args([
+                "create",
+                file.to_str().unwrap(),
+                "--start",
+                "1000000000",
+                "--step",
+                "10",
+                "DS:x:GAUGE:30:U:U",
+                "RRA:AVERAGE:0.5:1:16"
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        Command::new("rrdtool")
+            .args([
+                "update",
+                file.to_str().unwrap(),
+                "1000000010:10",
+                "1000000020:20",
+                "1000000030:30",
+                "1000000040:40",
+                "1000000050:U",
+                "1000000060:60"
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let def = format!("DEF:x={}:x:AVERAGE", file.display());
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let run = |program: &std::path::Path, mode: &str, elements: &[&str]| {
+        let mut command = Command::new(program);
+        command.arg(mode);
+        if mode == "graphv" {
+            command
+                .arg(temp.path().join("shift.xml"))
+                .args(["--imgformat", "XML"]);
+        }
+        command
+            .args([
+                "--start",
+                "1000000000",
+                "--end",
+                "1000000060",
+                "--step",
+                "10",
+            ])
+            .arg(&def)
+            .args(elements)
+            .output()
+            .unwrap()
+    };
+    for elements in [
+        vec!["SHIFT:x:15", "XPORT:x:X"],
+        vec!["SHIFT:x:-15", "XPORT:x:X"],
+        vec!["SHIFT:x:shift=5", "XPORT:x:X"],
+        vec!["SHIFT:x:20", "SHIFT:x:-10", "XPORT:x:X"],
+        vec![
+            "CDEF:before=x,1,*",
+            "SHIFT:x:20",
+            "CDEF:after=x,1,*",
+            "XPORT:before:Before",
+            "XPORT:after:After",
+            "XPORT:x:X",
+        ],
+        vec!["CDEF:y=x,2,*", "SHIFT:y:-20", "XPORT:y:Y"],
+        vec!["VDEF:offset=x,AVERAGE", "SHIFT:x:offset", "XPORT:x:X"],
+    ] {
+        let expected = run(std::path::Path::new("rrdtool"), "xport", &elements);
+        let actual = run(&alias, "xport", &elements);
+        assert!(
+            expected.status.success(),
+            "{elements:?}: {}",
+            String::from_utf8_lossy(&expected.stderr)
+        );
+        assert!(
+            actual.status.success(),
+            "{elements:?}: {}",
+            String::from_utf8_lossy(&actual.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stdout),
+            String::from_utf8_lossy(&expected.stdout),
+            "{elements:?}"
+        );
+        assert_eq!(actual.stderr, expected.stderr);
+        assert_eq!(actual.status.code(), expected.status.code());
+    }
+    let elements = [
+        "VDEF:before=x,MAXIMUM",
+        "SHIFT:x:20",
+        "VDEF:after=x,MAXIMUM",
+        "LINE1:x#ff0000:X",
+        "PRINT:before:%s:strftime",
+        "PRINT:after:%s:strftime",
+    ];
+    let expected = run(std::path::Path::new("rrdtool"), "graphv", &elements);
+    let expected_file = std::fs::read(temp.path().join("shift.xml")).unwrap();
+    let actual = run(&alias, "graphv", &elements);
+    assert!(
+        expected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&expected.stderr)
+    );
+    assert!(
+        actual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(
+        std::fs::read(temp.path().join("shift.xml")).unwrap(),
+        expected_file
+    );
+    for invalid in [
+        "SHIFT:absent:10",
+        "SHIFT:x:nope",
+        "SHIFT:x:1.5",
+        "SHIFT:x:x",
+        "SHIFT:maximum:10",
+    ] {
+        let elements = ["VDEF:maximum=x,MAXIMUM", invalid, "XPORT:x:X"];
+        let expected = run(std::path::Path::new("rrdtool"), "xport", &elements);
+        let actual = run(&alias, "xport", &elements);
+        assert!(!expected.status.success());
+        assert_eq!(actual.status.code(), expected.status.code(), "{invalid}");
+        assert_eq!(
+            String::from_utf8_lossy(&actual.stderr),
+            String::from_utf8_lossy(&expected.stderr),
+            "{invalid}"
+        );
+    }
+}
+
+#[test]
+fn cdef_vdef_scalars_match_upstream_substitution_and_timing() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping CDEF VDEF scalar differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("scalars.rrd");
+    assert!(
+        Command::new("rrdtool")
+            .args([
+                "create",
+                file.to_str().unwrap(),
+                "--start",
+                "1000000000",
+                "--step",
+                "10",
+                "DS:x:GAUGE:30:U:U",
+                "RRA:AVERAGE:0.5:1:16"
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        Command::new("rrdtool")
+            .args([
+                "update",
+                file.to_str().unwrap(),
+                "1000000010:1.123456789012345",
+                "1000000020:2.234567890123456",
+                "1000000030:U",
+                "1000000040:4.345678901234567",
+                "1000000050:20.45678901234567",
+                "1000000060:6.567890123456789"
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let def = format!("DEF:x={}:x:AVERAGE", file.display());
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let run = |program: &std::path::Path, elements: &[&str], format: &str| {
+        Command::new(program)
+            .args([
+                "graphv",
+                temp.path().join("scalars.json").to_str().unwrap(),
+                "--imgformat",
+                "JSON",
+                "--start",
+                "1000000000",
+                "--end",
+                "1000000060",
+            ])
+            .arg(&def)
+            .args(elements)
+            .arg("LINE1:result#ff0000:Result")
+            .arg(format!("PRINT:result:LAST:{format}"))
+            .output()
+            .unwrap()
+    };
+    for elements in [
+        vec!["VDEF:mean=x,AVERAGE", "CDEF:result=x,mean,-"],
+        vec![
+            "VDEF:percentile=x,50,PERCENTNAN",
+            "CDEF:result=x,percentile,GT,x,0,IF",
+        ],
+        vec!["VDEF:mean=x,AVERAGE", "CDEF:result=x,POP,PREV(mean)"],
+        vec!["VDEF:window=x,MAXIMUM", "CDEF:result=x,window,TREND"],
+        vec![
+            "CDEF:missing=x,POP,UNKN",
+            "VDEF:unknown=missing,AVERAGE",
+            "CDEF:result=x,unknown,+",
+        ],
+        vec![
+            "CDEF:infinite=x,POP,INF",
+            "VDEF:infinity=infinite,MAXIMUM",
+            "CDEF:result=x,infinity,+",
+        ],
+        vec!["VDEF:mean=x,AVERAGE", "SHIFT:x:20", "CDEF:result=x,mean,-"],
+        vec![
+            "VDEF:mean=x,AVERAGE",
+            "CDEF:early=x,mean,-",
+            "VDEF:minimum=early,MINIMUM",
+            "CDEF:result=early,minimum,-",
+        ],
+    ] {
+        for format in [
+            "%0.17le",
+            "%+24.17lE",
+            "%#.0le",
+            "%-24.17le",
+            "%24.17le",
+            "%020.10le",
+            "%.19le",
+        ] {
+            let expected = run(std::path::Path::new("rrdtool"), &elements, format);
+            let expected_file = std::fs::read(temp.path().join("scalars.json")).unwrap();
+            let actual = run(&alias, &elements, format);
+            assert!(
+                expected.status.success(),
+                "{elements:?}: {}",
+                String::from_utf8_lossy(&expected.stderr)
+            );
+            assert!(
+                actual.status.success(),
+                "{elements:?}: {}",
+                String::from_utf8_lossy(&actual.stderr)
+            );
+            assert_eq!(actual.stdout, expected.stdout, "{elements:?}");
+            assert_eq!(actual.stderr, expected.stderr, "{elements:?}");
+            assert_eq!(
+                std::fs::read(temp.path().join("scalars.json")).unwrap(),
+                expected_file,
+                "{elements:?}"
+            );
+        }
+    }
+    let invalid = ["VDEF:mean=x,AVERAGE", "CDEF:result=mean,2,*"];
+    let expected = run(std::path::Path::new("rrdtool"), &invalid, "%0.17le");
+    let actual = run(&alias, &invalid, "%0.17le");
+    assert!(!expected.status.success());
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stdout, expected.stdout);
+    assert_eq!(actual.stderr, expected.stderr);
+}
+
+#[test]
+fn png_gprint_legends_match_literal_comments_and_suppression() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping PNG GPRINT differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("legend.rrd");
+    assert!(
+        Command::new("rrdtool")
+            .args([
+                "create",
+                file.to_str().unwrap(),
+                "--start",
+                "1000000000",
+                "--step",
+                "10",
+                "DS:x:GAUGE:30:U:U",
+                "RRA:AVERAGE:0.5:1:8"
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        Command::new("rrdtool")
+            .args([
+                "update",
+                file.to_str().unwrap(),
+                "1000000010:1",
+                "1000000020:3",
+                "1000000030:5",
+                "1000000040:7"
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let def = format!("DEF:x={}:x:AVERAGE", file.display());
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let run =
+        |program: &std::path::Path, path: &std::path::Path, elements: &[&str], options: &[&str]| {
+            Command::new(program)
+                .args([
+                    "graphv",
+                    path.to_str().unwrap(),
+                    "--start",
+                    "1000000000",
+                    "--end",
+                    "1000000040",
+                    "--width",
+                    "400",
+                    "--height",
+                    "100",
+                ])
+                .arg(&def)
+                .args([
+                    "VDEF:mean=x,AVERAGE",
+                    "VDEF:maximum=x,MAXIMUM",
+                    "PRINT:mean:%0.2lf",
+                ])
+                .args(options)
+                .args(elements)
+                .output()
+                .unwrap()
+        };
+    let gprints = [
+        "TEXTALIGN:center",
+        "COMMENT:Header\\c",
+        "LINE1:x#0000ff:Values",
+        "GPRINT:mean:Avg %0.2lf\\l",
+        "COMMENT:Next ",
+        "GPRINT:maximum:Max %0.2lf\\r",
+        "GPRINT:x:LAST:Last %0.2lf\\n",
+    ];
+    let comments = [
+        "TEXTALIGN:center",
+        "COMMENT:Header\\c",
+        "LINE1:x#0000ff:Values",
+        "COMMENT:Avg 4.00\\l",
+        "COMMENT:Next ",
+        "COMMENT:Max 7.00\\r",
+        "COMMENT:Last 7.00\\n",
+    ];
+    for (program, name) in [
+        (std::path::Path::new("rrdtool"), "oracle"),
+        (alias.as_path(), "rondi"),
+    ] {
+        for options in [
+            vec![],
+            vec!["--only-graph"],
+            vec!["--no-legend"],
+            vec!["--legend-direction", "bottomup"],
+            vec!["--full-size-mode", "--height", "160"],
+        ] {
+            let gprint_path = temp.path().join(format!("{name}-gprint.png"));
+            let comment_path = temp.path().join(format!("{name}-comment.png"));
+            let actual = run(program, &gprint_path, &gprints, &options);
+            let expected = run(program, &comment_path, &comments, &options);
+            assert!(
+                actual.status.success(),
+                "{name} {options:?}: {}",
+                String::from_utf8_lossy(&actual.stderr)
+            );
+            assert!(
+                expected.status.success(),
+                "{name} {options:?}: {}",
+                String::from_utf8_lossy(&expected.stderr)
+            );
+            assert_eq!(actual.stdout, expected.stdout, "{name} {options:?}");
+            assert_eq!(actual.stderr, expected.stderr, "{name} {options:?}");
+            assert_eq!(
+                std::fs::read(gprint_path).unwrap(),
+                std::fs::read(comment_path).unwrap(),
+                "{name} {options:?}"
+            );
+        }
+    }
+    // bottomup2 reverses the data legend while retaining header/footer comments.
+    for (program, name) in [
+        (std::path::Path::new("rrdtool"), "oracle"),
+        (alias.as_path(), "rondi"),
+    ] {
+        let forward = [
+            "COMMENT:Header\\c",
+            "LINE1:x#ff000000:First\\l",
+            "LINE1:x#ff000000:Second\\l",
+            "COMMENT:Footer\\c",
+        ];
+        let reversed = [
+            "COMMENT:Header\\c",
+            "LINE1:x#ff000000:Second\\l",
+            "LINE1:x#ff000000:First\\l",
+            "COMMENT:Footer\\c",
+        ];
+        let actual_path = temp.path().join(format!("{name}-bottomup2.png"));
+        let expected_path = temp.path().join(format!("{name}-reversed.png"));
+        assert!(
+            run(
+                program,
+                &actual_path,
+                &forward,
+                &["--legend-direction", "bottomup2"]
+            )
+            .status
+            .success()
+        );
+        assert!(
+            run(program, &expected_path, &reversed, &[])
+                .status
+                .success()
+        );
+        assert!(
+            std::fs::read(actual_path).unwrap() == std::fs::read(expected_path).unwrap(),
+            "{name} bottomup2"
+        );
+        for control in ["s", "u"] {
+            let gprint = format!("GPRINT:mean:Avg %0.2lf\\{control}");
+            let comment = format!("COMMENT:Avg 4.00\\{control}");
+            let actual = run(
+                program,
+                &temp.path().join("control-gprint.png"),
+                &["LINE1:x#0000ff", &gprint, "COMMENT:Next\\l"],
+                &[],
+            );
+            let expected = run(
+                program,
+                &temp.path().join("control-comment.png"),
+                &["LINE1:x#0000ff", &comment, "COMMENT:Next\\l"],
+                &[],
+            );
+            assert!(
+                actual.status.success() && expected.status.success(),
+                "{name} control {control}"
+            );
+            assert!(
+                std::fs::read(temp.path().join("control-gprint.png")).unwrap()
+                    == std::fs::read(temp.path().join("control-comment.png")).unwrap(),
+                "{name} control {control}"
+            );
+        }
+    }
+    // A terminal control aligns the complete row, not just its last fragment.
+    let split = ["LINE1:x#0000ff", "COMMENT:Left", "COMMENT:Right\\c"];
+    let combined = ["LINE1:x#0000ff", "COMMENT:LeftRight\\c"];
+    let split_path = temp.path().join("split.png");
+    let combined_path = temp.path().join("combined.png");
+    assert!(run(&alias, &split_path, &split, &[]).status.success());
+    assert!(run(&alias, &combined_path, &combined, &[]).status.success());
+    assert_eq!(
+        std::fs::read(split_path).unwrap(),
+        std::fs::read(combined_path).unwrap()
+    );
+    let invalid = ["LINE1:x#0000ff", "COMMENT:bad\\x"];
+    let path = temp.path().join("invalid.png");
+    let expected = run(std::path::Path::new("rrdtool"), &path, &invalid, &[]);
+    let actual = run(&alias, &path, &invalid, &[]);
+    assert!(!expected.status.success());
+    assert_eq!(actual.status.code(), expected.status.code());
+    assert_eq!(actual.stderr, expected.stderr);
+}
+
+#[test]
+fn png_value_formatters_match_rrdtool() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping value formatter differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("value-formats.rrd");
+    rondi::create_rrd_file(
+        &database,
+        1_000_000_000,
+        10,
+        &["DS:x:GAUGE:30:U:U".into()],
+        &["RRA:AVERAGE:0.5:1:8".into()],
+        true,
+    )
+    .unwrap();
+    rondi::update_rrd_file(&database, 1_000_000_010, Some(1234567.89)).unwrap();
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let run = |program: &std::path::Path, elements: &[String], suffix: &[&str]| {
+        Command::new(program)
+            .env("TZ", "America/Los_Angeles")
+            .env("LC_ALL", "C")
+            .args([
+                "graphv",
+                temp.path().join("graph.png").to_str().unwrap(),
+                "--start",
+                "1000000000",
+                "--end",
+                "1000000010",
+            ])
+            .arg(format!("DEF:x={}:x:AVERAGE", database.display()))
+            .arg("LINE:x#ff0000")
+            .args(elements)
+            .args(suffix)
+            .output()
+            .unwrap()
+    };
+    let print_lines = |output: &[u8]| {
+        String::from_utf8_lossy(output)
+            .lines()
+            .filter(|line| line.starts_with("print["))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let duration_formats = [
+        "",
+        "%W %d %h %m %s %f",
+        "%D %H %M %S",
+        "%02H\\:%02m\\:%02s",
+        "%8.3S %08.2f",
+        "%.s %% %.3W",
+        "literal",
+    ];
+    for value in [
+        "0",
+        "-0",
+        "1234567.89",
+        "-1234567.89",
+        "604800999.99",
+        "UNKN",
+        "INF",
+        "NEGINF",
+    ] {
+        let mut elements = vec![
+            format!("CDEF:result=x,POP,{value},1,*"),
+            "VDEF:v=result,MAXIMUM".into(),
+        ];
+        for format in duration_formats {
+            elements.push(format!("PRINT:v:{format}:valstrfduration"));
+            if !format.is_empty() {
+                elements.push(format!("PRINT:v:format={format}:vformatter=duration"));
+            }
+        }
+        for format in ["", "%Y-%m-%d %H\\:%M\\:%S", "%s", "%% %F %T"] {
+            elements.push(format!("PRINT:v:{format}:valstrftime"));
+            if !format.is_empty() {
+                elements.push(format!("PRINT:v:format={format}:vformatter=timestamp"));
+            }
+        }
+        let expected = run(std::path::Path::new("rrdtool"), &elements, &[]);
+        let actual = run(&alias, &elements, &[]);
+        assert!(
+            expected.status.success(),
+            "oracle {value}: {}",
+            String::from_utf8_lossy(&expected.stderr)
+        );
+        assert!(
+            actual.status.success(),
+            "rondi {value}: {}",
+            String::from_utf8_lossy(&actual.stderr)
+        );
+        assert_eq!(
+            print_lines(&actual.stdout),
+            print_lines(&expected.stdout),
+            "value {value}"
+        );
+    }
+    // Value timestamps use UTC; strftime continues to use the VDEF event time.
+    for mode in ["JSON", "XML"] {
+        for formatter in ["valstrftime", "valstrfduration"] {
+            for format in ["%0.2lf", "%F %T"] {
+                let elements = vec![
+                    "VDEF:v=x,MAXIMUM".into(),
+                    format!("PRINT:v:{format}:{formatter}"),
+                ];
+                let options = ["--imgformat", mode];
+                let expected = run(std::path::Path::new("rrdtool"), &elements, &options);
+                let actual = run(&alias, &elements, &options);
+                assert_eq!(
+                    actual.status.code(),
+                    expected.status.code(),
+                    "{mode} {formatter} {format}"
+                );
+                assert_eq!(actual.stderr, expected.stderr);
+                if expected.status.success() {
+                    assert_eq!(print_lines(&actual.stdout), print_lines(&expected.stdout));
+                }
+            }
+        }
+    }
+    for directive in [
+        "PRINT:v:format=:vformatter=timestamp",
+        "PRINT:v:%Q:valstrfduration",
+        "PRINT:v:%.-1s:valstrfduration",
+        "PRINT:v:%:valstrfduration",
+        "PRINT:v:%0.2lf:vformatter=invalid",
+    ] {
+        let elements = vec!["VDEF:v=x,MAXIMUM".into(), directive.into()];
+        let expected = run(std::path::Path::new("rrdtool"), &elements, &[]);
+        let actual = run(&alias, &elements, &[]);
+        assert!(!expected.status.success(), "{directive}");
+        assert_eq!(actual.status.code(), expected.status.code(), "{directive}");
+        assert_eq!(actual.stderr, expected.stderr, "{directive}");
+    }
+    for mode in ["PNG", "JSON", "XML"] {
+        for directive in [
+            "PRINT:vname=v:format=%0.2lf",
+            "PRINT:vname=missing:format=%0.2lf",
+            "PRINT:missing:%0.2lf",
+            "PRINT:v:MAX:valstrfduration",
+            "PRINT:x:%0.2lf",
+            "PRINT:format=%0.2lf:cf=MAX:vname=x",
+            "PRINT:vname=v:%0.2lf",
+            "PRINT:vname=v:format=:%0.2lf",
+            "PRINT:vname=:v:%0.2lf",
+            "PRINT:vname=v:cf=LAST:format=%0.2lf",
+            "PRINT:vname=v:format=%0.2lf:format=%0.3lf",
+            "PRINT:vname=x:vname=v:format=%0.2lf",
+            "PRINT:x:%0.2lf:cf=BAD",
+            "PRINT:vname=v:format=%0.2lf:unused=1",
+            "PRINT:v:%H:vformatter=duration:valstrftime",
+            "PRINT:v:%F:strftime:strftime",
+        ] {
+            let elements = vec!["VDEF:v=x,MAXIMUM".into(), directive.into()];
+            let expected = run(
+                std::path::Path::new("rrdtool"),
+                &elements,
+                &["--imgformat", mode],
+            );
+            let actual = run(&alias, &elements, &["--imgformat", mode]);
+            assert_eq!(
+                actual.status.code(),
+                expected.status.code(),
+                "{mode} {directive}"
+            );
+            assert_eq!(actual.stderr, expected.stderr, "{mode} {directive}");
+            if expected.status.success() {
+                assert_eq!(
+                    print_lines(&actual.stdout),
+                    print_lines(&expected.stdout),
+                    "{mode} {directive}"
+                );
+                if mode != "PNG" {
+                    // Compare complete exported metadata and row bytes too.
+                    let expected = run(
+                        std::path::Path::new("rrdtool"),
+                        &elements,
+                        &["--imgformat", mode],
+                    );
+                    assert!(expected.status.success());
+                    let bytes = std::fs::read(temp.path().join("graph.png")).unwrap();
+                    let actual = run(&alias, &elements, &["--imgformat", mode]);
+                    assert!(actual.status.success());
+                    assert_eq!(
+                        std::fs::read(temp.path().join("graph.png")).unwrap(),
+                        bytes,
+                        "{mode} {directive}"
+                    );
+                }
+            }
+        }
+    }
+    for program in [std::path::Path::new("rrdtool"), alias.as_path()] {
+        for (gprint, comment) in [
+            (
+                "GPRINT:v:Elapsed %Hh %02mm %06.3ss\\l:valstrfduration",
+                "COMMENT:Elapsed 0h 20m 34.567s\\l",
+            ),
+            (
+                "GPRINT:v:%F %T\\l:valstrftime",
+                "COMMENT:1970-01-15 06\\:56\\:07\\l",
+            ),
+            (
+                "GPRINT:x:MAX:Elapsed %Hh %02mm %06.3ss\\l:vformatter=duration",
+                "COMMENT:Elapsed 0h 20m 34.567s\\l",
+            ),
+        ] {
+            let actual = run(program, &["VDEF:v=x,MAXIMUM".into(), gprint.into()], &[]);
+            assert!(
+                actual.status.success(),
+                "{gprint}: {}",
+                String::from_utf8_lossy(&actual.stderr)
+            );
+            let image = std::fs::read(temp.path().join("graph.png")).unwrap();
+            let expected = run(program, &["VDEF:v=x,MAXIMUM".into(), comment.into()], &[]);
+            assert!(expected.status.success());
+            assert!(
+                image == std::fs::read(temp.path().join("graph.png")).unwrap(),
+                "{} {gprint}",
+                program.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn graph_base_utc_and_shared_si_units_match_rrdtool() {
+    if !Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        eprintln!("skipping base/UTC differential: rrdtool is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let database = temp.path().join("graph-options.rrd");
+    rondi::create_rrd_file(
+        &database,
+        1_000_000_000,
+        10,
+        &["DS:x:GAUGE:30:U:U".into()],
+        &["RRA:AVERAGE:0.5:1:8".into()],
+        true,
+    )
+    .unwrap();
+    rondi::update_rrd_file(&database, 1_000_000_010, Some(1.0)).unwrap();
+    rondi::update_rrd_file(&database, 1_000_000_020, Some(2048.0)).unwrap();
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let mut elements = Vec::new();
+    for (name, value) in [
+        ("zero", "0"),
+        ("small", "1"),
+        ("large", "2048"),
+        ("huge", "1048576"),
+        ("negative", "-2048"),
+        ("unknown", "UNKN"),
+        ("fraction", "0.0009765625"),
+        ("minusfraction", "-0.0009765625"),
+        ("tiny", "0.0005"),
+        ("tie", "2.5"),
+    ] {
+        elements.push(format!("CDEF:{name}_data=x,POP,{value},1,*"));
+        elements.push(format!("VDEF:{name}={name}_data,MAXIMUM"));
+    }
+    elements.extend(
+        [
+            "VDEF:first=x,FIRST",
+            "LINE:x#ff0000",
+            "PRINT:zero:%0.3lf %S",
+            "GPRINT:large:%0.3lf %S\\l",
+            "PRINT:small:%0.3lf %S",
+            "PRINT:large:%0.3lf %s",
+            "GPRINT:huge:%0.3lf %s\\l",
+            "PRINT:large:%0.3lf %S",
+            "PRINT:negative:%0.3lf %S",
+            "PRINT:fraction:%0.3lf %s",
+            "PRINT:large:%0.3lf %S",
+            "PRINT:unknown:%0.3lf %s",
+            "PRINT:large:%0.3lf %S",
+            "PRINT:minusfraction:%0.3lf %s",
+            "PRINT:tiny:%0.3lf",
+            "PRINT:tie:%#.0lf",
+            "PRINT:large:literal %%S %0.3lf",
+            "PRINT:large:literal %%s %0.3lf",
+            "PRINT:first:%F %T %z:strftime",
+            "GPRINT:first:%F %T %z\\l:strftime",
+        ]
+        .into_iter()
+        .map(str::to_owned),
+    );
+    let run = |program: &std::path::Path,
+               destination: &std::path::Path,
+               mode: &str,
+               options: &[&str],
+               script: &[String]| {
+        Command::new(program)
+            .env("TZ", "America/Los_Angeles")
+            .env("LC_ALL", "C")
+            .args([
+                "graphv",
+                destination.to_str().unwrap(),
+                "--imgformat",
+                mode,
+                "--start",
+                "1000000000",
+                "--end",
+                "1000000020",
+            ])
+            .arg(format!("DEF:x={}:x:AVERAGE", database.display()))
+            .args(options)
+            .args(script)
+            .output()
+            .unwrap()
+    };
+    let print_lines = |output: &[u8]| {
+        String::from_utf8_lossy(output)
+            .lines()
+            .filter(|line| line.starts_with("print["))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    for mode in ["PNG", "XML", "JSON"] {
+        for base in [
+            vec![],
+            vec!["--base", "1024"],
+            vec!["-b", "1000"],
+            vec!["--base=1024"],
+        ] {
+            for utc in [false, true] {
+                let mut options = base.clone();
+                if utc {
+                    options.push("--utc");
+                }
+                let expected_path = temp.path().join("oracle.graph");
+                let actual_path = temp.path().join("rondi.graph");
+                let expected = run(
+                    std::path::Path::new("rrdtool"),
+                    &expected_path,
+                    mode,
+                    &options,
+                    &elements,
+                );
+                let actual = run(&alias, &actual_path, mode, &options, &elements);
+                assert!(
+                    expected.status.success(),
+                    "oracle {mode} {options:?}: {}",
+                    String::from_utf8_lossy(&expected.stderr)
+                );
+                assert!(
+                    actual.status.success(),
+                    "rondi {mode} {options:?}: {}",
+                    String::from_utf8_lossy(&actual.stderr)
+                );
+                assert_eq!(actual.stderr, expected.stderr);
+                assert_eq!(
+                    print_lines(&actual.stdout),
+                    print_lines(&expected.stdout),
+                    "{mode} {options:?}"
+                );
+                if mode != "PNG" {
+                    assert_eq!(
+                        String::from_utf8(std::fs::read(actual_path).unwrap()).unwrap(),
+                        String::from_utf8(std::fs::read(expected_path).unwrap()).unwrap(),
+                        "{mode} {options:?}"
+                    );
+                }
+            }
+        }
+    }
+    for value in ["0", "999", "1025", "abc", "1000suffix", "  +1024ignored"] {
+        let script = vec![
+            "LINE:x#ff0000".into(),
+            "VDEF:v=x,MAXIMUM".into(),
+            "PRINT:v:%0.3lf %s".into(),
+        ];
+        let expected = run(
+            std::path::Path::new("rrdtool"),
+            &temp.path().join("invalid-oracle.png"),
+            "PNG",
+            &["--base", value],
+            &script,
+        );
+        let actual = run(
+            &alias,
+            &temp.path().join("invalid-rondi.png"),
+            "PNG",
+            &["--base", value],
+            &script,
+        );
+        assert_eq!(
+            actual.status.code(),
+            expected.status.code(),
+            "base {value:?}"
+        );
+        assert_eq!(actual.stderr, expected.stderr, "base {value:?}");
+        assert_eq!(
+            print_lines(&actual.stdout),
+            print_lines(&expected.stdout),
+            "base {value:?}"
+        );
+    }
 }

@@ -5,7 +5,7 @@ use crate::format::{RrdFetchResult, RrdFetchRow};
 use crate::storage::StoreError;
 use std::fmt::Write as FmtWrite;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 const STAT_HEAD_LEN: usize = 128;
@@ -480,6 +480,13 @@ pub(crate) fn fetch_path(
         .rem_euclid(row_count);
     }
 
+    // rrd_fetch.c seeks once initially and again at the ring boundary.
+    // Buffer sequential rows under the same shared lock, reusing the byte
+    // scratch space rather than allocating and issuing two syscalls per row.
+    let mut reader = BufReader::with_capacity(64 * 1024, &mut file);
+    let row_bytes = info.data_sources.len() * VALUE_LEN;
+    let mut bytes = vec![0; row_bytes];
+    let mut next_pointer = None;
     let mut rows = Vec::new();
     let mut timestamp = start
         .checked_add(step_i64)
@@ -503,10 +510,12 @@ pub(crate) fn fetch_path(
                         .ok_or_else(|| rrd_error("RRD row offset overflows"))?,
                 )
                 .ok_or_else(|| rrd_error("RRD row offset overflows"))?;
-            file.seek(SeekFrom::Start(offset))?;
-            let mut bytes = vec![0; info.data_sources.len() * VALUE_LEN];
-            file.read_exact(&mut bytes)?;
+            if next_pointer != Some(pointer) {
+                reader.seek(SeekFrom::Start(offset))?;
+            }
+            reader.read_exact(&mut bytes)?;
             pointer += 1;
+            next_pointer = Some(pointer);
             bytes
                 .chunks_exact(VALUE_LEN)
                 .map(|chunk| {

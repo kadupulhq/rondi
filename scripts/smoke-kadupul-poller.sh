@@ -34,7 +34,11 @@ define('CACTI_LOCALE', 'en-US');
 function read_config_option($name) {
     return $name === 'path_rrdtool' ? getenv('RRDTOOL_EXE') : '';
 }
-$config = ['cacti_server_os' => 'unix'];
+// Current Kadupul coordinates local writers through the RRA directory lease.
+$config = ['cacti_server_os' => 'unix', 'rra_path' => dirname($argv[1])];
+function cacti_log($message) {
+    fwrite(STDERR, $message . PHP_EOL);
+}
 require getenv('KADUPUL_ROOT') . '/lib/rrd.php';
 $pipe = rrd_init();
 if (!is_resource($pipe)) {

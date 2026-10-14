@@ -1074,8 +1074,8 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{:>10}:", row.timestamp);
         for value in row.values {
             match value {
+                Some(value) if from_daemon => print!(" {}", format_rrdcached_fetch_value(value)),
                 Some(value) => print!(" {}", format_rrd_float(value)),
-                None if from_daemon => print!(" {}", rrd_daemon_unknown_text()),
                 None => print!(" {}", rrd_unknown_text()),
             }
         }
@@ -1104,11 +1104,35 @@ fn rrd_unknown_text() -> &'static str {
     }
 }
 
-fn rrd_daemon_unknown_text() -> &'static str {
-    if cfg!(target_arch = "x86_64") {
-        "nan"
+fn format_rrdcached_fetch_value(value: f64) -> String {
+    // rrd_tool.c prints FETCH values with the host C printf. In particular,
+    // Darwin prints both NaN signs as "nan", unlike Rust's formatter.
+    let mut buffer = [0 as libc::c_char; 128];
+    let length =
+        unsafe { libc::snprintf(buffer.as_mut_ptr(), buffer.len(), c"%0.10e".as_ptr(), value) };
+    assert!(length >= 0 && (length as usize) < buffer.len());
+    let bytes =
+        unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), length as usize) };
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+// rrd_client.c::parse_value_array_header calls rrd_strtodbl, retaining
+// non-finite values rather than collapsing them to the storage unknown type.
+fn parse_rrdcached_fetch_value(value: &str) -> Result<f64, Box<dyn std::error::Error>> {
+    if let Some(number) = rondi::parse_rrd_number(value) {
+        return Ok(number);
+    }
+    let special = value.to_ascii_lowercase();
+    if special.starts_with("-nan") {
+        Ok(rrd_nan())
+    } else if special.starts_with("nan") {
+        Ok(-rrd_nan())
+    } else if special.starts_with("-inf") {
+        Ok(f64::NEG_INFINITY)
+    } else if special.starts_with("inf") {
+        Ok(f64::INFINITY)
     } else {
-        "-nan"
+        Err(format!("invalid rrdcached FETCH value: {value}").into())
     }
 }
 
@@ -1167,15 +1191,8 @@ fn parse_rrdcached_fetch(
             .ok_or("invalid rrdcached FETCH data row")?;
         let values = values
             .split_whitespace()
-            .map(|value| {
-                let parsed: f64 = value.parse()?;
-                Ok(if parsed.is_finite() {
-                    Some(parsed)
-                } else {
-                    None
-                })
-            })
-            .collect::<Result<Vec<_>, std::num::ParseFloatError>>()?;
+            .map(|value| parse_rrdcached_fetch_value(value).map(Some))
+            .collect::<Result<Vec<_>, _>>()?;
         if values.len() != ds_count {
             return Err("rrdcached FETCH row has an invalid data-source count".into());
         }
@@ -1215,6 +1232,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     let mut vertical_label = None::<String>;
     let mut vertical_label_angle = 90.0_f64;
     let mut imginfo = None::<String>;
+    let mut print_options = GraphPrintOptions::default();
     let mut lower_limit = None::<f64>;
     let mut upper_limit = None::<f64>;
     let mut no_legend = false;
@@ -1226,7 +1244,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     let mut only_graph = false;
     let mut full_size_mode = false;
     let mut force_rules_legend = false;
-    let mut legend_bottomup = false;
+    let mut legend_direction = LegendDirection::TopDown;
     let mut graph_colors = GraphColors::default();
     let mut grid_dash = Vec::<f64>::new();
     let mut border_width = 2_u32;
@@ -1240,6 +1258,11 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         let argument = &args[index];
         if let Some(value) = argument.strip_prefix("--imgformat=") {
             format = value.to_ascii_uppercase();
+            index += 1;
+            continue;
+        }
+        if let Some(value) = argument.strip_prefix("--base=") {
+            print_options.base = parse_graph_base(value)?;
             index += 1;
             continue;
         }
@@ -1260,6 +1283,15 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             continue;
         }
         match argument.as_str() {
+            "--base" | "-b" => {
+                print_options.base =
+                    parse_graph_base(args.get(index + 1).ok_or("--base requires a value")?)?;
+                index += 2;
+            }
+            "--utc" => {
+                print_options.utc = true;
+                index += 1;
+            }
             "--imgformat" | "-a" => {
                 format = args
                     .get(index + 1)
@@ -1381,14 +1413,15 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                 }
                 index += 2;
             }
+            "--legend-direction" => {
+                let direction = args
+                    .get(index + 1)
+                    .ok_or("--legend-direction requires a value")?;
+                legend_direction = parse_legend_direction(direction)?;
+                index += 2;
+            }
             value if value.starts_with("--legend-direction=") => {
-                match &value["--legend-direction=".len()..] {
-                    "topdown" => legend_bottomup = false,
-                    "bottomup" | "bottomup2" => legend_bottomup = true,
-                    direction => {
-                        return Err(format!("invalid legend direction: {direction}").into());
-                    }
-                }
+                legend_direction = parse_legend_direction(&value["--legend-direction=".len()..])?;
                 index += 1;
             }
             "--rigid" | "-r" => {
@@ -1428,13 +1461,34 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                 if value.starts_with("DEF:")
                     || value.starts_with("CDEF:")
                     || value.starts_with("XPORT:")
-                    || value.starts_with("VDEF:") =>
+                    || value.starts_with("VDEF:")
+                    || value.starts_with("SHIFT:") =>
             {
                 definitions.push(value.to_owned());
                 index += 1;
             }
             value if value.starts_with("PRINT:") || value.starts_with("GPRINT:") => {
-                graph_prints.push(parse_graph_print(value)?);
+                let print = parse_graph_print(value, &definitions)?;
+                if print.kind == "gprint" {
+                    let reference = graph_prints.len().to_string();
+                    graph_gprints.push((String::from("__gprint"), reference.clone()));
+                    let mut legend = GraphSeries::legend_element("gprint", String::new());
+                    legend.variable = reference;
+                    graph_series.push(legend);
+                }
+                graph_prints.push(print);
+                index += 1;
+            }
+            value if value.starts_with("COMMENT:") => {
+                let text = parse_graph_comment(value)?;
+                graph_gprints.push((String::from("comment"), text.clone()));
+                graph_series.push(GraphSeries::legend_element("comment", text));
+                index += 1;
+            }
+            value if value.starts_with("TEXTALIGN:") => {
+                let alignment = parse_graph_textalign(value)?;
+                graph_gprints.push((String::from("align"), alignment.clone()));
+                graph_series.push(GraphSeries::legend_element("textalign", alignment));
                 index += 1;
             }
             value if value.starts_with("TICK:") => {
@@ -1444,11 +1498,15 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                 index += 1;
             }
             value if value.starts_with("HRULE:") => {
-                graph_series.push(parse_graph_hrule(value)?);
+                let rule = parse_graph_hrule(value)?;
+                validate_graph_rule_reference(&rule, &definitions, value)?;
+                graph_series.push(rule);
                 index += 1;
             }
             value if value.starts_with("VRULE:") => {
-                graph_series.push(parse_graph_vrule(value, now)?);
+                let rule = parse_graph_vrule(value, now)?;
+                validate_graph_rule_reference(&rule, &definitions, value)?;
+                graph_series.push(rule);
                 index += 1;
             }
             value if value.starts_with("LINE") || value.starts_with("AREA:") => {
@@ -1482,6 +1540,23 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     ) {
         return Err(format!("RRDtool graph format {format} is unsupported").into());
     }
+    for print in &mut graph_prints {
+        // rrd_xport.c ignores vformatter in exported metadata, while console
+        // PRINT output still passes through rrd_graph.c::print_calc.
+        if format != "PNG"
+            && matches!(
+                print.formatter,
+                GraphPrintFormatter::Timestamp | GraphPrintFormatter::Duration
+            )
+        {
+            print.export_numeric = true;
+        }
+        if (print.formatter == GraphPrintFormatter::Numeric || print.export_numeric)
+            && parse_graph_numeric_format(&print.format).is_err()
+        {
+            return Err(format!("bad format for PRINT in \"{}'", print.format).into());
+        }
+    }
     match format.as_str() {
         "JSON" => xport_args.push(String::from("--json")),
         "JSONTIME" => {
@@ -1506,8 +1581,34 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         definitions.push(String::from("XPORT:__rondi_rule_anchor:"));
     }
     xport_args.extend(definitions);
-    let rendered =
-        render_xport_with_graph_prints(&xport_args, Some(&graph_gprints), &graph_prints)?;
+    print_options.export = format != "PNG";
+    let rendered = render_xport_with_graph_prints(
+        &xport_args,
+        Some(&graph_gprints),
+        &graph_prints,
+        print_options,
+    )?;
+    for rule in &mut graph_series {
+        if rule.style == "gprint" {
+            let reference = rule.variable.parse::<usize>()?;
+            rule.legend = rendered
+                .gprint_values
+                .get(&reference)
+                .ok_or("GPRINT legend is unavailable")?
+                .clone();
+        }
+        if matches!(rule.style, "hrule" | "vrule") && !rule.variable.is_empty() {
+            let value = rendered
+                .vdef_values
+                .get(&rule.variable)
+                .ok_or_else(|| format!("VDEF {} is unavailable", rule.variable))?;
+            if rule.style == "hrule" {
+                rule.rule_value = Some(value.value);
+            } else {
+                rule.rule_time = Some(value.timestamp.unwrap_or(0));
+            }
+        }
+    }
     let graph_image = if format == "PNG" {
         Some(render_graph_png(
             &rendered,
@@ -1529,7 +1630,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                 only_graph,
                 full_size_mode,
                 force_rules_legend,
-                legend_bottomup,
+                legend_direction,
                 colors: graph_colors,
                 grid_dash,
                 border_width,
@@ -1598,6 +1699,32 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LegendDirection {
+    TopDown,
+    BottomUp,
+    BottomUp2,
+}
+
+fn parse_legend_direction(direction: &str) -> Result<LegendDirection, Box<dyn std::error::Error>> {
+    match direction {
+        "topdown" => Ok(LegendDirection::TopDown),
+        "bottomup" => Ok(LegendDirection::BottomUp),
+        "bottomup2" => Ok(LegendDirection::BottomUp2),
+        _ => Err(format!("unknown legend-position '{direction}'").into()),
+    }
+}
+
+fn parse_graph_base(value: &str) -> Result<u32, Box<dyn std::error::Error>> {
+    let value = std::ffi::CString::new(value)?;
+    // SAFETY: atol reads a valid NUL-terminated string and retains no pointer.
+    match unsafe { libc::atol(value.as_ptr()) } {
+        1000 => Ok(1000),
+        1024 => Ok(1024),
+        _ => Err("the only sensible value for base apart from 1000 is 1024".into()),
+    }
 }
 
 fn parse_graph_series(
@@ -1761,12 +1888,18 @@ fn parse_graph_hrule(definition: &str) -> Result<GraphSeries, Box<dyn std::error
     let (value, color) = value_and_color
         .split_once('#')
         .ok_or_else(|| format!("HRULE color is required in {definition}"))?;
-    let value = value.parse::<f64>()?;
-    if !value.is_finite() {
+    let number = rondi::parse_rrd_number(value);
+    if number.is_some_and(|value| !value.is_finite())
+        || value.parse::<f64>().is_ok_and(|v| !v.is_finite())
+    {
         return Err(format!("invalid HRULE value in {definition}").into());
     }
     Ok(GraphSeries {
-        variable: String::new(),
+        variable: if number.is_some() {
+            String::new()
+        } else {
+            value.to_owned()
+        },
         style: "hrule",
         line_width: 1.0,
         stack: false,
@@ -1775,7 +1908,7 @@ fn parse_graph_hrule(definition: &str) -> Result<GraphSeries, Box<dyn std::error
         color2: None,
         grad_height: 0.0,
         tick_fraction: 0.0,
-        rule_value: Some(value),
+        rule_value: number,
         rule_time: None,
         legend,
         dash_pattern,
@@ -1795,9 +1928,13 @@ fn parse_graph_vrule(
     let (time, color) = time_and_color
         .split_once('#')
         .ok_or_else(|| format!("VRULE color is required in {definition}"))?;
-    let time = parse_rrd_time(time, now)?;
+    let timestamp = parse_rrd_time(time, now).ok();
     Ok(GraphSeries {
-        variable: String::new(),
+        variable: if timestamp.is_some() {
+            String::new()
+        } else {
+            time.to_owned()
+        },
         style: "vrule",
         line_width: 1.0,
         stack: false,
@@ -1807,11 +1944,38 @@ fn parse_graph_vrule(
         grad_height: 0.0,
         tick_fraction: 0.0,
         rule_value: None,
-        rule_time: Some(time),
+        rule_time: timestamp,
         legend,
         dash_pattern,
         dash_offset,
     })
+}
+
+fn validate_graph_rule_reference(
+    rule: &GraphSeries,
+    definitions: &[String],
+    original: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if rule.variable.is_empty() {
+        return Ok(());
+    }
+    // parse_hvrule resolves only an already-defined VDEF, never a DEF/CDEF.
+    let name = format!("{}=", rule.variable);
+    if let Some(definition) = definitions.iter().find(|definition| {
+        definition
+            .split_once(':')
+            .is_some_and(|(_, rest)| rest.starts_with(&name))
+    }) {
+        if definition.starts_with("VDEF:") {
+            return Ok(());
+        }
+        return Err(format!(
+            "Using vname {} of wrong type in line {original}\n",
+            rule.variable
+        )
+        .into());
+    }
+    Err(format!("{} is not a vname nor a number", rule.variable).into())
 }
 
 fn parse_dash_pattern(
@@ -1897,6 +2061,118 @@ struct GraphSeries {
     dash_offset: f64,
 }
 
+impl GraphSeries {
+    fn legend_element(style: &'static str, legend: String) -> Self {
+        Self {
+            variable: String::new(),
+            style,
+            legend,
+            line_width: 0.0,
+            stack: false,
+            skip_scale: true,
+            color: None,
+            color2: None,
+            grad_height: 0.0,
+            tick_fraction: 0.0,
+            rule_value: None,
+            rule_time: None,
+            dash_pattern: Vec::new(),
+            dash_offset: 0.0,
+        }
+    }
+}
+
+fn graph_text_fields(value: &str) -> Vec<String> {
+    let mut fields = vec![String::new()];
+    let mut chars = value.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '\\' if chars.peek() == Some(&':') => {
+                chars.next();
+                fields.last_mut().unwrap().push(':');
+            }
+            ':' => fields.push(String::new()),
+            _ => fields.last_mut().unwrap().push(character),
+        }
+    }
+    fields
+}
+
+fn graph_text_argument(
+    definition: &str,
+    prefix: &str,
+    key: &str,
+    missing: &str,
+    empty_named_fallback: bool,
+) -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
+    let value = definition.strip_prefix(prefix).ok_or(missing)?;
+    let mut fields = graph_text_fields(value);
+    let named_prefix = format!("{key}=");
+    let named = fields
+        .iter()
+        .position(|field| field.starts_with(&named_prefix));
+    let value = if let Some(index) = named {
+        let value = fields.remove(index)[named_prefix.len()..].to_owned();
+        if empty_named_fallback && value.is_empty() {
+            if fields.is_empty() {
+                return Err(missing.into());
+            }
+            fields.remove(0)
+        } else {
+            value
+        }
+    } else {
+        fields.remove(0)
+    };
+    Ok((value, fields))
+}
+
+fn reject_unused_graph_text(
+    definition: &str,
+    unused: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !unused.is_empty() {
+        return Err(format!(
+            "Unused Arguments \"{}\" in command : {definition}",
+            unused.join(":")
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn parse_graph_comment(definition: &str) -> Result<String, Box<dyn std::error::Error>> {
+    // parse_comment accepts an empty positional legend and removes only the
+    // colon escape. Legend controls remain intact in exported metadata.
+    let (text, unused) = graph_text_argument(
+        definition,
+        "COMMENT:",
+        "legend",
+        "No positional CF/FORMAT",
+        true,
+    )?;
+    reject_unused_graph_text(definition, &unused)?;
+    Ok(text)
+}
+
+fn parse_graph_textalign(definition: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let (alignment, unused) = graph_text_argument(
+        definition,
+        "TEXTALIGN:",
+        "align",
+        "No alignment given",
+        false,
+    )?;
+    if !matches!(
+        alignment.as_str(),
+        "left" | "right" | "center" | "justified"
+    ) {
+        return Err(format!("Unknown alignment type '{alignment}'").into());
+    }
+    reject_unused_graph_text(definition, &unused)?;
+    Ok(alignment)
+}
+
 struct GraphPngOptions<'a> {
     width: u32,
     height: u32,
@@ -1914,7 +2190,7 @@ struct GraphPngOptions<'a> {
     only_graph: bool,
     full_size_mode: bool,
     force_rules_legend: bool,
-    legend_bottomup: bool,
+    legend_direction: LegendDirection,
     colors: GraphColors,
     grid_dash: Vec<f64>,
     border_width: u32,
@@ -1982,12 +2258,15 @@ struct GraphPrint {
     consolidation: Option<String>,
     format: String,
     formatter: GraphPrintFormatter,
+    export_numeric: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GraphPrintFormatter {
     Numeric,
     Strftime,
+    Timestamp,
+    Duration,
 }
 
 struct GraphVdef {
@@ -2021,45 +2300,99 @@ fn parse_graph_vdef(definition: &str) -> Result<GraphVdef, Box<dyn std::error::E
     })
 }
 
-fn parse_graph_print(definition: &str) -> Result<GraphPrint, Box<dyn std::error::Error>> {
+fn parse_graph_print(
+    definition: &str,
+    definitions: &[String],
+) -> Result<GraphPrint, Box<dyn std::error::Error>> {
     let (directive, body) = definition
         .split_once(':')
         .ok_or("invalid graph print element")?;
-    let mut fields = body.splitn(4, ':');
-    let variable = fields.next().unwrap_or_default();
-    let second = fields.next().unwrap_or_default();
-    let third = fields.next();
-    let fourth = fields.next();
-    if variable.is_empty() || second.is_empty() {
-        return Err(format!("invalid graph print element: {definition}").into());
+    let mut fields = graph_text_fields(body);
+    let mut formatter = GraphPrintFormatter::Numeric;
+    let strftime = fields
+        .iter()
+        .rposition(|field| field == "strftime" || field.starts_with("strftime="));
+    if let Some(index) = strftime {
+        fields.remove(index);
     }
-    let (consolidation, format, suffix) = if let Some(third) = third {
-        if matches!(third, "strftime" | "valstrftime") {
-            (None, second, Some(third))
-        } else {
-            let format = third;
-            if !matches!(second, "AVERAGE" | "MIN" | "MAX" | "LAST") {
-                return Err(format!("unsupported graph print consolidation: {second}").into());
+    let formatter_index = fields.iter().rposition(|field| {
+        matches!(field.as_str(), "valstrftime" | "valstrfduration")
+            || field.starts_with("vformatter=")
+    });
+    if let Some(index) = formatter_index {
+        let field = fields.remove(index);
+        let value = match field.as_str() {
+            "valstrftime" => "timestamp",
+            "valstrfduration" => "duration",
+            _ => field.strip_prefix("vformatter=").unwrap(),
+        };
+        formatter = match value {
+            "timestamp" => GraphPrintFormatter::Timestamp,
+            "duration" => GraphPrintFormatter::Duration,
+            other => return Err(format!("Unsupported vformatter: {other}").into()),
+        };
+    }
+    let mut remaining = fields;
+    if strftime.is_some() {
+        formatter = GraphPrintFormatter::Strftime;
+    }
+    // newGraphDescription consumes named arguments before parse_gprint
+    // fills missing fields from the remaining positional arguments.
+    let take_named = |fields: &mut Vec<String>, prefix: &str| {
+        fields
+            .iter()
+            .rposition(|field| field.starts_with(prefix))
+            .map(|index| fields.remove(index)[prefix.len()..].to_owned())
+    };
+    let named_variable = remaining.iter().any(|field| field.starts_with("vname="));
+    let variable = take_named(&mut remaining, "vname=")
+        .or_else(|| (!remaining.is_empty()).then(|| remaining.remove(0)))
+        .ok_or("No positional VNAME")?;
+    let is_vdef = definitions
+        .iter()
+        .find_map(|definition| {
+            ["DEF:", "CDEF:", "VDEF:"].iter().find_map(|prefix| {
+                definition
+                    .strip_prefix(prefix)
+                    .and_then(|body| body.split_once('='))
+                    .filter(|(name, _)| *name == variable)
+                    .map(|_| *prefix == "VDEF:")
+            })
+        })
+        .ok_or_else(|| {
+            if named_variable {
+                format!("vname {variable} not found")
+            } else {
+                format!("undefined vname {variable}")
             }
-            (Some(second.to_owned()), format, fourth)
+        })?;
+    let mut consolidation = take_named(&mut remaining, "cf=");
+    if let Some(cf) = &consolidation {
+        if !matches!(cf.as_str(), "AVERAGE" | "MIN" | "MAX" | "LAST") {
+            return Err(format!("bad CF: {cf}").into());
         }
-    } else {
-        (None, second, None)
-    };
-    let formatter = match suffix.unwrap_or_default() {
-        "" => GraphPrintFormatter::Numeric,
-        "strftime" => GraphPrintFormatter::Strftime,
-        // RRDtool 1.11.0 does not implement this suffix; it validates the
-        // format as a numeric printf format, so retain that observed behavior.
-        "valstrftime" => GraphPrintFormatter::Numeric,
-        other => return Err(format!("unsupported graph print formatter: {other}").into()),
-    };
+    } else if !is_vdef {
+        let cf = if remaining.is_empty() {
+            return Err("No positional CDEF".into());
+        } else {
+            remaining.remove(0)
+        };
+        if !matches!(cf.as_str(), "AVERAGE" | "MIN" | "MAX" | "LAST") {
+            return Err(format!("bad CF for DEF/CDEF: {cf}").into());
+        }
+        consolidation = Some(cf);
+    }
+    let format = take_named(&mut remaining, "format=")
+        .filter(|value| !value.is_empty())
+        .or_else(|| (!remaining.is_empty()).then(|| remaining.remove(0)))
+        .ok_or("No positional CF/FORMAT")?;
+    reject_unused_graph_text(definition, &remaining)?;
     let kind = match directive {
         "PRINT" => "print",
         "GPRINT" => "gprint",
         _ => return Err(format!("invalid graph print element: {definition}").into()),
     };
-    if formatter == GraphPrintFormatter::Numeric && parse_graph_numeric_format(format).is_err() {
+    if formatter == GraphPrintFormatter::Numeric && parse_graph_numeric_format(&format).is_err() {
         return Err(format!("bad format for PRINT in \"{format}'").into());
     }
     Ok(GraphPrint {
@@ -2068,6 +2401,7 @@ fn parse_graph_print(definition: &str) -> Result<GraphPrint, Box<dyn std::error:
         consolidation,
         format: format.to_owned(),
         formatter,
+        export_numeric: false,
     })
 }
 
@@ -2089,7 +2423,8 @@ fn render_xport_with_gprints(
     args: &[String],
     graph_gprints: Option<&[(String, String)]>,
 ) -> Result<(String, i64, i64, u64), Box<dyn std::error::Error>> {
-    let rendered = render_xport_with_graph_prints(args, graph_gprints, &[])?;
+    let rendered =
+        render_xport_with_graph_prints(args, graph_gprints, &[], GraphPrintOptions::default())?;
     Ok((rendered.output, rendered.start, rendered.end, rendered.step))
 }
 
@@ -2099,6 +2434,8 @@ struct RenderedGraphXport {
     end: i64,
     step: u64,
     prints: Vec<String>,
+    gprint_values: std::collections::HashMap<usize, String>,
+    vdef_values: std::collections::HashMap<String, rondi::VdefResult>,
     variables: Vec<String>,
     rows: Vec<Vec<Option<f64>>>,
 }
@@ -2107,6 +2444,7 @@ fn render_xport_with_graph_prints(
     args: &[String],
     graph_gprints: Option<&[(String, String)]>,
     graph_prints: &[GraphPrint],
+    print_options: GraphPrintOptions,
 ) -> Result<RenderedGraphXport, Box<dyn std::error::Error>> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -2121,6 +2459,7 @@ fn render_xport_with_graph_prints(
     let mut enum_ds = false;
     let mut definitions = Vec::<rondi::RrdXportDefinition>::new();
     let mut cdefs = Vec::<rondi::RrdXportCdef>::new();
+    let mut operations = Vec::<rondi::RrdXportOperation>::new();
     let mut vdefs = Vec::<GraphVdef>::new();
     let mut exports = Vec::<rondi::RrdXportColumn>::new();
     let mut index = 1;
@@ -2209,14 +2548,85 @@ fn render_xport_with_graph_prints(
                 if name.is_empty() || expression.is_empty() {
                     return Err(format!("invalid CDEF: {value}").into());
                 }
-                cdefs.push(rondi::RrdXportCdef {
+                let input_names: Vec<_> = expression
+                    .split(',')
+                    .map(|token| {
+                        token
+                            .strip_prefix("PREV(")
+                            .and_then(|name| name.strip_suffix(')'))
+                            .unwrap_or(token)
+                    })
+                    .collect();
+                if input_names
+                    .iter()
+                    .any(|name| vdefs.iter().any(|vdef| vdef.name == *name))
+                    && !input_names.iter().any(|name| {
+                        definitions.iter().any(|def| def.name == *name)
+                            || cdefs.iter().any(|cdef| cdef.name == *name)
+                    })
+                {
+                    return Err(
+                        "rpn expressions without DEF or CDEF variables are not supported".into(),
+                    );
+                }
+                let cdef = rondi::RrdXportCdef {
                     name: name.to_owned(),
                     expression: expression.to_owned(),
+                };
+                operations.push(rondi::RrdXportOperation::Cdef(cdef.clone()));
+                cdefs.push(cdef);
+                index += 1;
+            }
+            value if value.starts_with("SHIFT:") => {
+                let (variable, offset) = value[6..].split_once(':').ok_or("No shift given")?;
+                if vdefs.iter().any(|definition| definition.name == variable) {
+                    return Err(
+                        format!("Cannot shift a VDEF: '{variable}' in line '{value}'\n").into(),
+                    );
+                }
+                if !definitions
+                    .iter()
+                    .any(|definition| definition.name == variable)
+                    && !cdefs.iter().any(|definition| definition.name == variable)
+                {
+                    return Err(format!("vname {variable} not found").into());
+                }
+                let offset = offset.strip_prefix("shift=").unwrap_or(offset);
+                let offset = if vdefs.iter().any(|definition| definition.name == offset) {
+                    rondi::RrdXportShift::Vdef(offset.to_owned())
+                } else if definitions
+                    .iter()
+                    .any(|definition| definition.name == offset)
+                    || cdefs.iter().any(|definition| definition.name == offset)
+                {
+                    return Err(format!(
+                        "Offset cannot be a (C)DEF: '{offset}' in line '{value}'\n"
+                    )
+                    .into());
+                } else {
+                    let number = std::ffi::CString::new(offset)?;
+                    let mut end = std::ptr::null_mut();
+                    let seconds = unsafe { libc::strtol(number.as_ptr(), &mut end, 10) };
+                    if end == number.as_ptr().cast_mut() || unsafe { *end } != 0 {
+                        return Err(format!("error parsing number {offset}").into());
+                    }
+                    rondi::RrdXportShift::Seconds(seconds as i64)
+                };
+                operations.push(rondi::RrdXportOperation::Shift {
+                    variable: variable.to_owned(),
+                    offset,
                 });
                 index += 1;
             }
             value if value.starts_with("VDEF:") => {
-                vdefs.push(parse_graph_vdef(value)?);
+                let vdef = parse_graph_vdef(value)?;
+                operations.push(rondi::RrdXportOperation::Vdef {
+                    name: vdef.name.clone(),
+                    variable: vdef.variable.clone(),
+                    function: vdef.function,
+                    percentile: vdef.percentile,
+                });
+                vdefs.push(vdef);
                 index += 1;
             }
             value if value.starts_with('-') => {
@@ -2267,42 +2677,27 @@ fn render_xport_with_graph_prints(
             });
         }
     }
-    let mut result = rondi::fetch_xport_with_cdefs(
+    let mut result = rondi::fetch_xport_with_operations(
         &definitions,
-        &cdefs,
+        &operations,
         &exports,
         start,
         end,
         requested_step.max(0) as u64,
         max_rows.max(0) as u64,
     )?;
-    let mut vdef_values = std::collections::HashMap::new();
-    for vdef in &vdefs {
-        let values = result
-            .raw_variables
-            .get(&vdef.variable)
-            .cloned()
-            .ok_or_else(|| format!("VDEF source variable {} is unavailable", vdef.variable))?;
-        // RRDtool's graph buffer includes an unknown right-edge boundary slot
-        // that is not part of the rows returned by xport.
-        let mut values = values;
-        values.push(rrd_nan());
-        let value = rondi::evaluate_vdef(
-            vdef.function,
-            vdef.percentile,
-            &values,
-            result.start,
-            result.step,
-        )?;
-        vdef_values.insert(vdef.name.clone(), value);
-    }
+    let vdef_values = std::mem::take(&mut result.vdef_values);
     let mut graph_gprints_out = graph_gprints.unwrap_or_default().to_vec();
     let mut print_values = Vec::new();
-    for graph_print in graph_prints {
+    let mut gprint_values = std::collections::HashMap::new();
+    let mut metadata_print_values = Vec::new();
+    let mut console_si = GraphSiState::default();
+    let mut metadata_si = GraphSiState::default();
+    for (print_index, graph_print) in graph_prints.iter().enumerate() {
         let (value, timestamp) = if let Some(value) = vdef_values.get(&graph_print.variable) {
             (value.value, value.timestamp)
         } else {
-            if graph_print.formatter != GraphPrintFormatter::Numeric {
+            if graph_print.formatter == GraphPrintFormatter::Strftime {
                 return Err(
                     "strftime graph printing requires a VDEF in this implementation".into(),
                 );
@@ -2313,40 +2708,74 @@ fn render_xport_with_graph_prints(
                     graph_print.variable
                 )
             })?;
-            let column = exports
-                .iter()
-                .position(|export| export.variable == graph_print.variable)
+            // rrd_graph.c/rrd_xport.c reduce the complete native buffer,
+            // including its right-edge calculation, before export truncation.
+            let summary = result
+                .summaries
+                .get(&graph_print.variable)
                 .ok_or_else(|| format!("unknown graph print variable {}", graph_print.variable))?;
-            let values = result
-                .rows
-                .iter()
-                .filter_map(|row| row.get(column).copied().flatten())
-                .filter(|value| value.is_finite())
-                .collect::<Vec<_>>();
             let value = match consolidation {
-                "AVERAGE" if values.is_empty() => rrd_nan(),
-                "AVERAGE" => values.iter().sum::<f64>() / values.len() as f64,
-                "MIN" => values
-                    .iter()
-                    .copied()
-                    .reduce(f64::min)
-                    .unwrap_or_else(rrd_nan),
-                "MAX" => values
-                    .iter()
-                    .copied()
-                    .reduce(f64::max)
-                    .unwrap_or_else(rrd_nan),
-                "LAST" => values.last().copied().unwrap_or_else(rrd_nan),
+                "AVERAGE" => summary.average,
+                "MIN" => summary.minimum,
+                "MAX" => summary.maximum,
+                "LAST" => summary.last,
                 _ => unreachable!(),
-            };
+            }
+            .unwrap_or_else(rrd_nan);
             (value, None)
         };
-        let formatted =
-            format_graph_print(value, timestamp, graph_print.formatter, &graph_print.format)?;
+        let metadata = if graph_print.formatter == GraphPrintFormatter::Numeric
+            || graph_print.export_numeric
+        {
+            format_graph_numeric_impl(
+                value,
+                &graph_print.format,
+                true,
+                print_options.base,
+                &mut metadata_si,
+            )?
+        } else {
+            format_graph_print(
+                value,
+                timestamp,
+                graph_print.formatter,
+                &graph_print.format,
+                GraphPrintOptions {
+                    utc: false,
+                    ..print_options
+                },
+                &mut metadata_si,
+            )?
+        };
+        // Export formatting mutates %S into %s before console print_calc runs.
+        let console_format = if print_options.export
+            && (graph_print.formatter == GraphPrintFormatter::Numeric || graph_print.export_numeric)
+        {
+            graph_print.format.replacen("%S", "%s", 1)
+        } else {
+            graph_print.format.clone()
+        };
+        let formatted = format_graph_print(
+            value,
+            timestamp,
+            graph_print.formatter,
+            &console_format,
+            print_options,
+            &mut console_si,
+        )?;
         if graph_print.kind == "gprint" {
-            graph_gprints_out.push((String::from("gprint"), formatted));
+            gprint_values.insert(print_index, formatted);
+            if let Some(entry) = graph_gprints_out
+                .iter_mut()
+                .find(|(kind, index)| kind == "__gprint" && index == &print_index.to_string())
+            {
+                *entry = (String::from("gprint"), metadata);
+            } else {
+                graph_gprints_out.push((String::from("gprint"), metadata));
+            }
         } else {
             print_values.push(formatted);
+            metadata_print_values.push(metadata);
         }
     }
     exports.truncate(visible_export_count);
@@ -2364,7 +2793,7 @@ fn render_xport_with_graph_prints(
                 show_time,
                 enum_ds: false,
                 graph_gprints: Some(&graph_gprints_out),
-                graph_prints: Some(&print_values),
+                graph_prints: Some(&metadata_print_values),
             },
         )
     } else {
@@ -2378,7 +2807,7 @@ fn render_xport_with_graph_prints(
                 show_time,
                 enum_ds,
                 graph_gprints: Some(&graph_gprints_out),
-                graph_prints: Some(&print_values),
+                graph_prints: Some(&metadata_print_values),
             },
         )
     };
@@ -2388,12 +2817,178 @@ fn render_xport_with_graph_prints(
         end: result.end,
         step: result.step,
         prints: print_values,
+        gprint_values,
+        vdef_values,
         variables: exports
             .iter()
             .map(|export| export.variable.clone())
             .collect(),
         rows: result.rows,
     })
+}
+
+struct LegendEntry {
+    series_index: usize,
+    text: String,
+    width: u32,
+}
+
+struct LegendRow {
+    entries: Vec<LegendEntry>,
+    alignment: &'static str,
+    offset: i64,
+}
+
+fn prepare_legend_rows(
+    series: &[GraphSeries],
+    minimum: f64,
+    maximum: f64,
+    start: i64,
+    end: i64,
+    force_rules: bool,
+) -> Result<Vec<LegendRow>, Box<dyn std::error::Error>> {
+    let mut rows = Vec::new();
+    let mut entries = Vec::new();
+    let mut default_alignment = "left";
+    let mut offset = 0_i64;
+    for (series_index, item) in series.iter().enumerate() {
+        if item.style == "textalign" {
+            default_alignment = match item.legend.as_str() {
+                "right" => "right",
+                "center" => "center",
+                "justified" => "justified",
+                _ => "left",
+            };
+            continue;
+        }
+        if item.color.is_none() && !matches!(item.style, "comment" | "gprint") {
+            continue;
+        }
+        if !force_rules
+            && matches!(item.style, "hrule" | "vrule")
+            && !item
+                .rule_value
+                .is_some_and(|value| (minimum..=maximum).contains(&value))
+            && !item
+                .rule_time
+                .is_some_and(|time| (start..=end).contains(&time))
+        {
+            continue;
+        }
+        let mut text = item.legend.replace("\\t", "    ");
+        let control = if text.len() >= 2 && text.as_bytes()[text.len() - 2] == b'\\' {
+            let code = text.chars().last().unwrap();
+            text.truncate(text.len() - 2);
+            match code {
+                'l' | 'n' | 'r' | 'c' | 'j' | 'g' | '.' | 's' | 'u' => code,
+                _ => {
+                    return Err(
+                        format!("Unknown control code at the end of '{text}\\{code}'").into(),
+                    );
+                }
+            }
+        } else {
+            '\0'
+        };
+        if control == 'g' {
+            text.truncate(text.trim_end_matches(' ').len());
+        }
+        let text = ascii_text(&text);
+        if !text.is_empty() {
+            let text_width = u32::try_from(text.len())
+                .ok()
+                .and_then(|length| length.checked_mul(8))
+                .ok_or("PNG legend text width overflows")?;
+            let width = text_width
+                .checked_add(if item.color.is_some() {
+                    if control == 'g' { 13 } else { 27 }
+                } else {
+                    0
+                })
+                .ok_or("PNG legend entry width overflows")?;
+            entries.push(LegendEntry {
+                series_index,
+                text,
+                width,
+            });
+        }
+        let alignment = match control {
+            'l' | 'n' => Some("left"),
+            'r' => Some("right"),
+            'c' => Some("center"),
+            'j' => Some("justified"),
+            's' | 'u' => Some(default_alignment),
+            _ => None,
+        };
+        if let Some(alignment) = alignment {
+            let has_text = !entries.is_empty();
+            rows.push(LegendRow {
+                entries: std::mem::take(&mut entries),
+                alignment,
+                offset,
+            });
+            // leg_place advances only for nonempty text, except that \s
+            // also advances an empty row. Use the bitmap font's 12px line
+            // advance and 7px font size; Pango measurements remain separate.
+            if has_text || control == 's' {
+                offset += 12;
+            }
+            if control == 's' {
+                offset -= 7;
+            }
+            if control == 'u' {
+                offset -= 12;
+            }
+        }
+    }
+    if !entries.is_empty() {
+        rows.push(LegendRow {
+            entries,
+            alignment: default_alignment,
+            offset,
+        });
+    }
+    Ok(rows)
+}
+
+fn legend_reversal_bounds(
+    rows: &[LegendRow],
+    series: &[GraphSeries],
+    direction: LegendDirection,
+) -> Option<(i64, i64, usize, usize)> {
+    if direction == LegendDirection::TopDown {
+        return None;
+    }
+    // grid_paint locates the first/last nonempty legend by script index.
+    // bottomup2 excludes comments before the first and after the last
+    // non-comment element; comments between those endpoints also reverse.
+    let entries: Vec<_> = rows
+        .iter()
+        .flat_map(|row| {
+            row.entries
+                .iter()
+                .map(move |entry| (row.offset, entry.series_index))
+        })
+        .filter(|(_, index)| {
+            direction != LegendDirection::BottomUp2 || series[*index].style != "comment"
+        })
+        .collect();
+    let first = entries.iter().min_by_key(|(_, index)| *index)?;
+    let last = entries.iter().max_by_key(|(_, index)| *index)?;
+    Some((
+        first.0,
+        last.0,
+        if direction == LegendDirection::BottomUp {
+            0
+        } else {
+            first.1
+        },
+        if direction == LegendDirection::BottomUp {
+            usize::MAX
+        } else {
+            last.1
+        },
+    ))
 }
 
 fn render_graph_png(
@@ -2418,7 +3013,7 @@ fn render_graph_png(
         only_graph,
         full_size_mode,
         force_rules_legend,
-        legend_bottomup,
+        legend_direction,
         colors,
         grid_dash,
         border_width,
@@ -2446,21 +3041,22 @@ fn render_graph_png(
     )?;
     // RRDtool treats these as plot dimensions unless full-size mode is set.
     // only-graph suppresses every margin and label around the plot.
-    let has_legend = !only_graph
-        && show_legend
-        && series.iter().any(|item| {
-            if item.color.is_none() || item.legend.is_empty() {
-                return false;
-            }
-            if force_rules_legend || !matches!(item.style, "hrule" | "vrule") {
-                return true;
-            }
-            item.rule_value
-                .is_some_and(|value| (minimum..=maximum).contains(&value))
-                || item
-                    .rule_time
-                    .is_some_and(|time| (graph.start..=graph.end).contains(&time))
-        });
+    let legend_rows = if !only_graph && show_legend {
+        prepare_legend_rows(
+            series,
+            minimum,
+            maximum,
+            graph.start,
+            graph.end,
+            force_rules_legend,
+        )?
+    } else {
+        Vec::new()
+    };
+    if legend_rows.len() > 256 {
+        return Err("PNG legend exceeds the 256 row safety limit".into());
+    }
+    let has_legend = !legend_rows.is_empty();
     let horizontal_margin = if only_graph {
         0
     } else {
@@ -2469,7 +3065,15 @@ fn render_graph_png(
     let vertical_margin = if only_graph {
         0
     } else {
-        (if has_legend { 55 } else { 39 }) + if title.is_some() { 13 } else { 0 }
+        (if has_legend {
+            55 + legend_rows
+                .iter()
+                .map(|row| row.offset.max(0) as u32)
+                .max()
+                .unwrap_or(0)
+        } else {
+            39
+        }) + if title.is_some() { 13 } else { 0 }
     };
     let (width, height) = if full_size_mode {
         let plot_width = width
@@ -2637,12 +3241,24 @@ fn render_graph_png(
         }
     }
     let prepared_series = prepare_graph_series(graph, series);
-    for (series_index, item) in series.iter().enumerate() {
+    // rrd_graph.c paints rules after every LINE/AREA/TICK, irrespective of
+    // their position in the script. Keep the original order within each pass.
+    let drawing_order = series
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| !matches!(item.style, "hrule" | "vrule"))
+        .chain(
+            series
+                .iter()
+                .enumerate()
+                .filter(|(_, item)| matches!(item.style, "hrule" | "vrule")),
+        );
+    for (series_index, item) in drawing_order {
         let prepared = &prepared_series[series_index];
         let color = item.color.unwrap_or([0, 0, 0, 0]);
         if item.style == "hrule" {
             let value = item.rule_value.expect("HRULE carries a numeric value");
-            if value < minimum || value > maximum {
+            if !value.is_finite() || value < minimum || value > maximum {
                 continue;
             }
             let y = y_for(value);
@@ -2825,86 +3441,96 @@ fn render_graph_png(
         }
     }
     if has_legend {
-        let mut x = left;
-        let y = bottom + 26;
-        let mut legend_series = series.iter().collect::<Vec<_>>();
-        if legend_bottomup {
-            legend_series.reverse();
-        }
-        for item in legend_series {
-            let (Some(color), false) = (item.color, item.legend.is_empty()) else {
-                continue;
+        let reversal = legend_reversal_bounds(&legend_rows, series, legend_direction);
+        for row in &legend_rows {
+            let fill: u32 = row.entries.iter().map(|entry| entry.width).sum();
+            let spare = width.saturating_sub(fill);
+            let glue = if row.alignment == "justified" && row.entries.len() > 1 {
+                spare / (row.entries.len() as u32 - 1)
+            } else {
+                0
             };
-            if !force_rules_legend
-                && matches!(item.style, "hrule" | "vrule")
-                && !item
-                    .rule_value
-                    .is_some_and(|value| (minimum..=maximum).contains(&value))
-                && !item
-                    .rule_time
-                    .is_some_and(|time| (graph.start..=graph.end).contains(&time))
-            {
-                continue;
+            let mut x = match row.alignment {
+                "right" => left + spare,
+                "center" => left + spare / 2,
+                _ => left,
+            };
+            for entry in &row.entries {
+                let offset = if let Some((minimum, maximum, first, last)) = reversal {
+                    if (first..=last).contains(&entry.series_index) {
+                        minimum + maximum - row.offset
+                    } else {
+                        row.offset
+                    }
+                } else {
+                    row.offset
+                };
+                let y = (i64::from(bottom) + 26 + offset).max(0) as u32;
+                let item = &series[entry.series_index];
+                let sample_x = x;
+                let text_x = if let Some(color) = item.color {
+                    draw_styled_line(
+                        &mut pixels,
+                        canvas_width,
+                        canvas_height,
+                        (x, y.saturating_sub(3)),
+                        (x + 10, y.saturating_sub(3)),
+                        DashStroke {
+                            color,
+                            pattern: &item.dash_pattern,
+                            offset: item.dash_offset,
+                            width: item.line_width,
+                        },
+                    );
+                    if item.style == "tick" && colors.frame[3] > 0 {
+                        draw_line(
+                            &mut pixels,
+                            canvas_width,
+                            canvas_height,
+                            (sample_x.saturating_sub(1), y.saturating_sub(5)),
+                            (sample_x + 11, y.saturating_sub(5)),
+                            colors.frame,
+                        );
+                        draw_line(
+                            &mut pixels,
+                            canvas_width,
+                            canvas_height,
+                            (sample_x.saturating_sub(1), y + 1),
+                            (sample_x + 11, y + 1),
+                            colors.frame,
+                        );
+                        draw_line(
+                            &mut pixels,
+                            canvas_width,
+                            canvas_height,
+                            (sample_x.saturating_sub(1), y.saturating_sub(5)),
+                            (sample_x.saturating_sub(1), y + 1),
+                            colors.frame,
+                        );
+                        draw_line(
+                            &mut pixels,
+                            canvas_width,
+                            canvas_height,
+                            (sample_x + 11, y.saturating_sub(5)),
+                            (sample_x + 11, y + 1),
+                            colors.frame,
+                        );
+                    }
+                    x + 13
+                } else {
+                    x
+                };
+                draw_text(
+                    &mut pixels,
+                    canvas_width,
+                    canvas_height,
+                    text_x,
+                    y.saturating_sub(7),
+                    &entry.text,
+                    colors.font,
+                );
+                x = x.saturating_add(entry.width).saturating_add(glue);
             }
-            let sample_x = x;
-            draw_styled_line(
-                &mut pixels,
-                canvas_width,
-                canvas_height,
-                (x, y - 3),
-                (x + 10, y - 3),
-                DashStroke {
-                    color,
-                    pattern: &item.dash_pattern,
-                    offset: item.dash_offset,
-                    width: item.line_width,
-                },
-            );
-            if item.style == "tick" && colors.frame[3] > 0 {
-                draw_line(
-                    &mut pixels,
-                    canvas_width,
-                    canvas_height,
-                    (sample_x.saturating_sub(1), y - 5),
-                    (sample_x + 11, y - 5),
-                    colors.frame,
-                );
-                draw_line(
-                    &mut pixels,
-                    canvas_width,
-                    canvas_height,
-                    (sample_x.saturating_sub(1), y + 1),
-                    (sample_x + 11, y + 1),
-                    colors.frame,
-                );
-                draw_line(
-                    &mut pixels,
-                    canvas_width,
-                    canvas_height,
-                    (sample_x.saturating_sub(1), y - 5),
-                    (sample_x.saturating_sub(1), y + 1),
-                    colors.frame,
-                );
-                draw_line(
-                    &mut pixels,
-                    canvas_width,
-                    canvas_height,
-                    (sample_x + 11, y - 5),
-                    (sample_x + 11, y + 1),
-                    colors.frame,
-                );
-            }
-            x += 13;
-            draw_text(
-                &mut pixels,
-                canvas_width,
-                canvas_height,
-                x,
-                y - 7,
-                &ascii_text(&item.legend),
-                colors.font,
-            );
-            x = x.saturating_add((item.legend.len() as u32).saturating_mul(8) + 14);
         }
     }
     if border_width > 0 && !only_graph {
@@ -3159,6 +3785,15 @@ fn prepare_graph_series(
     let mut previous_values = vec![Some(0.0); graph.rows.len()];
     let mut has_previous_graph = false;
     for item in series {
+        // Legend/rule elements have no sampled values and must not allocate
+        // row-sized buffers for each COMMENT/GPRINT in a large export.
+        if !matches!(item.style, "line" | "area" | "tick") {
+            prepared.push(PreparedGraphSeries {
+                values: Vec::new(),
+                baseline: Vec::new(),
+            });
+            continue;
+        }
         let mut values = vec![None; graph.rows.len()];
         let mut baseline = vec![None; graph.rows.len()];
         let column = graph
@@ -3485,26 +4120,208 @@ struct XportFormatOptions<'a> {
     graph_prints: Option<&'a [String]>,
 }
 
+#[derive(Clone, Copy)]
+struct GraphPrintOptions {
+    base: u32,
+    utc: bool,
+    export: bool,
+}
+
+impl Default for GraphPrintOptions {
+    fn default() -> Self {
+        Self {
+            base: 1000,
+            utc: false,
+            export: false,
+        }
+    }
+}
+
+#[derive(Default)]
+struct GraphSiState {
+    factor: Option<f64>,
+    symbol: &'static str,
+}
+
 fn format_graph_print(
     value: f64,
     timestamp: Option<i64>,
     formatter: GraphPrintFormatter,
     format: &str,
+    options: GraphPrintOptions,
+    si: &mut GraphSiState,
 ) -> Result<String, Box<dyn std::error::Error>> {
     match formatter {
-        GraphPrintFormatter::Numeric => format_graph_numeric(value, format),
+        GraphPrintFormatter::Numeric => {
+            format_graph_numeric_impl(value, format, false, options.base, si)
+        }
+        GraphPrintFormatter::Timestamp => format_graph_value_timestamp(value, format),
+        GraphPrintFormatter::Duration => format_graph_duration(value, format),
         GraphPrintFormatter::Strftime => match timestamp {
-            Some(timestamp) => format_graph_time(timestamp, format),
+            Some(timestamp) => format_graph_time(timestamp, format, options.utc),
             None => Ok(clean_graph_time_format(format)),
         },
     }
 }
 
-fn format_graph_time(timestamp: i64, format: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn format_graph_value_timestamp(
+    value: f64,
+    format: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    // timestamp_to_tm truncates the value to whole seconds and uses UTC,
+    // unlike strftime's local-time rendering of the VDEF's event timestamp.
+    if !value.is_finite() || value < i64::MIN as f64 || value >= -(i64::MIN as f64) {
+        return graph_value_printf(value, c"%.0f");
+    }
+    let seconds = value as libc::time_t;
+    let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
+    // SAFETY: gmtime_r writes to valid storage and retains neither pointer.
+    if unsafe { libc::gmtime_r(&seconds, tm.as_mut_ptr()) }.is_null() {
+        return graph_value_printf(value, c"%.0f");
+    }
+    let format = std::ffi::CString::new(if format.is_empty() {
+        "%Y-%m-%d %H:%M:%S"
+    } else {
+        format
+    })?;
+    let mut buffer = [0_u8; 200];
+    // SAFETY: gmtime_r initialized tm; the format and output buffer are valid.
+    let length = unsafe {
+        libc::strftime(
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            format.as_ptr(),
+            tm.as_ptr(),
+        )
+    };
+    if length == 0 {
+        return Err("graph print strftime output is empty or exceeds its buffer".into());
+    }
+    Ok(String::from_utf8_lossy(&buffer[..length]).into_owned())
+}
+
+fn graph_value_printf(
+    value: f64,
+    format: &std::ffi::CStr,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut buffer = [0_u8; 200];
+    // SAFETY: callers supply one floating conversion; the buffer is writable.
+    let length = unsafe {
+        libc::snprintf(
+            buffer.as_mut_ptr().cast(),
+            buffer.len(),
+            format.as_ptr(),
+            value,
+        )
+    };
+    if length < 0 {
+        return Err("graph print value formatting failed".into());
+    }
+    let length = (length as usize).min(buffer.len() - 1);
+    Ok(String::from_utf8_lossy(&buffer[..length]).into_owned())
+}
+
+fn format_graph_duration(value: f64, format: &str) -> Result<String, Box<dyn std::error::Error>> {
+    // strfduration interprets values as milliseconds, truncates component
+    // precision before printf rounding, and puts one sign before the format.
+    if !value.is_finite() {
+        return graph_value_printf(value, c"%f");
+    }
+    let format = if format.is_empty() {
+        "%H:%02m:%02s"
+    } else {
+        format
+    };
+    let seconds = value.abs() / 1000.0;
+    let minutes = seconds / 60.0;
+    let hours = minutes / 60.0;
+    let days = hours / 24.0;
+    let weeks = days / 7.0;
+    let mut output = if value < 0.0 {
+        String::from("-")
+    } else {
+        String::new()
+    };
+    let mut chars = format.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character != '%' {
+            output.push(character);
+            continue;
+        }
+        let zero_pad = chars.next_if_eq(&'0').is_some();
+        let mut width = String::new();
+        while let Some(digit) = chars.next_if(|character| character.is_ascii_digit()) {
+            width.push(digit);
+        }
+        let width = if width.is_empty() {
+            0
+        } else {
+            width
+                .parse::<usize>()
+                .map_err(|_| "Wrong duration format")?
+        };
+        let mut precision = String::new();
+        if chars.next_if_eq(&'.').is_some() {
+            while let Some(digit) = chars.next_if(|character| character.is_ascii_digit()) {
+                precision.push(digit);
+            }
+        }
+        let precision = if precision.is_empty() {
+            0
+        } else {
+            precision
+                .parse::<usize>()
+                .map_err(|_| "Wrong duration format")?
+        };
+        if width > 4096 || precision > 308 {
+            return Err("duration format width or precision exceeds the safety limit".into());
+        }
+        let component = match chars.next() {
+            Some('%') => {
+                output.push('%');
+                continue;
+            }
+            Some('W') => weeks,
+            Some('d') => days - weeks.trunc() * 7.0,
+            Some('D') => days,
+            Some('h') => hours - days.trunc() * 24.0,
+            Some('H') => hours,
+            Some('m') => minutes - hours.trunc() * 60.0,
+            Some('M') => minutes,
+            Some('s') => seconds - minutes.trunc() * 60.0,
+            Some('S') => seconds,
+            Some('f') => value.abs() - seconds.trunc() * 1000.0,
+            _ => return Err("Wrong duration format".into()),
+        };
+        let factor = 10_f64.powi(precision as i32);
+        let truncated = (component * factor).trunc() / factor;
+        let spec = std::ffi::CString::new(format!(
+            "%{}{width}.{precision}f",
+            if zero_pad { "0" } else { "" }
+        ))?;
+        output.push_str(&graph_value_printf(truncated, &spec)?);
+    }
+    // The pinned graph engine's FMT_LEG_LEN includes the terminating NUL.
+    let bytes = output.as_bytes();
+    Ok(String::from_utf8_lossy(&bytes[..bytes.len().min(199)]).into_owned())
+}
+
+fn format_graph_time(
+    timestamp: i64,
+    format: &str,
+    utc: bool,
+) -> Result<String, Box<dyn std::error::Error>> {
     use std::ffi::CString;
     let timestamp = timestamp as libc::time_t;
     let mut broken_down = unsafe { std::mem::zeroed::<libc::tm>() };
-    let converted = unsafe { libc::localtime_r(&timestamp, &mut broken_down) };
+    // SAFETY: both functions write to valid tm storage and retain no pointers.
+    let converted = unsafe {
+        if utc {
+            libc::gmtime_r(&timestamp, &mut broken_down)
+        } else {
+            libc::localtime_r(&timestamp, &mut broken_down)
+        }
+    };
     if converted.is_null() {
         return Err("graph print timestamp is outside the platform time range".into());
     }
@@ -3558,13 +4375,36 @@ fn clean_graph_time_format(format: &str) -> String {
     result
 }
 
-fn format_graph_numeric(value: f64, format: &str) -> Result<String, Box<dyn std::error::Error>> {
+fn format_graph_numeric_impl(
+    value: f64,
+    format: &str,
+    metadata: bool,
+    base: u32,
+    si: &mut GraphSiState,
+) -> Result<String, Box<dyn std::error::Error>> {
     use std::ffi::CString;
 
+    // The C path searches the raw format, including escaped percent literals,
+    // and rewrites only the first %S before passing it to printf.
+    let shared_units = format.contains("%S");
+    let autoscale = shared_units || format.contains("%s");
+    let normalized = shared_units.then(|| format.replacen("%S", "%s", 1));
+    let format = normalized.as_deref().unwrap_or(format);
     let parsed = parse_graph_numeric_format(format)
         .map_err(|_| format!("bad format for PRINT in \"{format}'"))?;
-    let (scaled_value, si_symbol) = if parsed.si_symbol.is_some() {
-        graph_si_scale(value)
+    let (scaled_value, si_symbol) = if autoscale {
+        if let Some(factor) = si.factor.filter(|_| shared_units) {
+            (value / factor, si.symbol)
+        } else {
+            let (scaled, symbol, factor) = graph_si_scale(value, base);
+            si.factor = if shared_units && scaled == 0.0 {
+                None
+            } else {
+                Some(factor)
+            };
+            si.symbol = symbol;
+            (scaled, symbol)
+        }
     } else {
         (value, "")
     };
@@ -3574,7 +4414,16 @@ fn format_graph_numeric(value: f64, format: &str) -> Result<String, Box<dyn std:
         append_graph_format_literal(&mut output, &format[cursor..substitution.start]);
         match substitution.kind {
             GraphFormatSubstitutionKind::Floating => {
-                let conversion = CString::new(&format[substitution.start..substitution.end])?;
+                let specification = &format[substitution.start..substitution.end];
+                if metadata {
+                    if let Some(formatted) = format_rrd_metadata_float(scaled_value, specification)
+                    {
+                        output.push_str(&formatted);
+                        cursor = substitution.end;
+                        continue;
+                    }
+                }
+                let conversion = CString::new(specification)?;
                 let mut buffer = [0 as libc::c_char; 4096];
                 let length = unsafe {
                     libc::snprintf(
@@ -3600,6 +4449,136 @@ fn format_graph_numeric(value: f64, format: &str) -> Result<String, Box<dyn std:
     Ok(output)
 }
 
+// Port rrd_snprintf.c::fmtflt's fixed/scientific scaling and integer
+// rounding for the tested numeric range and printf grammar. The host printf
+// path remains separate for graphv console output and other conversions.
+fn format_rrd_metadata_float(value: f64, specification: &str) -> Option<String> {
+    if !specification.ends_with(['e', 'E', 'f', 'F']) {
+        return None;
+    }
+    let upper = specification.ends_with(['E', 'F']);
+    let scientific = specification.ends_with(['e', 'E']);
+    let mut body = specification.strip_prefix('%')?;
+    let flag = body.chars().next().filter(|flag| "-+ #0".contains(*flag));
+    if flag.is_some() {
+        body = &body[1..];
+    }
+    let body = body
+        .strip_suffix("le")
+        .or_else(|| body.strip_suffix("lE"))
+        .or_else(|| body.strip_suffix("lf"))
+        .or_else(|| body.strip_suffix("lF"))?;
+    let (width, precision) = body.split_once('.').unwrap_or((body, "6"));
+    let width = if width.is_empty() {
+        0
+    } else {
+        width.parse::<usize>().ok()?
+    };
+    if width > 4095 {
+        return None;
+    }
+    let precision = precision.parse::<usize>().ok()?.min(19);
+    if !value.is_finite() {
+        // fmtflt chooses the sign by comparison, never by NaN's sign bit.
+        let sign = if value < 0.0 {
+            "-"
+        } else if flag == Some('+') {
+            "+"
+        } else if flag == Some(' ') {
+            " "
+        } else {
+            ""
+        };
+        let token = if value.is_nan() {
+            if upper { "NAN" } else { "nan" }
+        } else if upper {
+            "INF"
+        } else {
+            "inf"
+        };
+        let text = format!("{sign}{token}");
+        let padding = " ".repeat(width.saturating_sub(text.len()));
+        return Some(if flag == Some('-') {
+            format!("{text}{padding}")
+        } else {
+            format!("{padding}{text}")
+        });
+    }
+    let mut exponent = 0_i32;
+    let mut factor = 1.0_f64;
+    if scientific {
+        let mut magnitude = value.abs();
+        while magnitude > 0.0 && magnitude < 1.0 && exponent > -307 {
+            magnitude *= 10.0;
+            exponent -= 1;
+        }
+        while magnitude >= 10.0 && exponent < 308 {
+            magnitude /= 10.0;
+            exponent += 1;
+        }
+        if magnitude > 0.0 && magnitude < 1.0 {
+            return None;
+        }
+        for _ in 0..exponent.max(0) {
+            factor *= 10.0;
+        }
+        for _ in 0..(-exponent).max(0) {
+            factor /= 10.0;
+        }
+    }
+    let scaled = value.abs() / factor;
+    if !scaled.is_finite() || scaled >= u64::MAX as f64 {
+        return None;
+    }
+    let mut integer = scaled as u64;
+    let mask = 10_u64.pow(precision as u32);
+    let fraction = mask as f64 * (scaled - integer as f64);
+    let mut fractional = fraction as u64;
+    if fraction - fractional as f64 >= 0.5 {
+        fractional += 1;
+    }
+    if fractional >= mask {
+        integer += 1;
+        fractional = 0;
+        if scientific && integer == 10 {
+            integer = 1;
+            exponent += 1;
+        }
+    }
+    let sign = if value < 0.0 {
+        "-"
+    } else if flag == Some('+') {
+        "+"
+    } else if flag == Some(' ') {
+        " "
+    } else {
+        ""
+    };
+    let fraction = if precision > 0 {
+        format!(".{fractional:0precision$}")
+    } else if flag == Some('#') {
+        ".".to_owned()
+    } else {
+        String::new()
+    };
+    let digits = if scientific {
+        format!(
+            "{integer}{fraction}{}{exponent:+03}",
+            if upper { 'E' } else { 'e' }
+        )
+    } else {
+        format!("{integer}{fraction}")
+    };
+    let padding = " ".repeat(width.saturating_sub(sign.len() + digits.len()));
+    Some(if flag == Some('-') {
+        format!("{sign}{digits}{padding}")
+    } else if flag == Some('0') {
+        format!("{sign}{}{digits}", "0".repeat(padding.len()))
+    } else {
+        format!("{padding}{sign}{digits}")
+    })
+}
+
 #[derive(Clone, Copy)]
 struct GraphFormatSubstitution {
     start: usize,
@@ -3615,7 +4594,6 @@ enum GraphFormatSubstitutionKind {
 
 struct ParsedGraphNumericFormat {
     substitutions: Vec<GraphFormatSubstitution>,
-    si_symbol: Option<usize>,
 }
 
 fn parse_graph_numeric_format(format: &str) -> Result<ParsedGraphNumericFormat, ()> {
@@ -3704,10 +4682,7 @@ fn parse_graph_numeric_format(format: &str) -> Result<ParsedGraphNumericFormat, 
             return Err(());
         }
     }
-    Ok(ParsedGraphNumericFormat {
-        substitutions,
-        si_symbol,
-    })
+    Ok(ParsedGraphNumericFormat { substitutions })
 }
 
 fn append_graph_format_literal(output: &mut String, literal: &str) {
@@ -3722,21 +4697,22 @@ fn append_graph_format_literal(output: &mut String, literal: &str) {
     }
 }
 
-fn graph_si_scale(value: f64) -> (f64, &'static str) {
+fn graph_si_scale(value: f64, base: u32) -> (f64, &'static str, f64) {
     const SYMBOLS: [&str; 13] = [
         "a", "f", "p", "n", "u", "m", " ", "k", "M", "G", "T", "P", "E",
     ];
     if value == 0.0 || value.is_nan() {
-        return (value, SYMBOLS[6]);
+        return (value, SYMBOLS[6], 1.0);
     }
-    let exponent = (value.abs().log10() / 3.0).floor() as i32;
-    let factor = 1000.0_f64.powi(exponent);
-    let symbol = usize::try_from(exponent + 6)
-        .ok()
+    let exponent = (value.abs().ln() / f64::from(base).ln()).floor() as i32;
+    let factor = f64::from(base).powf(f64::from(exponent));
+    let symbol = exponent
+        .checked_add(6)
+        .and_then(|index| usize::try_from(index).ok())
         .and_then(|index| SYMBOLS.get(index))
         .copied()
         .unwrap_or("?");
-    (value / factor, symbol)
+    (value / factor, symbol, factor)
 }
 
 fn format_xport_xml(
@@ -6023,11 +6999,32 @@ mod time_spec_tests {
 #[cfg(test)]
 mod graph_stroke_tests {
     use super::{
-        GraphPngOptions, GraphScaleOptions, RenderedGraphXport, draw_line_with_width,
-        draw_styled_line, draw_vertical_text, graph_scale_bounds, graph_value_bounds,
-        interpolate_graph_color, parse_graph_hrule, parse_graph_series, parse_graph_tick,
-        parse_graph_vrule, prepare_graph_series, render_graph_png, set_pixel, tick_mark_range,
+        GraphPngOptions, GraphScaleOptions, LegendDirection, RenderedGraphXport,
+        draw_line_with_width, draw_styled_line, draw_vertical_text, graph_scale_bounds,
+        graph_value_bounds, interpolate_graph_color, parse_graph_hrule, parse_graph_series,
+        parse_graph_tick, parse_graph_vrule, prepare_graph_series, prepare_legend_rows,
+        render_graph_png, set_pixel, tick_mark_range,
     };
+
+    #[test]
+    fn small_and_upward_legend_controls_adjust_the_following_row() {
+        let series = ["A\\s", "B\\u", "C\\l", "\\u", "D\\l"]
+            .into_iter()
+            .map(|legend| {
+                let mut item = parse_graph_series("LINE1:x#ffffff").unwrap().0;
+                item.style = "comment";
+                item.color = None;
+                item.legend = legend.into();
+                item
+            })
+            .collect::<Vec<_>>();
+        let rows = prepare_legend_rows(&series, 0.0, 1.0, 0, 10, false).unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.offset).collect::<Vec<_>>(),
+            [0, 5, 5, 17, 5]
+        );
+        assert!(rows[3].entries.is_empty());
+    }
 
     #[test]
     fn line_directive_width_is_retained_and_defaults_to_one() {
@@ -6211,6 +7208,8 @@ mod graph_stroke_tests {
             end: 1,
             step: 1,
             prints: Vec::new(),
+            gprint_values: Default::default(),
+            vdef_values: Default::default(),
             variables: vec!["base".into(), "upper".into()],
             rows: vec![vec![Some(3.0), Some(2.0)]],
         };
@@ -6246,6 +7245,8 @@ mod graph_stroke_tests {
             end: 10,
             step: 1,
             prints: Vec::new(),
+            gprint_values: Default::default(),
+            vdef_values: Default::default(),
             variables: vec![String::from("normal"), String::from("spike")],
             rows: vec![
                 vec![Some(2.0), Some(1000.0)],
@@ -6388,6 +7389,8 @@ mod graph_stroke_tests {
             end: 10,
             step: 1,
             prints: Vec::new(),
+            gprint_values: Default::default(),
+            vdef_values: Default::default(),
             variables: vec!["events".to_owned()],
             rows: vec![vec![Some(1.0)]; 11],
         };
@@ -6414,7 +7417,7 @@ mod graph_stroke_tests {
                     only_graph: false,
                     full_size_mode: false,
                     force_rules_legend: false,
-                    legend_bottomup: false,
+                    legend_direction: LegendDirection::TopDown,
                     colors: super::GraphColors::default(),
                     grid_dash: Vec::new(),
                     border_width: 0,
@@ -6461,6 +7464,8 @@ mod graph_stroke_tests {
             end: 10,
             step: 1,
             prints: Vec::new(),
+            gprint_values: Default::default(),
+            vdef_values: Default::default(),
             variables: vec![String::from("load")],
             rows: vec![vec![Some(2.0)], vec![Some(4.0)]],
         };
@@ -6496,6 +7501,8 @@ mod graph_stroke_tests {
             end: 30,
             step: 10,
             prints: Vec::new(),
+            gprint_values: Default::default(),
+            vdef_values: Default::default(),
             variables: vec![String::from("base"), String::from("extra")],
             rows: vec![
                 vec![Some(2.0), Some(3.0)],

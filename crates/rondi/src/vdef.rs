@@ -241,6 +241,20 @@ fn interval_timestamp(start: i64, index: usize, step: u64) -> Result<i64, VdefEr
     )
 }
 
+fn rrd_isinf_result(value: f64) -> libc::c_int {
+    // vdef_percent_compar returns isinf's actual integer result. Darwin's
+    // math.h returns 1 for either infinity; glibc preserves its sign.
+    #[cfg(target_vendor = "apple")]
+    {
+        let _ = value;
+        1
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        if value.is_sign_negative() { -1 } else { 1 }
+    }
+}
+
 fn rrd_qsort_compatible(values: &mut [f64]) {
     // rrd_graph.c passes vdef_percent_compar to the host C library's qsort.
     // In particular, its comparisons involving infinities are not a strict
@@ -260,10 +274,10 @@ fn rrd_qsort_compatible(values: &mut [f64]) {
             return 1;
         }
         if left.is_infinite() {
-            return if left.is_sign_negative() { -1 } else { 1 };
+            return rrd_isinf_result(left);
         }
         if right.is_infinite() {
-            return if right.is_sign_negative() { -1 } else { 1 };
+            return rrd_isinf_result(right);
         }
         if left < right { -1 } else { 1 }
     }
@@ -346,9 +360,12 @@ mod tests {
     }
 
     #[test]
-    fn percentile_comparator_preserves_rrdtool_negative_infinity_sign() {
+    fn percentile_comparator_matches_host_isinf_result() {
         let mut values = [f64::NEG_INFINITY, 1.0];
         rrd_qsort_compatible(&mut values);
+        #[cfg(target_vendor = "apple")]
+        assert_eq!(values, [1.0, f64::NEG_INFINITY]);
+        #[cfg(not(target_vendor = "apple"))]
         assert_eq!(values, [f64::NEG_INFINITY, 1.0]);
     }
 

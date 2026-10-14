@@ -34,6 +34,64 @@ pub struct RrdXportCdef {
     pub expression: String,
 }
 
+/// Calculations run in graph-script order, matching rrd_graph.c::data_calc.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RrdXportOperation {
+    Cdef(RrdXportCdef),
+    Vdef {
+        name: String,
+        variable: String,
+        function: crate::VdefFunction,
+        percentile: Option<f64>,
+    },
+    Shift {
+        variable: String,
+        offset: RrdXportShift,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RrdXportShift {
+    Seconds(i64),
+    Vdef(String),
+}
+
+/// Legacy PRINT reductions over the complete native graph buffer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RrdXportSummary {
+    pub average: Option<f64>,
+    pub minimum: Option<f64>,
+    pub maximum: Option<f64>,
+    pub last: Option<f64>,
+}
+
+fn summarize_graph_values(values: &[f64]) -> RrdXportSummary {
+    let mut finite = values.iter().copied().filter(|value| value.is_finite());
+    let Some(first) = finite.next() else {
+        return RrdXportSummary {
+            average: None,
+            minimum: None,
+            maximum: None,
+            last: None,
+        };
+    };
+    let (mut sum, mut minimum, mut maximum, mut last, mut count) =
+        (first, first, first, first, 1usize);
+    for value in finite {
+        sum += value;
+        minimum = minimum.min(value);
+        maximum = maximum.max(value);
+        last = value;
+        count += 1;
+    }
+    RrdXportSummary {
+        average: Some(if count > 1 { sum / count as f64 } else { first }),
+        minimum: Some(minimum),
+        maximum: Some(maximum),
+        last: Some(last),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct RrdXportResult {
     pub start: i64,
@@ -45,6 +103,10 @@ pub struct RrdXportResult {
     /// XPORT output. Graph VDEF calculations need to distinguish infinities
     /// from unknown data even though both serialize as null/unknown.
     pub raw_variables: HashMap<String, Vec<f64>>,
+    pub summaries: HashMap<String, RrdXportSummary>,
+    /// Aggregates captured at their position in the calculation sequence.
+    /// Subsequent SHIFT operations do not move an already-calculated timestamp.
+    pub vdef_values: HashMap<String, crate::VdefResult>,
 }
 
 struct FetchedDefinition {
@@ -79,6 +141,28 @@ pub fn fetch_xport(
 pub fn fetch_xport_with_cdefs(
     definitions: &[RrdXportDefinition],
     cdefs: &[RrdXportCdef],
+    columns: &[RrdXportColumn],
+    start: i64,
+    end: i64,
+    requested_step: u64,
+    max_rows: u64,
+) -> Result<RrdXportResult, StoreError> {
+    let operations: Vec<_> = cdefs.iter().cloned().map(RrdXportOperation::Cdef).collect();
+    fetch_xport_with_operations(
+        definitions,
+        &operations,
+        columns,
+        start,
+        end,
+        requested_step,
+        max_rows,
+    )
+}
+
+/// Fetch sources, apply ordered calculations/shifts, then resample exports.
+pub fn fetch_xport_with_operations(
+    definitions: &[RrdXportDefinition],
+    operations: &[RrdXportOperation],
     columns: &[RrdXportColumn],
     start: i64,
     end: i64,
@@ -139,7 +223,13 @@ pub fn fetch_xport_with_cdefs(
         .iter()
         .map(|definition| (definition.name.clone(), definition.fetched.step))
         .collect();
-    for cdef in cdefs {
+    for cdef in operations.iter().filter_map(|operation| {
+        if let RrdXportOperation::Cdef(cdef) = operation {
+            Some(cdef)
+        } else {
+            None
+        }
+    }) {
         let step = expression_step(&cdef.expression, &variable_steps)?;
         variable_steps.insert(cdef.name.clone(), step);
     }
@@ -186,62 +276,198 @@ pub fn fetch_xport_with_cdefs(
         ));
     }
 
-    let mut variables: HashMap<String, Vec<f64>> = HashMap::new();
+    // Keep each source on its native grid. rrd_graph.c::data_calc evaluates
+    // CDEFs at the GCD of their inputs, before rrd_xport.c resamples exports.
+    let mut native_variables: HashMap<String, Vec<f64>> = HashMap::new();
+    let mut variable_starts = HashMap::new();
+    let mut variable_ends = HashMap::new();
     for definition in &fetched_definitions {
-        let source_step = i64::try_from(definition.fetched.step)
-            .map_err(|_| StoreError::RrdUnsupported("DEF step overflows".into()))?;
-        let mut values = Vec::with_capacity(row_count);
-        for row_index in 0..row_count {
-            let row_offset = i64::try_from(row_index)
-                .ok()
-                .and_then(|row| row.checked_mul(step_i64))
-                .ok_or_else(|| StoreError::RrdUnsupported("xport row time overflows".into()))?;
-            let bucket_start = aligned_start
-                .checked_add(row_offset)
-                .ok_or_else(|| StoreError::RrdUnsupported("xport row time overflows".into()))?;
-            let offset = bucket_start
-                .checked_sub(definition.fetched.start)
-                .ok_or_else(|| StoreError::RrdUnsupported("DEF time offset overflows".into()))?;
-            let source_row = offset / source_step;
-            values.push(if source_row < 0 {
-                rrd_nan()
-            } else {
-                usize::try_from(source_row)
-                    .ok()
-                    .and_then(|idx| definition.fetched.rows.get(idx))
-                    .and_then(|row| row.values[definition.source_index])
-                    .unwrap_or(rrd_nan())
-            });
-        }
-        variables.insert(definition.name.clone(), values);
+        native_variables.insert(
+            definition.name.clone(),
+            definition
+                .fetched
+                .rows
+                .iter()
+                .map(|row| row.values[definition.source_index].unwrap_or(rrd_nan()))
+                .collect(),
+        );
+        variable_starts.insert(definition.name.clone(), definition.fetched.start);
+        variable_ends.insert(definition.name.clone(), definition.fetched.end);
     }
-    for cdef in cdefs {
-        if variables.contains_key(&cdef.name) {
+    let mut vdef_values: HashMap<String, crate::VdefResult> = HashMap::new();
+    let mut applied_shifts = HashMap::<String, i64>::new();
+    for operation in operations {
+        let cdef = match operation {
+            RrdXportOperation::Cdef(cdef) => cdef,
+            RrdXportOperation::Vdef {
+                name,
+                variable,
+                function,
+                percentile,
+            } => {
+                if native_variables.contains_key(name) || vdef_values.contains_key(name) {
+                    return Err(rpn_error("duplicate VDEF variable"));
+                }
+                let values = native_variables
+                    .get(variable)
+                    .ok_or_else(|| rpn_error("VDEF source is unavailable"))?;
+                let value = crate::evaluate_vdef(
+                    *function,
+                    *percentile,
+                    values,
+                    variable_starts[variable],
+                    variable_steps[variable],
+                )
+                .map_err(|error| rpn_error(&error.to_string()))?;
+                vdef_values.insert(name.clone(), value);
+                continue;
+            }
+            RrdXportOperation::Shift { variable, offset } => {
+                if !native_variables.contains_key(variable) {
+                    return Err(rpn_error("SHIFT source is unavailable"));
+                }
+                let seconds = match offset {
+                    RrdXportShift::Seconds(seconds) => *seconds,
+                    RrdXportShift::Vdef(name) => {
+                        let value = vdef_values
+                            .get(name)
+                            .ok_or_else(|| rpn_error("SHIFT offset VDEF is unavailable"))?
+                            .value;
+                        if !value.is_finite() || value < i64::MIN as f64 || value >= i64::MAX as f64
+                        {
+                            return Err(rpn_error("SHIFT offset is outside the supported range"));
+                        }
+                        value as i64
+                    }
+                };
+                let step = i64::try_from(variable_steps[variable])
+                    .map_err(|_| rpn_error("SHIFT step overflows"))?;
+                // C integer division truncates toward zero. Repeated SHIFT
+                // replaces the previous offset, rather than accumulating it.
+                let shift = (seconds / step) * step;
+                let previous = applied_shifts.get(variable).copied().unwrap_or(0);
+                for boundary in [&mut variable_starts, &mut variable_ends] {
+                    let time = boundary.get_mut(variable).unwrap();
+                    *time = time
+                        .checked_sub(previous)
+                        .and_then(|time| time.checked_add(shift))
+                        .ok_or_else(|| rpn_error("SHIFT timestamp overflows"))?;
+                }
+                applied_shifts.insert(variable.clone(), shift);
+                continue;
+            }
+        };
+        if native_variables.contains_key(&cdef.name) || vdef_values.contains_key(&cdef.name) {
             return Err(StoreError::RrdUnsupported(format!(
                 "duplicate xport variable '{}'",
                 cdef.name
             )));
         }
-        let mut values = Vec::with_capacity(row_count);
-        for row_index in 0..row_count {
+        let cdef_step = variable_steps[&cdef.name];
+        let inputs: Vec<_> = cdef
+            .expression
+            .split(',')
+            .filter_map(|token| {
+                let token = token.trim();
+                let name = token
+                    .strip_prefix("PREV(")
+                    .and_then(|s| s.strip_suffix(')'))
+                    .unwrap_or(token);
+                native_variables.contains_key(name).then_some(name)
+            })
+            .collect();
+        if inputs.is_empty()
+            && cdef.expression.split(',').any(|token| {
+                let name = token
+                    .strip_prefix("PREV(")
+                    .and_then(|name| name.strip_suffix(')'))
+                    .unwrap_or(token);
+                vdef_values.contains_key(name)
+            })
+        {
+            return Err(rpn_error(
+                "rpn expressions without DEF or CDEF variables are not supported",
+            ));
+        }
+        let cdef_start = inputs
+            .iter()
+            .map(|name| variable_starts[*name])
+            .max()
+            .unwrap_or(aligned_start);
+        let cdef_end = inputs
+            .iter()
+            .map(|name| variable_ends[*name])
+            .min()
+            .unwrap_or(aligned_end);
+        let cdef_step_i64 =
+            i64::try_from(cdef_step).map_err(|_| rpn_error("CDEF step overflows"))?;
+        let count = cdef_end
+            .checked_sub(cdef_start)
+            .and_then(|range| usize::try_from(range / cdef_step_i64).ok())
+            .ok_or_else(|| rpn_error("CDEF range overflows"))?;
+        if count > 10_000_000 {
+            return Err(rpn_error("CDEF exceeds the 10 million row safety limit"));
+        }
+        let mut inputs_on_grid = HashMap::new();
+        for name in inputs {
+            inputs_on_grid.insert(
+                name.to_string(),
+                resample_variable(
+                    &native_variables[name],
+                    variable_starts[name],
+                    variable_steps[name],
+                    cdef_start,
+                    cdef_step,
+                    count,
+                )?,
+            );
+        }
+        let mut values = Vec::with_capacity(count);
+        // RRDtool parses an RPN program once and reuses its evaluation stack.
+        // Keep token boundaries and stack storage across rows as well.
+        let tokens = cdef.expression.split(',').collect::<Vec<_>>();
+        let mut stack = Vec::new();
+        for row_index in 0..count {
             let timestamp = i64::try_from(row_index)
                 .ok()
                 .and_then(|row| row.checked_add(1))
-                .and_then(|row| row.checked_mul(step_i64))
-                .and_then(|offset| aligned_start.checked_add(offset))
-                .ok_or_else(|| StoreError::RrdUnsupported("CDEF timestamp overflows".into()))?;
+                .and_then(|row| row.checked_mul(cdef_step_i64))
+                .and_then(|offset| cdef_start.checked_add(offset))
+                .ok_or_else(|| rpn_error("CDEF timestamp overflows"))?;
             let previous = values.last().copied().unwrap_or(rrd_nan());
             values.push(evaluate_rpn(
-                &cdef.expression,
-                &variables,
-                &variable_steps,
+                &tokens,
+                &mut stack,
+                RpnVariables {
+                    series: &inputs_on_grid,
+                    steps: &variable_steps,
+                    scalars: &vdef_values,
+                },
                 row_index,
                 timestamp,
-                output_step,
+                cdef_step,
                 previous,
             )?);
         }
-        variables.insert(cdef.name.clone(), values);
+        native_variables.insert(cdef.name.clone(), values);
+        variable_starts.insert(cdef.name.clone(), cdef_start);
+        variable_ends.insert(cdef.name.clone(), cdef_end);
+    }
+    let mut variables = HashMap::new();
+    let mut summaries = HashMap::new();
+    for (name, values) in native_variables {
+        summaries.insert(name.clone(), summarize_graph_values(&values));
+        variables.insert(
+            name.clone(),
+            resample_variable(
+                &values,
+                variable_starts[&name],
+                variable_steps[&name],
+                aligned_start,
+                output_step,
+                row_count,
+            )?,
+        );
     }
     let mut rows = vec![Vec::with_capacity(columns.len()); row_count];
     for (row_index, output_row) in rows.iter_mut().enumerate() {
@@ -263,20 +489,57 @@ pub fn fetch_xport_with_cdefs(
         legends: columns.iter().map(|column| column.legend.clone()).collect(),
         rows,
         raw_variables: variables,
+        summaries,
+        vdef_values,
     })
 }
 
+fn resample_variable(
+    values: &[f64],
+    source_start: i64,
+    source_step: u64,
+    start: i64,
+    step: u64,
+    count: usize,
+) -> Result<Vec<f64>, StoreError> {
+    let source_step = i64::try_from(source_step).map_err(|_| rpn_error("source step overflows"))?;
+    let step = i64::try_from(step).map_err(|_| rpn_error("sample step overflows"))?;
+    (0..count)
+        .map(|row| {
+            let offset = i64::try_from(row)
+                .ok()
+                .and_then(|row| row.checked_mul(step))
+                .and_then(|offset| start.checked_add(offset))
+                .and_then(|timestamp| timestamp.checked_sub(source_start))
+                .ok_or_else(|| rpn_error("sample time overflows"))?;
+            Ok(usize::try_from(offset / source_step)
+                .ok()
+                .and_then(|index| values.get(index))
+                .copied()
+                .unwrap_or(rrd_nan()))
+        })
+        .collect()
+}
+
+struct RpnVariables<'a> {
+    series: &'a HashMap<String, Vec<f64>>,
+    steps: &'a HashMap<String, u64>,
+    scalars: &'a HashMap<String, crate::VdefResult>,
+}
+
 fn evaluate_rpn(
-    expression: &str,
-    variables: &HashMap<String, Vec<f64>>,
-    variable_steps: &HashMap<String, u64>,
+    tokens: &[&str],
+    stack: &mut Vec<f64>,
+    context: RpnVariables<'_>,
     row: usize,
     timestamp: i64,
     step_width: u64,
     previous: f64,
 ) -> Result<f64, StoreError> {
-    let mut stack = Vec::<f64>::new();
-    let tokens: Vec<_> = expression.split(',').collect();
+    let variables = context.series;
+    let variable_steps = context.steps;
+    let scalars = context.scalars;
+    stack.clear();
     for (token_index, token) in tokens.iter().enumerate() {
         let token = *token;
         let unary: Option<fn(f64) -> f64> = match token {
@@ -380,19 +643,19 @@ fn evaluate_rpn(
             "RAD2DEG" => Some(|value| 57.29577951 * value),
             "DEG2RAD" => Some(|value| 0.0174532952 * value),
             "UN" => {
-                let a = pop(&mut stack)?;
+                let a = pop(stack)?;
                 stack.push(if a.is_nan() { 1.0 } else { 0.0 });
                 continue;
             }
             "ISINF" => {
-                let a = pop(&mut stack)?;
+                let a = pop(stack)?;
                 stack.push(if a.is_infinite() { 1.0 } else { 0.0 });
                 continue;
             }
             _ => None,
         };
         if let Some(op) = unary {
-            let a = pop(&mut stack)?;
+            let a = pop(stack)?;
             stack.push(op(a));
             continue;
         }
@@ -454,14 +717,19 @@ fn evaluate_rpn(
             _ => None,
         };
         if let Some(op) = binary {
-            let b = pop(&mut stack)?;
-            let a = pop(&mut stack)?;
+            let b = pop(stack)?;
+            let a = pop(stack)?;
             stack.push(op(a, b));
             continue;
         }
         match token {
             token if token.starts_with("PREV(") && token.ends_with(')') => {
                 let variable = &token[5..token.len() - 1];
+                if let Some(scalar) = scalars.get(variable) {
+                    // data_calc replaces OP_PREV_OTHER on a VDEF with OP_NUMBER.
+                    stack.push(scalar.value);
+                    continue;
+                }
                 let values = variables
                     .get(variable)
                     .ok_or_else(|| rpn_error(&format!("unknown variable '{variable}'")))?;
@@ -473,7 +741,7 @@ fn evaluate_rpn(
                 stack.push(prior);
             }
             "AVG" | "MEDIAN" | "STDEV" | "SMIN" | "SMAX" | "SORT" | "REV" => {
-                let count = pop_count(&mut stack)?;
+                let count = pop_count(stack)?;
                 if stack.len() < count {
                     return Err(rpn_error("stack underflow"));
                 }
@@ -541,7 +809,7 @@ fn evaluate_rpn(
                 }
             }
             "COPY" => {
-                let count = pop_count(&mut stack)?;
+                let count = pop_count(stack)?;
                 if stack.len() < count {
                     return Err(rpn_error("stack underflow"));
                 }
@@ -569,7 +837,7 @@ fn evaluate_rpn(
                 stack[top] = stack[target];
             }
             "ROLL" => {
-                let shift_value = pop(&mut stack)?;
+                let shift_value = pop(stack)?;
                 let shift = if shift_value.is_finite() {
                     shift_value as i32 as isize
                 } else {
@@ -579,7 +847,7 @@ fn evaluate_rpn(
                     .last()
                     .copied()
                     .ok_or_else(|| rpn_error("stack underflow"))?;
-                let count = pop_count(&mut stack)?;
+                let count = pop_count(stack)?;
                 if stack.len() < count {
                     return Err(rpn_error("stack underflow"));
                 }
@@ -617,8 +885,8 @@ fn evaluate_rpn(
                 }
             }
             "PERCENT" => {
-                let count = pop_count(&mut stack)?;
-                let percent = pop(&mut stack)?;
+                let count = pop_count(stack)?;
+                let percent = pop(stack)?;
                 if !(0.0..=100.0).contains(&percent) || !percent.is_finite() {
                     return Err(rpn_error("percentile argument must be between 0 and 100"));
                 }
@@ -639,6 +907,11 @@ fn evaluate_rpn(
                 }
                 let variable = tokens[token_index - 2];
                 let duration = parse_rrd_number(tokens[token_index - 1])
+                    .or_else(|| {
+                        scalars
+                            .get(tokens[token_index - 1])
+                            .map(|scalar| scalar.value)
+                    })
                     .ok_or_else(|| rpn_error("trend duration must follow a variable"))?;
                 let values = variables
                     .get(variable)
@@ -699,20 +972,20 @@ fn evaluate_rpn(
                         sum / count as f64
                     }
                 };
-                let _duration_value = pop(&mut stack)?;
-                let _source_value = pop(&mut stack)?;
+                let _duration_value = pop(stack)?;
+                let _source_value = pop(stack)?;
                 stack.push(value);
             }
             "PREDICT" | "PREDICTSIGMA" | "PREDICTPERC" => {
                 // Match rrd_rpncalc.c's stack contract:
                 // shifts..., shift_count, window_seconds, [percentile,] x, OP.
                 let percentile = if token == "PREDICTPERC" {
-                    Some(pop(&mut stack)?)
+                    Some(pop(stack)?)
                 } else {
                     None
                 };
-                let window_seconds = pop(&mut stack)?;
-                let shift_count = pop(&mut stack)?;
+                let window_seconds = pop(stack)?;
+                let shift_count = pop(stack)?;
                 if !window_seconds.is_finite() || !shift_count.is_finite() {
                     return Err(rpn_error("invalid prediction arguments"));
                 }
@@ -723,7 +996,7 @@ fn evaluate_rpn(
                 }
                 let shifts = shift_count.trunc() as i64;
                 let shift_values: Vec<f64> = if shifts < 0 {
-                    vec![pop(&mut stack)?]
+                    vec![pop(stack)?]
                 } else {
                     if shifts > 100_000 || stack.len() < shifts as usize {
                         return Err(rpn_error("invalid prediction shift count"));
@@ -770,9 +1043,14 @@ fn evaluate_rpn(
                         if offset >= row {
                             continue;
                         }
+                        // OP_VARIABLE advances the C source pointer only when
+                        // the CDEF timestamp lands on a source-step boundary.
+                        let source_phase =
+                            timestamp.rem_euclid(source_step as i64) as u64 / step_width;
                         let Some(index) = row
                             .saturating_add(1)
-                            .checked_sub(offset.saturating_mul(stride))
+                            .checked_sub(source_phase as usize)
+                            .and_then(|index| index.checked_sub(offset.saturating_mul(stride)))
                         else {
                             continue;
                         };
@@ -810,9 +1088,9 @@ fn evaluate_rpn(
                 stack.push(prediction);
             }
             "IF" => {
-                let no = pop(&mut stack)?;
-                let yes = pop(&mut stack)?;
-                let condition = pop(&mut stack)?;
+                let no = pop(stack)?;
+                let yes = pop(stack)?;
+                let condition = pop(stack)?;
                 stack.push(if condition.is_nan() || condition == 0.0 {
                     no
                 } else {
@@ -820,9 +1098,9 @@ fn evaluate_rpn(
                 });
             }
             "LIMIT" => {
-                let max = pop(&mut stack)?;
-                let min = pop(&mut stack)?;
-                let value = pop(&mut stack)?;
+                let max = pop(stack)?;
+                let min = pop(stack)?;
+                let value = pop(stack)?;
                 stack.push(
                     if value.is_nan() || min.is_nan() || max.is_nan() || value < min || value > max
                     {
@@ -835,6 +1113,10 @@ fn evaluate_rpn(
             _ => {
                 if let Some(number) = parse_rrd_number(token) {
                     stack.push(number);
+                } else if let Some(scalar) = scalars.get(token) {
+                    // Preserve the aggregate double directly; serializing and
+                    // reparsing it can change RRDtool's floating-point result.
+                    stack.push(scalar.value);
                 } else if let Some(values) = variables.get(token) {
                     if !tokens.get(token_index + 1).is_some_and(|next| {
                         matches!(*next, "PREDICT" | "PREDICTSIGMA" | "PREDICTPERC")
