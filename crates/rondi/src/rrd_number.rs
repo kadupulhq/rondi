@@ -52,6 +52,49 @@ fn parse_special(input: &str) -> Option<f64> {
 /// Overflow saturates as glibc and Apple libc do. Returns the value and the
 /// byte offset of `end`, which is 0 when nothing converts.
 pub fn c_strtol(text: &str, base: u32) -> (i64, usize) {
+    let (negative, magnitude, overflow, end) = strtol_parts(text, base);
+    let value = if negative {
+        if overflow || magnitude > i64::MIN.unsigned_abs() {
+            i64::MIN
+        } else {
+            0_i64.wrapping_sub_unsigned(magnitude)
+        }
+    } else if overflow || magnitude > i64::MAX as u64 {
+        i64::MAX
+    } else {
+        magnitude as i64
+    };
+    (value, end)
+}
+
+/// `errno = 0; strtoll(text, NULL, base)`: the value and whether errno
+/// became ERANGE.
+pub(crate) fn c_strtoll_errno(text: &str, base: u32) -> (i64, bool) {
+    let (negative, magnitude, overflow, _) = strtol_parts(text, base);
+    let limit = if negative {
+        i64::MIN.unsigned_abs()
+    } else {
+        i64::MAX as u64
+    };
+    (c_strtol(text, base).0, overflow || magnitude > limit)
+}
+
+/// `errno = 0; strtoul(text, NULL, base)`: a leading `-` negates in
+/// unsigned arithmetic, and only a magnitude past ULONG_MAX sets ERANGE.
+pub(crate) fn c_strtoul_errno(text: &str, base: u32) -> (u64, bool) {
+    let (negative, magnitude, overflow, _) = strtol_parts(text, base);
+    if overflow {
+        (u64::MAX, true)
+    } else if negative {
+        (magnitude.wrapping_neg(), false)
+    } else {
+        (magnitude, false)
+    }
+}
+
+/// The parse shared by the strtol family: sign, magnitude (wrapping),
+/// whether it overflowed 64 bits, and the end offset (0 if no digits).
+fn strtol_parts(text: &str, base: u32) -> (bool, u64, bool, usize) {
     let bytes = text.as_bytes();
     let mut position = 0;
     while position < bytes.len()
@@ -93,20 +136,9 @@ pub fn c_strtol(text: &str, base: u32) -> (i64, usize) {
         position += 1;
     }
     if position == digits_start {
-        return (0, 0);
+        return (false, 0, false, 0);
     }
-    let value = if negative {
-        if overflow || magnitude > i64::MIN.unsigned_abs() {
-            i64::MIN
-        } else {
-            0_i64.wrapping_sub_unsigned(magnitude)
-        }
-    } else if overflow || magnitude > i64::MAX as u64 {
-        i64::MAX
-    } else {
-        magnitude as i64
-    };
-    (value, position)
+    (negative, magnitude, overflow, position)
 }
 
 /// `rrd_diff()` from rrd_diff.c: the decimal difference `a - b` of two
@@ -194,7 +226,7 @@ pub(crate) fn rrd_diff(a: &str, b: &str) -> f64 {
 /// `rrd_strtod()`: the value and the end of the converted text, or `None`
 /// when it leaves `endptr` at the start (no digits, or an exponent outside
 /// the double range).
-fn parse_rrd_decimal(input: &str) -> Option<(f64, usize)> {
+pub(crate) fn parse_rrd_decimal(input: &str) -> Option<(f64, usize)> {
     let bytes = input.as_bytes();
     let mut position = 0;
     // C isspace(), which unlike is_ascii_whitespace includes \v.

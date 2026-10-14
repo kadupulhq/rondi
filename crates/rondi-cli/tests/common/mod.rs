@@ -178,3 +178,27 @@ impl Sides {
         );
     }
 }
+
+/// An RRD with its rra_ptr words zeroed and each archive rotated oldest row
+/// first, for comparing files whose initial row RRDtool picks at random.
+/// Assumes the 64-bit little-endian version 3-5 layout.
+pub fn masked_rrd(bytes: &[u8]) -> Vec<u8> {
+    let word =
+        |offset: usize| u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap()) as usize;
+    let (ds, rra) = (word(24), word(32));
+    let pointers = 128 + 120 * ds + 120 * rra + 16 + 112 * ds + 80 * ds * rra;
+    let mut out = bytes[..pointers].to_vec();
+    out.extend(std::iter::repeat_n(0, 8 * rra));
+    let mut data = pointers + 8 * rra;
+    for index in 0..rra {
+        let rows = word(128 + 120 * ds + 120 * index + 24);
+        let length = rows * ds * 8;
+        let archive = &bytes[data..data + length];
+        let next = ((word(pointers + 8 * index) + 1) % rows) * ds * 8;
+        out.extend_from_slice(&archive[next..]);
+        out.extend_from_slice(&archive[..next]);
+        data += length;
+    }
+    out.extend_from_slice(&bytes[data..]);
+    out
+}

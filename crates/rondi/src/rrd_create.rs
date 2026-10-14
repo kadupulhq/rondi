@@ -424,9 +424,9 @@ fn write_rrd(filename: &str, bytes: &[u8], no_overwrite: bool) -> Result<(), Sto
     let result = (|| -> Result<(), StoreError> {
         file.write_all(bytes)?;
         file.flush()?;
-        drop(file);
-        chmod_like_write_rrd(&temp_path, filename)
+        chmod_like_write_rrd(&file, filename)
             .map_err(|_| StoreError::Rrd("Cannot chmod temporary file!".into()))?;
+        drop(file);
         // A hard link keeps --no-overwrite from replacing a file created
         // after the stat above; RRDtool's rename would replace it.
         let renamed = if no_overwrite {
@@ -444,25 +444,26 @@ fn write_rrd(filename: &str, bytes: &[u8], no_overwrite: bool) -> Result<(), Sto
 /// or to S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH when there is no target. chmod is
 /// not masked by the umask, so a new file is always 0644.
 #[cfg(unix)]
-fn chmod_like_write_rrd(temp_path: &Path, filename: &str) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
+fn chmod_like_write_rrd(temp: &std::fs::File, filename: &str) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
     use std::os::unix::fs::PermissionsExt;
     let mode = match std::fs::metadata(filename) {
         Ok(metadata) => metadata.permissions().mode() as libc::mode_t,
         Err(_) => libc::S_IRUSR | libc::S_IWUSR | libc::S_IRGRP | libc::S_IROTH,
     };
-    let path = std::ffi::CString::new(temp_path.as_os_str().as_bytes())?;
-    // SAFETY: `path` is a valid NUL-terminated string for the call.
-    if unsafe { libc::chmod(path.as_ptr(), mode) } != 0 {
+    // fchmod on the descriptor mkstemp returned, so the path cannot be
+    // swapped for a link between creation and chmod.
+    // SAFETY: the descriptor is open for the duration of the call.
+    if unsafe { libc::fchmod(temp.as_raw_fd(), mode) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn chmod_like_write_rrd(temp_path: &Path, filename: &str) -> std::io::Result<()> {
+fn chmod_like_write_rrd(temp: &std::fs::File, filename: &str) -> std::io::Result<()> {
     match std::fs::metadata(filename) {
-        Ok(metadata) => std::fs::set_permissions(temp_path, metadata.permissions()),
+        Ok(metadata) => temp.set_permissions(metadata.permissions()),
         Err(_) => Ok(()),
     }
 }

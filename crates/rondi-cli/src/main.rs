@@ -5053,12 +5053,18 @@ fn rrdtool_restore(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     let range_check = RANGE_CHECK.load(std::sync::atomic::Ordering::Relaxed);
     let force_overwrite = FORCE_OVERWRITE.load(std::sync::atomic::Ordering::Relaxed);
+    // rrd_restore.c:1270-1290: stdin ends at the first ctrl-Z.
     let xml = if positional[0] == "-" {
-        let mut xml = String::new();
-        std::io::stdin().read_to_string(&mut xml)?;
-        xml
+        let mut xml = Vec::new();
+        std::io::stdin().read_to_end(&mut xml)?;
+        if let Some(end) = xml.iter().position(|byte| *byte == 0x1a) {
+            xml.truncate(end);
+        }
+        String::from_utf8_lossy(&xml).into_owned()
     } else {
-        std::fs::read_to_string(&positional[0])?
+        std::fs::read(&positional[0])
+            .map(|xml| String::from_utf8_lossy(&xml).into_owned())
+            .map_err(|_| format!("Could not create xml reader for: {}", positional[0]))?
     };
     restore_rrd_file(&xml, &positional[1], force_overwrite, range_check)?;
     Ok(())
