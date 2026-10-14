@@ -297,6 +297,7 @@ fn a14_updatev_return_value_on_failure() {
         &[
             step(&["updatev", "t.rrd", "1000000010:3", "1000000020:abc"]),
             step(&["updatev", "t.rrd", "1000000005:3"]),
+            step(&["updatev", "missing.rrd", "1000000030:3"]),
         ],
     );
 }

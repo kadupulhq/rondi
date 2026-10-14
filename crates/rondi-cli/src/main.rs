@@ -4432,7 +4432,14 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
     // tries once unless $RRD_LOCKING says otherwise. A directory-wide Rondi
     // lock would serialize unrelated files and stop parallel poller updates.
     if daemon_address.is_none() {
-        ensure_rrd_file_exists(&filename)?;
+        if let Err(error) = ensure_rrd_file_exists(&filename) {
+            // rrd_update_v pushes return_value before _rrd_updatex opens the
+            // file, so the open failure still prints it.
+            if verbose {
+                println!("return_value = -1");
+            }
+            return Err(error);
+        }
         let template = template.as_ref().map(|names| names.join(":"));
         let arguments = samples.iter().map(String::as_str).collect::<Vec<_>>();
         let (summaries, result) = rondi::with_rrd_locking(&locking, || {
