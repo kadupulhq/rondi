@@ -327,3 +327,35 @@ fn use_nan_for_all_missing_data_survives_a_short_range() {
         "{output:?}"
     );
 }
+
+// rrdtool has no size limit, so only PNG output with something to draw is
+// bounded, and the limit applies before --width sizes any per-pixel buffer.
+// Print-only graphs and other formats keep working at any width.
+#[test]
+fn png_dimension_limit_applies_before_data_processing() {
+    let Some(f) = fixture() else { return };
+    let graph = |extra: &[&str], elements: &[&str]| {
+        let mut command = vec!["graph", "out.png"];
+        command.extend(RANGE);
+        command.extend(extra);
+        command.push("DEF:x=a.rrd:x:AVERAGE");
+        command.extend(elements);
+        f.run(&f.alias, &args(&command))
+    };
+    for extra in [&["--width", "2000000000"][..], &["--height", "2000000000"]] {
+        let output = graph(extra, &["LINE1:x#ff0000"]);
+        assert_eq!(output.status.code(), Some(1), "{extra:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "ERROR: PNG graph dimensions exceed the 4096 pixel safety limit\n",
+            "{extra:?}"
+        );
+    }
+    let print_only = graph(&["--width", "2000000000"], &["PRINT:x:AVERAGE:%lf"]);
+    assert_eq!(print_only.status.code(), Some(0));
+    let xml = graph(
+        &["--imgformat", "XML", "--width", "5000"],
+        &["LINE1:x#ff0000"],
+    );
+    assert_eq!(xml.status.code(), Some(0));
+}
