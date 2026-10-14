@@ -15,6 +15,8 @@ mod rrd_resize;
 mod rrd_restore;
 pub mod rrd_snprintf;
 pub mod rrdc_proto;
+#[cfg(unix)]
+pub mod safe_fs;
 pub(crate) mod storage;
 pub mod time;
 pub mod vdef;
@@ -33,6 +35,8 @@ pub use rrd_binary::{
     update_rrd_raw_values_precise_verbose, update_rrd_raw_values_verbose, update_rrd_text,
     update_rrd_values, update_rrd_values_verbose, with_rrd_locking,
 };
+#[cfg(unix)]
+pub use rrd_create::create_rrd_at;
 pub use rrd_create::rrd_create_r2;
 pub use rrd_number::{c_strtol, parse_rrd_number};
 pub use rrd_resize::resize_rrd_file;

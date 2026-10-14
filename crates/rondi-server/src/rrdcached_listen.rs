@@ -153,6 +153,12 @@ fn open_unix(sock: &RrdcachedListenAddress, listeners: &mut Vec<RrdcachedListene
         eprintln!("rrdcached: refusing socket directory {dir}: another user can write it");
         return false;
     }
+    if !socket_ancestors_are_safe(std::path::Path::new(dir)) {
+        eprintln!(
+            "rrdcached: refusing socket path {path}: an ancestor can be replaced by another user"
+        );
+        return false;
+    }
     // Upstream unlinks whatever is at the path because the pid file proves
     // no other daemon owns it. Rondi refuses a live socket or a non-socket,
     // and otherwise renames the new socket over a stale one.
@@ -257,6 +263,69 @@ fn socket_parent_is_private(stat: &libc::stat) -> bool {
     let sticky = stat.st_mode & libc::S_ISVTX != 0;
     let shared = stat.st_mode & 0o022 != 0;
     owner && (!shared || sticky)
+}
+
+fn socket_ancestors_are_safe(directory: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+    let Ok(cwd) = std::env::current_dir() else {
+        return false;
+    };
+    let path = if directory.is_absolute() {
+        directory.to_path_buf()
+    } else {
+        cwd.join(directory)
+    };
+    // Root and the daemon account are trusted owners. A foreign owner can
+    // chmod its directory regardless of the current permission bits.
+    let euid = unsafe { libc::geteuid() };
+    let trusted = |uid| uid == 0 || uid == euid;
+    let mut current = PathBuf::from("/");
+    let Ok(mut parent) = std::fs::metadata(&current) else {
+        return false;
+    };
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::CurDir => continue,
+            Component::Normal(name) => current.push(name),
+            Component::ParentDir => {
+                // The kernel takes `..` from the resolved directory, which
+                // the components checked so far keep from being replaced.
+                let Ok(resolved) = std::fs::canonicalize(&current) else {
+                    return false;
+                };
+                current = resolved.parent().map_or(resolved.clone(), PathBuf::from);
+                let Ok(metadata) = std::fs::metadata(&current) else {
+                    return false;
+                };
+                parent = metadata;
+                continue;
+            }
+            Component::Prefix(_) => return false,
+        }
+        let Ok(entry) = std::fs::symlink_metadata(&current) else {
+            return false;
+        };
+        if !trusted(parent.uid())
+            || !trusted(entry.uid())
+            || (parent.mode() & 0o022 != 0 && parent.mode() & 0o1000 == 0)
+        {
+            return false;
+        }
+        // Root-owned system aliases such as /tmp on macOS are permitted;
+        // both their containing directory and their destination are checked.
+        let Ok(resolved) = std::fs::metadata(&current) else {
+            return false;
+        };
+        if !resolved.is_dir() || !trusted(resolved.uid()) {
+            return false;
+        }
+        parent = resolved;
+    }
+    let Ok(canonical) = std::fs::canonicalize(&path) else {
+        return false;
+    };
+    canonical == path || socket_ancestors_are_safe(&canonical)
 }
 
 /// A fresh mode-0700 directory beside the socket path, created and used only
@@ -757,6 +826,48 @@ pub(crate) fn unblock_shutdown_signals() {
 #[cfg(test)]
 mod tests {
     use super::dirname;
+
+    #[test]
+    fn socket_refuses_replaceable_ancestor_even_with_private_immediate_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ancestor = temp.path().join("shared");
+        let parent = ancestor.join("private");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = parent.join("daemon.sock");
+        let address = super::RrdcachedListenAddress {
+            address: path.to_str().unwrap().into(),
+            mode: Some(0o600),
+            group: None,
+            commands: None,
+        };
+        assert!(!super::open_rrdcached_listener(&address, &mut Vec::new()));
+        assert!(!path.exists());
+        std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        assert!(super::socket_ancestors_are_safe(&parent));
+    }
+
+    #[test]
+    fn socket_ancestors_follow_parent_components_like_bind() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let shared = root.join("shared");
+        std::fs::create_dir_all(shared.join("inner")).unwrap();
+        std::fs::create_dir_all(root.join("run")).unwrap();
+        assert!(super::socket_ancestors_are_safe(&root.join("run/../run")));
+        assert!(super::socket_ancestors_are_safe(
+            &root.join("shared/inner/../../run")
+        ));
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!super::socket_ancestors_are_safe(
+            &root.join("run/../shared/inner")
+        ));
+    }
 
     #[test]
     fn socket_directory_requires_daemon_owner_and_sticky_shared_writes() {

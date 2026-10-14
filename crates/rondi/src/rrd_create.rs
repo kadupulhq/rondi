@@ -15,6 +15,10 @@ use std::path::Path;
 const DS_NAM_SIZE: usize = 20;
 const DST_SIZE: usize = 20;
 
+/// Maximum encoded archive allocation for one daemon CREATE, including its
+/// header. Local `rrdtool create` keeps upstream's unbounded size.
+pub const MAX_RRD_CREATE_BYTES: usize = 64 * 1024 * 1024;
+
 /// The C library's single error slot: `rrd_set_error` replaces the text and
 /// `rrd_test_error` asks whether any is set.
 #[derive(Default)]
@@ -40,17 +44,28 @@ pub fn rrd_create_r2(
     template: Option<&str>,
     argv: &[String],
 ) -> Result<(), StoreError> {
+    if no_overwrite && std::fs::metadata(filename).is_ok() {
+        return Err(StoreError::Rrd(format!(
+            "creating '{filename}': File exists"
+        )));
+    }
+    let bytes = create_bytes(pdp_step, last_up, template, argv, usize::MAX)?;
+    write_rrd(filename, &bytes, no_overwrite)
+}
+
+fn create_bytes(
+    pdp_step: u64,
+    last_up: i64,
+    template: Option<&str>,
+    argv: &[String],
+    max_bytes: usize,
+) -> Result<Vec<u8>, StoreError> {
     if !cfg!(target_pointer_width = "64") || cfg!(target_endian = "big") {
         return Err(StoreError::RrdUnsupported(
             "RRD creation currently requires a 64-bit little-endian target".into(),
         ));
     }
     let mut error = ErrorSlot::default();
-    if no_overwrite && std::fs::metadata(filename).is_ok() {
-        return Err(StoreError::Rrd(format!(
-            "creating '{filename}': File exists"
-        )));
-    }
     let mut version = "0003";
     let mut step = pdp_step;
     let last_up_set = last_up > 0;
@@ -121,8 +136,7 @@ pub fn rrd_create_r2(
     if !last_up_set && template_latest_last_up > 0 {
         live_last_up = template_latest_last_up;
     }
-    let bytes = rrd_init_data(version, step, live_last_up, &ds_defs, &rra_defs)?;
-    write_rrd(filename, &bytes, no_overwrite)
+    rrd_init_data(version, step, live_last_up, &ds_defs, &rra_defs, max_bytes)
 }
 
 /// `DS_RE` from rrd_create.c:310, matched the way GRegex does:
@@ -346,6 +360,7 @@ fn rrd_init_data(
     last_up: i64,
     ds_defs: &[[u8; DS_DEF_LEN]],
     rra_defs: &[[u8; RRA_DEF_LEN]],
+    max_bytes: usize,
 ) -> Result<Vec<u8>, StoreError> {
     let ds_cnt = ds_defs.len();
     let rra_cnt = rra_defs.len();
@@ -360,16 +375,29 @@ fn rrd_init_data(
         .and_then(|values| usize::try_from(values).ok())
         .and_then(|values| values.checked_mul(VALUE_LEN))
         .ok_or_else(|| StoreError::Rrd("cannot allocate memory".into()))?;
-    let header_len = STAT_HEAD_LEN
-        + ds_cnt * DS_DEF_LEN
-        + rra_cnt * RRA_DEF_LEN
-        + LIVE_HEAD_LEN
-        + ds_cnt * PDP_PREP_LEN
-        + ds_cnt * rra_cnt * CDP_PREP_LEN
-        + rra_cnt * RRA_PTR_LEN;
+    let allocation_error =
+        || StoreError::Rrd("cannot allocate memory: RRD CREATE exceeds its size limit".into());
+    let header_len = [
+        Some(STAT_HEAD_LEN),
+        ds_cnt.checked_mul(DS_DEF_LEN),
+        rra_cnt.checked_mul(RRA_DEF_LEN),
+        Some(LIVE_HEAD_LEN),
+        ds_cnt.checked_mul(PDP_PREP_LEN),
+        ds_cnt
+            .checked_mul(rra_cnt)
+            .and_then(|count| count.checked_mul(CDP_PREP_LEN)),
+        rra_cnt.checked_mul(RRA_PTR_LEN),
+    ]
+    .into_iter()
+    .try_fold(0_usize, |total, size| total.checked_add(size?))
+    .ok_or_else(allocation_error)?;
+    let total_len = header_len
+        .checked_add(values)
+        .filter(|size| *size <= max_bytes)
+        .ok_or_else(allocation_error)?;
     let mut bytes = Vec::new();
     bytes
-        .try_reserve_exact(header_len + values)
+        .try_reserve_exact(total_len)
         .map_err(|_| StoreError::Rrd("cannot allocate memory".into()))?;
     bytes.resize(STAT_HEAD_LEN, 0);
     bytes[0..4].copy_from_slice(b"RRD\0");
@@ -446,6 +474,107 @@ fn write_rrd(filename: &str, bytes: &[u8], no_overwrite: bool) -> Result<(), Sto
     })();
     let _ = std::fs::remove_file(&temp_path);
     result
+}
+
+/// Daemon CREATE publishes through the already opened parent, never reopening
+/// its pathname after confinement checks. A private staging directory protects
+/// the unpublished file from replacement by another account.
+#[cfg(unix)]
+pub fn create_rrd_at(
+    parent: &std::fs::File,
+    name: &std::ffi::OsStr,
+    start: i64,
+    step: u64,
+    definitions: &[String],
+    no_overwrite: bool,
+) -> Result<(), StoreError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::ffi::OsStrExt;
+    if start < 315_360_000 {
+        return Err(StoreError::Rrd(
+            "the first entry to the RRD should be after 1980".into(),
+        ));
+    }
+    if name.as_bytes().contains(&b'/') || name == "." || name == ".." {
+        return Err(StoreError::InvalidName);
+    }
+    let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| StoreError::InvalidName)?;
+    if no_overwrite {
+        let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: the directory and NUL-terminated name remain valid. As in
+        // rrd_create_r2, an existing target is reported before parsing.
+        let status = unsafe {
+            libc::fstatat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                &mut metadata,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if status == 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EEXIST).into());
+        }
+    }
+    let bytes = create_bytes(step, start, None, definitions, MAX_RRD_CREATE_BYTES)?;
+    let staging = crate::safe_fs::PrivateDirectory::create(parent)?;
+    let mut file = crate::safe_fs::open_at(
+        &staging.directory,
+        c"rrd",
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        0o600,
+    )?;
+    let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: the directory and NUL-terminated name remain valid. The
+    // existing entry is inspected without following a final symlink.
+    let status = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            &mut metadata,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    let mode = if status == 0 {
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(StoreError::Rrd(
+                "refusing to replace a linked or special target".into(),
+            ));
+        }
+        metadata.st_mode & 0o777
+    } else if std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
+        0o644
+    } else {
+        return Err(std::io::Error::last_os_error().into());
+    };
+    file.write_all(&bytes)?;
+    file.flush()?;
+    // SAFETY: file is the newly created descriptor owned by this function.
+    if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    // SAFETY: both names are single components relative to open directories.
+    let status = unsafe {
+        if no_overwrite {
+            libc::linkat(
+                staging.directory.as_raw_fd(),
+                c"rrd".as_ptr(),
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                0,
+            )
+        } else {
+            libc::renameat(
+                staging.directory.as_raw_fd(),
+                c"rrd".as_ptr(),
+                parent.as_raw_fd(),
+                name.as_ptr(),
+            )
+        }
+    };
+    if status != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
 }
 
 /// rrd_create.c:1462-1476: chmod the temporary file to the target's mode,
@@ -539,6 +668,69 @@ fn u64_at(bytes: &[u8], offset: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{match_ds_re, scan_min_max};
+
+    #[test]
+    fn create_rejects_overflow_and_oversized_archives_before_writing() {
+        let temp = tempfile::tempdir().unwrap();
+        for rows in ["2305843009213693951", "18446744073709551615"] {
+            let target = temp.path().join(format!("large-{rows}.rrd"));
+            let args = vec![
+                "DS:value:GAUGE:30:U:U".into(),
+                format!("RRA:AVERAGE:0.5:1:{rows}"),
+            ];
+            assert!(
+                super::rrd_create_r2(
+                    target.to_str().unwrap(),
+                    10,
+                    1_000_000_000,
+                    true,
+                    None,
+                    &args
+                )
+                .is_err()
+            );
+            assert!(!target.exists());
+        }
+        let parent = std::fs::File::open(temp.path()).unwrap();
+        let definitions = [
+            "DS:value:GAUGE:30:U:U".to_owned(),
+            "RRA:AVERAGE:0.5:1:8388608".to_owned(),
+        ];
+        assert!(
+            super::create_rrd_at(
+                &parent,
+                std::ffi::OsStr::new("daemon.rrd"),
+                1_000_000_000,
+                10,
+                &definitions,
+                true
+            )
+            .is_err()
+        );
+        assert!(!temp.path().join("daemon.rrd").exists());
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn local_create_is_not_bound_by_the_daemon_size_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("local.rrd");
+        let args = vec![
+            "DS:value:GAUGE:30:U:U".into(),
+            "RRA:AVERAGE:0.5:1:8388608".into(),
+        ];
+        super::rrd_create_r2(
+            target.to_str().unwrap(),
+            10,
+            1_000_000_000,
+            true,
+            None,
+            &args,
+        )
+        .unwrap();
+        let length = usize::try_from(std::fs::metadata(&target).unwrap().len()).unwrap();
+        assert!(length > super::MAX_RRD_CREATE_BYTES);
+    }
 
     #[test]
     fn ds_regex_matches_like_gregex() {

@@ -1138,6 +1138,91 @@ fn rrdcached_recursive_create_requires_and_honors_dash_r() {
 }
 
 #[test]
+fn rrdcached_unconfined_create_matches_upstream_through_symlinks_and_no_overwrite() {
+    if !Command::new("rrdcached")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        oracle_skip!("skipping rrdcached CREATE differential: rrdcached is not installed");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dir_path = std::fs::canonicalize(dir.path()).unwrap();
+    // Both daemons refuse to serve as root without -B, so a root runner
+    // drops to nobody and hands it the fixtures.
+    let root = unsafe { libc::geteuid() } == 0;
+    fn own_fixture(path: &std::path::Path) {
+        std::os::unix::fs::lchown(path, Some(65534), Some(65534)).unwrap();
+        if std::fs::symlink_metadata(path).unwrap().is_dir() {
+            for entry in std::fs::read_dir(path).unwrap() {
+                own_fixture(&entry.unwrap().path());
+            }
+        }
+    }
+    if root {
+        own_fixture(&dir_path);
+    }
+    let mut replies = Vec::new();
+    for name in ["upstream", "rondi"] {
+        let run_dir = dir_path.join(name);
+        let real = run_dir.join("real");
+        let socket = run_dir.join("run/rrdcached.sock");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        // Without -B, upstream follows any symlinked ancestor.
+        std::os::unix::fs::symlink(&real, run_dir.join("link")).unwrap();
+        let alias = run_dir.join("rrdcached");
+        std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+        let mut command = Command::new(if name == "rondi" {
+            alias.as_os_str()
+        } else {
+            std::ffi::OsStr::new("rrdcached")
+        });
+        if root {
+            use std::os::unix::process::CommandExt;
+            own_fixture(&run_dir);
+            command.uid(65534).gid(65534);
+        }
+        let mut child = command
+            .args(["-g", "-R", "-b", run_dir.to_str().unwrap(), "-l"])
+            .arg(format!("unix:{}", socket.display()))
+            .arg("-p")
+            .arg(run_dir.join("rrdcached.pid"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        wait_for_socket(&mut child, &socket);
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        stream.set_read_timeout(Some(common::io_timeout())).unwrap();
+        let mut reader = BufReader::new(&mut stream);
+        let definitions = "DS:v:GAUGE:30:U:U RRA:AVERAGE:0.5:1:8";
+        let mut session = Vec::new();
+        for request in [
+            format!("CREATE {}/real/a.rrd -O {definitions}\n", run_dir.display()),
+            format!("CREATE {}/real/a.rrd -O {definitions}\n", run_dir.display()),
+            format!(
+                "CREATE {}/link/x/y/b.rrd {definitions}\n",
+                run_dir.display()
+            ),
+        ] {
+            session.push(
+                rrdcached_request(&mut reader, &request).replace(run_dir.to_str().unwrap(), "RUN"),
+            );
+        }
+        session.push(real.join("x/y/b.rrd").is_file().to_string());
+        replies.push(session);
+        drop(reader);
+        drop(stream);
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+        child.wait().unwrap();
+    }
+    assert_eq!(replies[1], replies[0]);
+}
+
+#[test]
 fn rrdcached_accepts_attached_arguments_and_cacti_options() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("data");

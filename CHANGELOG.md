@@ -16,6 +16,9 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ### Fixed
 
+- Reject Unix socket paths with ancestors another account can replace, and traverse daemon RRD parents through directory descriptors without following symlinks.
+- Bound rrdcached CREATE allocations to 64 MiB, including headers, and check archive size arithmetic before allocating. Local `rrdtool create` keeps upstream's unbounded size.
+- Validate native journal ownership, file type, link count, and group or other write permission before recovery, append, or compaction can modify it.
 - Refuse root rrdcached startup without effective `-B -b` confinement and default Unix sockets to `0600` unless explicitly configured.
 - Restrict output writes to owned, singly linked regular files and create new outputs with mode `0600`.
 - Require a new `resize.rrd` destination, preserve existing forced-restore destinations on write failure, and bound XML restore allocations.
