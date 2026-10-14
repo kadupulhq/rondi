@@ -243,3 +243,59 @@ fn create_arguments_parse_like_handle_request_create() {
     );
     assert_same(&observed);
 }
+
+#[test]
+fn fetch_times_parse_like_handle_request_fetch_parse() {
+    let Some(work) = Work::new() else { return };
+    let sessions: [&[u8]; 12] = [
+        b"FETCH a.rrd AVERAGE x 1000000600\n",
+        b"FETCH a.rrd AVERAGE 1000000000 y\n",
+        b"FETCH a.rrd BOGUS x\n",
+        b"FETCH a.rrd AVERAGE 0x3B9ACA00 1000000600\n",
+        b"FETCH a.rrd AVERAGE 1000000000abc 07346545000\n",
+        b"FETCH a.rrd AVERAGE 99999999999999999999 1\n",
+        b"FETCH a.rrd AVERAGE 1000000000 -99999999999999999999\n",
+        b"FETCH a.rrd AVERAGE 1000000600 1000000000\n",
+        b"FETCH a.rrd AVERAGE 1000000100 1000000000\n",
+        b"FETCH a.rrd MAX 1000003000 1000000000\n",
+        b"FETCHBIN a.rrd AVERAGE x\n",
+        b"FETCHBIN a.rrd AVERAGE 1000000600 1000000000\n",
+    ];
+    let observed = work.differential(&["-B"], &sessions);
+    assert!(
+        observed[0][0]
+            .ends_with("\n-1 Cannot parse start time `x': Only simple integers are allowed.\n")
+    );
+    assert!(observed[0][7].ends_with("\n-1 rrd_fetch_r failed: malloc fetch data area\n"));
+    assert_same(&observed);
+
+    // Without times the range is the last day before now, and values up to
+    // zero count back from now.
+    let before = now();
+    let observed = work.differential(
+        &["-B"],
+        &[b"FETCH a.rrd AVERAGE\n", b"FETCH a.rrd AVERAGE -3600 0\n"],
+    );
+    let after = now();
+    for replies in &observed {
+        for (reply, span) in replies.iter().zip([86_400, 3_600]) {
+            let header = |name: &str| {
+                reply
+                    .lines()
+                    .find_map(|line| line.strip_prefix(name))
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or_else(|| panic!("no {name} in {reply:?}"))
+            };
+            let (start, end) = (header("Start: "), header("End: "));
+            let aligned = |time: i64| time - time % 300;
+            assert!(
+                (aligned(before - span)..=aligned(after - span)).contains(&start),
+                "{reply:?}"
+            );
+            assert!(
+                (aligned(before) + 300..=aligned(after) + 300).contains(&end),
+                "{reply:?}"
+            );
+        }
+    }
+}

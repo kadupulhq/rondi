@@ -3184,6 +3184,29 @@ fn rrdcached_fetch_data(
         return Err("Usage: FETCH <file> <CF> [<start> [<end>] [<column>...]]".to_owned());
     }
     let path = base.target(fields[0])?;
+    // handle_request_fetch_parse reads both times before rrd_fetch_r runs:
+    // strtol base 0, a value up to zero counts back from now, and an absent
+    // time defaults to the day before now.
+    let now = wall_time_seconds();
+    let time = |index: usize, name: &str, default: i64| -> Result<i64, String> {
+        let Some(text) = fields.get(index) else {
+            return Ok(default);
+        };
+        let ((value, end), (_, erange)) =
+            (rondi::c_strtol(text, 0), rondi::c_strtoll_errno(text, 0));
+        if end == 0 || erange {
+            return Err(format!(
+                "Cannot parse {name} time `{text}': Only simple integers are allowed."
+            ));
+        }
+        Ok(if value > 0 {
+            value
+        } else {
+            now.wrapping_add(value)
+        })
+    };
+    let start = time(2, "start", now - 86_400)?;
+    let end = time(3, "end", now)?;
     // rrd_fetch_r converts the CF before rrd_fetch_fn opens the file.
     const CONSOLIDATION_FUNCTIONS: [&str; 10] = [
         "AVERAGE",
@@ -3205,27 +3228,19 @@ fn rrdcached_fetch_data(
     }
     let file = rrdcached_rrd_open(&base.abs(fields[0]), &path, false)
         .map_err(|error| format!("rrd_fetch_r failed: {error}"))?;
-    let info =
-        rondi::inspect_rrd_open_file(file.try_clone().map_err(|error| error.to_string())?, &path)
-            .map_err(|error| error.to_string())?;
-    let start = fields
-        .get(2)
-        .map(|value| value.parse::<i64>().map_err(|error| error.to_string()))
-        .transpose()?
-        .unwrap_or(info.last_update.saturating_sub(86_400));
-    let end = fields
-        .get(3)
-        .map(|value| value.parse::<i64>().map_err(|error| error.to_string()))
-        .transpose()?
-        .unwrap_or(info.last_update);
     let result =
         rondi::fetch_rrd_open_file(file, &path, fields[1], start, end, 1).map_err(|error| {
-            let error = error.to_string();
-            if error.contains("no archive matching consolidation function") {
-                "rrd_fetch_r failed: the RRD does not contain an RRA matching the chosen CF"
-                    .to_owned()
-            } else {
-                error
+            match error {
+                StoreError::Rrd(message) => format!("rrd_fetch_r failed: {message}"),
+                error => {
+                    let error = error.to_string();
+                    if error.contains("no archive matching consolidation function") {
+                        "rrd_fetch_r failed: the RRD does not contain an RRA matching the chosen CF"
+                            .to_owned()
+                    } else {
+                        error
+                    }
+                }
             }
         })?;
     let selected = if fields.len() > 4 {
