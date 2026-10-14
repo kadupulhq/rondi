@@ -329,3 +329,20 @@ fn fetch_columns_select_like_handle_request_fetch_parse() {
         observed[1][0]
     );
 }
+
+#[test]
+fn help_reads_only_its_first_field() {
+    let Some(work) = Work::new() else { return };
+    let sessions: [&[u8]; 4] = [
+        b"HELP PING x\n",
+        b"HELP update a b\n",
+        b"HELP  PING\n",
+        b"HELP bogus PING\n",
+    ];
+    let observed = work.differential(&[], &sessions);
+    assert!(
+        observed[0][0]
+            .ends_with("]\n4 Help for PING\nUsage: PING\n\nPING given, PONG returned\n\n")
+    );
+    assert_same(&observed);
+}

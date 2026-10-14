@@ -2702,7 +2702,8 @@ fn rrdcached_help(fields: &[&str]) -> String {
         "QUIT\n",
     ];
 
-    if let [command] = fields {
+    // handle_request_help reads one field and ignores the rest.
+    if let Some(command) = fields.first() {
         let command = command.to_ascii_uppercase();
         let entry = match command.as_str() {
             "UPDATE" => Some((
