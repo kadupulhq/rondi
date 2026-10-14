@@ -1135,15 +1135,35 @@ fn handle_input_line(argv: &[String], remote: bool) -> i32 {
     match result {
         Ok(()) => 0,
         Err(error) => {
-            if remote {
-                println!("ERROR: {error}");
-            } else {
-                eprintln!("ERROR: {error}");
+            let mut line = b"ERROR: ".to_vec();
+            match error.downcast_ref::<RawRrdError>() {
+                Some(RawRrdError(message)) => line.extend_from_slice(message),
+                None => line.extend_from_slice(error.to_string().as_bytes()),
             }
+            line.push(b'\n');
+            // Nothing is left to report a failed write to.
+            let _ = if remote {
+                std::io::stdout().write_all(&line)
+            } else {
+                std::io::stderr().write_all(&line)
+            };
             1
         }
     }
 }
+
+/// An `rrd_get_error()` text that quotes header bytes, printed unchanged
+/// because they need not be UTF-8.
+#[derive(Debug)]
+struct RawRrdError(Vec<u8>);
+
+impl std::fmt::Display for RawRrdError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&String::from_utf8_lossy(&self.0))
+    }
+}
+
+impl std::error::Error for RawRrdError {}
 
 /// Runs a libc call that takes one path and reports `errno` on failure.
 fn c_path_call(
@@ -1719,12 +1739,22 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let daemon_address = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty());
+    let mut name_error = None;
     let result = if let Some(address) = daemon_address {
         let escaped = escape_rrdcached_field(&filename.to_string_lossy());
         let command = format!("FETCH {escaped} {cf} {start} {end}");
         parse_rrdcached_fetch(&send_rrdcached_multiline_command(&address, &command)?)?
     } else {
-        fetch_rrd_file(&filename, cf, start, end, resolution)?
+        let result = fetch_rrd_file(&filename, cf, start, end, resolution)?;
+        // rrd_fetch_fn runs rrd_cf_conv over every RRA while it looks for a
+        // match and keeps going past a name it rejects, so the data prints
+        // and rrdtool still exits with that error.
+        name_error = inspect_rrd(&filename.to_string_lossy())?
+            .archives
+            .iter()
+            .rev()
+            .find_map(|archive| rondi::cf_conv_error(&archive.raw_consolidation));
+        result
     };
     // stdout is line buffered; one write per row dominates large fetches.
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
@@ -1744,7 +1774,10 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         writeln!(out)?;
     }
     out.flush()?;
-    Ok(())
+    match name_error {
+        Some(message) => Err(RawRrdError(message).into()),
+        None => Ok(()),
+    }
 }
 
 #[inline]
@@ -4981,17 +5014,16 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     ensure_rrd_file_exists(std::path::Path::new(&filename))?;
     let info = inspect_rrd(&filename)?;
-    if info.data_sources.iter().any(|ds| {
-        !matches!(
-            ds.kind.as_str(),
-            "GAUGE" | "COUNTER" | "DERIVE" | "ABSOLUTE" | "DCOUNTER" | "DDERIVE"
-        )
-    }) || info.archives.iter().any(|archive| {
-        !matches!(
-            archive.consolidation.as_str(),
-            "AVERAGE" | "MIN" | "MAX" | "LAST"
-        )
-    }) {
+    // rrd_info prints a DS or RRA with a name dst_conv or rrd_cf_conv
+    // rejects through its default branch and reports the error afterwards.
+    if info.data_sources.iter().any(|ds| ds.kind == "COMPUTE")
+        || info.archives.iter().any(|archive| {
+            !matches!(
+                archive.consolidation.as_str(),
+                "AVERAGE" | "MIN" | "MAX" | "LAST"
+            ) && rondi::cf_conv_error(&archive.raw_consolidation).is_none()
+        })
+    {
         return Err(
             "rrdtool info output for this data-source or consolidation type is not implemented"
                 .into(),
@@ -5055,7 +5087,10 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     std::io::stdout().write_all(&out)?;
-    Ok(())
+    match rondi::rrd_name_error(&info) {
+        Some(message) => Err(RawRrdError(message).into()),
+        None => Ok(()),
+    }
 }
 
 fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -5104,22 +5139,27 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         send_rrdcached_flush(&address, &positional[0])?;
     }
     ensure_rrd_file_exists(std::path::Path::new(&positional[0]))?;
-    let xml = dump_rrd_file_with_header(&positional[0], header)?;
+    let xml = rondi::dump_rrd_file_with_header_bytes(&positional[0], header)?;
     if let Some(output) = positional.get(1) {
-        match write_output_file(output, xml.as_bytes()) {
+        match write_output_file(output, &xml) {
             Ok(()) => {}
             // rrd_dump_opt_r returns -1 from a failed fopen without setting
             // an error, so rrdtool reports nothing and exits 0.
-            Err(OutputError::Open(_)) => {}
+            Err(OutputError::Open(_)) => return Ok(()),
             Err(OutputError::Write(errno)) => {
                 return Err(format!("error writing output file: {}", rrd_strerror(errno)).into());
             }
             Err(error) => return Err(error.into()),
         }
     } else {
-        print!("{xml}");
+        std::io::stdout().write_all(&xml)?;
     }
-    Ok(())
+    // rrd_dump_opt_r finishes the dump before rrd_tool.c sees the error
+    // a rejected DS type or CF name left behind.
+    match rondi::rrd_name_error(&inspect_rrd(&positional[0])?) {
+        Some(message) => Err(RawRrdError(message).into()),
+        None => Ok(()),
+    }
 }
 
 fn rrdtool_restore(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {

@@ -3,7 +3,6 @@
 
 use crate::format::{RrdFetchResult, RrdFetchRow};
 use crate::storage::StoreError;
-use std::fmt::Write as FmtWrite;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -1533,12 +1532,14 @@ pub fn tune_rrd_data_sources_file(
     let mut file = RrdFileLock::exclusive(file)?;
     file.seek(SeekFrom::Start(0))?;
     let info = read_info(&mut file, path)?;
-    if info.data_sources.iter().any(|source| {
-        !matches!(
-            source.kind.as_str(),
-            "GAUGE" | "COUNTER" | "DERIVE" | "ABSOLUTE" | "DCOUNTER" | "DDERIVE"
-        )
-    }) {
+    // rrd_tune.c never converts the stored DS types, so a name dst_conv
+    // would reject is no obstacle; only a COMPUTE DS keeps other fields in
+    // the parameter slots.
+    if info
+        .data_sources
+        .iter()
+        .any(|source| source.kind == "COMPUTE")
+    {
         return Err(StoreError::RrdUnsupported(
             "tune metadata currently supports basic data-source types only".into(),
         ));
@@ -1654,6 +1655,62 @@ pub fn inspect_rrd_file(path: impl AsRef<Path>) -> Result<RrdInfo, StoreError> {
     inspect_path(path.as_ref())
 }
 
+/// The error rrd_format.c `dst_conv` sets for a DS type it does not know.
+pub fn dst_conv_error(kind: &[u8]) -> Option<Vec<u8>> {
+    const KNOWN: [&[u8]; 7] = [
+        b"COUNTER",
+        b"ABSOLUTE",
+        b"GAUGE",
+        b"DERIVE",
+        b"COMPUTE",
+        b"DCOUNTER",
+        b"DDERIVE",
+    ];
+    (!KNOWN.contains(&kind)).then(|| conv_error("unknown data acquisition function", kind))
+}
+
+/// The error rrd_format.c `rrd_cf_conv` sets for a consolidation function
+/// it does not know.
+pub fn cf_conv_error(cf: &[u8]) -> Option<Vec<u8>> {
+    const KNOWN: [&[u8]; 10] = [
+        b"AVERAGE",
+        b"MIN",
+        b"MAX",
+        b"LAST",
+        b"HWPREDICT",
+        b"MHWPREDICT",
+        b"DEVPREDICT",
+        b"SEASONAL",
+        b"DEVSEASONAL",
+        b"FAILURES",
+    ];
+    (!KNOWN.contains(&cf)).then(|| conv_error("unknown consolidation function", cf))
+}
+
+fn conv_error(prefix: &str, name: &[u8]) -> Vec<u8> {
+    let mut message = format!("{prefix} '").into_bytes();
+    message.extend_from_slice(name);
+    message.push(b'\'');
+    message
+}
+
+/// The error rrd_info and rrd_dump leave set after converting every DS type
+/// and then every RRA consolidation function. Neither stops at a failure, so
+/// the output is complete and the last failure is what rrdtool reports.
+pub fn rrd_name_error(info: &RrdInfo) -> Option<Vec<u8>> {
+    let archives = info
+        .archives
+        .iter()
+        .rev()
+        .find_map(|archive| cf_conv_error(&archive.raw_consolidation));
+    archives.or_else(|| {
+        info.data_sources
+            .iter()
+            .rev()
+            .find_map(|source| dst_conv_error(&source.raw_kind))
+    })
+}
+
 /// Return RRDtool's first-row timestamp for an archive index.
 pub fn first_rrd_time(path: impl AsRef<Path>, archive_index: usize) -> Result<i64, StoreError> {
     let info = inspect_path(path.as_ref())?;
@@ -1708,35 +1765,53 @@ pub fn dump_rrd_file_with_header(
     dump_rrd_open_file(open_rrd_read(path.as_ref())?, path.as_ref(), header)
 }
 
+/// [`dump_rrd_file_with_header`] as the exact bytes RRDtool writes: names
+/// and last_ds text are copied from the header even when they are not UTF-8.
+pub fn dump_rrd_file_with_header_bytes(
+    path: impl AsRef<Path>,
+    header: RrdDumpHeader,
+) -> Result<Vec<u8>, StoreError> {
+    dump_rrd_open_file_bytes(open_rrd_read(path.as_ref())?, path.as_ref(), header)
+}
+
 /// Dump an already opened descriptor under a shared RRD lock.
 pub fn dump_rrd_open_file(
     file: File,
     path: &Path,
     header: RrdDumpHeader,
 ) -> Result<String, StoreError> {
+    dump_rrd_open_file_bytes(file, path, header)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// [`dump_rrd_open_file`] as bytes; see [`dump_rrd_file_with_header_bytes`].
+pub fn dump_rrd_open_file_bytes(
+    file: File,
+    path: &Path,
+    header: RrdDumpHeader,
+) -> Result<Vec<u8>, StoreError> {
     let mut file = RrdFileLock::shared(file)?;
     file.seek(SeekFrom::Start(0))?;
     let info = read_info(&mut file, path)?;
-    if info.data_sources.iter().any(|ds| {
-        !matches!(
-            ds.kind.as_str(),
-            "GAUGE" | "COUNTER" | "DERIVE" | "ABSOLUTE" | "DCOUNTER" | "DDERIVE"
-        )
-    }) || info.archives.iter().any(|archive| {
-        !matches!(
-            archive.consolidation.as_str(),
-            "AVERAGE" | "MIN" | "MAX" | "LAST"
-        )
-    }) {
+    // rrd_dump.c dumps a DS or RRA whose name dst_conv or rrd_cf_conv
+    // rejects like a plain one; the caller reports the conversion error.
+    if info.data_sources.iter().any(|ds| ds.kind == "COMPUTE")
+        || info.archives.iter().any(|archive| {
+            !matches!(
+                archive.consolidation.as_str(),
+                "AVERAGE" | "MIN" | "MAX" | "LAST"
+            ) && cf_conv_error(&archive.raw_consolidation).is_none()
+        })
+    {
         return Err(StoreError::RrdUnsupported(
             "rrdtool dump currently supports GAUGE/COUNTER/DERIVE/ABSOLUTE/DCOUNTER/DDERIVE and AVERAGE/MIN/MAX/LAST only".into(),
         ));
     }
-    let mut out = String::new();
+    let mut out = Vec::new();
     match header {
-        RrdDumpHeader::None => out.push_str("<!-- Round Robin Database Dump -->\n<rrd>\n"),
-        RrdDumpHeader::Dtd => out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!DOCTYPE rrd SYSTEM \"https://oss.oetiker.ch/rrdtool/rrdtool.dtd\">\n<!-- Round Robin Database Dump -->\n<rrd>\n"),
-        RrdDumpHeader::Xsd => out.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!-- Round Robin Database Dump -->\n<rrd xmlns=\"https://oss.oetiker.ch/rrdtool/rrdtool-dump.xml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n\txsi:schemaLocation=\"https://oss.oetiker.ch/rrdtool/rrdtool-dump.xml https://oss.oetiker.ch/rrdtool/rrdtool-dump.xsd\">\n"),
+        RrdDumpHeader::None => out.extend_from_slice(b"<!-- Round Robin Database Dump -->\n<rrd>\n"),
+        RrdDumpHeader::Dtd => out.extend_from_slice(b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!DOCTYPE rrd SYSTEM \"https://oss.oetiker.ch/rrdtool/rrdtool.dtd\">\n<!-- Round Robin Database Dump -->\n<rrd>\n"),
+        RrdDumpHeader::Xsd => out.extend_from_slice(b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!-- Round Robin Database Dump -->\n<rrd xmlns=\"https://oss.oetiker.ch/rrdtool/rrdtool-dump.xml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n\txsi:schemaLocation=\"https://oss.oetiker.ch/rrdtool/rrdtool-dump.xml https://oss.oetiker.ch/rrdtool/rrdtool-dump.xsd\">\n"),
     }
     // rrd_dump.c:119-123 writes 0003 for every version up to 3.
     let version = if c_atoi(info.version.as_bytes()) <= 3 {
@@ -1754,12 +1829,12 @@ pub fn dump_rrd_open_file(
     )
     .unwrap();
     for source in &info.data_sources {
-        let name = xml_escape_text(&source.name);
-        let kind = xml_escape_text(&source.kind);
-        let last_value = xml_escape_text(&source.last_value);
-        out.push_str("\t<ds>\n");
-        writeln!(out, "\t\t<name> {} </name>", name).unwrap();
-        writeln!(out, "\t\t<type> {} </type>", kind).unwrap();
+        // CB_FMTS copies the fields with %s, unescaped.
+        out.extend_from_slice(b"\t<ds>\n\t\t<name> ");
+        out.extend_from_slice(&source.raw_name);
+        out.extend_from_slice(b" </name>\n\t\t<type> ");
+        out.extend_from_slice(&source.raw_kind);
+        out.extend_from_slice(b" </type>\n");
         writeln!(
             out,
             "\t\t<minimal_heartbeat>{}</minimal_heartbeat>",
@@ -1778,8 +1853,10 @@ pub fn dump_rrd_open_file(
             format_rrd_optional(source.maximum)
         )
         .unwrap();
-        out.push_str("\n\t\t<!-- PDP Status -->\n");
-        writeln!(out, "\t\t<last_ds>{}</last_ds>", last_value).unwrap();
+        out.extend_from_slice(b"\n\t\t<!-- PDP Status -->\n");
+        out.extend_from_slice(b"\t\t<last_ds>");
+        out.extend_from_slice(&source.raw_last_value);
+        out.extend_from_slice(b"</last_ds>\n");
         writeln!(
             out,
             "\t\t<value>{}</value>",
@@ -1792,9 +1869,9 @@ pub fn dump_rrd_open_file(
             source.unknown_seconds
         )
         .unwrap();
-        out.push_str("\t</ds>\n\n");
+        out.extend_from_slice(b"\t</ds>\n\n");
     }
-    out.push_str("\t<!-- Round Robin Archives -->\n");
+    out.extend_from_slice(b"\t<!-- Round Robin Archives -->\n");
     let step_i64 = i64::try_from(info.step).map_err(|_| rrd_error("RRD step overflows"))?;
     for archive in &info.archives {
         let resolution = step_i64
@@ -1811,18 +1888,20 @@ pub fn dump_rrd_open_file(
                     .ok_or_else(divides_by_zero)?,
             )
             .ok_or_else(|| rrd_error("RRD last timestamp alignment overflows"))?;
-        writeln!(out, "\t<rra>\n\t\t<cf>{}</cf>", archive.consolidation).unwrap();
+        out.extend_from_slice(b"\t<rra>\n\t\t<cf>");
+        out.extend_from_slice(&archive.raw_consolidation);
+        out.extend_from_slice(b"</cf>\n");
         writeln!(
             out,
             "\t\t<pdp_per_row>{}</pdp_per_row> <!-- {} seconds -->\n",
             archive.pdp_per_row, resolution
         )
         .unwrap();
-        out.push_str("\t\t<params>\n");
+        out.extend_from_slice(b"\t\t<params>\n");
         writeln!(out, "\t\t<xff>{}</xff>", format_rrd_float(archive.xff)).unwrap();
-        out.push_str("\t\t</params>\n\t\t<cdp_prep>\n");
+        out.extend_from_slice(b"\t\t</params>\n\t\t<cdp_prep>\n");
         for prep in &archive.cdp_prep {
-            out.push_str("\t\t\t<ds>\n");
+            out.extend_from_slice(b"\t\t\t<ds>\n");
             writeln!(
                 out,
                 "\t\t\t<primary_value>{}</primary_value>",
@@ -1842,9 +1921,9 @@ pub fn dump_rrd_open_file(
                 prep.unknown_datapoints
             )
             .unwrap();
-            out.push_str("\t\t\t</ds>\n");
+            out.extend_from_slice(b"\t\t\t</ds>\n");
         }
-        out.push_str("\t\t</cdp_prep>\n\t\t<database>\n");
+        out.extend_from_slice(b"\t\t</cdp_prep>\n\t\t<database>\n");
         let rows =
             usize::try_from(archive.rows).map_err(|_| rrd_error("RRA row count overflows"))?;
         // rrd_dump.c:330-340 steps past cur_row and wraps to row 0 once it
@@ -1884,11 +1963,11 @@ pub fn dump_rrd_open_file(
                 let value = f64::from_le_bytes(bytes);
                 write!(out, "<v>{}</v>", format_rrd_value(value)).unwrap();
             }
-            out.push_str("</row>\n");
+            out.extend_from_slice(b"</row>\n");
         }
-        out.push_str("\t\t</database>\n\t</rra>\n");
+        out.extend_from_slice(b"\t\t</database>\n\t</rra>\n");
     }
-    out.push_str("</rrd>\n");
+    out.extend_from_slice(b"</rrd>\n");
     Ok(out)
 }
 
@@ -2290,9 +2369,7 @@ fn choose_archive(
         .map(|(index, _)| index)
         .or_else(|| best_partial.map(|(index, _, _)| index))
         .ok_or_else(|| {
-            StoreError::RrdUnsupported(format!(
-                "RRD has no archive matching consolidation function {requested_cf}"
-            ))
+            StoreError::Rrd("the RRD does not contain an RRA matching the chosen CF".into())
         })
 }
 
@@ -2521,13 +2598,6 @@ fn fixed_bytes(bytes: &[u8], offset: usize, length: usize) -> Result<Vec<u8>, St
         .position(|byte| *byte == 0)
         .unwrap_or(field.len());
     Ok(field[..end].to_vec())
-}
-
-fn xml_escape_text(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 // RRDtool opens operator-supplied .rrd paths normally, following symlinks.

@@ -3221,9 +3221,8 @@ fn rrdcached_fetch_data(
     let result =
         rondi::fetch_rrd_open_file(file, &path, fields[1], start, end, 1).map_err(|error| {
             let error = error.to_string();
-            if error.contains("no archive matching consolidation function") {
-                "rrd_fetch_r failed: the RRD does not contain an RRA matching the chosen CF"
-                    .to_owned()
+            if error == "the RRD does not contain an RRA matching the chosen CF" {
+                format!("rrd_fetch_r failed: {error}")
             } else {
                 error
             }
