@@ -130,12 +130,6 @@ fn open_unix(sock: &RrdcachedListenAddress, listeners: &mut Vec<RrdcachedListene
         );
         return false;
     };
-    if !socket_ancestors_are_safe(std::path::Path::new(dir)) {
-        eprintln!(
-            "rrdcached: refusing socket path {path}: an ancestor can be replaced by another user"
-        );
-        return false;
-    }
     // Everything below works relative to this descriptor, so renaming or
     // replacing the directory's path afterwards cannot redirect it.
     // SAFETY: c_dir is NUL terminated and outlives the call.
@@ -157,6 +151,12 @@ fn open_unix(sock: &RrdcachedListenAddress, listeners: &mut Vec<RrdcachedListene
     };
     if !socket_parent_is_private(&parent_stat) {
         eprintln!("rrdcached: refusing socket directory {dir}: another user can write it");
+        return false;
+    }
+    if !socket_ancestors_are_safe(std::path::Path::new(dir)) {
+        eprintln!(
+            "rrdcached: refusing socket path {path}: an ancestor can be replaced by another user"
+        );
         return false;
     }
     // Upstream unlinks whatever is at the path because the pid file proves
@@ -818,6 +818,7 @@ mod tests {
     fn socket_refuses_replaceable_ancestor_even_with_private_immediate_parent() {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         let ancestor = temp.path().join("shared");
         let parent = ancestor.join("private");
         std::fs::create_dir_all(&parent).unwrap();

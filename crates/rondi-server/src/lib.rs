@@ -312,6 +312,13 @@ impl RrdcachedBase {
         {
             return Err(denied());
         }
+        // Preserve access-check diagnostics. Every actual open repeats this
+        // descriptor traversal, so changing a parent afterwards cannot bypass it.
+        if let Err(error) = rondi::safe_fs::open_directory(parent, false) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(denied());
+            }
+        }
         Ok(path)
     }
 

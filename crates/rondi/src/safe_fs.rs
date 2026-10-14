@@ -34,6 +34,13 @@ pub fn open_directory(path: &Path, create: bool) -> io::Result<File> {
 }
 
 pub fn open_at(directory: &File, name: &CStr, flags: i32, mode: libc::mode_t) -> io::Result<File> {
+    if name.to_bytes().is_empty()
+        || name.to_bytes().contains(&b'/')
+        || name.to_bytes() == b"."
+        || name.to_bytes() == b".."
+    {
+        return Err(io::Error::from_raw_os_error(libc::EPERM));
+    }
     // SAFETY: directory is open, name is NUL terminated, and the returned
     // descriptor is transferred exactly once into an owning File.
     let fd = unsafe {

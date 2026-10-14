@@ -378,7 +378,7 @@ fn rrdcached_failed_privilege_change_exits_without_serving_like_upstream() {
     let dir = std::fs::canonicalize(dir.path()).unwrap();
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o1777)).unwrap();
     }
     // setgid(0) and setuid(0) fail with EPERM for an unprivileged caller.
     for (case, option) in [("setgid", ["-G", "0"]), ("setuid", ["-U", "0"])] {
@@ -388,7 +388,7 @@ fn rrdcached_failed_privilege_change_exits_without_serving_like_upstream() {
             std::fs::create_dir_all(&run).unwrap();
             {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(dir.join(case), std::fs::Permissions::from_mode(0o777))
+                std::fs::set_permissions(dir.join(case), std::fs::Permissions::from_mode(0o1777))
                     .unwrap();
                 std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
             }
