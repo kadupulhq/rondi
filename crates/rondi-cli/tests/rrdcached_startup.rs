@@ -361,3 +361,32 @@ fn rrdcached_unknown_permission_keeps_its_spelling_like_upstream() {
         assert_eq!(upstream.status, Some(4), "-P {permissions}: {upstream:?}");
     }
 }
+
+#[test]
+fn rrdcached_pid_directory_failure_matches_upstream() {
+    use std::os::unix::fs::PermissionsExt;
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping rrdcached -p differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::write(work.join("file"), b"").unwrap();
+    std::fs::create_dir(work.join("sealed")).unwrap();
+    give_to_nobody(&work);
+    std::fs::set_permissions(work.join("sealed"), std::fs::Permissions::from_mode(0o555)).unwrap();
+    for pid in [work.join("sealed/sub/pid"), work.join("file/sub/pid")] {
+        let pid = pid.to_str().unwrap();
+        let upstream = startup_outcome(&work, false, &["-p", pid]);
+        let observed = startup_outcome(&work, true, &["-p", pid]);
+        assert_eq!(observed, upstream, "-p {pid}");
+        assert!(
+            upstream.stderr.ends_with(
+                "FATAL: Fail to create/open PID file \nrrdcached: daemonize failed, exiting.\n"
+            ),
+            "-p {pid}: {upstream:?}"
+        );
+        assert!(!work.join("s.sock").exists());
+    }
+}

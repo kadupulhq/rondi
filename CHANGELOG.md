@@ -29,3 +29,4 @@ follows [Semantic Versioning](VERSIONING.md).
 - Handle SIGUSR1 (shut down after flushing), SIGUSR2 (shut down without flushing), and SIGHUP (ignored) in rrdcached as upstream does, removing the pid file and sockets on exit.
 - Validate rrdcached `-b` during option parsing with upstream messages and exit statuses, and report an unusable base directory without Rust debug formatting.
 - Repeat an unknown rrdcached `-P` permission name as given instead of uppercased.
+- Report an uncreatable rrdcached pid file directory twice and end with `FATAL: Fail to create/open PID file`, as check_pidfile does.

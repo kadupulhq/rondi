@@ -405,18 +405,23 @@ impl PidFile {
             return Ok(None);
         };
         let display = path.display();
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            && let Err(error) = std::fs::create_dir_all(parent)
-        {
-            eprintln!(
-                "Failed to create pidfile directory '{}': {}",
-                parent.display(),
-                errno_text(&error)
-            );
-            return Err(PidFileFailed);
-        }
+        let make_parent = || {
+            let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            else {
+                return true;
+            };
+            std::fs::create_dir_all(parent)
+                .map_err(|error| {
+                    eprintln!(
+                        "Failed to create pidfile directory '{}': {}",
+                        parent.display(),
+                        errno_text(&error)
+                    );
+                })
+                .is_ok()
+        };
         let pid = std::process::id();
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -425,13 +430,25 @@ impl PidFile {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o644).custom_flags(libc::O_NOFOLLOW);
         }
-        let file = match options.open(&path) {
-            Ok(file) => file,
-            Err(error) => {
+        let created = if make_parent() {
+            options.open(&path).map_err(|error| {
                 eprintln!(
                     "rrdcached: can't create pid file '{display}' ({})",
                     errno_text(&error)
                 );
+            })
+        } else {
+            Err(())
+        };
+        let file = match created {
+            Ok(file) => file,
+            Err(()) => {
+                // check_pidfile reopens through open_pidfile, which repeats
+                // the directory creation and its message.
+                if !make_parent() {
+                    eprintln!("FATAL: Fail to create/open PID file ");
+                    return Err(PidFileFailed);
+                }
                 let existing = match read_pid_file(&path) {
                     Ok(existing) => existing,
                     Err(error) => {
