@@ -438,12 +438,14 @@ fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 let commands = value
                     .split([',', ' '])
                     .filter(|command| !command.is_empty())
-                    .map(str::to_ascii_uppercase)
                     .collect::<Vec<_>>();
                 let mut valid = Vec::new();
                 for command in commands {
-                    if RRDCACHED_COMMANDS.contains(&command.as_str()) {
-                        valid.push(command);
+                    // find_command_index compares with strcasecmp; the
+                    // diagnostic repeats the name as given.
+                    let upper = command.to_ascii_uppercase();
+                    if RRDCACHED_COMMANDS.contains(&upper.as_str()) {
+                        valid.push(upper);
                         // Upstream assigns each permission's result to the
                         // shared status, so a later valid name clears an
                         // earlier error, including one from another option.

@@ -343,3 +343,21 @@ fn rrdcached_unwritable_base_directory_error_is_plain_and_leaves_no_socket() {
     assert!(!work.join("s.sock").exists());
     assert!(!pid.exists());
 }
+
+#[test]
+fn rrdcached_unknown_permission_keeps_its_spelling_like_upstream() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping rrdcached -P differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    // Each list ends with an unknown name so both daemons stop with status 4.
+    for permissions in ["nosuch", "ping,Bogus", "Flush nosuch,pInG,Nope"] {
+        let upstream = startup_outcome(&work, false, &["-P", permissions]);
+        let observed = startup_outcome(&work, true, &["-P", permissions]);
+        assert_eq!(observed, upstream, "-P {permissions}");
+        assert_eq!(upstream.status, Some(4), "-P {permissions}: {upstream:?}");
+    }
+}
