@@ -8,6 +8,20 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
 
+// A search-only descriptor needs execute permission alone, as a pathname
+// lookup does, so execute-only ancestors stay traversable.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const DIRECTORY_SEARCH: i32 = libc::O_PATH;
+#[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
+const DIRECTORY_SEARCH: i32 = libc::O_SEARCH;
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "android",
+    target_vendor = "apple",
+    target_os = "freebsd"
+)))]
+const DIRECTORY_SEARCH: i32 = libc::O_RDONLY;
+
 pub fn open_directory(path: &Path, create: bool) -> io::Result<File> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -28,7 +42,7 @@ pub fn open_directory(path: &Path, create: bool) -> io::Result<File> {
                 return Err(io::Error::last_os_error());
             }
         }
-        directory = open_at(&directory, &name, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+        directory = open_at(&directory, &name, DIRECTORY_SEARCH | libc::O_DIRECTORY, 0)?;
     }
     Ok(directory)
 }
@@ -68,4 +82,24 @@ pub fn open_file(path: &Path, flags: i32, mode: libc::mode_t) -> io::Result<File
     )?;
     let directory = open_directory(parent, false)?;
     open_at(&directory, &name, flags, mode)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn traversal_passes_execute_only_ancestors() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let search_only = root.join("search-only");
+        std::fs::create_dir_all(search_only.join("data")).unwrap();
+        std::fs::write(search_only.join("data/metric.rrd"), b"rrd").unwrap();
+        std::fs::set_permissions(&search_only, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let opened = super::open_file(&search_only.join("data/metric.rrd"), libc::O_RDONLY, 0);
+        let created = super::open_directory(&search_only.join("data/new"), true);
+        std::fs::set_permissions(&search_only, std::fs::Permissions::from_mode(0o700)).unwrap();
+        opened.unwrap();
+        created.unwrap();
+        assert!(search_only.join("data/new").is_dir());
+    }
 }

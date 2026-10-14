@@ -286,14 +286,22 @@ impl RrdcachedBase {
     fn target(&self, requested: &str) -> Result<PathBuf, String> {
         let path = self.fs_path(requested);
         if !self.confined() {
-            return Ok(std::fs::canonicalize(&path).unwrap_or_else(|_| {
-                match (path.parent(), path.file_name()) {
-                    (Some(parent), Some(name)) => std::fs::canonicalize(parent)
-                        .map(|parent| parent.join(name))
-                        .unwrap_or(path),
-                    _ => path,
-                }
-            }));
+            // Unconfined upstream follows symlinked ancestors, including
+            // above directories CREATE -R has yet to make. Resolve the deepest
+            // existing ancestor so the descriptor walk sees no symlinks.
+            return Ok(path
+                .ancestors()
+                .find_map(|ancestor| {
+                    let resolved = std::fs::canonicalize(ancestor).ok()?;
+                    let missing = path.strip_prefix(ancestor).ok()?;
+                    // join("") would append a trailing separator.
+                    Some(if missing.as_os_str().is_empty() {
+                        resolved
+                    } else {
+                        resolved.join(missing)
+                    })
+                })
+                .unwrap_or(path));
         }
         let denied = || format!("{}: Permission denied", self.abs(requested));
         if path
@@ -3643,7 +3651,14 @@ fn rrdcached_create(
         &definitions,
         no_overwrite,
     )
-    .map_err(|error| error.to_string())
+    .map_err(|error| match error {
+        StoreError::Io(error)
+            if no_overwrite && error.kind() == std::io::ErrorKind::AlreadyExists =>
+        {
+            format!("RRD Error: creating '{display}': File exists")
+        }
+        error => error.to_string(),
+    })
 }
 
 async fn handle(

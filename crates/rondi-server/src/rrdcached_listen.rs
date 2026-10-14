@@ -288,7 +288,20 @@ fn socket_ancestors_are_safe(directory: &std::path::Path) -> bool {
         match component {
             Component::RootDir | Component::CurDir => continue,
             Component::Normal(name) => current.push(name),
-            _ => return false,
+            Component::ParentDir => {
+                // The kernel takes `..` from the resolved directory, which
+                // the components checked so far keep from being replaced.
+                let Ok(resolved) = std::fs::canonicalize(&current) else {
+                    return false;
+                };
+                current = resolved.parent().map_or(resolved.clone(), PathBuf::from);
+                let Ok(metadata) = std::fs::metadata(&current) else {
+                    return false;
+                };
+                parent = metadata;
+                continue;
+            }
+            Component::Prefix(_) => return false,
         }
         let Ok(entry) = std::fs::symlink_metadata(&current) else {
             return false;
@@ -835,6 +848,25 @@ mod tests {
         assert!(!path.exists());
         std::fs::set_permissions(&ancestor, std::fs::Permissions::from_mode(0o1777)).unwrap();
         assert!(super::socket_ancestors_are_safe(&parent));
+    }
+
+    #[test]
+    fn socket_ancestors_follow_parent_components_like_bind() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let shared = root.join("shared");
+        std::fs::create_dir_all(shared.join("inner")).unwrap();
+        std::fs::create_dir_all(root.join("run")).unwrap();
+        assert!(super::socket_ancestors_are_safe(&root.join("run/../run")));
+        assert!(super::socket_ancestors_are_safe(
+            &root.join("shared/inner/../../run")
+        ));
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        assert!(!super::socket_ancestors_are_safe(
+            &root.join("run/../shared/inner")
+        ));
     }
 
     #[test]

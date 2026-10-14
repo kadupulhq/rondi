@@ -15,7 +15,8 @@ use std::path::Path;
 const DS_NAM_SIZE: usize = 20;
 const DST_SIZE: usize = 20;
 
-/// Maximum encoded archive allocation for one CREATE, including its header.
+/// Maximum encoded archive allocation for one daemon CREATE, including its
+/// header. Local `rrdtool create` keeps upstream's unbounded size.
 pub const MAX_RRD_CREATE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The C library's single error slot: `rrd_set_error` replaces the text and
@@ -48,7 +49,7 @@ pub fn rrd_create_r2(
             "creating '{filename}': File exists"
         )));
     }
-    let bytes = create_bytes(pdp_step, last_up, template, argv)?;
+    let bytes = create_bytes(pdp_step, last_up, template, argv, usize::MAX)?;
     write_rrd(filename, &bytes, no_overwrite)
 }
 
@@ -57,6 +58,7 @@ fn create_bytes(
     last_up: i64,
     template: Option<&str>,
     argv: &[String],
+    max_bytes: usize,
 ) -> Result<Vec<u8>, StoreError> {
     if !cfg!(target_pointer_width = "64") || cfg!(target_endian = "big") {
         return Err(StoreError::RrdUnsupported(
@@ -134,7 +136,7 @@ fn create_bytes(
     if !last_up_set && template_latest_last_up > 0 {
         live_last_up = template_latest_last_up;
     }
-    rrd_init_data(version, step, live_last_up, &ds_defs, &rra_defs)
+    rrd_init_data(version, step, live_last_up, &ds_defs, &rra_defs, max_bytes)
 }
 
 /// `DS_RE` from rrd_create.c:310, matched the way GRegex does:
@@ -358,6 +360,7 @@ fn rrd_init_data(
     last_up: i64,
     ds_defs: &[[u8; DS_DEF_LEN]],
     rra_defs: &[[u8; RRA_DEF_LEN]],
+    max_bytes: usize,
 ) -> Result<Vec<u8>, StoreError> {
     let ds_cnt = ds_defs.len();
     let rra_cnt = rra_defs.len();
@@ -390,7 +393,7 @@ fn rrd_init_data(
     .ok_or_else(allocation_error)?;
     let total_len = header_len
         .checked_add(values)
-        .filter(|size| *size <= MAX_RRD_CREATE_BYTES)
+        .filter(|size| *size <= max_bytes)
         .ok_or_else(allocation_error)?;
     let mut bytes = Vec::new();
     bytes
@@ -496,7 +499,23 @@ pub fn create_rrd_at(
         return Err(StoreError::InvalidName);
     }
     let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| StoreError::InvalidName)?;
-    let bytes = create_bytes(step, start, None, definitions)?;
+    if no_overwrite {
+        let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: the directory and NUL-terminated name remain valid. As in
+        // rrd_create_r2, an existing target is reported before parsing.
+        let status = unsafe {
+            libc::fstatat(
+                parent.as_raw_fd(),
+                name.as_ptr(),
+                &mut metadata,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if status == 0 {
+            return Err(std::io::Error::from_raw_os_error(libc::EEXIST).into());
+        }
+    }
+    let bytes = create_bytes(step, start, None, definitions, MAX_RRD_CREATE_BYTES)?;
     let mut temporary = None;
     for _ in 0..100 {
         let random = std::collections::hash_map::RandomState::new()
@@ -673,7 +692,7 @@ mod tests {
     #[test]
     fn create_rejects_overflow_and_oversized_archives_before_writing() {
         let temp = tempfile::tempdir().unwrap();
-        for rows in ["2305843009213693951", "18446744073709551615", "8388608"] {
+        for rows in ["2305843009213693951", "18446744073709551615"] {
             let target = temp.path().join(format!("large-{rows}.rrd"));
             let args = vec![
                 "DS:value:GAUGE:30:U:U".into(),
@@ -692,6 +711,45 @@ mod tests {
             );
             assert!(!target.exists());
         }
+        let parent = std::fs::File::open(temp.path()).unwrap();
+        let definitions = [
+            "DS:value:GAUGE:30:U:U".to_owned(),
+            "RRA:AVERAGE:0.5:1:8388608".to_owned(),
+        ];
+        assert!(
+            super::create_rrd_at(
+                &parent,
+                std::ffi::OsStr::new("daemon.rrd"),
+                1_000_000_000,
+                10,
+                &definitions,
+                true
+            )
+            .is_err()
+        );
+        assert!(!temp.path().join("daemon.rrd").exists());
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn local_create_is_not_bound_by_the_daemon_size_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("local.rrd");
+        let args = vec![
+            "DS:value:GAUGE:30:U:U".into(),
+            "RRA:AVERAGE:0.5:1:8388608".into(),
+        ];
+        super::rrd_create_r2(
+            target.to_str().unwrap(),
+            10,
+            1_000_000_000,
+            true,
+            None,
+            &args,
+        )
+        .unwrap();
+        let length = usize::try_from(std::fs::metadata(&target).unwrap().len()).unwrap();
+        assert!(length > super::MAX_RRD_CREATE_BYTES);
     }
 
     #[test]
