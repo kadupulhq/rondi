@@ -1678,9 +1678,11 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err("the first entry to fetch should be after 1980".into());
     }
     if align_start {
-        let delta = start.rem_euclid(i64::try_from(resolution)?);
-        start = start.checked_sub(delta).ok_or("start time overflows")?;
-        end = end.checked_sub(delta).ok_or("end time overflows")?;
+        // rrd_fetch.c takes start % step in unsigned long, so a step above
+        // i64::MAX is valid and leaves delta equal to start.
+        let delta = (start as u64) % resolution;
+        start = start.wrapping_sub(delta as i64);
+        end = end.wrapping_sub(delta as i64);
     }
     if end < start {
         return Err(format!("start ({start}) should be less than end ({end})").into());
