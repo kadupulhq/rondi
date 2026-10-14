@@ -8,6 +8,83 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
 
+/// Keep CREATE's unpublished file inaccessible to other accounts, even when
+/// the destination directory is writable by those accounts.
+pub(crate) struct PrivateDirectory<'a> {
+    parent: &'a File,
+    name: CString,
+    pub(crate) directory: File,
+}
+
+impl<'a> PrivateDirectory<'a> {
+    pub(crate) fn create(parent: &'a File) -> io::Result<Self> {
+        use std::hash::{BuildHasher, Hasher};
+        use std::os::unix::fs::MetadataExt;
+        for _ in 0..100 {
+            let random = std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish();
+            let name = CString::new(format!(".rondi-create-{random:016x}")).unwrap();
+            // SAFETY: parent is open and name is NUL terminated.
+            if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    continue;
+                }
+                return Err(error);
+            }
+            let directory = open_at(parent, &name, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+            let metadata = directory.metadata()?;
+            // SAFETY: geteuid has no preconditions. A replacement directory
+            // owned by another account must never become the staging area.
+            if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
+                return Err(io::Error::from_raw_os_error(libc::EPERM));
+            }
+            return Ok(Self {
+                parent,
+                name,
+                directory,
+            });
+        }
+        Err(io::Error::from_raw_os_error(libc::EEXIST))
+    }
+}
+
+impl Drop for PrivateDirectory<'_> {
+    fn drop(&mut self) {
+        // SAFETY: both descriptors remain open. Remove only our staging file;
+        // a rename of the directory cannot redirect this cleanup elsewhere.
+        unsafe { libc::unlinkat(self.directory.as_raw_fd(), c"rrd".as_ptr(), 0) };
+        let mut ours: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: directory is open and the output buffer remains valid.
+        if unsafe { libc::fstat(self.directory.as_raw_fd(), &mut ours) } != 0 {
+            return;
+        }
+        let mut current: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: the descriptor, name, and output buffer remain valid.
+        if unsafe {
+            libc::fstatat(
+                self.parent.as_raw_fd(),
+                self.name.as_ptr(),
+                &mut current,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        } == 0
+            && current.st_dev == ours.st_dev
+            && current.st_ino == ours.st_ino
+        {
+            // SAFETY: this name still identifies our empty staging directory.
+            unsafe {
+                libc::unlinkat(
+                    self.parent.as_raw_fd(),
+                    self.name.as_ptr(),
+                    libc::AT_REMOVEDIR,
+                )
+            };
+        }
+    }
+}
+
 pub fn open_directory(path: &Path, create: bool) -> io::Result<File> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -68,4 +145,57 @@ pub fn open_file(path: &Path, flags: i32, mode: libc::mode_t) -> io::Result<File
     )?;
     let directory = open_directory(parent, false)?;
     open_at(&directory, &name, flags, mode)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn staging_rename_cannot_replace_payload_or_redirect_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = File::open(temp.path()).unwrap();
+        let staging = PrivateDirectory::create(&parent).unwrap();
+        assert_eq!(
+            staging.directory.metadata().unwrap().permissions().mode() & 0o077,
+            0
+        );
+        let mut file = open_at(
+            &staging.directory,
+            c"rrd",
+            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
+            0o600,
+        )
+        .unwrap();
+        file.write_all(b"original RRD").unwrap();
+        let original = temp
+            .path()
+            .join(std::ffi::OsStr::from_bytes(staging.name.to_bytes()));
+        let moved = temp.path().join("moved");
+        std::fs::rename(&original, &moved).unwrap();
+        std::fs::create_dir(&original).unwrap();
+        std::fs::write(original.join("rrd"), b"replacement").unwrap();
+        // Publishing resolves the payload through the pinned private directory.
+        assert_eq!(
+            unsafe {
+                libc::renameat(
+                    staging.directory.as_raw_fd(),
+                    c"rrd".as_ptr(),
+                    parent.as_raw_fd(),
+                    c"result".as_ptr(),
+                )
+            },
+            0
+        );
+        drop(staging);
+        let mut bytes = String::new();
+        File::open(temp.path().join("result"))
+            .unwrap()
+            .read_to_string(&mut bytes)
+            .unwrap();
+        assert_eq!(bytes, "original RRD");
+        assert_eq!(std::fs::read(original.join("rrd")).unwrap(), b"replacement");
+    }
 }

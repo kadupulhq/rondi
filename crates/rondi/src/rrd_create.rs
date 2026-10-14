@@ -466,7 +466,8 @@ fn write_rrd(filename: &str, bytes: &[u8], no_overwrite: bool) -> Result<(), Sto
 }
 
 /// Daemon CREATE publishes through the already opened parent, never reopening
-/// its pathname after confinement checks or resolving a temporary path again.
+/// its pathname after confinement checks. A private staging directory protects
+/// the unpublished file from replacement by another account.
 #[cfg(unix)]
 pub fn create_rrd_at(
     parent: &std::fs::File,
@@ -476,7 +477,6 @@ pub fn create_rrd_at(
     definitions: &[String],
     no_overwrite: bool,
 ) -> Result<(), StoreError> {
-    use std::hash::{BuildHasher, Hasher};
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
     if start < 315_360_000 {
@@ -489,85 +489,65 @@ pub fn create_rrd_at(
     }
     let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| StoreError::InvalidName)?;
     let bytes = create_bytes(step, start, None, definitions)?;
-    let mut temporary = None;
-    for _ in 0..100 {
-        let random = std::collections::hash_map::RandomState::new()
-            .build_hasher()
-            .finish();
-        let temp_name = std::ffi::CString::new(format!(".rondi-create-{random:016x}")).unwrap();
-        match crate::safe_fs::open_at(
-            parent,
-            &temp_name,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-            0o600,
-        ) {
-            Ok(file) => {
-                temporary = Some((temp_name, file));
-                break;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(error.into()),
+    let staging = crate::safe_fs::PrivateDirectory::create(parent)?;
+    let mut file = crate::safe_fs::open_at(
+        &staging.directory,
+        c"rrd",
+        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        0o600,
+    )?;
+    let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: the directory and NUL-terminated name remain valid. The
+    // existing entry is inspected without following a final symlink.
+    let status = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            &mut metadata,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    let mode = if status == 0 {
+        if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(StoreError::Rrd(
+                "refusing to replace a linked or special target".into(),
+            ));
         }
+        metadata.st_mode & 0o777
+    } else if std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
+        0o644
+    } else {
+        return Err(std::io::Error::last_os_error().into());
+    };
+    file.write_all(&bytes)?;
+    file.flush()?;
+    // SAFETY: file is the newly created descriptor owned by this function.
+    if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
+        return Err(std::io::Error::last_os_error().into());
     }
-    let (temp_name, mut file) =
-        temporary.ok_or_else(|| StoreError::Rrd("Cannot create temporary file".into()))?;
-    let result = (|| -> Result<(), StoreError> {
-        let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: the directory and NUL-terminated name remain valid. The
-        // existing entry is inspected without following a final symlink.
-        let status = unsafe {
-            libc::fstatat(
+    // SAFETY: both names are single components relative to open directories.
+    let status = unsafe {
+        if no_overwrite {
+            libc::linkat(
+                staging.directory.as_raw_fd(),
+                c"rrd".as_ptr(),
                 parent.as_raw_fd(),
                 name.as_ptr(),
-                &mut metadata,
-                libc::AT_SYMLINK_NOFOLLOW,
+                0,
             )
-        };
-        let mode = if status == 0 {
-            if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
-                return Err(StoreError::Rrd(
-                    "refusing to replace a linked or special target".into(),
-                ));
-            }
-            metadata.st_mode & 0o777
-        } else if std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
-            0o644
         } else {
-            return Err(std::io::Error::last_os_error().into());
-        };
-        file.write_all(&bytes)?;
-        file.flush()?;
-        // SAFETY: file is the newly created descriptor owned by this function.
-        if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
+            libc::renameat(
+                staging.directory.as_raw_fd(),
+                c"rrd".as_ptr(),
+                parent.as_raw_fd(),
+                name.as_ptr(),
+            )
         }
-        // SAFETY: both names are single components relative to the open parent.
-        let status = unsafe {
-            if no_overwrite {
-                libc::linkat(
-                    parent.as_raw_fd(),
-                    temp_name.as_ptr(),
-                    parent.as_raw_fd(),
-                    name.as_ptr(),
-                    0,
-                )
-            } else {
-                libc::renameat(
-                    parent.as_raw_fd(),
-                    temp_name.as_ptr(),
-                    parent.as_raw_fd(),
-                    name.as_ptr(),
-                )
-            }
-        };
-        if status != 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-        Ok(())
-    })();
-    // SAFETY: only this operation's exclusive temporary entry is removed.
-    unsafe { libc::unlinkat(parent.as_raw_fd(), temp_name.as_ptr(), 0) };
-    result
+    };
+    if status != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
 }
 
 /// rrd_create.c:1462-1476: chmod the temporary file to the target's mode,
