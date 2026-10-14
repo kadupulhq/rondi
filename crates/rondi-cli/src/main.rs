@@ -2056,6 +2056,12 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             }
             info.push("value_min", InfoValue::Val(im.minval));
             info.push("value_max", InfoValue::Val(im.maxval));
+            // calc_horizontal_grid gives up on a NaN scaled range (an
+            // infinite limit) without setting an error, so rrd_graph_v
+            // returns nothing: no file, no output and a zero exit status.
+            if ((im.maxval - im.minval) / im.magfact).is_nan() {
+                return Ok(());
+            }
             let legend_size = im.text_prop[TEXT_PROP_LEGEND];
             let mut legends = Vec::new();
             for (index, x0, y0) in im.legend_origins() {

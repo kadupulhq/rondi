@@ -436,3 +436,39 @@ fn zoom_scales_the_written_image_and_image_info() {
     .collect();
     f.assert_all_same_output(&cases);
 }
+
+// An infinite --upper-limit or --lower-limit makes si_unit's magfact infinite,
+// so calc_horizontal_grid sees a NaN scaled range and graph_paint stops
+// without an error: no file, no output, exit 0. --logarithmic is left out
+// because the pinned build loops forever there.
+#[test]
+fn infinite_limits_abandon_the_graph_silently() {
+    let Some(f) = fixture() else { return };
+    let line = "LINE1:x#ff0000";
+    let cases: Vec<Vec<String>> = [
+        vec!["-u", "inf", line],
+        vec!["-u", "1e400", line],
+        vec!["-l", "-inf", line],
+        vec!["-l", "-inf", line, "PRINT:x:AVERAGE:%lf"],
+        vec!["-u", "inf", "-r", line],
+        vec!["-u", "inf", "-l", "-inf", line],
+        vec!["-u", "inf", "-A", line],
+        vec!["-u", "inf", "-y", "10:2", line],
+        vec!["-u", "inf", "--imginfo", "%s %lu %lu", line],
+        vec!["-u", "inf", "-j", line],
+        vec!["-l", "inf", line],
+        vec!["-u", "-inf", line],
+        vec!["-u", "nan", line],
+        vec!["-u", "1e308", line],
+        vec!["-u", "inf", "PRINT:x:AVERAGE:%lf"],
+        vec!["-u", "inf", "-a", "CSV", line],
+    ]
+    .iter()
+    .flat_map(|extra| {
+        let mut graphv = f.graph(extra);
+        graphv[0] = String::from("graphv");
+        [f.graph(extra), graphv]
+    })
+    .collect();
+    f.assert_all_same_output(&cases);
+}

@@ -368,11 +368,12 @@ pub(crate) fn rrd_graph_options(args: &[String], now: i64) -> Result<GraphOption
             _ if option == short(b'v') => graph.vertical_label = Some(value),
             _ if option == short(b'u') => {
                 let maxval = rrd_strtodbl(&value, Some("option -u"))?;
-                graph.upper_limit = maxval.is_finite().then_some(maxval);
+                // NaN leaves the limit unset; an infinity is kept.
+                graph.upper_limit = (!maxval.is_nan()).then_some(maxval);
             }
             _ if option == short(b'l') => {
                 minval = rrd_strtodbl(&value, Some("option -l"))?;
-                graph.lower_limit = minval.is_finite().then_some(minval);
+                graph.lower_limit = (!minval.is_nan()).then_some(minval);
             }
             _ if option == short(b'b') => {
                 let base = atol(&value);
