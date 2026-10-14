@@ -1,6 +1,6 @@
 #![cfg(unix)]
 use rondi::open_output_file;
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 
 #[test]
 fn output_rejects_fifo_without_waiting_and_preserves_links() {
@@ -47,4 +47,39 @@ fn foreign_owned_output_is_rejected_without_truncation() {
     assert_eq!(std::fs::metadata(&path).unwrap().uid(), 65534);
     assert!(open_output_file(&path, false).is_err());
     assert_eq!(std::fs::read(path).unwrap(), b"keep");
+}
+
+#[test]
+fn character_devices_open_directly_and_through_a_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    let device = open_output_file(std::path::Path::new("/dev/null"), false).unwrap();
+    assert!(device.metadata().unwrap().file_type().is_char_device());
+    let linked = dir.path().join("null");
+    std::os::unix::fs::symlink("/dev/null", &linked).unwrap();
+    let device = open_output_file(&linked, false).unwrap();
+    assert!(device.metadata().unwrap().file_type().is_char_device());
+    // Blocking mode is restored so a terminal write cannot return EAGAIN.
+    // SAFETY: the descriptor is open.
+    let flags = unsafe { libc::fcntl(std::os::fd::AsRawFd::as_raw_fd(&device), libc::F_GETFL) };
+    assert_eq!(flags & libc::O_NONBLOCK, 0);
+}
+
+#[test]
+fn symlinks_to_other_inodes_stay_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("fifo");
+    let name = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    // SAFETY: name is a valid NUL-terminated path.
+    assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+    let to_fifo = dir.path().join("to_fifo");
+    std::os::unix::fs::symlink(&fifo, &to_fifo).unwrap();
+    assert!(open_output_file(&to_fifo, false).is_err());
+    let to_dir = dir.path().join("to_dir");
+    std::os::unix::fs::symlink(dir.path(), &to_dir).unwrap();
+    assert!(open_output_file(&to_dir, false).is_err());
+    let missing = dir.path().join("missing");
+    let dangling = dir.path().join("dangling");
+    std::os::unix::fs::symlink(&missing, &dangling).unwrap();
+    assert!(open_output_file(&dangling, false).is_err());
+    assert!(!missing.exists());
 }
