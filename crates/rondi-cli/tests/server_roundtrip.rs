@@ -747,6 +747,9 @@ fn rrdtool_xport_daemon_flushes_pending_values_like_upstream() {
         assert_eq!(actual.stderr, expected.stderr);
     }
     let daemon_created = Command::new(&rondi_alias)
+        // rrd_client.c resolves a relative Unix-daemon filename from the
+        // client's working directory before sending it to the daemon.
+        .current_dir(&root)
         .args([
             "create",
             "--daemon",
@@ -854,6 +857,7 @@ fn rrdtool_xport_daemon_flushes_pending_values_like_upstream() {
         String::from_utf8_lossy(&upstream_daemon_fetch.stdout),
     );
     let daemon_first = Command::new(&rondi_alias)
+        .current_dir(&root)
         .args([
             "first",
             "--daemon",

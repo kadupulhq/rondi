@@ -106,7 +106,7 @@ Closed since the earlier draft (all EXECUTED unless noted):
 - Pipe mode still lacks commands. EXECUTED: `pwd`, `ls`, `cd /tmp`, `xport`, `graph`, `graphv`, and `flushcached` each print `ERROR: unknown function '<name>'`; upstream runs them. The chroot argument is not implemented (READ-ONLY).
 - The pipe tokenizer is still `shell_words::split` (`crates/rondi-cli/src/main.rs`). EXECUTED: input `info no\:such.rrd` prints `opening 'no:such.rrd'` from Rondi and `opening 'no\:such.rrd'` from upstream. This breaks `COMMENT` text with `\:` once graph commands reach pipe mode.
 - Help text for 14 commands is stored under `crates/rondi-cli/src/help/` (dump, fetch, first, graph, graphv, info, lastupdate, list, resize, restore, tune, update, updatev, xport). EXECUTED (file listing). `create`, `last`, and `flushcached` help are not in that set; whether they match was not checked.
-- `RRDCACHED_ADDRESS` is read in 13 places (EXECUTED: `grep -c`). `RRDCACHED_STRIPPATH` and `RRD_DEFAULT_FONT` are not read; `RRD_LOCKING` is.
+- `RRDCACHED_ADDRESS` is read in 13 places (EXECUTED: `grep -c`). `RRDCACHED_STRIPPATH` now follows `rrd_client.c` `get_path` for TCP client filenames; Unix clients canonicalize paths before sending them. Differential tests compare CREATE, UPDATE, FIRST, LAST, FETCH and FLUSH requests and outcomes with RRDtool 1.11.0. `RRD_DEFAULT_FONT` is not read; `RRD_LOCKING` is.
 - Upstream shell suite against Rondi (exploratory, macOS probe, 31 scripts from `tests/` at `v1.11.0`, run with `RRDTOOL=<binary>`). Upstream passed 15 on this host. Rondi passed 10 of those 15 and failed `graph1`, `graph2`, `graph4`, `rpn1`, and `vformatter1`. `rpn1` stops at a `graphv` call (EXECUTED: rerun with `bash -x`); the other four were not traced. The 16 scripts that fail with upstream on macOS (the `create-with-source-*`, `modify*`, `tune*`, `list1`, and `graph5` scripts, among others) say nothing about Rondi and must be rerun in the Linux container. The earlier draft listed `tune2` and `pdp-calc1` as Rondi failures; `pdp-calc1` now passes, and `tune2` fails for upstream too here.
 
 ### Gaps
@@ -115,7 +115,7 @@ Closed since the earlier draft (all EXECUTED unless noted):
 2. `rrdupdate` name. `rrdcgi` only if a consumer needs it (see Roadmap).
 3. Option completeness outside graph (RD-002, RD-004).
 4. Upstream's local-fallback text after "Unable to connect to rrdcached" (decided).
-5. `RRDCACHED_STRIPPATH`.
+5. `RRDCACHED_STRIPPATH` is implemented for the supported daemon client commands, with differential path and error cases; broader daemon client behavior remains incomplete.
 6. Error text corpus beyond the tested set (RD-010).
 7. Time parser completeness. The parser is a subset with differential tests (READ-ONLY).
 8. TCP paths for `xport`, `graphv`, and other daemon commands. TLS does not exist in RRDtool 1.11.0 (READ-ONLY) and should not be added under the compatibility names.
