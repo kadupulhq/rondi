@@ -383,6 +383,44 @@ fn a18_rrd_strtod_whitespace_and_exponent_wrap() {
     );
 }
 
+// A19: get_time_from_reading takes the microseconds from the saturated
+// time_t (rrd_update.c:1409-1410), so a time past 2^63 leaves a huge
+// unknown_sec, and calculate_elapsed_steps returns the step count as int.
+#[test]
+fn a19_huge_times_saturate_and_wrap_elapsed_steps() {
+    let create: &[&str] = &[
+        "--start",
+        "1000000000",
+        "--step",
+        "300",
+        "DS:g:GAUGE:600:U:U",
+        "DS:h:GAUGE:99999999999999999:U:U",
+        "RRA:AVERAGE:0.5:1:4",
+        "RRA:MAX:0.5:7:4",
+        "RRA:AVERAGE:0.9:5:4",
+    ];
+    for time in ["99999999999999999999", "9223372036854775807"] {
+        assert_same(
+            create,
+            &[
+                step(&["updatev", "t.rrd", &format!("{time}:5:6")]),
+                step(&["info", "t.rrd"]),
+            ],
+        );
+    }
+    // 2^32 + 1 and 2^31 steps after the first PDP boundary.
+    for time in ["1289490189017.25", "645245094317"] {
+        assert_same(
+            create,
+            &[
+                step(&["updatev", "t.rrd", "1000000100:5:6"]),
+                step(&["updatev", "t.rrd", &format!("{time}:7:8")]),
+                step(&["info", "t.rrd"]),
+            ],
+        );
+    }
+}
+
 // Control: the consolidation path itself matches byte-for-byte.
 #[test]
 fn control_core_update_math_matches() {

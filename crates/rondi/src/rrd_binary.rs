@@ -571,6 +571,9 @@ fn apply_update(
         .checked_sub(previous_boundary)
         .ok_or_else(|| rrd_error("RRD elapsed steps overflow"))?
         / step;
+    // calculate_elapsed_steps returns int, so process_arg sees the count
+    // wrapped to 32 bits and sign-extended into its unsigned long.
+    let elapsed_steps = i64::from(elapsed_steps as i32);
     let ds_count = info.data_sources.len();
     let rra_start = STAT_HEAD_LEN + ds_count * DS_DEF_LEN;
     let live_start = rra_start + info.archives.len() * RRA_DEF_LEN;
@@ -929,8 +932,14 @@ fn update_text_arguments(
                     time +=
                         now.as_secs() as f64 + f64::from(now.subsec_micros()) * f64::from(1e-6_f32);
                 }
-                let seconds = time.floor();
-                (seconds as i64, ((time - seconds) * 1e6) as u64)
+                // rrd_update.c:1409-1410 takes the microseconds from the
+                // time_t it stored, so past 2^63 the excess over the
+                // saturated seconds becomes a huge (long) microsecond count.
+                // Rust's saturating casts reproduce the arm64 conversion of
+                // the pinned oracle; x86-64 C yields LONG_MIN instead.
+                let seconds = time.floor() as i64;
+                let microseconds = ((time - seconds as f64) * f64::from(1e6_f32)) as i64;
+                (seconds, microseconds as u64)
             }
         };
         if version < 3 {
