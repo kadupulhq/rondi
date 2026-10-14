@@ -1766,7 +1766,8 @@ fn reduce_data(
     step: &mut u64,
     columns: &mut [Vec<f64>],
 ) -> Result<(), StoreError> {
-    let reduce_factor = (*step as f64 / cur_step as f64).ceil() as i32;
+    // `int reduce_factor = ceil(...)` keeps C's out-of-range conversion.
+    let reduce_factor = rpn::c_int((*step as f64 / cur_step as f64).ceil());
     // `int` converts to `unsigned long` by sign extension.
     let factor = i64::from(reduce_factor) as u64;
     *step = cur_step.wrapping_mul(factor);
