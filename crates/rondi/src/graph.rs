@@ -266,6 +266,10 @@ pub struct GraphImage {
     pub daemon_addr: Option<String>,
     /// `--use-nan-for-all-missing-data`.
     pub allow_missing_ds: bool,
+    /// The error a failed `rrdc_connect` left set while `data_fetch` fell
+    /// back to the local file. RRDtool reports it once the command has
+    /// otherwise finished.
+    pub pending_error: Option<String>,
     gdef_map: HashMap<String, usize>,
     // Layout options and results; see `graph_layout`.
     pub xsize: i64,
@@ -323,6 +327,7 @@ impl GraphImage {
             gdes: Vec::new(),
             daemon_addr: None,
             allow_missing_ds: false,
+            pending_error: None,
             gdef_map: HashMap::new(),
             xsize: 400,
             ysize: 100,
@@ -1847,8 +1852,10 @@ fn gcd(mut left: u64, mut right: u64) -> u64 {
 
 /// Called before each DEF fetch with the daemon address that applies to it
 /// (the DEF's `daemon=` or the image-wide one), so the caller can flush the
-/// file through rrdcached first.
-pub type DaemonHook<'a> = &'a mut dyn FnMut(&str, &str) -> Result<(), StoreError>;
+/// file through rrdcached first. `Ok(Some(message))` reports a daemon that
+/// could not be reached: RRDtool then reads the local file and keeps the
+/// message as its pending error.
+pub type DaemonHook<'a> = &'a mut dyn FnMut(&str, &str) -> Result<Option<String>, StoreError>;
 
 /// `gdes_fetch_key`. Every number goes through `%d`, so the 64-bit times
 /// and steps keep only their low 32 bits, as the pinned build reads them.
@@ -1928,8 +1935,10 @@ impl GraphImage {
         } else {
             Some(element.daemon.clone())
         };
-        if let Some(address) = address.filter(|address| !address.is_empty()) {
-            daemon(&address, &element.rrd)?;
+        if let Some(address) = address.filter(|address| !address.is_empty())
+            && let Some(message) = daemon(&address, &element.rrd)?
+        {
+            self.pending_error = Some(message);
         }
         let cf = element.cf.unwrap_or(Cf::Average);
         let fetched = if element.rrd.starts_with("cb//") {
@@ -1982,7 +1991,8 @@ impl GraphImage {
                 )
             }
             Err(_) if self.allow_missing_ds => {
-                // rrd_fetch_empty
+                // rrd_clear_error, then rrd_fetch_empty.
+                self.pending_error = None;
                 let mut step = element.step;
                 if step == 0 {
                     // C divides by this step next; a range under 100s

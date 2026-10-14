@@ -165,3 +165,40 @@ fn cdef_over_disjoint_windows_fails_the_allocation() {
         assert_same(&sides, &split(&line), &[]);
     }
 }
+
+// rrd_graph.c:1002-1007: data_fetch reads the local file when rrdc_connect
+// fails but leaves its error set, so rrdtool prints the result and then
+// fails. rrd_xport.c:211 connects to the image-wide daemon first and stops
+// there, and an ALLOW_MISSING_DS fallback clears the pending error.
+#[test]
+fn unreachable_daemon_falls_back_to_the_local_file() {
+    let Some(sides) = sides() else { return };
+    let socket = sides.up.join("missing.sock");
+    let address = format!("unix:{}", socket.display());
+    let def_address = address.replace(':', "\\:");
+    let window = "-s 1700000000 -e 1700030000";
+    let graph = format!("{window} DEF:x=t.rrd:a:AVERAGE LINE1:x#ff0000 PRINT:x:AVERAGE:%lf");
+    for line in [
+        format!("graph out.png --daemon {address} {graph}"),
+        format!("graphv out.png --daemon {address} {graph}"),
+        format!("graph out.png {window} DEF:x=t.rrd:a:AVERAGE:daemon={def_address} LINE1:x#ff0000"),
+        format!("xport {window} DEF:x=t.rrd:a:AVERAGE:daemon={def_address} XPORT:x"),
+        format!("xport --daemon {address} {window} DEF:x=t.rrd:a:AVERAGE XPORT:x"),
+    ] {
+        assert_same(&sides, &split(&line), &[]);
+    }
+    let env = [("RRDCACHED_ADDRESS", address.as_str())];
+    for line in [
+        format!("graph out.png {graph}"),
+        format!("graphv out.png {graph}"),
+        format!("xport {window} DEF:x=t.rrd:a:AVERAGE XPORT:x"),
+        format!(
+            "graph out.png {window} --use-nan-for-all-missing-data DEF:x=t.rrd:a:AVERAGE DEF:y=missing.rrd:a:AVERAGE LINE1:x#ff0000"
+        ),
+        format!(
+            "graph out.png {window} --use-nan-for-all-missing-data DEF:y=missing.rrd:a:AVERAGE DEF:x=t.rrd:a:AVERAGE LINE1:x#ff0000"
+        ),
+    ] {
+        assert_same(&sides, &split(&line), &env);
+    }
+}
