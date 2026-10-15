@@ -10,6 +10,11 @@ described in docs/compatibility/restore.md.
         XML file from them, run every case and replace cases.tsv, inputs/,
         expected/base.vectors and expected/outputs/.
 
+    scripts/gen-restore-vectors.py write --check
+        Rebuild the case table from the committed seed dumps and compare it
+        with cases.tsv and inputs/ without running any reference; exits 1 on
+        a difference.
+
     scripts/gen-restore-vectors.py overrides --platform NAME [--rrdtool PATH]
         Replay the committed inputs with the reference rrdtool on another
         platform and write expected/NAME.vectors holding only the cases
@@ -352,7 +357,6 @@ def mini_cases(mini):
     add(Case("no-rra", no_rra))
     ds_only = mini[:ds_a] + mini[ds_b:]
     add(Case("no-ds", ds_only))
-    a, b = element_spans(mini, "ds")[-1]
     no_ds_anywhere = ds_only
     for _ in range(2):
         spans = element_spans(no_ds_anywhere, "ds")
@@ -692,7 +696,7 @@ def number_cases(wide):
         if seed == 0:
             values[: len(NUMBER_EDGES)] = [edge.encode() for edge in NUMBER_EDGES]
         feed = iter(values)
-        xml = re.sub(rb"<v>[^<]*</v>", lambda _: b"<v>" + next(feed) + b"</v>", wide)
+        xml = re.sub(rb"<v>[^<]*</v>", lambda _, feed=feed: b"<v>" + next(feed) + b"</v>", wide)
         cases.append(Case(f"numbers-{seed}", xml))
     return cases
 
@@ -872,7 +876,10 @@ def run_case(program, case, work, pad):
         produced, stdout = (stdout or None), b""
     else:
         path = os.path.join(directory, case.target)
-        produced = open(path, "rb").read() if os.path.isfile(path) else None
+        produced = None
+        if os.path.isfile(path):
+            with open(path, "rb") as handle:
+                produced = handle.read()
     shutil.rmtree(directory, ignore_errors=True)
     if status in ("hang", "signal"):
         stdout = stderr = b""
@@ -926,7 +933,8 @@ def write_vectors(path, cases, results, outputs):
 
 
 def parse_vectors(path):
-    data = open(path, "rb").read()
+    with open(path, "rb") as handle:
+        data = handle.read()
     out = {}
     while data:
         newline = data.index(b"\n")
@@ -945,7 +953,8 @@ def load_committed_cases():
                 continue
             fields = line.rstrip("\n").split("\t")
             case_id, input_name, mode, target, pre, expect = fields[:6]
-            xml = open(os.path.join(DATA, "inputs", input_name + ".xml"), "rb").read()
+            with open(os.path.join(DATA, "inputs", input_name + ".xml"), "rb") as handle:
+                xml = handle.read()
             cases.append(Case(case_id, xml, mode=mode, opts=fields[6:], target=target, pre=pre,
                               expect=expect, input_name=input_name))
     return cases
@@ -1007,7 +1016,40 @@ def apply_expectations(cases, results):
             case.expect = "xml-syntax"
 
 
+def committed_seeds():
+    seeds = {}
+    for name in SEEDS:
+        for variant in [name] + [f"{name}-hdr-{header}" for header in HEADER_VARIANTS.get(name, [])]:
+            with open(os.path.join(DATA, "inputs", f"seed-{variant}.xml"), "rb") as handle:
+                seeds[variant] = handle.read()
+    return seeds
+
+
+def check_table():
+    """Rebuild the case table from the committed seeds and compare it with
+    cases.tsv and inputs/ without running any reference. Returns the number
+    of differences."""
+    built = all_cases(committed_seeds())
+    committed = load_committed_cases()
+    problems = []
+    if [case.id for case in built] != [case.id for case in committed]:
+        problems.append("case ids or order differ")
+        built = []
+    for new, old in zip(built, committed[: len(built)], strict=True):
+        if (new.input, new.mode, new.opts, new.target, new.pre, new.xml) != (
+                old.input, old.mode, old.opts, old.target, old.pre, old.xml):
+            problems.append(f"{new.id}: definition or input differs")
+    for problem in problems:
+        print(problem)
+    print(f"{len(built)} cases rebuilt, {len(problems)} differences")
+    return len(problems)
+
+
 def command_write(args):
+    if args.check:
+        if check_table():
+            sys.exit(1)
+        return
     with tempfile.TemporaryDirectory() as work:
         seeds = make_seeds(args.rrdtool, work)
     cases = all_cases(seeds)
@@ -1084,6 +1126,8 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     write = commands.add_parser("write")
     write.add_argument("--rrdtool", default="rrdtool")
+    write.add_argument("--check", action="store_true",
+                       help="rebuild the table from the committed seeds and compare; run nothing")
     overrides = commands.add_parser("overrides")
     overrides.add_argument("--platform", required=True, choices=["linux-x86_64", "linux-aarch64"])
     overrides.add_argument("--rrdtool", default="rrdtool")
@@ -1095,4 +1139,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
