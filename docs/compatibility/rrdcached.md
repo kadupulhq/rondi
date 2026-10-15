@@ -335,8 +335,9 @@ symlinked final component, so `link.rrd`, `lnk/d.rrd` and `escape.rrd` get
 `-1 {ROOT}/b/<name>: Permission denied` for every command; `DUMP` is
 confined like the other commands; `CREATE` with an empty name is refused
 with `-1 {ROOT}/b/: Permission denied`; and `CREATE` refuses to replace a
-directory, symbolic link or other special file with
-`-1 RRD Error: refusing to replace a linked or special target`. Each case is
+directory, symbolic link or other special file (an `-1 RRD Error: `
+reply; for a directory, Rondi currently answers `-1 RRD Error: I/O error:
+Is a directory (os error 21)`, as pinned in `p-create-003`). Each case is
 listed under [Rondi divergences](#rondi-divergences).
 
 **RC-32** (black-box; must). Without `-b`, relative names resolve from the
