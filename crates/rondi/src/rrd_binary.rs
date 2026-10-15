@@ -1074,7 +1074,7 @@ fn update_text_arguments(
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |elapsed| elapsed.as_secs() as i64);
-            let value = crate::time::rrd_parsetime(time_text, now)
+            let value = crate::time::parse_time_spec(time_text, now)
                 .map_err(|error| prefixed(format!("ds time: {time_text}: {error}")))?;
             let seconds = value.absolute().ok_or_else(|| {
                 prefixed(format!(

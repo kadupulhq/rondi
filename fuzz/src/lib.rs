@@ -69,12 +69,18 @@ pub mod cli {
 
     pub fn fuzz_time(spec: &str, other: &str) {
         let now = crate::NOW;
-        let _ = rondi::time::parse_rrd_time(spec, now);
-        let _ = rondi::time::rrd_parsetime(spec, now);
-        let _ = rondi::time::resolve_rrd_range_times(Some(spec), Some(other), now);
-        let _ = rondi::time::resolve_rrd_range_times(Some(other), Some(spec), now);
-        let _ = rondi::time::resolve_rrd_range_times(Some(spec), None, now);
-        let _ = parse_rrd_update_timestamp(spec, now as f64 + 0.25);
+        let window = (now - 86_400, now);
+        if let (Ok(spec), Ok(other)) = (
+            rondi::time::parse_time_spec(spec, now),
+            rondi::time::parse_time_spec(other, now),
+        ) {
+            let _ = rondi::time::resolve_start_end(&spec, &other);
+            let _ = rondi::time::resolve_start_end(&other, &spec);
+        }
+        let _ = rondi::time::resolve_window(Some(spec), Some(other), window, now);
+        let _ = rondi::time::resolve_window(Some(other), Some(spec), window, now);
+        let _ = rondi::time::resolve_window(Some(spec), None, window, now);
+        let _ = parse_update_timestamp(spec, now as f64 + 0.25);
         let _ = parse_rrd_scaled_duration(spec, 1);
         let _ = parse_rrd_scaled_duration(spec, 300);
         let _ = rondi::parse_rrd_number(spec);

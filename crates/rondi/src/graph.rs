@@ -251,8 +251,8 @@ impl GraphElement {
     }
 }
 
-/// Resolves a DEF's `start=`/`end=` pair like `rrd_parsetime` followed by
-/// `rrd_proc_start_end`. Arguments are the given specifications and the
+/// Resolves a DEF's `start=`/`end=` pair as at-style time specifications
+/// (see `time::resolve_window`). Arguments are the given specifications and the
 /// element's current window; errors carry RRDtool's full message.
 pub type TimeResolver<'a> =
     &'a dyn Fn(Option<&str>, Option<&str>, i64, i64) -> Result<(i64, i64), String>;
