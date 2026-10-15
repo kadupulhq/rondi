@@ -16,7 +16,6 @@ mod rrd_definitions;
 mod rrd_number;
 mod rrd_resize;
 mod rrd_restore;
-pub mod rrdc_proto;
 #[cfg(unix)]
 pub mod safe_fs;
 pub(crate) mod storage;

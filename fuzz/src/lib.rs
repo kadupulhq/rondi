@@ -131,6 +131,44 @@ pub mod cli {
 pub mod server {
     include!("../../crates/rondi-server/src/lib.rs");
 
+    use std::path::Path;
+    use tokio::io::AsyncWriteExt;
+
+    /// The rrdcached engine on `root`, confined to it with `-B`, writing
+    /// values as soon as they arrive.
+    fn fuzz_engine(
+        root: &Path,
+        journal: Option<&Path>,
+    ) -> Option<rrdcached::engine::ProtocolEngine> {
+        let settings = rrdcached::engine::EngineSettings {
+            base: Some(root),
+            confine_to_base: true,
+            journal,
+            max_pending_bytes: 1 << 20,
+            write_interval: 0,
+            flush_at_shutdown: false,
+            no_overwrite: false,
+            recursive_create: true,
+        };
+        rrdcached::engine::ProtocolEngine::open(&settings)
+            .ok()
+            .map(|(engine, _)| engine)
+    }
+
+    /// Writes every pending entry, checking that none names a file outside
+    /// the base directory.
+    fn fuzz_write_pending(root: &Path, engine: &rrdcached::engine::ProtocolEngine) {
+        use rrdcached::daemon::Engine;
+        for path in engine.pending() {
+            assert!(
+                path.starts_with(root),
+                "pending entry escaped root: {}",
+                path.display()
+            );
+            engine.write(&path);
+        }
+    }
+
     /// Feed one client byte stream through the real connection loop
     /// (including BATCH and FETCHBIN) and return everything it wrote back.
     pub async fn fuzz_rrdcached(
@@ -138,27 +176,14 @@ pub mod server {
         input: &[u8],
         socket_commands: Option<Vec<String>>,
     ) -> Vec<u8> {
+        use rrdcached::daemon::Engine;
         use tokio::io::AsyncReadExt;
-        let stats = Arc::new(RrdcachedStats::default());
-        // -B keeps every name inside the scratch root, so a fuzz input cannot
-        // reach files outside it.
-        let base = RrdcachedBase::new(Some(root), true).expect("base");
-        let queue = match RrdcachedQueue::open(&base, None, 1 << 20, 0, false, &stats) {
-            Ok((queue, _)) => Arc::new(Mutex::new(queue)),
-            Err(_) => return Vec::new(),
+        let Some(engine) = fuzz_engine(root, None) else {
+            return Vec::new();
         };
         let (client, server) = tokio::net::UnixStream::pair().expect("socketpair");
         let (_stop, stop_rx) = tokio::sync::watch::channel(false);
-        let serve = serve_rrdcached_connection(
-            Box::new(server),
-            base,
-            stats,
-            Arc::clone(&queue),
-            false,
-            true,
-            socket_commands,
-            stop_rx,
-        );
+        let serve = engine.serve(server, socket_commands.map(Arc::from), stop_rx);
         let (mut reader, mut writer) = client.into_split();
         let input = input.to_vec();
         let write = async move {
@@ -172,57 +197,25 @@ pub mod server {
             out
         };
         let (_, _, out) = tokio::join!(serve, write, read);
-        // Flush whatever is still queued so replayed samples reach the files.
-        let paths = queue
-            .lock()
-            .map(|q| q.pending.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        let stats = RrdcachedStats::default();
-        for path in paths {
-            let _ = flush_rrdcached_path(&path, &queue, &stats);
-        }
+        // Write whatever is still pending so queued samples reach the files.
+        fuzz_write_pending(root, &engine);
         out
     }
 
-    /// Replay an arbitrary journal and flush what it recovers.
+    /// Replay an arbitrary journal and write what it recovers.
     pub fn fuzz_journal(root: &Path, journal: &[u8]) {
+        use rrdcached::daemon::Engine;
         let directory = root.join("journal");
         std::fs::create_dir_all(&directory).expect("journal directory");
         std::fs::write(directory.join("rrd.journal.0000000001.000000"), journal)
             .expect("journal");
-        let stats = RrdcachedStats::default();
-        let Ok((queue, _)) =
-            RrdcachedQueue::open(
-                &RrdcachedBase::new(Some(root), true).expect("base"),
-                Some(&directory),
-                1 << 20,
-                0,
-                false,
-                &stats,
-            )
-        else {
+        let Some(engine) = fuzz_engine(root, Some(&directory)) else {
             return;
         };
-        let queue = Mutex::new(queue);
-        let paths = queue
-            .lock()
-            .map(|q| q.pending.keys().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        for path in paths {
-            // Replay must never hand back a path outside the base directory.
-            assert!(
-                path.starts_with(root),
-                "journal escaped root: {}",
-                path.display()
-            );
-            let _ = flush_rrdcached_path(&path, &queue, &stats);
-        }
-        if let Ok(mut queue) = queue.lock() {
-            queue.rotate_journal();
-            queue.journal_done();
-        }
+        fuzz_write_pending(root, &engine);
+        engine.flush_pass(0);
+        engine.finish(true);
     }
-
     /// Serve one raw HTTP/1 request stream through the JSON API handler.
     pub async fn fuzz_http(root: &Path, input: &[u8]) -> Vec<u8> {
         use tokio::io::AsyncReadExt;
