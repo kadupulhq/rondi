@@ -11,3 +11,12 @@
 
 # Fuzz seeds are byte-exact inputs (HTTP requests keep CRLF).
 /fuzz/seeds/** -text
+
+# Restore vectors are byte-exact inputs and outputs (CRLF, NUL, binary).
+/crates/rondi-cli/tests/data/restore/** -text
+/crates/rondi-cli/tests/data/restore/expected/** -diff
+/crates/rondi-cli/tests/data/restore/inputs/doc-bad-utf8.xml -diff
+/crates/rondi-cli/tests/data/restore/inputs/doc-latin1-name.xml -diff
+/crates/rondi-cli/tests/data/restore/inputs/doc-not-xml-binary.xml -diff
+/crates/rondi-cli/tests/data/restore/inputs/doc-utf16be-bom.xml -diff
+/crates/rondi-cli/tests/data/restore/inputs/doc-utf16le-bom.xml -diff

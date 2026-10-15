@@ -1,0 +1,1 @@
+<rrd><version>0003</version><step>60</step><lastupdate>0</lastupdate><rra><cf>AVERAGE</cf></rra><ds><name>a</name><type>GAUGE</type></ds></rrd>

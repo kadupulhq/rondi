@@ -1,0 +1,2866 @@
+@@ wide-bad-v-981 status 1
+1
+@@ wide-bad-v-981 stdout 0
+
+@@ wide-bad-v-981 stderr 71
+ERROR: ling 40: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-981 file 4
+none
+@@ wide-bad-v-981 flags 0
+
+@@ wide-bad-v-981@stdin status 1
+1
+@@ wide-bad-v-981@stdin stdout 0
+
+@@ wide-bad-v-981@stdin stderr 71
+ERROR: ling 39: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-981@stdin file 4
+none
+@@ wide-bad-v-981@stdin flags 0
+
+@@ wide-bad-v-1239 status 1
+1
+@@ wide-bad-v-1239 stdout 0
+
+@@ wide-bad-v-1239 stderr 71
+ERROR: ling 46: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-1239 file 4
+none
+@@ wide-bad-v-1239 flags 0
+
+@@ wide-bad-v-1239@stdin status 1
+1
+@@ wide-bad-v-1239@stdin stdout 0
+
+@@ wide-bad-v-1239@stdin stderr 71
+ERROR: ling 42: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-1239@stdin file 4
+none
+@@ wide-bad-v-1239@stdin flags 0
+
+@@ wide-bad-v-1669 status 1
+1
+@@ wide-bad-v-1669 stdout 0
+
+@@ wide-bad-v-1669 stderr 71
+ERROR: ling 52: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-1669 file 4
+none
+@@ wide-bad-v-1669 flags 0
+
+@@ wide-bad-v-1669@stdin status 1
+1
+@@ wide-bad-v-1669@stdin stdout 0
+
+@@ wide-bad-v-1669@stdin stderr 71
+ERROR: ling 47: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-1669@stdin file 4
+none
+@@ wide-bad-v-1669@stdin flags 0
+
+@@ wide-bad-v-2357 status 1
+1
+@@ wide-bad-v-2357 stdout 0
+
+@@ wide-bad-v-2357 stderr 71
+ERROR: ling 58: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-2357 file 4
+none
+@@ wide-bad-v-2357 flags 0
+
+@@ wide-bad-v-2357@stdin status 1
+1
+@@ wide-bad-v-2357@stdin stdout 0
+
+@@ wide-bad-v-2357@stdin stderr 71
+ERROR: ling 55: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-2357@stdin file 4
+none
+@@ wide-bad-v-2357@stdin flags 0
+
+@@ wide-bad-v-2615 status 1
+1
+@@ wide-bad-v-2615 stdout 0
+
+@@ wide-bad-v-2615 stderr 71
+ERROR: ling 64: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-2615 file 4
+none
+@@ wide-bad-v-2615 flags 0
+
+@@ wide-bad-v-2615@stdin status 1
+1
+@@ wide-bad-v-2615@stdin stdout 0
+
+@@ wide-bad-v-2615@stdin stderr 71
+ERROR: ling 58: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-2615@stdin file 4
+none
+@@ wide-bad-v-2615@stdin flags 0
+
+@@ wide-bad-v-3045 status 1
+1
+@@ wide-bad-v-3045 stdout 0
+
+@@ wide-bad-v-3045 stderr 71
+ERROR: ling 64: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-3045 file 4
+none
+@@ wide-bad-v-3045 flags 0
+
+@@ wide-bad-v-3045@stdin status 1
+1
+@@ wide-bad-v-3045@stdin stdout 0
+
+@@ wide-bad-v-3045@stdin stderr 71
+ERROR: ling 63: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-3045@stdin file 4
+none
+@@ wide-bad-v-3045@stdin flags 0
+
+@@ wide-bad-v-3733 status 1
+1
+@@ wide-bad-v-3733 stdout 0
+
+@@ wide-bad-v-3733 stderr 71
+ERROR: ling 76: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-3733 file 4
+none
+@@ wide-bad-v-3733 flags 0
+
+@@ wide-bad-v-3733@stdin status 1
+1
+@@ wide-bad-v-3733@stdin stdout 0
+
+@@ wide-bad-v-3733@stdin stderr 71
+ERROR: ling 71: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-3733@stdin file 4
+none
+@@ wide-bad-v-3733@stdin flags 0
+
+@@ wide-bad-v-3991 status 1
+1
+@@ wide-bad-v-3991 stdout 0
+
+@@ wide-bad-v-3991 stderr 71
+ERROR: ling 76: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-3991 file 4
+none
+@@ wide-bad-v-3991 flags 0
+
+@@ wide-bad-v-3991@stdin status 1
+1
+@@ wide-bad-v-3991@stdin stdout 0
+
+@@ wide-bad-v-3991@stdin stderr 71
+ERROR: ling 74: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-3991@stdin file 4
+none
+@@ wide-bad-v-3991@stdin flags 0
+
+@@ wide-bad-v-4421 status 1
+1
+@@ wide-bad-v-4421 stdout 0
+
+@@ wide-bad-v-4421 stderr 71
+ERROR: ling 81: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-4421 file 4
+none
+@@ wide-bad-v-4421 flags 0
+
+@@ wide-bad-v-4421@stdin status 1
+1
+@@ wide-bad-v-4421@stdin stdout 0
+
+@@ wide-bad-v-4421@stdin stderr 71
+ERROR: ling 79: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-4421@stdin file 4
+none
+@@ wide-bad-v-4421@stdin flags 0
+
+@@ wide-bad-v-5109 status 1
+1
+@@ wide-bad-v-5109 stdout 0
+
+@@ wide-bad-v-5109 stderr 71
+ERROR: ling 87: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-5109 file 4
+none
+@@ wide-bad-v-5109 flags 0
+
+@@ wide-bad-v-5109@stdin status 1
+1
+@@ wide-bad-v-5109@stdin stdout 0
+
+@@ wide-bad-v-5109@stdin stderr 71
+ERROR: ling 87: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-5109@stdin file 4
+none
+@@ wide-bad-v-5109@stdin flags 0
+
+@@ wide-bad-v-5367 status 1
+1
+@@ wide-bad-v-5367 stdout 0
+
+@@ wide-bad-v-5367 stderr 71
+ERROR: ling 93: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-5367 file 4
+none
+@@ wide-bad-v-5367 flags 0
+
+@@ wide-bad-v-5367@stdin status 1
+1
+@@ wide-bad-v-5367@stdin stdout 0
+
+@@ wide-bad-v-5367@stdin stderr 71
+ERROR: ling 90: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-5367@stdin file 4
+none
+@@ wide-bad-v-5367@stdin flags 0
+
+@@ wide-bad-v-5797 status 1
+1
+@@ wide-bad-v-5797 stdout 0
+
+@@ wide-bad-v-5797 stderr 71
+ERROR: ling 99: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-5797 file 4
+none
+@@ wide-bad-v-5797 flags 0
+
+@@ wide-bad-v-5797@stdin status 1
+1
+@@ wide-bad-v-5797@stdin stdout 0
+
+@@ wide-bad-v-5797@stdin stderr 71
+ERROR: ling 95: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-5797@stdin file 4
+none
+@@ wide-bad-v-5797@stdin flags 0
+
+@@ wide-bad-v-6485 status 1
+1
+@@ wide-bad-v-6485 stdout 0
+
+@@ wide-bad-v-6485 stderr 72
+ERROR: ling 105: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-6485 file 4
+none
+@@ wide-bad-v-6485 flags 0
+
+@@ wide-bad-v-6485@stdin status 1
+1
+@@ wide-bad-v-6485@stdin stdout 0
+
+@@ wide-bad-v-6485@stdin stderr 72
+ERROR: ling 103: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-6485@stdin file 4
+none
+@@ wide-bad-v-6485@stdin flags 0
+
+@@ wide-bad-v-6743 status 1
+1
+@@ wide-bad-v-6743 stdout 0
+
+@@ wide-bad-v-6743 stderr 72
+ERROR: ling 111: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-6743 file 4
+none
+@@ wide-bad-v-6743 flags 0
+
+@@ wide-bad-v-6743@stdin status 1
+1
+@@ wide-bad-v-6743@stdin stdout 0
+
+@@ wide-bad-v-6743@stdin stderr 72
+ERROR: ling 106: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-6743@stdin file 4
+none
+@@ wide-bad-v-6743@stdin flags 0
+
+@@ wide-bad-v-7173 status 1
+1
+@@ wide-bad-v-7173 stdout 0
+
+@@ wide-bad-v-7173 stderr 72
+ERROR: ling 117: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-7173 file 4
+none
+@@ wide-bad-v-7173 flags 0
+
+@@ wide-bad-v-7173@stdin status 1
+1
+@@ wide-bad-v-7173@stdin stdout 0
+
+@@ wide-bad-v-7173@stdin stderr 72
+ERROR: ling 111: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-7173@stdin file 4
+none
+@@ wide-bad-v-7173@stdin flags 0
+
+@@ wide-bad-v-7861 status 1
+1
+@@ wide-bad-v-7861 stdout 0
+
+@@ wide-bad-v-7861 stderr 72
+ERROR: ling 123: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-7861 file 4
+none
+@@ wide-bad-v-7861 flags 0
+
+@@ wide-bad-v-7861@stdin status 1
+1
+@@ wide-bad-v-7861@stdin stdout 0
+
+@@ wide-bad-v-7861@stdin stderr 72
+ERROR: ling 119: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-7861@stdin file 4
+none
+@@ wide-bad-v-7861@stdin flags 0
+
+@@ wide-bad-v-8119 status 1
+1
+@@ wide-bad-v-8119 stdout 0
+
+@@ wide-bad-v-8119 stderr 72
+ERROR: ling 123: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-8119 file 4
+none
+@@ wide-bad-v-8119 flags 0
+
+@@ wide-bad-v-8119@stdin status 1
+1
+@@ wide-bad-v-8119@stdin stdout 0
+
+@@ wide-bad-v-8119@stdin stderr 72
+ERROR: ling 122: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-8119@stdin file 4
+none
+@@ wide-bad-v-8119@stdin flags 0
+
+@@ wide-bad-v-8549 status 1
+1
+@@ wide-bad-v-8549 stdout 0
+
+@@ wide-bad-v-8549 stderr 72
+ERROR: ling 129: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-8549 file 4
+none
+@@ wide-bad-v-8549 flags 0
+
+@@ wide-bad-v-8549@stdin status 1
+1
+@@ wide-bad-v-8549@stdin stdout 0
+
+@@ wide-bad-v-8549@stdin stderr 72
+ERROR: ling 127: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-8549@stdin file 4
+none
+@@ wide-bad-v-8549@stdin flags 0
+
+@@ wide-bad-v-9237 status 1
+1
+@@ wide-bad-v-9237 stdout 0
+
+@@ wide-bad-v-9237 stderr 72
+ERROR: ling 141: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-9237 file 4
+none
+@@ wide-bad-v-9237 flags 0
+
+@@ wide-bad-v-9237@stdin status 1
+1
+@@ wide-bad-v-9237@stdin stdout 0
+
+@@ wide-bad-v-9237@stdin stderr 72
+ERROR: ling 135: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-9237@stdin file 4
+none
+@@ wide-bad-v-9237@stdin flags 0
+
+@@ wide-bad-v-9495 status 1
+1
+@@ wide-bad-v-9495 stdout 0
+
+@@ wide-bad-v-9495 stderr 72
+ERROR: ling 141: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-9495 file 4
+none
+@@ wide-bad-v-9495 flags 0
+
+@@ wide-bad-v-9495@stdin status 1
+1
+@@ wide-bad-v-9495@stdin stdout 0
+
+@@ wide-bad-v-9495@stdin stderr 72
+ERROR: ling 138: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-9495@stdin file 4
+none
+@@ wide-bad-v-9495@stdin flags 0
+
+@@ wide-bad-v-9925 status 1
+1
+@@ wide-bad-v-9925 stdout 0
+
+@@ wide-bad-v-9925 stderr 72
+ERROR: ling 147: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-9925 file 4
+none
+@@ wide-bad-v-9925 flags 0
+
+@@ wide-bad-v-9925@stdin status 1
+1
+@@ wide-bad-v-9925@stdin stdout 0
+
+@@ wide-bad-v-9925@stdin stderr 72
+ERROR: ling 143: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-9925@stdin file 4
+none
+@@ wide-bad-v-9925@stdin flags 0
+
+@@ wide-bad-v-10613 status 1
+1
+@@ wide-bad-v-10613 stdout 0
+
+@@ wide-bad-v-10613 stderr 72
+ERROR: ling 153: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-10613 file 4
+none
+@@ wide-bad-v-10613 flags 0
+
+@@ wide-bad-v-10613@stdin status 1
+1
+@@ wide-bad-v-10613@stdin stdout 0
+
+@@ wide-bad-v-10613@stdin stderr 72
+ERROR: ling 151: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-10613@stdin file 4
+none
+@@ wide-bad-v-10613@stdin flags 0
+
+@@ wide-bad-v-10871 status 1
+1
+@@ wide-bad-v-10871 stdout 0
+
+@@ wide-bad-v-10871 stderr 72
+ERROR: ling 162: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-10871 file 4
+none
+@@ wide-bad-v-10871 flags 0
+
+@@ wide-bad-v-10871@stdin status 1
+1
+@@ wide-bad-v-10871@stdin stdout 0
+
+@@ wide-bad-v-10871@stdin stderr 72
+ERROR: ling 154: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-v-10871@stdin file 4
+none
+@@ wide-bad-v-10871@stdin flags 0
+
+@@ wide-bad-step status 1
+0
+@@ wide-bad-step stdout 0
+
+@@ wide-bad-step stderr 0
+
+@@ wide-bad-step file 20
+315a1ad6fa2ea8c909fd
+@@ wide-bad-step flags 0
+
+@@ wide-bad-step@stdin status 1
+0
+@@ wide-bad-step@stdin stdout 0
+
+@@ wide-bad-step@stdin stderr 0
+
+@@ wide-bad-step@stdin file 20
+315a1ad6fa2ea8c909fd
+@@ wide-bad-step@stdin flags 0
+
+@@ wide-bad-minimal_heartbeat status 1
+0
+@@ wide-bad-minimal_heartbeat stdout 0
+
+@@ wide-bad-minimal_heartbeat stderr 0
+
+@@ wide-bad-minimal_heartbeat file 20
+3e1d838b9a6154813169
+@@ wide-bad-minimal_heartbeat flags 0
+
+@@ wide-bad-minimal_heartbeat@stdin status 1
+0
+@@ wide-bad-minimal_heartbeat@stdin stdout 0
+
+@@ wide-bad-minimal_heartbeat@stdin stderr 0
+
+@@ wide-bad-minimal_heartbeat@stdin file 20
+3e1d838b9a6154813169
+@@ wide-bad-minimal_heartbeat@stdin flags 0
+
+@@ wide-bad-pdp_per_row status 1
+0
+@@ wide-bad-pdp_per_row stdout 0
+
+@@ wide-bad-pdp_per_row stderr 0
+
+@@ wide-bad-pdp_per_row file 20
+f345b01b978a8175be49
+@@ wide-bad-pdp_per_row flags 0
+
+@@ wide-bad-pdp_per_row@stdin status 1
+0
+@@ wide-bad-pdp_per_row@stdin stdout 0
+
+@@ wide-bad-pdp_per_row@stdin stderr 0
+
+@@ wide-bad-pdp_per_row@stdin file 20
+f345b01b978a8175be49
+@@ wide-bad-pdp_per_row@stdin flags 0
+
+@@ wide-bad-unknown_datapoints status 1
+0
+@@ wide-bad-unknown_datapoints stdout 0
+
+@@ wide-bad-unknown_datapoints stderr 0
+
+@@ wide-bad-unknown_datapoints file 20
+64003d56771f332b4b3c
+@@ wide-bad-unknown_datapoints flags 0
+
+@@ wide-bad-unknown_datapoints@stdin status 1
+0
+@@ wide-bad-unknown_datapoints@stdin stdout 0
+
+@@ wide-bad-unknown_datapoints@stdin stderr 0
+
+@@ wide-bad-unknown_datapoints@stdin file 20
+64003d56771f332b4b3c
+@@ wide-bad-unknown_datapoints@stdin flags 0
+
+@@ wide-bad-xff status 1
+1
+@@ wide-bad-xff stdout 0
+
+@@ wide-bad-xff stderr 71
+ERROR: ling 40: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-xff file 20
+6625f63f3a22c650c6ae
+@@ wide-bad-xff flags 0
+
+@@ wide-bad-xff@stdin status 1
+1
+@@ wide-bad-xff@stdin stdout 0
+
+@@ wide-bad-xff@stdin stderr 71
+ERROR: ling 29: get_xml_double from 'zz' Numerical result out of range
+
+@@ wide-bad-xff@stdin file 20
+6625f63f3a22c650c6ae
+@@ wide-bad-xff@stdin flags 0
+
+@@ numbers-0 status 1
+0
+@@ numbers-0 stdout 0
+
+@@ numbers-0 stderr 0
+
+@@ numbers-0 file 20
+985594dc972a3e537b52
+@@ numbers-0 flags 0
+
+@@ numbers-0@stdin status 1
+0
+@@ numbers-0@stdin stdout 0
+
+@@ numbers-0@stdin stderr 0
+
+@@ numbers-0@stdin file 20
+985594dc972a3e537b52
+@@ numbers-0@stdin flags 0
+
+@@ numbers-1 status 1
+0
+@@ numbers-1 stdout 0
+
+@@ numbers-1 stderr 0
+
+@@ numbers-1 file 20
+7ca1d3137641644c4259
+@@ numbers-1 flags 0
+
+@@ numbers-1@stdin status 1
+0
+@@ numbers-1@stdin stdout 0
+
+@@ numbers-1@stdin stderr 0
+
+@@ numbers-1@stdin file 20
+7ca1d3137641644c4259
+@@ numbers-1@stdin flags 0
+
+@@ numbers-2 status 1
+0
+@@ numbers-2 stdout 0
+
+@@ numbers-2 stderr 0
+
+@@ numbers-2 file 20
+8288fac81262bf326ba0
+@@ numbers-2 flags 0
+
+@@ numbers-2@stdin status 1
+0
+@@ numbers-2@stdin stdout 0
+
+@@ numbers-2@stdin stderr 0
+
+@@ numbers-2@stdin file 20
+8288fac81262bf326ba0
+@@ numbers-2@stdin flags 0
+
+@@ numbers-3 status 1
+0
+@@ numbers-3 stdout 0
+
+@@ numbers-3 stderr 0
+
+@@ numbers-3 file 20
+b77a2fcd489a965e6059
+@@ numbers-3 flags 0
+
+@@ numbers-3@stdin status 1
+0
+@@ numbers-3@stdin stdout 0
+
+@@ numbers-3@stdin stderr 0
+
+@@ numbers-3@stdin file 20
+b77a2fcd489a965e6059
+@@ numbers-3@stdin flags 0
+
+@@ tiny-self-closing-database status 6
+signal
+@@ tiny-self-closing-database stdout 0
+
+@@ tiny-self-closing-database stderr 0
+
+@@ tiny-self-closing-database file 4
+none
+@@ tiny-self-closing-database flags 6
+signal
+@@ tiny-self-closing-database@stdin status 6
+signal
+@@ tiny-self-closing-database@stdin stdout 0
+
+@@ tiny-self-closing-database@stdin stderr 0
+
+@@ tiny-self-closing-database@stdin file 4
+none
+@@ tiny-self-closing-database@stdin flags 6
+signal
+@@ walk-text-in-database status 6
+signal
+@@ walk-text-in-database stdout 0
+
+@@ walk-text-in-database stderr 0
+
+@@ walk-text-in-database file 4
+none
+@@ walk-text-in-database flags 6
+signal
+@@ walk-text-in-database@stdin status 6
+signal
+@@ walk-text-in-database@stdin stdout 0
+
+@@ walk-text-in-database@stdin stderr 0
+
+@@ walk-text-in-database@stdin file 4
+none
+@@ walk-text-in-database@stdin flags 6
+signal
+@@ walk-params-bad-xff-then-ok status 1
+1
+@@ walk-params-bad-xff-then-ok stdout 0
+
+@@ walk-params-bad-xff-then-ok stderr 69
+ERROR: ling 1: get_xml_double from 'x' Numerical result out of range
+
+@@ walk-params-bad-xff-then-ok file 20
+be6e10662717c87f1ec0
+@@ walk-params-bad-xff-then-ok flags 0
+
+@@ walk-params-bad-xff-then-ok@stdin status 1
+1
+@@ walk-params-bad-xff-then-ok@stdin stdout 0
+
+@@ walk-params-bad-xff-then-ok@stdin stderr 69
+ERROR: ling 1: get_xml_double from 'x' Numerical result out of range
+
+@@ walk-params-bad-xff-then-ok@stdin file 20
+be6e10662717c87f1ec0
+@@ walk-params-bad-xff-then-ok@stdin flags 0
+
+@@ walk-params-legacy-values status 1
+1
+@@ walk-params-legacy-values stdout 0
+
+@@ walk-params-legacy-values stderr 68
+ERROR: ling 1: get_xml_double from '' Numerical result out of range
+
+@@ walk-params-legacy-values file 20
+be6e10662717c87f1ec0
+@@ walk-params-legacy-values flags 0
+
+@@ walk-params-legacy-values@stdin status 1
+1
+@@ walk-params-legacy-values@stdin stdout 0
+
+@@ walk-params-legacy-values@stdin stderr 68
+ERROR: ling 1: get_xml_double from '' Numerical result out of range
+
+@@ walk-params-legacy-values@stdin file 20
+be6e10662717c87f1ec0
+@@ walk-params-legacy-values@stdin flags 0
+
+@@ walk-params-legacy-one status 1
+1
+@@ walk-params-legacy-one stdout 0
+
+@@ walk-params-legacy-one stderr 68
+ERROR: ling 1: get_xml_double from '' Numerical result out of range
+
+@@ walk-params-legacy-one file 20
+c6ff7fa83b4853a72a9c
+@@ walk-params-legacy-one flags 0
+
+@@ walk-params-legacy-one@stdin status 1
+1
+@@ walk-params-legacy-one@stdin stdout 0
+
+@@ walk-params-legacy-one@stdin stderr 68
+ERROR: ling 1: get_xml_double from '' Numerical result out of range
+
+@@ walk-params-legacy-one@stdin file 20
+c6ff7fa83b4853a72a9c
+@@ walk-params-legacy-one@stdin flags 0
+
+@@ walk-cdp-ds-bad-value-then-ok status 1
+1
+@@ walk-cdp-ds-bad-value-then-ok stdout 0
+
+@@ walk-cdp-ds-bad-value-then-ok stderr 69
+ERROR: ling 1: get_xml_double from 'x' Numerical result out of range
+
+@@ walk-cdp-ds-bad-value-then-ok file 4
+none
+@@ walk-cdp-ds-bad-value-then-ok flags 0
+
+@@ walk-cdp-ds-bad-value-then-ok@stdin status 1
+1
+@@ walk-cdp-ds-bad-value-then-ok@stdin stdout 0
+
+@@ walk-cdp-ds-bad-value-then-ok@stdin stderr 69
+ERROR: ling 1: get_xml_double from 'x' Numerical result out of range
+
+@@ walk-cdp-ds-bad-value-then-ok@stdin file 4
+none
+@@ walk-cdp-ds-bad-value-then-ok@stdin flags 0
+
+@@ walk-database-other-elem status 6
+signal
+@@ walk-database-other-elem stdout 0
+
+@@ walk-database-other-elem stderr 0
+
+@@ walk-database-other-elem file 4
+none
+@@ walk-database-other-elem flags 6
+signal
+@@ walk-database-other-elem@stdin status 6
+signal
+@@ walk-database-other-elem@stdin stdout 0
+
+@@ walk-database-other-elem@stdin stderr 0
+
+@@ walk-database-other-elem@stdin file 4
+none
+@@ walk-database-other-elem@stdin flags 6
+signal
+@@ walk-row-v-bad-range status 1
+1
+@@ walk-row-v-bad-range stdout 0
+
+@@ walk-row-v-bad-range stderr 69
+ERROR: ling 1: get_xml_double from 'x' Numerical result out of range
+
+@@ walk-row-v-bad-range file 4
+none
+@@ walk-row-v-bad-range flags 0
+
+@@ walk-row-v-bad-range@stdin status 1
+1
+@@ walk-row-v-bad-range@stdin stdout 0
+
+@@ walk-row-v-bad-range@stdin stderr 69
+ERROR: ling 1: get_xml_double from 'x' Numerical result out of range
+
+@@ walk-row-v-bad-range@stdin file 4
+none
+@@ walk-row-v-bad-range@stdin flags 0
+
+@@ walk-errno-huge-then-junk status 1
+1
+@@ walk-errno-huge-then-junk stdout 0
+
+@@ walk-errno-huge-then-junk stderr 73
+ERROR: ling 1: get_xml_double from '2junk' Numerical result out of range
+
+@@ walk-errno-huge-then-junk file 4
+none
+@@ walk-errno-huge-then-junk flags 0
+
+@@ walk-errno-huge-then-junk@stdin status 1
+1
+@@ walk-errno-huge-then-junk@stdin stdout 0
+
+@@ walk-errno-huge-then-junk@stdin stderr 73
+ERROR: ling 1: get_xml_double from '2junk' Numerical result out of range
+
+@@ walk-errno-huge-then-junk@stdin file 4
+none
+@@ walk-errno-huge-then-junk@stdin flags 0
+
+@@ walk-errno-plain-then-junk status 1
+1
+@@ walk-errno-plain-then-junk stdout 0
+
+@@ walk-errno-plain-then-junk stderr 51
+ERROR: ling 1: get_xml_double from '2junk' Success
+
+@@ walk-errno-plain-then-junk file 4
+none
+@@ walk-errno-plain-then-junk flags 0
+
+@@ walk-errno-plain-then-junk@stdin status 1
+1
+@@ walk-errno-plain-then-junk@stdin stdout 0
+
+@@ walk-errno-plain-then-junk@stdin stderr 51
+ERROR: ling 1: get_xml_double from '2junk' Success
+
+@@ walk-errno-plain-then-junk@stdin file 4
+none
+@@ walk-errno-plain-then-junk@stdin flags 0
+
+@@ walk-errno-int-resets status 1
+1
+@@ walk-errno-int-resets stdout 0
+
+@@ walk-errno-int-resets stderr 51
+ERROR: ling 1: get_xml_double from '2junk' Success
+
+@@ walk-errno-int-resets file 4
+none
+@@ walk-errno-int-resets flags 0
+
+@@ walk-errno-int-resets@stdin status 1
+1
+@@ walk-errno-int-resets@stdin stdout 0
+
+@@ walk-errno-int-resets@stdin stderr 51
+ERROR: ling 1: get_xml_double from '2junk' Success
+
+@@ walk-errno-int-resets@stdin file 4
+none
+@@ walk-errno-int-resets@stdin flags 0
+
+@@ walk-errno-tiny-then-junk status 1
+1
+@@ walk-errno-tiny-then-junk stdout 0
+
+@@ walk-errno-tiny-then-junk stderr 51
+ERROR: ling 1: get_xml_double from '2junk' Success
+
+@@ walk-errno-tiny-then-junk file 4
+none
+@@ walk-errno-tiny-then-junk flags 0
+
+@@ walk-errno-tiny-then-junk@stdin status 1
+1
+@@ walk-errno-tiny-then-junk@stdin stdout 0
+
+@@ walk-errno-tiny-then-junk@stdin stderr 51
+ERROR: ling 1: get_xml_double from '2junk' Success
+
+@@ walk-errno-tiny-then-junk@stdin file 4
+none
+@@ walk-errno-tiny-then-junk@stdin flags 0
+
+@@ walk-errno-exp-1025 status 1
+1
+@@ walk-errno-exp-1025 stdout 0
+
+@@ walk-errno-exp-1025 stderr 74
+ERROR: ling 1: get_xml_double from '1e1025' Numerical result out of range
+
+@@ walk-errno-exp-1025 file 4
+none
+@@ walk-errno-exp-1025 flags 0
+
+@@ walk-errno-exp-1025@stdin status 1
+1
+@@ walk-errno-exp-1025@stdin stdout 0
+
+@@ walk-errno-exp-1025@stdin stderr 74
+ERROR: ling 1: get_xml_double from '1e1025' Numerical result out of range
+
+@@ walk-errno-exp-1025@stdin file 4
+none
+@@ walk-errno-exp-1025@stdin flags 0
+
+@@ walk-errno-exp-m1022 status 1
+1
+@@ walk-errno-exp-m1022 stdout 0
+
+@@ walk-errno-exp-m1022 stderr 75
+ERROR: ling 1: get_xml_double from '1e-1022' Numerical result out of range
+
+@@ walk-errno-exp-m1022 file 4
+none
+@@ walk-errno-exp-m1022 flags 0
+
+@@ walk-errno-exp-m1022@stdin status 1
+1
+@@ walk-errno-exp-m1022@stdin stdout 0
+
+@@ walk-errno-exp-m1022@stdin stderr 75
+ERROR: ling 1: get_xml_double from '1e-1022' Numerical result out of range
+
+@@ walk-errno-exp-m1022@stdin file 4
+none
+@@ walk-errno-exp-m1022@stdin flags 0
+
+@@ walk-errno-frac-exp-m1022 status 1
+1
+@@ walk-errno-frac-exp-m1022 stdout 0
+
+@@ walk-errno-frac-exp-m1022 stderr 77
+ERROR: ling 1: get_xml_double from '1.5e-1021' Numerical result out of range
+
+@@ walk-errno-frac-exp-m1022 file 4
+none
+@@ walk-errno-frac-exp-m1022 flags 0
+
+@@ walk-errno-frac-exp-m1022@stdin status 1
+1
+@@ walk-errno-frac-exp-m1022@stdin stdout 0
+
+@@ walk-errno-frac-exp-m1022@stdin stderr 77
+ERROR: ling 1: get_xml_double from '1.5e-1021' Numerical result out of range
+
+@@ walk-errno-frac-exp-m1022@stdin file 4
+none
+@@ walk-errno-frac-exp-m1022@stdin flags 0
+
+@@ int-step-empty status 1
+0
+@@ int-step-empty stdout 0
+
+@@ int-step-empty stderr 0
+
+@@ int-step-empty file 20
+ac19e5ef385654aee6a1
+@@ int-step-empty flags 0
+
+@@ int-step-empty@stdin status 1
+0
+@@ int-step-empty@stdin stdout 0
+
+@@ int-step-empty@stdin stderr 0
+
+@@ int-step-empty@stdin file 20
+ac19e5ef385654aee6a1
+@@ int-step-empty@stdin flags 0
+
+@@ int-step-blank status 1
+0
+@@ int-step-blank stdout 0
+
+@@ int-step-blank stderr 0
+
+@@ int-step-blank file 20
+ac19e5ef385654aee6a1
+@@ int-step-blank flags 0
+
+@@ int-step-blank@stdin status 1
+0
+@@ int-step-blank@stdin stdout 0
+
+@@ int-step-blank@stdin stderr 0
+
+@@ int-step-blank@stdin file 20
+ac19e5ef385654aee6a1
+@@ int-step-blank@stdin flags 0
+
+@@ int-step-alpha status 1
+0
+@@ int-step-alpha stdout 0
+
+@@ int-step-alpha stderr 0
+
+@@ int-step-alpha file 20
+ac19e5ef385654aee6a1
+@@ int-step-alpha flags 0
+
+@@ int-step-alpha@stdin status 1
+0
+@@ int-step-alpha@stdin stdout 0
+
+@@ int-step-alpha@stdin stderr 0
+
+@@ int-step-alpha@stdin file 20
+ac19e5ef385654aee6a1
+@@ int-step-alpha@stdin flags 0
+
+@@ int-step-u64over status 1
+1
+@@ int-step-u64over stdout 0
+
+@@ int-step-u64over stderr 88
+ERROR: ling 18: get_xml_ulong from '18446744073709551616' Numerical result out of range
+
+@@ int-step-u64over file 4
+none
+@@ int-step-u64over flags 0
+
+@@ int-step-u64over@stdin status 1
+1
+@@ int-step-u64over@stdin stdout 0
+
+@@ int-step-u64over@stdin stderr 87
+ERROR: ling 6: get_xml_ulong from '18446744073709551616' Numerical result out of range
+
+@@ int-step-u64over@stdin file 4
+none
+@@ int-step-u64over@stdin flags 0
+
+@@ int-lastupdate-empty status 1
+0
+@@ int-lastupdate-empty stdout 0
+
+@@ int-lastupdate-empty stderr 0
+
+@@ int-lastupdate-empty file 20
+d8b756340ed0678ec581
+@@ int-lastupdate-empty flags 0
+
+@@ int-lastupdate-empty@stdin status 1
+0
+@@ int-lastupdate-empty@stdin stdout 0
+
+@@ int-lastupdate-empty@stdin stderr 0
+
+@@ int-lastupdate-empty@stdin file 20
+d8b756340ed0678ec581
+@@ int-lastupdate-empty@stdin flags 0
+
+@@ int-lastupdate-blank status 1
+0
+@@ int-lastupdate-blank stdout 0
+
+@@ int-lastupdate-blank stderr 0
+
+@@ int-lastupdate-blank file 20
+d8b756340ed0678ec581
+@@ int-lastupdate-blank flags 0
+
+@@ int-lastupdate-blank@stdin status 1
+0
+@@ int-lastupdate-blank@stdin stdout 0
+
+@@ int-lastupdate-blank@stdin stderr 0
+
+@@ int-lastupdate-blank@stdin file 20
+d8b756340ed0678ec581
+@@ int-lastupdate-blank@stdin flags 0
+
+@@ int-lastupdate-alpha status 1
+0
+@@ int-lastupdate-alpha stdout 0
+
+@@ int-lastupdate-alpha stderr 0
+
+@@ int-lastupdate-alpha file 20
+d8b756340ed0678ec581
+@@ int-lastupdate-alpha flags 0
+
+@@ int-lastupdate-alpha@stdin status 1
+0
+@@ int-lastupdate-alpha@stdin stdout 0
+
+@@ int-lastupdate-alpha@stdin stderr 0
+
+@@ int-lastupdate-alpha@stdin file 20
+d8b756340ed0678ec581
+@@ int-lastupdate-alpha@stdin flags 0
+
+@@ int-lastupdate-i64over status 1
+1
+@@ int-lastupdate-i64over stdout 0
+
+@@ int-lastupdate-i64over stderr 88
+ERROR: ling 18: get_xml_time_t from '9223372036854775808' Numerical result out of range
+
+@@ int-lastupdate-i64over file 4
+none
+@@ int-lastupdate-i64over flags 0
+
+@@ int-lastupdate-i64over@stdin status 1
+1
+@@ int-lastupdate-i64over@stdin stdout 0
+
+@@ int-lastupdate-i64over@stdin stderr 87
+ERROR: ling 7: get_xml_time_t from '9223372036854775808' Numerical result out of range
+
+@@ int-lastupdate-i64over@stdin file 4
+none
+@@ int-lastupdate-i64over@stdin flags 0
+
+@@ int-lastupdate-u64max status 1
+1
+@@ int-lastupdate-u64max stdout 0
+
+@@ int-lastupdate-u64max stderr 89
+ERROR: ling 18: get_xml_time_t from '18446744073709551615' Numerical result out of range
+
+@@ int-lastupdate-u64max file 4
+none
+@@ int-lastupdate-u64max flags 0
+
+@@ int-lastupdate-u64max@stdin status 1
+1
+@@ int-lastupdate-u64max@stdin stdout 0
+
+@@ int-lastupdate-u64max@stdin stderr 88
+ERROR: ling 7: get_xml_time_t from '18446744073709551615' Numerical result out of range
+
+@@ int-lastupdate-u64max@stdin file 4
+none
+@@ int-lastupdate-u64max@stdin flags 0
+
+@@ int-lastupdate-u64over status 1
+1
+@@ int-lastupdate-u64over stdout 0
+
+@@ int-lastupdate-u64over stderr 89
+ERROR: ling 18: get_xml_time_t from '18446744073709551616' Numerical result out of range
+
+@@ int-lastupdate-u64over file 4
+none
+@@ int-lastupdate-u64over flags 0
+
+@@ int-lastupdate-u64over@stdin status 1
+1
+@@ int-lastupdate-u64over@stdin stdout 0
+
+@@ int-lastupdate-u64over@stdin stderr 88
+ERROR: ling 7: get_xml_time_t from '18446744073709551616' Numerical result out of range
+
+@@ int-lastupdate-u64over@stdin file 4
+none
+@@ int-lastupdate-u64over@stdin flags 0
+
+@@ int-lastupdate-negbig status 1
+1
+@@ int-lastupdate-negbig stdout 0
+
+@@ int-lastupdate-negbig stderr 89
+ERROR: ling 18: get_xml_time_t from '-9223372036854775809' Numerical result out of range
+
+@@ int-lastupdate-negbig file 4
+none
+@@ int-lastupdate-negbig flags 0
+
+@@ int-lastupdate-negbig@stdin status 1
+1
+@@ int-lastupdate-negbig@stdin stdout 0
+
+@@ int-lastupdate-negbig@stdin stderr 88
+ERROR: ling 7: get_xml_time_t from '-9223372036854775809' Numerical result out of range
+
+@@ int-lastupdate-negbig@stdin file 4
+none
+@@ int-lastupdate-negbig@stdin flags 0
+
+@@ int-minimal_heartbeat-empty status 1
+0
+@@ int-minimal_heartbeat-empty stdout 0
+
+@@ int-minimal_heartbeat-empty stderr 0
+
+@@ int-minimal_heartbeat-empty file 20
+870c823b405008a82b37
+@@ int-minimal_heartbeat-empty flags 0
+
+@@ int-minimal_heartbeat-empty@stdin status 1
+0
+@@ int-minimal_heartbeat-empty@stdin stdout 0
+
+@@ int-minimal_heartbeat-empty@stdin stderr 0
+
+@@ int-minimal_heartbeat-empty@stdin file 20
+870c823b405008a82b37
+@@ int-minimal_heartbeat-empty@stdin flags 0
+
+@@ int-minimal_heartbeat-blank status 1
+0
+@@ int-minimal_heartbeat-blank stdout 0
+
+@@ int-minimal_heartbeat-blank stderr 0
+
+@@ int-minimal_heartbeat-blank file 20
+870c823b405008a82b37
+@@ int-minimal_heartbeat-blank flags 0
+
+@@ int-minimal_heartbeat-blank@stdin status 1
+0
+@@ int-minimal_heartbeat-blank@stdin stdout 0
+
+@@ int-minimal_heartbeat-blank@stdin stderr 0
+
+@@ int-minimal_heartbeat-blank@stdin file 20
+870c823b405008a82b37
+@@ int-minimal_heartbeat-blank@stdin flags 0
+
+@@ int-minimal_heartbeat-alpha status 1
+0
+@@ int-minimal_heartbeat-alpha stdout 0
+
+@@ int-minimal_heartbeat-alpha stderr 0
+
+@@ int-minimal_heartbeat-alpha file 20
+870c823b405008a82b37
+@@ int-minimal_heartbeat-alpha flags 0
+
+@@ int-minimal_heartbeat-alpha@stdin status 1
+0
+@@ int-minimal_heartbeat-alpha@stdin stdout 0
+
+@@ int-minimal_heartbeat-alpha@stdin stderr 0
+
+@@ int-minimal_heartbeat-alpha@stdin file 20
+870c823b405008a82b37
+@@ int-minimal_heartbeat-alpha@stdin flags 0
+
+@@ int-minimal_heartbeat-u64over status 1
+1
+@@ int-minimal_heartbeat-u64over stdout 0
+
+@@ int-minimal_heartbeat-u64over stderr 88
+ERROR: ling 18: get_xml_ulong from '18446744073709551616' Numerical result out of range
+
+@@ int-minimal_heartbeat-u64over file 4
+none
+@@ int-minimal_heartbeat-u64over flags 0
+
+@@ int-minimal_heartbeat-u64over@stdin status 1
+1
+@@ int-minimal_heartbeat-u64over@stdin stdout 0
+
+@@ int-minimal_heartbeat-u64over@stdin stderr 88
+ERROR: ling 13: get_xml_ulong from '18446744073709551616' Numerical result out of range
+
+@@ int-minimal_heartbeat-u64over@stdin file 4
+none
+@@ int-minimal_heartbeat-u64over@stdin flags 0
+
+@@ int-unknown_sec-empty status 1
+0
+@@ int-unknown_sec-empty stdout 0
+
+@@ int-unknown_sec-empty stderr 0
+
+@@ int-unknown_sec-empty file 20
+dbefea8ed29997f9322e
+@@ int-unknown_sec-empty flags 0
+
+@@ int-unknown_sec-empty@stdin status 1
+0
+@@ int-unknown_sec-empty@stdin stdout 0
+
+@@ int-unknown_sec-empty@stdin stderr 0
+
+@@ int-unknown_sec-empty@stdin file 20
+dbefea8ed29997f9322e
+@@ int-unknown_sec-empty@stdin flags 0
+
+@@ int-unknown_sec-blank status 1
+0
+@@ int-unknown_sec-blank stdout 0
+
+@@ int-unknown_sec-blank stderr 0
+
+@@ int-unknown_sec-blank file 20
+dbefea8ed29997f9322e
+@@ int-unknown_sec-blank flags 0
+
+@@ int-unknown_sec-blank@stdin status 1
+0
+@@ int-unknown_sec-blank@stdin stdout 0
+
+@@ int-unknown_sec-blank@stdin stderr 0
+
+@@ int-unknown_sec-blank@stdin file 20
+dbefea8ed29997f9322e
+@@ int-unknown_sec-blank@stdin flags 0
+
+@@ int-unknown_sec-alpha status 1
+0
+@@ int-unknown_sec-alpha stdout 0
+
+@@ int-unknown_sec-alpha stderr 0
+
+@@ int-unknown_sec-alpha file 20
+dbefea8ed29997f9322e
+@@ int-unknown_sec-alpha flags 0
+
+@@ int-unknown_sec-alpha@stdin status 1
+0
+@@ int-unknown_sec-alpha@stdin stdout 0
+
+@@ int-unknown_sec-alpha@stdin stderr 0
+
+@@ int-unknown_sec-alpha@stdin file 20
+dbefea8ed29997f9322e
+@@ int-unknown_sec-alpha@stdin flags 0
+
+@@ int-unknown_sec-u64over status 1
+1
+@@ int-unknown_sec-u64over stdout 0
+
+@@ int-unknown_sec-u64over stderr 88
+ERROR: ling 39: get_xml_ulong from '18446744073709551616' Numerical result out of range
+
+@@ int-unknown_sec-u64over file 4
+none
+@@ int-unknown_sec-u64over flags 0
+
+@@ int-unknown_sec-u64over@stdin status 1
+1
+@@ int-unknown_sec-u64over@stdin stdout 0
+
+@@ int-unknown_sec-u64over@stdin stderr 88
+ERROR: ling 20: get_xml_ulong from '18446744073709551616' Numerical result out of range
+
+@@ int-unknown_sec-u64over@stdin file 4
+none
+@@ int-unknown_sec-u64over@stdin flags 0
+
+@@ int-pdp_per_row-empty status 1
+0
+@@ int-pdp_per_row-empty stdout 0
+
+@@ int-pdp_per_row-empty stderr 0
+
+@@ int-pdp_per_row-empty file 20
+d96fb1e877d841670b43
+@@ int-pdp_per_row-empty flags 0
+
+@@ int-pdp_per_row-empty@stdin status 1
+0
+@@ int-pdp_per_row-empty@stdin stdout 0
+
+@@ int-pdp_per_row-empty@stdin stderr 0
+
+@@ int-pdp_per_row-empty@stdin file 20
+d96fb1e877d841670b43
+@@ int-pdp_per_row-empty@stdin flags 0
+
+@@ int-pdp_per_row-blank status 1
+0
+@@ int-pdp_per_row-blank stdout 0
+
+@@ int-pdp_per_row-blank stderr 0
+
+@@ int-pdp_per_row-blank file 20
+d96fb1e877d841670b43
+@@ int-pdp_per_row-blank flags 0
+
+@@ int-pdp_per_row-blank@stdin status 1
+0
+@@ int-pdp_per_row-blank@stdin stdout 0
+
+@@ int-pdp_per_row-blank@stdin stderr 0
+
+@@ int-pdp_per_row-blank@stdin file 20
+d96fb1e877d841670b43
+@@ int-pdp_per_row-blank@stdin flags 0
+
+@@ int-pdp_per_row-alpha status 1
+0
+@@ int-pdp_per_row-alpha stdout 0
+
+@@ int-pdp_per_row-alpha stderr 0
+
+@@ int-pdp_per_row-alpha file 20
+d96fb1e877d841670b43
+@@ int-pdp_per_row-alpha flags 0
+
+@@ int-pdp_per_row-alpha@stdin status 1
+0
+@@ int-pdp_per_row-alpha@stdin stdout 0
+
+@@ int-pdp_per_row-alpha@stdin stderr 0
+
+@@ int-pdp_per_row-alpha@stdin file 20
+d96fb1e877d841670b43
+@@ int-pdp_per_row-alpha@stdin flags 0
+
+@@ int-pdp_per_row-u64over status 1
+1
+@@ int-pdp_per_row-u64over stdout 0
+
+@@ int-pdp_per_row-u64over stderr 88
+ERROR: ling 39: get_xml_ulong from '18446744073709551616' Numerical result out of range
+
+@@ int-pdp_per_row-u64over file 4
+none
+@@ int-pdp_per_row-u64over flags 0
+
+@@ int-pdp_per_row-u64over@stdin status 1
+1
+@@ int-pdp_per_row-u64over@stdin stdout 0
+
+@@ int-pdp_per_row-u64over@stdin stderr 88
+ERROR: ling 25: get_xml_ulong from '18446744073709551616' Numerical result out of range
+
+@@ int-pdp_per_row-u64over@stdin file 4
+none
+@@ int-pdp_per_row-u64over@stdin flags 0
+
+@@ int-unknown_datapoints-empty status 1
+0
+@@ int-unknown_datapoints-empty stdout 0
+
+@@ int-unknown_datapoints-empty stderr 0
+
+@@ int-unknown_datapoints-empty file 20
+dbefea8ed29997f9322e
+@@ int-unknown_datapoints-empty flags 0
+
+@@ int-unknown_datapoints-empty@stdin status 1
+0
+@@ int-unknown_datapoints-empty@stdin stdout 0
+
+@@ int-unknown_datapoints-empty@stdin stderr 0
+
+@@ int-unknown_datapoints-empty@stdin file 20
+dbefea8ed29997f9322e
+@@ int-unknown_datapoints-empty@stdin flags 0
+
+@@ int-unknown_datapoints-blank status 1
+0
+@@ int-unknown_datapoints-blank stdout 0
+
+@@ int-unknown_datapoints-blank stderr 0
+
+@@ int-unknown_datapoints-blank file 20
+dbefea8ed29997f9322e
+@@ int-unknown_datapoints-blank flags 0
+
+@@ int-unknown_datapoints-blank@stdin status 1
+0
+@@ int-unknown_datapoints-blank@stdin stdout 0
+
+@@ int-unknown_datapoints-blank@stdin stderr 0
+
+@@ int-unknown_datapoints-blank@stdin file 20
+dbefea8ed29997f9322e
+@@ int-unknown_datapoints-blank@stdin flags 0
+
+@@ int-unknown_datapoints-alpha status 1
+0
+@@ int-unknown_datapoints-alpha stdout 0
+
+@@ int-unknown_datapoints-alpha stderr 0
+
+@@ int-unknown_datapoints-alpha file 20
+dbefea8ed29997f9322e
+@@ int-unknown_datapoints-alpha flags 0
+
+@@ int-unknown_datapoints-alpha@stdin status 1
+0
+@@ int-unknown_datapoints-alpha@stdin stdout 0
+
+@@ int-unknown_datapoints-alpha@stdin stderr 0
+
+@@ int-unknown_datapoints-alpha@stdin file 20
+dbefea8ed29997f9322e
+@@ int-unknown_datapoints-alpha@stdin flags 0
+
+@@ int-unknown_datapoints-u64over status 1
+1
+@@ int-unknown_datapoints-u64over stdout 0
+
+@@ int-unknown_datapoints-u64over stderr 88
+ERROR: ling 39: get_xml_ulong from '18446744073709551616' Numerical result out of range
+
+@@ int-unknown_datapoints-u64over file 4
+none
+@@ int-unknown_datapoints-u64over flags 0
+
+@@ int-unknown_datapoints-u64over@stdin status 1
+1
+@@ int-unknown_datapoints-u64over@stdin stdout 0
+
+@@ int-unknown_datapoints-u64over@stdin stderr 88
+ERROR: ling 36: get_xml_ulong from '18446744073709551616' Numerical result out of range
+
+@@ int-unknown_datapoints-u64over@stdin file 4
+none
+@@ int-unknown_datapoints-u64over@stdin flags 0
+
+@@ float-min-u status 1
+1
+@@ float-min-u stdout 0
+
+@@ float-min-u stderr 70
+ERROR: ling 19: get_xml_double from 'U' Numerical result out of range
+
+@@ float-min-u file 4
+none
+@@ float-min-u flags 0
+
+@@ float-min-u@stdin status 1
+1
+@@ float-min-u@stdin stdout 0
+
+@@ float-min-u@stdin stderr 70
+ERROR: ling 14: get_xml_double from 'U' Numerical result out of range
+
+@@ float-min-u@stdin file 4
+none
+@@ float-min-u@stdin flags 0
+
+@@ float-min-empty status 1
+1
+@@ float-min-empty stdout 0
+
+@@ float-min-empty stderr 69
+ERROR: ling 19: get_xml_double from '' Numerical result out of range
+
+@@ float-min-empty file 4
+none
+@@ float-min-empty flags 0
+
+@@ float-min-empty@stdin status 1
+1
+@@ float-min-empty@stdin stdout 0
+
+@@ float-min-empty@stdin stderr 69
+ERROR: ling 14: get_xml_double from '' Numerical result out of range
+
+@@ float-min-empty@stdin file 4
+none
+@@ float-min-empty@stdin flags 0
+
+@@ float-min-alpha status 1
+1
+@@ float-min-alpha stdout 0
+
+@@ float-min-alpha stderr 72
+ERROR: ling 19: get_xml_double from 'abc' Numerical result out of range
+
+@@ float-min-alpha file 4
+none
+@@ float-min-alpha flags 0
+
+@@ float-min-alpha@stdin status 1
+1
+@@ float-min-alpha@stdin stdout 0
+
+@@ float-min-alpha@stdin stderr 72
+ERROR: ling 14: get_xml_double from 'abc' Numerical result out of range
+
+@@ float-min-alpha@stdin file 4
+none
+@@ float-min-alpha@stdin flags 0
+
+@@ float-min-dash status 1
+1
+@@ float-min-dash stdout 0
+
+@@ float-min-dash stderr 70
+ERROR: ling 19: get_xml_double from '-' Numerical result out of range
+
+@@ float-min-dash file 4
+none
+@@ float-min-dash flags 0
+
+@@ float-min-dash@stdin status 1
+1
+@@ float-min-dash@stdin stdout 0
+
+@@ float-min-dash@stdin stderr 70
+ERROR: ling 14: get_xml_double from '-' Numerical result out of range
+
+@@ float-min-dash@stdin file 4
+none
+@@ float-min-dash@stdin flags 0
+
+@@ float-min-exp-only status 1
+1
+@@ float-min-exp-only stdout 0
+
+@@ float-min-exp-only stderr 71
+ERROR: ling 19: get_xml_double from 'e5' Numerical result out of range
+
+@@ float-min-exp-only file 4
+none
+@@ float-min-exp-only flags 0
+
+@@ float-min-exp-only@stdin status 1
+1
+@@ float-min-exp-only@stdin stdout 0
+
+@@ float-min-exp-only@stdin stderr 71
+ERROR: ling 14: get_xml_double from 'e5' Numerical result out of range
+
+@@ float-min-exp-only@stdin file 4
+none
+@@ float-min-exp-only@stdin flags 0
+
+@@ float-min-trail status 1
+1
+@@ float-min-trail stdout 0
+
+@@ float-min-trail stderr 52
+ERROR: ling 19: get_xml_double from '2junk' Success
+
+@@ float-min-trail file 4
+none
+@@ float-min-trail flags 0
+
+@@ float-min-trail@stdin status 1
+1
+@@ float-min-trail@stdin stdout 0
+
+@@ float-min-trail@stdin stderr 52
+ERROR: ling 14: get_xml_double from '2junk' Success
+
+@@ float-min-trail@stdin file 4
+none
+@@ float-min-trail@stdin flags 0
+
+@@ float-min-comma status 1
+1
+@@ float-min-comma stdout 0
+
+@@ float-min-comma stderr 50
+ERROR: ling 19: get_xml_double from '1,5' Success
+
+@@ float-min-comma file 4
+none
+@@ float-min-comma flags 0
+
+@@ float-min-comma@stdin status 1
+1
+@@ float-min-comma@stdin stdout 0
+
+@@ float-min-comma@stdin stderr 50
+ERROR: ling 14: get_xml_double from '1,5' Success
+
+@@ float-min-comma@stdin file 4
+none
+@@ float-min-comma@stdin flags 0
+
+@@ float-min-hex status 1
+1
+@@ float-min-hex stdout 0
+
+@@ float-min-hex stderr 51
+ERROR: ling 19: get_xml_double from '0x10' Success
+
+@@ float-min-hex file 4
+none
+@@ float-min-hex flags 0
+
+@@ float-min-hex@stdin status 1
+1
+@@ float-min-hex@stdin stdout 0
+
+@@ float-min-hex@stdin stderr 51
+ERROR: ling 14: get_xml_double from '0x10' Success
+
+@@ float-min-hex@stdin file 4
+none
+@@ float-min-hex@stdin flags 0
+
+@@ float-min-hexfloat status 1
+1
+@@ float-min-hexfloat stdout 0
+
+@@ float-min-hexfloat stderr 52
+ERROR: ling 19: get_xml_double from '0x1p4' Success
+
+@@ float-min-hexfloat file 4
+none
+@@ float-min-hexfloat flags 0
+
+@@ float-min-hexfloat@stdin status 1
+1
+@@ float-min-hexfloat@stdin stdout 0
+
+@@ float-min-hexfloat@stdin stderr 52
+ERROR: ling 14: get_xml_double from '0x1p4' Success
+
+@@ float-min-hexfloat@stdin file 4
+none
+@@ float-min-hexfloat@stdin flags 0
+
+@@ float-min-nbsp status 1
+1
+@@ float-min-nbsp stdout 0
+
+@@ float-min-nbsp stderr 72
+ERROR: ling 19: get_xml_double from ' 1' Numerical result out of range
+
+@@ float-min-nbsp file 4
+none
+@@ float-min-nbsp flags 0
+
+@@ float-min-nbsp@stdin status 1
+1
+@@ float-min-nbsp@stdin stdout 0
+
+@@ float-min-nbsp@stdin stderr 72
+ERROR: ling 14: get_xml_double from ' 1' Numerical result out of range
+
+@@ float-min-nbsp@stdin file 4
+none
+@@ float-min-nbsp@stdin flags 0
+
+@@ float-max-empty status 1
+1
+@@ float-max-empty stdout 0
+
+@@ float-max-empty stderr 69
+ERROR: ling 19: get_xml_double from '' Numerical result out of range
+
+@@ float-max-empty file 4
+none
+@@ float-max-empty flags 0
+
+@@ float-max-empty@stdin status 1
+1
+@@ float-max-empty@stdin stdout 0
+
+@@ float-max-empty@stdin stderr 69
+ERROR: ling 16: get_xml_double from '' Numerical result out of range
+
+@@ float-max-empty@stdin file 4
+none
+@@ float-max-empty@stdin flags 0
+
+@@ float-max-exp-only status 1
+1
+@@ float-max-exp-only stdout 0
+
+@@ float-max-exp-only stderr 71
+ERROR: ling 19: get_xml_double from 'e5' Numerical result out of range
+
+@@ float-max-exp-only file 4
+none
+@@ float-max-exp-only flags 0
+
+@@ float-max-exp-only@stdin status 1
+1
+@@ float-max-exp-only@stdin stdout 0
+
+@@ float-max-exp-only@stdin stderr 71
+ERROR: ling 16: get_xml_double from 'e5' Numerical result out of range
+
+@@ float-max-exp-only@stdin file 4
+none
+@@ float-max-exp-only@stdin flags 0
+
+@@ float-max-trail status 1
+1
+@@ float-max-trail stdout 0
+
+@@ float-max-trail stderr 52
+ERROR: ling 19: get_xml_double from '2junk' Success
+
+@@ float-max-trail file 4
+none
+@@ float-max-trail flags 0
+
+@@ float-max-trail@stdin status 1
+1
+@@ float-max-trail@stdin stdout 0
+
+@@ float-max-trail@stdin stderr 52
+ERROR: ling 16: get_xml_double from '2junk' Success
+
+@@ float-max-trail@stdin file 4
+none
+@@ float-max-trail@stdin flags 0
+
+@@ float-max-hexfloat status 1
+1
+@@ float-max-hexfloat stdout 0
+
+@@ float-max-hexfloat stderr 52
+ERROR: ling 19: get_xml_double from '0x1p4' Success
+
+@@ float-max-hexfloat file 4
+none
+@@ float-max-hexfloat flags 0
+
+@@ float-max-hexfloat@stdin status 1
+1
+@@ float-max-hexfloat@stdin stdout 0
+
+@@ float-max-hexfloat@stdin stderr 52
+ERROR: ling 16: get_xml_double from '0x1p4' Success
+
+@@ float-max-hexfloat@stdin file 4
+none
+@@ float-max-hexfloat@stdin flags 0
+
+@@ float-pdpvalue-empty status 1
+1
+@@ float-pdpvalue-empty stdout 0
+
+@@ float-pdpvalue-empty stderr 69
+ERROR: ling 19: get_xml_double from '' Numerical result out of range
+
+@@ float-pdpvalue-empty file 4
+none
+@@ float-pdpvalue-empty flags 0
+
+@@ float-pdpvalue-empty@stdin status 1
+1
+@@ float-pdpvalue-empty@stdin stdout 0
+
+@@ float-pdpvalue-empty@stdin stderr 69
+ERROR: ling 19: get_xml_double from '' Numerical result out of range
+
+@@ float-pdpvalue-empty@stdin file 4
+none
+@@ float-pdpvalue-empty@stdin flags 0
+
+@@ float-pdpvalue-exp-only status 1
+1
+@@ float-pdpvalue-exp-only stdout 0
+
+@@ float-pdpvalue-exp-only stderr 71
+ERROR: ling 19: get_xml_double from 'e5' Numerical result out of range
+
+@@ float-pdpvalue-exp-only file 4
+none
+@@ float-pdpvalue-exp-only flags 0
+
+@@ float-pdpvalue-exp-only@stdin status 1
+1
+@@ float-pdpvalue-exp-only@stdin stdout 0
+
+@@ float-pdpvalue-exp-only@stdin stderr 71
+ERROR: ling 19: get_xml_double from 'e5' Numerical result out of range
+
+@@ float-pdpvalue-exp-only@stdin file 4
+none
+@@ float-pdpvalue-exp-only@stdin flags 0
+
+@@ float-pdpvalue-trail status 1
+1
+@@ float-pdpvalue-trail stdout 0
+
+@@ float-pdpvalue-trail stderr 52
+ERROR: ling 19: get_xml_double from '2junk' Success
+
+@@ float-pdpvalue-trail file 4
+none
+@@ float-pdpvalue-trail flags 0
+
+@@ float-pdpvalue-trail@stdin status 1
+1
+@@ float-pdpvalue-trail@stdin stdout 0
+
+@@ float-pdpvalue-trail@stdin stderr 52
+ERROR: ling 19: get_xml_double from '2junk' Success
+
+@@ float-pdpvalue-trail@stdin file 4
+none
+@@ float-pdpvalue-trail@stdin flags 0
+
+@@ float-pdpvalue-hexfloat status 1
+1
+@@ float-pdpvalue-hexfloat stdout 0
+
+@@ float-pdpvalue-hexfloat stderr 52
+ERROR: ling 19: get_xml_double from '0x1p4' Success
+
+@@ float-pdpvalue-hexfloat file 4
+none
+@@ float-pdpvalue-hexfloat flags 0
+
+@@ float-pdpvalue-hexfloat@stdin status 1
+1
+@@ float-pdpvalue-hexfloat@stdin stdout 0
+
+@@ float-pdpvalue-hexfloat@stdin stderr 52
+ERROR: ling 19: get_xml_double from '0x1p4' Success
+
+@@ float-pdpvalue-hexfloat@stdin file 4
+none
+@@ float-pdpvalue-hexfloat@stdin flags 0
+
+@@ float-xff-u status 1
+1
+@@ float-xff-u stdout 0
+
+@@ float-xff-u stderr 70
+ERROR: ling 40: get_xml_double from 'U' Numerical result out of range
+
+@@ float-xff-u file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-u flags 0
+
+@@ float-xff-u@stdin status 1
+1
+@@ float-xff-u@stdin stdout 0
+
+@@ float-xff-u@stdin stderr 70
+ERROR: ling 29: get_xml_double from 'U' Numerical result out of range
+
+@@ float-xff-u@stdin file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-u@stdin flags 0
+
+@@ float-xff-empty status 1
+1
+@@ float-xff-empty stdout 0
+
+@@ float-xff-empty stderr 69
+ERROR: ling 40: get_xml_double from '' Numerical result out of range
+
+@@ float-xff-empty file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-empty flags 0
+
+@@ float-xff-empty@stdin status 1
+1
+@@ float-xff-empty@stdin stdout 0
+
+@@ float-xff-empty@stdin stderr 69
+ERROR: ling 29: get_xml_double from '' Numerical result out of range
+
+@@ float-xff-empty@stdin file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-empty@stdin flags 0
+
+@@ float-xff-alpha status 1
+1
+@@ float-xff-alpha stdout 0
+
+@@ float-xff-alpha stderr 72
+ERROR: ling 40: get_xml_double from 'abc' Numerical result out of range
+
+@@ float-xff-alpha file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-alpha flags 0
+
+@@ float-xff-alpha@stdin status 1
+1
+@@ float-xff-alpha@stdin stdout 0
+
+@@ float-xff-alpha@stdin stderr 72
+ERROR: ling 29: get_xml_double from 'abc' Numerical result out of range
+
+@@ float-xff-alpha@stdin file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-alpha@stdin flags 0
+
+@@ float-xff-dash status 1
+1
+@@ float-xff-dash stdout 0
+
+@@ float-xff-dash stderr 70
+ERROR: ling 40: get_xml_double from '-' Numerical result out of range
+
+@@ float-xff-dash file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-dash flags 0
+
+@@ float-xff-dash@stdin status 1
+1
+@@ float-xff-dash@stdin stdout 0
+
+@@ float-xff-dash@stdin stderr 70
+ERROR: ling 29: get_xml_double from '-' Numerical result out of range
+
+@@ float-xff-dash@stdin file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-dash@stdin flags 0
+
+@@ float-xff-exp-only status 1
+1
+@@ float-xff-exp-only stdout 0
+
+@@ float-xff-exp-only stderr 71
+ERROR: ling 40: get_xml_double from 'e5' Numerical result out of range
+
+@@ float-xff-exp-only file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-exp-only flags 0
+
+@@ float-xff-exp-only@stdin status 1
+1
+@@ float-xff-exp-only@stdin stdout 0
+
+@@ float-xff-exp-only@stdin stderr 71
+ERROR: ling 29: get_xml_double from 'e5' Numerical result out of range
+
+@@ float-xff-exp-only@stdin file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-exp-only@stdin flags 0
+
+@@ float-xff-trail status 1
+1
+@@ float-xff-trail stdout 0
+
+@@ float-xff-trail stderr 52
+ERROR: ling 40: get_xml_double from '2junk' Success
+
+@@ float-xff-trail file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-trail flags 0
+
+@@ float-xff-trail@stdin status 1
+1
+@@ float-xff-trail@stdin stdout 0
+
+@@ float-xff-trail@stdin stderr 52
+ERROR: ling 29: get_xml_double from '2junk' Success
+
+@@ float-xff-trail@stdin file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-trail@stdin flags 0
+
+@@ float-xff-comma status 1
+1
+@@ float-xff-comma stdout 0
+
+@@ float-xff-comma stderr 50
+ERROR: ling 40: get_xml_double from '1,5' Success
+
+@@ float-xff-comma file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-comma flags 0
+
+@@ float-xff-comma@stdin status 1
+1
+@@ float-xff-comma@stdin stdout 0
+
+@@ float-xff-comma@stdin stderr 50
+ERROR: ling 29: get_xml_double from '1,5' Success
+
+@@ float-xff-comma@stdin file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-comma@stdin flags 0
+
+@@ float-xff-hex status 1
+1
+@@ float-xff-hex stdout 0
+
+@@ float-xff-hex stderr 51
+ERROR: ling 40: get_xml_double from '0x10' Success
+
+@@ float-xff-hex file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-hex flags 0
+
+@@ float-xff-hex@stdin status 1
+1
+@@ float-xff-hex@stdin stdout 0
+
+@@ float-xff-hex@stdin stderr 51
+ERROR: ling 29: get_xml_double from '0x10' Success
+
+@@ float-xff-hex@stdin file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-hex@stdin flags 0
+
+@@ float-xff-hexfloat status 1
+1
+@@ float-xff-hexfloat stdout 0
+
+@@ float-xff-hexfloat stderr 52
+ERROR: ling 40: get_xml_double from '0x1p4' Success
+
+@@ float-xff-hexfloat file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-hexfloat flags 0
+
+@@ float-xff-hexfloat@stdin status 1
+1
+@@ float-xff-hexfloat@stdin stdout 0
+
+@@ float-xff-hexfloat@stdin stderr 52
+ERROR: ling 29: get_xml_double from '0x1p4' Success
+
+@@ float-xff-hexfloat@stdin file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-hexfloat@stdin flags 0
+
+@@ float-xff-nbsp status 1
+1
+@@ float-xff-nbsp stdout 0
+
+@@ float-xff-nbsp stderr 72
+ERROR: ling 40: get_xml_double from ' 1' Numerical result out of range
+
+@@ float-xff-nbsp file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-nbsp flags 0
+
+@@ float-xff-nbsp@stdin status 1
+1
+@@ float-xff-nbsp@stdin stdout 0
+
+@@ float-xff-nbsp@stdin stderr 72
+ERROR: ling 29: get_xml_double from ' 1' Numerical result out of range
+
+@@ float-xff-nbsp@stdin file 20
+af6d5db10c3ff4a413a8
+@@ float-xff-nbsp@stdin flags 0
+
+@@ float-primary-empty status 1
+1
+@@ float-primary-empty stdout 0
+
+@@ float-primary-empty stderr 69
+ERROR: ling 40: get_xml_double from '' Numerical result out of range
+
+@@ float-primary-empty file 4
+none
+@@ float-primary-empty flags 0
+
+@@ float-primary-empty@stdin status 1
+1
+@@ float-primary-empty@stdin stdout 0
+
+@@ float-primary-empty@stdin stderr 69
+ERROR: ling 33: get_xml_double from '' Numerical result out of range
+
+@@ float-primary-empty@stdin file 4
+none
+@@ float-primary-empty@stdin flags 0
+
+@@ float-primary-exp-only status 1
+1
+@@ float-primary-exp-only stdout 0
+
+@@ float-primary-exp-only stderr 71
+ERROR: ling 40: get_xml_double from 'e5' Numerical result out of range
+
+@@ float-primary-exp-only file 4
+none
+@@ float-primary-exp-only flags 0
+
+@@ float-primary-exp-only@stdin status 1
+1
+@@ float-primary-exp-only@stdin stdout 0
+
+@@ float-primary-exp-only@stdin stderr 71
+ERROR: ling 33: get_xml_double from 'e5' Numerical result out of range
+
+@@ float-primary-exp-only@stdin file 4
+none
+@@ float-primary-exp-only@stdin flags 0
+
+@@ float-primary-trail status 1
+1
+@@ float-primary-trail stdout 0
+
+@@ float-primary-trail stderr 52
+ERROR: ling 40: get_xml_double from '2junk' Success
+
+@@ float-primary-trail file 4
+none
+@@ float-primary-trail flags 0
+
+@@ float-primary-trail@stdin status 1
+1
+@@ float-primary-trail@stdin stdout 0
+
+@@ float-primary-trail@stdin stderr 52
+ERROR: ling 33: get_xml_double from '2junk' Success
+
+@@ float-primary-trail@stdin file 4
+none
+@@ float-primary-trail@stdin flags 0
+
+@@ float-primary-hexfloat status 1
+1
+@@ float-primary-hexfloat stdout 0
+
+@@ float-primary-hexfloat stderr 52
+ERROR: ling 40: get_xml_double from '0x1p4' Success
+
+@@ float-primary-hexfloat file 4
+none
+@@ float-primary-hexfloat flags 0
+
+@@ float-primary-hexfloat@stdin status 1
+1
+@@ float-primary-hexfloat@stdin stdout 0
+
+@@ float-primary-hexfloat@stdin stderr 52
+ERROR: ling 33: get_xml_double from '0x1p4' Success
+
+@@ float-primary-hexfloat@stdin file 4
+none
+@@ float-primary-hexfloat@stdin flags 0
+
+@@ float-secondary-empty status 1
+1
+@@ float-secondary-empty stdout 0
+
+@@ float-secondary-empty stderr 69
+ERROR: ling 40: get_xml_double from '' Numerical result out of range
+
+@@ float-secondary-empty file 4
+none
+@@ float-secondary-empty flags 0
+
+@@ float-secondary-empty@stdin status 1
+1
+@@ float-secondary-empty@stdin stdout 0
+
+@@ float-secondary-empty@stdin stderr 69
+ERROR: ling 34: get_xml_double from '' Numerical result out of range
+
+@@ float-secondary-empty@stdin file 4
+none
+@@ float-secondary-empty@stdin flags 0
+
+@@ float-secondary-exp-only status 1
+1
+@@ float-secondary-exp-only stdout 0
+
+@@ float-secondary-exp-only stderr 71
+ERROR: ling 40: get_xml_double from 'e5' Numerical result out of range
+
+@@ float-secondary-exp-only file 4
+none
+@@ float-secondary-exp-only flags 0
+
+@@ float-secondary-exp-only@stdin status 1
+1
+@@ float-secondary-exp-only@stdin stdout 0
+
+@@ float-secondary-exp-only@stdin stderr 71
+ERROR: ling 34: get_xml_double from 'e5' Numerical result out of range
+
+@@ float-secondary-exp-only@stdin file 4
+none
+@@ float-secondary-exp-only@stdin flags 0
+
+@@ float-secondary-trail status 1
+1
+@@ float-secondary-trail stdout 0
+
+@@ float-secondary-trail stderr 52
+ERROR: ling 40: get_xml_double from '2junk' Success
+
+@@ float-secondary-trail file 4
+none
+@@ float-secondary-trail flags 0
+
+@@ float-secondary-trail@stdin status 1
+1
+@@ float-secondary-trail@stdin stdout 0
+
+@@ float-secondary-trail@stdin stderr 52
+ERROR: ling 34: get_xml_double from '2junk' Success
+
+@@ float-secondary-trail@stdin file 4
+none
+@@ float-secondary-trail@stdin flags 0
+
+@@ float-secondary-hexfloat status 1
+1
+@@ float-secondary-hexfloat stdout 0
+
+@@ float-secondary-hexfloat stderr 52
+ERROR: ling 40: get_xml_double from '0x1p4' Success
+
+@@ float-secondary-hexfloat file 4
+none
+@@ float-secondary-hexfloat flags 0
+
+@@ float-secondary-hexfloat@stdin status 1
+1
+@@ float-secondary-hexfloat@stdin stdout 0
+
+@@ float-secondary-hexfloat@stdin stderr 52
+ERROR: ling 34: get_xml_double from '0x1p4' Success
+
+@@ float-secondary-hexfloat@stdin file 4
+none
+@@ float-secondary-hexfloat@stdin flags 0
+
+@@ float-cdpvalue-empty status 1
+1
+@@ float-cdpvalue-empty stdout 0
+
+@@ float-cdpvalue-empty stderr 69
+ERROR: ling 40: get_xml_double from '' Numerical result out of range
+
+@@ float-cdpvalue-empty file 4
+none
+@@ float-cdpvalue-empty flags 0
+
+@@ float-cdpvalue-empty@stdin status 1
+1
+@@ float-cdpvalue-empty@stdin stdout 0
+
+@@ float-cdpvalue-empty@stdin stderr 69
+ERROR: ling 35: get_xml_double from '' Numerical result out of range
+
+@@ float-cdpvalue-empty@stdin file 4
+none
+@@ float-cdpvalue-empty@stdin flags 0
+
+@@ float-cdpvalue-exp-only status 1
+1
+@@ float-cdpvalue-exp-only stdout 0
+
+@@ float-cdpvalue-exp-only stderr 71
+ERROR: ling 40: get_xml_double from 'e5' Numerical result out of range
+
+@@ float-cdpvalue-exp-only file 4
+none
+@@ float-cdpvalue-exp-only flags 0
+
+@@ float-cdpvalue-exp-only@stdin status 1
+1
+@@ float-cdpvalue-exp-only@stdin stdout 0
+
+@@ float-cdpvalue-exp-only@stdin stderr 71
+ERROR: ling 35: get_xml_double from 'e5' Numerical result out of range
+
+@@ float-cdpvalue-exp-only@stdin file 4
+none
+@@ float-cdpvalue-exp-only@stdin flags 0
+
+@@ float-cdpvalue-trail status 1
+1
+@@ float-cdpvalue-trail stdout 0
+
+@@ float-cdpvalue-trail stderr 52
+ERROR: ling 40: get_xml_double from '2junk' Success
+
+@@ float-cdpvalue-trail file 4
+none
+@@ float-cdpvalue-trail flags 0
+
+@@ float-cdpvalue-trail@stdin status 1
+1
+@@ float-cdpvalue-trail@stdin stdout 0
+
+@@ float-cdpvalue-trail@stdin stderr 52
+ERROR: ling 35: get_xml_double from '2junk' Success
+
+@@ float-cdpvalue-trail@stdin file 4
+none
+@@ float-cdpvalue-trail@stdin flags 0
+
+@@ float-cdpvalue-hexfloat status 1
+1
+@@ float-cdpvalue-hexfloat stdout 0
+
+@@ float-cdpvalue-hexfloat stderr 52
+ERROR: ling 40: get_xml_double from '0x1p4' Success
+
+@@ float-cdpvalue-hexfloat file 4
+none
+@@ float-cdpvalue-hexfloat flags 0
+
+@@ float-cdpvalue-hexfloat@stdin status 1
+1
+@@ float-cdpvalue-hexfloat@stdin stdout 0
+
+@@ float-cdpvalue-hexfloat@stdin stderr 52
+ERROR: ling 35: get_xml_double from '0x1p4' Success
+
+@@ float-cdpvalue-hexfloat@stdin file 4
+none
+@@ float-cdpvalue-hexfloat@stdin flags 0
+
+@@ float-v-u status 1
+1
+@@ float-v-u stdout 0
+
+@@ float-v-u stderr 70
+ERROR: ling 57: get_xml_double from 'U' Numerical result out of range
+
+@@ float-v-u file 4
+none
+@@ float-v-u flags 0
+
+@@ float-v-u@stdin status 1
+1
+@@ float-v-u@stdin stdout 0
+
+@@ float-v-u@stdin stderr 70
+ERROR: ling 40: get_xml_double from 'U' Numerical result out of range
+
+@@ float-v-u@stdin file 4
+none
+@@ float-v-u@stdin flags 0
+
+@@ float-v-empty status 1
+1
+@@ float-v-empty stdout 0
+
+@@ float-v-empty stderr 69
+ERROR: ling 57: get_xml_double from '' Numerical result out of range
+
+@@ float-v-empty file 4
+none
+@@ float-v-empty flags 0
+
+@@ float-v-empty@stdin status 1
+1
+@@ float-v-empty@stdin stdout 0
+
+@@ float-v-empty@stdin stderr 69
+ERROR: ling 40: get_xml_double from '' Numerical result out of range
+
+@@ float-v-empty@stdin file 4
+none
+@@ float-v-empty@stdin flags 0
+
+@@ float-v-alpha status 1
+1
+@@ float-v-alpha stdout 0
+
+@@ float-v-alpha stderr 72
+ERROR: ling 56: get_xml_double from 'abc' Numerical result out of range
+
+@@ float-v-alpha file 4
+none
+@@ float-v-alpha flags 0
+
+@@ float-v-alpha@stdin status 1
+1
+@@ float-v-alpha@stdin stdout 0
+
+@@ float-v-alpha@stdin stderr 72
+ERROR: ling 40: get_xml_double from 'abc' Numerical result out of range
+
+@@ float-v-alpha@stdin file 4
+none
+@@ float-v-alpha@stdin flags 0
+
+@@ float-v-dash status 1
+1
+@@ float-v-dash stdout 0
+
+@@ float-v-dash stderr 70
+ERROR: ling 57: get_xml_double from '-' Numerical result out of range
+
+@@ float-v-dash file 4
+none
+@@ float-v-dash flags 0
+
+@@ float-v-dash@stdin status 1
+1
+@@ float-v-dash@stdin stdout 0
+
+@@ float-v-dash@stdin stderr 70
+ERROR: ling 40: get_xml_double from '-' Numerical result out of range
+
+@@ float-v-dash@stdin file 4
+none
+@@ float-v-dash@stdin flags 0
+
+@@ float-v-exp-only status 1
+1
+@@ float-v-exp-only stdout 0
+
+@@ float-v-exp-only stderr 71
+ERROR: ling 57: get_xml_double from 'e5' Numerical result out of range
+
+@@ float-v-exp-only file 4
+none
+@@ float-v-exp-only flags 0
+
+@@ float-v-exp-only@stdin status 1
+1
+@@ float-v-exp-only@stdin stdout 0
+
+@@ float-v-exp-only@stdin stderr 71
+ERROR: ling 40: get_xml_double from 'e5' Numerical result out of range
+
+@@ float-v-exp-only@stdin file 4
+none
+@@ float-v-exp-only@stdin flags 0
+
+@@ float-v-trail status 1
+1
+@@ float-v-trail stdout 0
+
+@@ float-v-trail stderr 52
+ERROR: ling 56: get_xml_double from '2junk' Success
+
+@@ float-v-trail file 4
+none
+@@ float-v-trail flags 0
+
+@@ float-v-trail@stdin status 1
+1
+@@ float-v-trail@stdin stdout 0
+
+@@ float-v-trail@stdin stderr 52
+ERROR: ling 40: get_xml_double from '2junk' Success
+
+@@ float-v-trail@stdin file 4
+none
+@@ float-v-trail@stdin flags 0
+
+@@ float-v-comma status 1
+1
+@@ float-v-comma stdout 0
+
+@@ float-v-comma stderr 50
+ERROR: ling 56: get_xml_double from '1,5' Success
+
+@@ float-v-comma file 4
+none
+@@ float-v-comma flags 0
+
+@@ float-v-comma@stdin status 1
+1
+@@ float-v-comma@stdin stdout 0
+
+@@ float-v-comma@stdin stderr 50
+ERROR: ling 40: get_xml_double from '1,5' Success
+
+@@ float-v-comma@stdin file 4
+none
+@@ float-v-comma@stdin flags 0
+
+@@ float-v-hex status 1
+1
+@@ float-v-hex stdout 0
+
+@@ float-v-hex stderr 51
+ERROR: ling 56: get_xml_double from '0x10' Success
+
+@@ float-v-hex file 4
+none
+@@ float-v-hex flags 0
+
+@@ float-v-hex@stdin status 1
+1
+@@ float-v-hex@stdin stdout 0
+
+@@ float-v-hex@stdin stderr 51
+ERROR: ling 40: get_xml_double from '0x10' Success
+
+@@ float-v-hex@stdin file 4
+none
+@@ float-v-hex@stdin flags 0
+
+@@ float-v-hexfloat status 1
+1
+@@ float-v-hexfloat stdout 0
+
+@@ float-v-hexfloat stderr 52
+ERROR: ling 56: get_xml_double from '0x1p4' Success
+
+@@ float-v-hexfloat file 4
+none
+@@ float-v-hexfloat flags 0
+
+@@ float-v-hexfloat@stdin status 1
+1
+@@ float-v-hexfloat@stdin stdout 0
+
+@@ float-v-hexfloat@stdin stderr 52
+ERROR: ling 40: get_xml_double from '0x1p4' Success
+
+@@ float-v-hexfloat@stdin file 4
+none
+@@ float-v-hexfloat@stdin flags 0
+
+@@ float-v-nbsp status 1
+1
+@@ float-v-nbsp stdout 0
+
+@@ float-v-nbsp stderr 72
+ERROR: ling 56: get_xml_double from ' 1' Numerical result out of range
+
+@@ float-v-nbsp file 4
+none
+@@ float-v-nbsp flags 0
+
+@@ float-v-nbsp@stdin status 1
+1
+@@ float-v-nbsp@stdin stdout 0
+
+@@ float-v-nbsp@stdin stderr 72
+ERROR: ling 40: get_xml_double from ' 1' Numerical result out of range
+
+@@ float-v-nbsp@stdin file 4
+none
+@@ float-v-nbsp@stdin flags 0
+
+@@ dup-database status 6
+signal
+@@ dup-database stdout 0
+
+@@ dup-database stderr 0
+
+@@ dup-database file 9
+undefined
+@@ dup-database flags 23
+nondeterministic signal
+@@ dup-database@stdin status 6
+signal
+@@ dup-database@stdin stdout 0
+
+@@ dup-database@stdin stderr 0
+
+@@ dup-database@stdin file 9
+undefined
+@@ dup-database@stdin flags 23
+nondeterministic signal
+@@ v-self-closing status 1
+1
+@@ v-self-closing stdout 0
+
+@@ v-self-closing stderr 69
+ERROR: ling 40: get_xml_double from '' Numerical result out of range
+
+@@ v-self-closing file 4
+none
+@@ v-self-closing flags 0
+
+@@ v-self-closing@stdin status 1
+1
+@@ v-self-closing@stdin stdout 0
+
+@@ v-self-closing@stdin stderr 69
+ERROR: ling 39: get_xml_double from '' Numerical result out of range
+
+@@ v-self-closing@stdin file 4
+none
+@@ v-self-closing@stdin flags 0
+
+@@ v-empty status 1
+1
+@@ v-empty stdout 0
+
+@@ v-empty stderr 69
+ERROR: ling 40: get_xml_double from '' Numerical result out of range
+
+@@ v-empty file 4
+none
+@@ v-empty flags 0
+
+@@ v-empty@stdin status 1
+1
+@@ v-empty@stdin stdout 0
+
+@@ v-empty@stdin stderr 69
+ERROR: ling 39: get_xml_double from '' Numerical result out of range
+
+@@ v-empty@stdin file 4
+none
+@@ v-empty@stdin flags 0
+
+@@ rows-all-gone status 6
+signal
+@@ rows-all-gone stdout 0
+
+@@ rows-all-gone stderr 0
+
+@@ rows-all-gone file 4
+none
+@@ rows-all-gone flags 6
+signal
+@@ rows-all-gone@stdin status 6
+signal
+@@ rows-all-gone@stdin stdout 0
+
+@@ rows-all-gone@stdin stderr 0
+
+@@ rows-all-gone@stdin file 4
+none
+@@ rows-all-gone@stdin flags 6
+signal
+@@ database-self-closing status 6
+signal
+@@ database-self-closing stdout 0
+
+@@ database-self-closing stderr 0
+
+@@ database-self-closing file 4
+none
+@@ database-self-closing flags 6
+signal
+@@ database-self-closing@stdin status 6
+signal
+@@ database-self-closing@stdin stdout 0
+
+@@ database-self-closing@stdin stderr 0
+
+@@ database-self-closing@stdin file 4
+none
+@@ database-self-closing@stdin flags 6
+signal
+@@ no-ds-at-all status 6
+signal
+@@ no-ds-at-all stdout 0
+
+@@ no-ds-at-all stderr 0
+
+@@ no-ds-at-all file 4
+none
+@@ no-ds-at-all flags 6
+signal
+@@ no-ds-at-all@stdin status 6
+signal
+@@ no-ds-at-all@stdin stdout 0
+
+@@ no-ds-at-all@stdin stderr 0
+
+@@ no-ds-at-all@stdin file 4
+none
+@@ no-ds-at-all@stdin flags 6
+signal
+@@ value-cdata status 1
+0
+@@ value-cdata stdout 0
+
+@@ value-cdata stderr 0
+
+@@ value-cdata file 20
+ac19e5ef385654aee6a1
+@@ value-cdata flags 0
+
+@@ value-cdata@stdin status 1
+0
+@@ value-cdata@stdin stdout 0
+
+@@ value-cdata@stdin stderr 0
+
+@@ value-cdata@stdin file 20
+ac19e5ef385654aee6a1
+@@ value-cdata@stdin flags 0
+
+@@ value-internal-entity status 1
+0
+@@ value-internal-entity stdout 0
+
+@@ value-internal-entity stderr 0
+
+@@ value-internal-entity file 20
+ac19e5ef385654aee6a1
+@@ value-internal-entity flags 0
+
+@@ value-internal-entity@stdin status 1
+0
+@@ value-internal-entity@stdin stdout 0
+
+@@ value-internal-entity@stdin stderr 0
+
+@@ value-internal-entity@stdin file 20
+ac19e5ef385654aee6a1
+@@ value-internal-entity@stdin flags 0
+
+@@ doc-comment-short@stdin status 1
+1
+@@ doc-comment-short@stdin stdout 0
+
+@@ doc-comment-short@stdin stderr 58
+ERROR: error reading/parsing XML: Comment not terminated 
+
+@@ doc-comment-short@stdin file 4
+none
+@@ doc-comment-short@stdin flags 0
+
+@@ error-keeps-existing status 1
+0
+@@ error-keeps-existing stdout 0
+
+@@ error-keeps-existing stderr 0
+
+@@ error-keeps-existing file 20
+ac19e5ef385654aee6a1
+@@ error-keeps-existing flags 0
+
+@@ xff-error-existing status 1
+1
+@@ xff-error-existing stdout 0
+
+@@ xff-error-existing stderr 70
+ERROR: ling 40: get_xml_double from 'U' Numerical result out of range
+
+@@ xff-error-existing file 20
+af6d5db10c3ff4a413a8
+@@ xff-error-existing flags 0
+

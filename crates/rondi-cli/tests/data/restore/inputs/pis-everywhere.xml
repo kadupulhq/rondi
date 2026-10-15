@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE rrd SYSTEM "https://oss.oetiker.ch/rrdtool/rrdtool.dtd">
+<!-- Round Robin Database Dump -->
+<rrd><?x y?>
+	<version>0003</version><?x y?>
+	<step>60</step> <!-- Seconds --><?x y?>
+	<lastupdate>1000000170</lastupdate> <!-- 2001-09-09 01:49:30 +0000 -->
+<?x y?>
+	<ds><?x y?>
+		<name> g </name><?x y?>
+		<type> GAUGE </type><?x y?>
+		<minimal_heartbeat>120</minimal_heartbeat><?x y?>
+		<min>0.0000000000e+00</min><?x y?>
+		<max>1.0000000000e+02</max>
+<?x y?>
+		<!-- PDP Status --><?x y?>
+		<last_ds>35</last_ds><?x y?>
+		<value>1.0500000000e+03</value><?x y?>
+		<unknown_sec> 0 </unknown_sec><?x y?>
+	</ds>
+<?x y?>
+	<!-- Round Robin Archives --><?x y?>
+	<rra><?x y?>
+		<cf>AVERAGE</cf><?x y?>
+		<pdp_per_row>1</pdp_per_row> <!-- 60 seconds -->
+<?x y?>
+		<params><?x y?>
+		<xff>5.0000000000e-01</xff><?x y?>
+		</params><?x y?>
+		<cdp_prep><?x y?>
+			<ds><?x y?>
+			<primary_value>2.5000000000e+01</primary_value><?x y?>
+			<secondary_value>0.0000000000e+00</secondary_value><?x y?>
+			<value>NaN</value><?x y?>
+			<unknown_datapoints>0</unknown_datapoints><?x y?>
+			</ds><?x y?>
+		</cdp_prep><?x y?>
+		<database><?x y?>
+			<!-- 2001-09-09 01:47:00 +0000 / 1000000020 --> <row><v>NaN</v></row><?x y?>
+			<!-- 2001-09-09 01:48:00 +0000 / 1000000080 --> <row><v>1.3333333333e+01</v></row><?x y?>
+			<!-- 2001-09-09 01:49:00 +0000 / 1000000140 --> <row><v>2.5000000000e+01</v></row><?x y?>
+		</database><?x y?>
+	</rra><?x y?>
+	<rra><?x y?>
+		<cf>MAX</cf><?x y?>
+		<pdp_per_row>2</pdp_per_row> <!-- 120 seconds -->
+<?x y?>
+		<params><?x y?>
+		<xff>5.0000000000e-01</xff><?x y?>
+		</params><?x y?>
+		<cdp_prep><?x y?>
+			<ds><?x y?>
+			<primary_value>1.3333333333e+01</primary_value><?x y?>
+			<secondary_value>1.3333333333e+01</secondary_value><?x y?>
+			<value>2.5000000000e+01</value><?x y?>
+			<unknown_datapoints>0</unknown_datapoints><?x y?>
+			</ds><?x y?>
+		</cdp_prep><?x y?>
+		<database><?x y?>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row><?x y?>
+			<!-- 2001-09-09 01:48:00 +0000 / 1000000080 --> <row><v>1.3333333333e+01</v></row><?x y?>
+		</database><?x y?>
+	</rra>
+</rrd>

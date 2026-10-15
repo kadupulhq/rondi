@@ -1,0 +1,115 @@
+<!-- Round Robin Database Dump -->
+<rrd>
+	<version>0003</version>
+	<step>300</step> <!-- Seconds -->
+	<lastupdate>1000000900</lastupdate> <!-- 2001-09-09 02:01:40 +0000 -->
+
+	<ds>
+		<name> g </name>
+		<type> GAUGE </type>
+		<minimal_heartbeat>600</minimal_heartbeat>
+		<min>0.0000000000e+00</min>
+		<max>1.0000000000e+02</max>
+
+		<!-- PDP Status -->
+		<last_ds>U</last_ds>
+		<value>NaN</value>
+		<unknown_sec> 100 </unknown_sec>
+	</ds>
+
+	<ds>
+		<name> c </name>
+		<type> COUNTER </type>
+		<minimal_heartbeat>600</minimal_heartbeat>
+		<min>NaN</min>
+		<max>NaN</max>
+
+		<!-- PDP Status -->
+		<last_ds>300</last_ds>
+		<value>3.3333333333e+01</value>
+		<unknown_sec> 0 </unknown_sec>
+	</ds>
+
+	<!-- Round Robin Archives -->
+	<rra>
+		<cf>AVERAGE</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 300 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>2.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<value>NaN</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+			<ds>
+			<primary_value>3.3333333333e-01</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<value>NaN</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:50:00 +0000 / 1000000200 --> <row><v>1.0000000000e+00</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:55:00 +0000 / 1000000500 --> <row><v>1.6666666667e+00</v><v>3.3333333333e-01</v></row>
+			<!-- 2001-09-09 02:00:00 +0000 / 1000000800 --> <row><v>2.0000000000e+00</v><v>3.3333333333e-01</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>MAX</cf>
+		<pdp_per_row>2</pdp_per_row> <!-- 600 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>2.0000000000e+00</primary_value>
+			<secondary_value>2.0000000000e+00</secondary_value>
+			<value>-inf</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+			<ds>
+			<primary_value>3.3333333333e-01</primary_value>
+			<secondary_value>3.3333333333e-01</secondary_value>
+			<value>-inf</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:40:00 +0000 / 999999600 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:50:00 +0000 / 1000000200 --> <row><v>1.0000000000e+00</v><v>NaN</v></row>
+			<!-- 2001-09-09 02:00:00 +0000 / 1000000800 --> <row><v>2.0000000000e+00</v><v>3.3333333333e-01</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>LAST</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 300 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>2.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<value>NaN</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+			<ds>
+			<primary_value>3.3333333333e-01</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<value>NaN</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:55:00 +0000 / 1000000500 --> <row><v>1.6666666667e+00</v><v>3.3333333333e-01</v></row>
+			<!-- 2001-09-09 02:00:00 +0000 / 1000000800 --> <row><v>2.0000000000e+00</v><v>3.3333333333e-01</v></row>
+		</database>
+	</rra>
+</rrd>
