@@ -141,6 +141,8 @@ Changes are reviewed through pull requests using the repository's [pull request 
 
 ## License
 
-Rondi is licensed under either the MIT License or the Apache License, Version 2.0, at your option (SPDX `MIT OR Apache-2.0`). See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE).
+Rondi is licensed under either the MIT License or the Apache License, Version 2.0, at your option (SPDX `MIT OR Apache-2.0`). See [LICENSE-MIT](LICENSE-MIT) and [LICENSE-APACHE](LICENSE-APACHE). This covers the code, documentation, scripts, container and workflow files, fuzz targets, and test inputs that Rondi authors.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in Rondi by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
 
 Rondi ports behavior and code from RRDtool 1.11.0, copyright Tobias Oetiker and contributors, which is licensed under GPL-2.0-or-later with the RRDtool FLOSS License Exception. RRDtool's own notice and exception text are reproduced unchanged in [COPYRIGHT](COPYRIGHT), and the GPL version 2 text in [LICENSE-GPL-2.0](LICENSE-GPL-2.0). RRDtool's code is not relicensed by this project, and the verbatim RRDtool help text Rondi prints keeps its upstream notice.
