@@ -12,6 +12,9 @@ The specifications are being written.
 | `rrdtool create` definitions, layout and output file | [create.md](create.md) | `crates/rondi-cli/tests/create_spec_vectors.rs` |
 | `rrdtool resize` row changes and `resize.rrd` | [resize.md](resize.md) | `crates/rondi-cli/tests/resize_spec_vectors.rs` |
 | At-style time specifications, `update` timestamps, `dump` date comments | [time-spec.md](time-spec.md) | `crates/rondi-cli/tests/time_spec_vectors.rs` |
+| Command dispatch, option parsing, help, exit status, environment, alias executables, `info`/`fetch`/`list` output | [cli.md](cli.md) | `crates/rondi-cli/tests/cli_spec_vectors.rs` |
+| Pipe mode (`rrdtool -`): line reading, quoting, built-in commands, replies | [pipe-mode.md](pipe-mode.md) | `crates/rondi-cli/tests/cli_spec_vectors.rs` |
+| `PRINT`/`GPRINT` formats, SI scaling, `strftime` and duration suffixes, `--imginfo` | [format-strings.md](format-strings.md) | `crates/rondi-cli/tests/cli_spec_vectors.rs` |
 
 Each specification states the observable behavior, how it was established
 (documentation, black-box test, or reference-source inspection), and the
