@@ -8,6 +8,7 @@ The specifications are being written.
 |---|---|---|
 | RPN expressions in CDEF, VDEF and xport | [rpn.md](rpn.md) | `crates/rondi-cli/tests/rpn_spec_vectors.rs` |
 | `rrdtool tune` data source and archive changes | [tune-modify.md](tune-modify.md) | `crates/rondi-cli/tests/tune_modify_spec.rs` |
+| `rrdtool restore` from an XML dump | [restore.md](restore.md) | `crates/rondi-cli/tests/restore_spec_vectors.rs` |
 
 Each specification states the observable behavior, how it was established
 (documentation, black-box test, or reference-source inspection), and the
