@@ -449,47 +449,7 @@ impl<'a> Parser<'a> {
             while let Some(Tok::Number(digits)) = self.peek() {
                 self.bump();
                 let count = low32(number(digits));
-                // Compatibility: whatever token follows the number is its
-                // unit, a sign included. A sign taken this way is ignored, so
-                // the next number keeps the current sign: `+5-1h` adds five
-                // seconds and one hour, `-1-1` subtracts two seconds.
-                // Provenance: black-box compatibility test (vectors ref-113,
-                // ref-114 and probes of RRDtool 1.11.0); this refines TS-37.
-                let unit = match self.peek() {
-                    None => Unit::Seconds,
-                    Some(Tok::Word(word)) => {
-                        self.bump();
-                        unit_word(word).unwrap_or(Unit::Unknown)
-                    }
-                    Some(_) => {
-                        self.bump();
-                        Unit::Unknown
-                    }
-                };
-                let unit = match unit {
-                    Unit::MonthsOrMinutes => {
-                        let as_months = match context {
-                            Some(UnitKind::Calendar) => true,
-                            Some(UnitKind::Exact) => false,
-                            None => count < 6,
-                        };
-                        if as_months {
-                            Unit::Months
-                        } else {
-                            Unit::Minutes
-                        }
-                    }
-                    other => other,
-                };
-                match unit {
-                    Unit::Days | Unit::Weeks | Unit::Months | Unit::Years => {
-                        context = Some(UnitKind::Calendar);
-                    }
-                    Unit::Seconds | Unit::Minutes | Unit::Hours => {
-                        context = Some(UnitKind::Exact);
-                    }
-                    Unit::Unknown | Unit::MonthsOrMinutes => {}
-                }
+                let unit = settle_unit(self.amount_unit(), count, &mut context);
                 let signed = if negative {
                     count.wrapping_neg()
                 } else {
@@ -500,6 +460,46 @@ impl<'a> Parser<'a> {
         }
         Ok(shift)
     }
+}
+
+impl Parser<'_> {
+    /// Takes the unit of an amount whose number was just read.
+    ///
+    /// Compatibility: whatever token follows the number is its unit, a sign
+    /// included. A sign taken this way is ignored, so the next number keeps
+    /// the current sign: `+5-1h` adds five seconds and one hour, `-1-1`
+    /// subtracts two seconds.
+    /// Provenance: black-box compatibility test (vectors ref-113, ref-114
+    /// and probes of RRDtool 1.11.0); this refines TS-37.
+    fn amount_unit(&mut self) -> Unit {
+        match self.bump() {
+            None => Unit::Seconds,
+            Some(Tok::Word(word)) => unit_word(word).unwrap_or(Unit::Unknown),
+            Some(_) => Unit::Unknown,
+        }
+    }
+}
+
+/// TS-40: decides what `m` means from the units before it under the same
+/// sign, and records the kind of a known unit for the next `m`.
+fn settle_unit(unit: Unit, count: i32, context: &mut Option<UnitKind>) -> Unit {
+    let unit = match (unit, *context) {
+        (Unit::MonthsOrMinutes, Some(UnitKind::Calendar)) => Unit::Months,
+        (Unit::MonthsOrMinutes, Some(UnitKind::Exact)) => Unit::Minutes,
+        (Unit::MonthsOrMinutes, None) if count < 6 => Unit::Months,
+        (Unit::MonthsOrMinutes, None) => Unit::Minutes,
+        (other, _) => other,
+    };
+    match unit {
+        Unit::Days | Unit::Weeks | Unit::Months | Unit::Years => {
+            *context = Some(UnitKind::Calendar);
+        }
+        Unit::Seconds | Unit::Minutes | Unit::Hours => {
+            *context = Some(UnitKind::Exact);
+        }
+        Unit::Unknown | Unit::MonthsOrMinutes => {}
+    }
+    unit
 }
 
 impl Shift {
