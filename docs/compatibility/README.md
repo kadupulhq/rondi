@@ -15,6 +15,8 @@ The specifications are being written.
 | Command dispatch, option parsing, help, exit status, environment, alias executables, `info`/`fetch`/`list` output | [cli.md](cli.md) | `crates/rondi-cli/tests/cli_spec_vectors.rs` |
 | Pipe mode (`rrdtool -`): line reading, quoting, built-in commands, replies | [pipe-mode.md](pipe-mode.md) | `crates/rondi-cli/tests/cli_spec_vectors.rs` |
 | `PRINT`/`GPRINT` formats, SI scaling, `strftime` and duration suffixes, `--imginfo` | [format-strings.md](format-strings.md) | `crates/rondi-cli/tests/cli_spec_vectors.rs` |
+| `rrdcached` request protocol and commands | [rrdcached.md](rrdcached.md) | `crates/rondi-cli/tests/rrdcached_spec_vectors.rs` |
+| `rrdcached` options, listeners, pid file, signals, journal and timers | [rrdcached-daemon.md](rrdcached-daemon.md) | `crates/rondi-cli/tests/rrdcached_spec_vectors.rs` |
 
 Each specification states the observable behavior, how it was established
 (documentation, black-box test, or reference-source inspection), and the
