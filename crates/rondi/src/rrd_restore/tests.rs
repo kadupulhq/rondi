@@ -517,7 +517,7 @@ fn oversized_layouts_are_refused_before_allocation() {
         }],
         ..Dump::default()
     };
-    assert_eq!(serialize(&dump), Err(RestoreError::TooLarge));
+    assert_eq!(serialize(&dump, usize::MAX), Err(RestoreError::TooLarge));
 }
 
 #[test]
@@ -658,4 +658,73 @@ fn mutated_dumps_neither_panic_nor_hang() {
         written > 300 && refused > 300,
         "{written} written, {refused} refused"
     );
+}
+
+/// Adversarial documents take time linear in their size and never build
+/// more state than the input justifies.
+#[test]
+fn adversarial_dumps_stay_linear_and_bounded() {
+    const N: usize = 200_000;
+    let deep = format!("<rrd>{}{}</rrd>", "<a>".repeat(N), "</a>".repeat(N));
+    let attributes: String = (0..N).map(|i| format!(" a{i}=\"x\"")).collect();
+    let wide_tag = format!("<rrd><step{attributes}>60</step></rrd>");
+    let long_text = format!("<rrd><version>{}</version></rrd>", "1".repeat(4 * N));
+    let comments = format!("{HEAD}{}{DS}</rrd>", "<!-- c -->".repeat(N));
+    let entities = format!("<rrd><step>{}60</step></rrd>", "&e;".repeat(N));
+    let declared: String = (0..N / 10)
+        .map(|i| format!("<!ENTITY e{i} \"&e{};&e{};\">", i + 1, i + 1))
+        .collect();
+    let laughs = format!(
+        "<!DOCTYPE rrd [{declared}]><rrd><step>{}60</step></rrd>",
+        "&e0;".repeat(N)
+    );
+    let one_line_rows: String = "<row><v>1</v></row>".repeat(N);
+    let rows = doc(
+        HEAD,
+        DS,
+        &RRA.replace("<row><v>1</v></row><row><v>2</v></row>", &one_line_rows),
+    );
+    let many_ds = "<ds><name>a</name><type>GAUGE</type></ds>".repeat(20_000);
+    let implicit_cdp = doc(
+        HEAD,
+        &many_ds,
+        &"<rra><cf>AVERAGE</cf></rra>".repeat(20_000),
+    );
+    let cases = [
+        ("deep", deep),
+        ("wide-tag", wide_tag),
+        ("long-text", long_text),
+        ("comments", comments),
+        ("entities", entities),
+        ("laughs", laughs),
+        ("rows", rows),
+        ("implicit-cdp", implicit_cdp),
+    ];
+    for (name, xml) in &cases {
+        for stdin in [false, true] {
+            let begun = std::time::Instant::now();
+            let restored = run_with(xml.as_bytes(), stdin, false);
+            let elapsed = begun.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_secs(20),
+                "{name}: {elapsed:?}"
+            );
+            if let Some(bytes) = &restored.bytes {
+                assert!(bytes.len() <= size_limit(xml.len()), "{name}");
+            }
+            match *name {
+                "rows" => assert_eq!(
+                    restored.bytes.as_ref().map(Vec::len),
+                    Some(rows_at(1, 1) + N * 8)
+                ),
+                // 20000 sources times 20000 archives of implicit CDP state
+                // would be 32 GB; it is refused before anything is allocated.
+                "implicit-cdp" => {
+                    assert_eq!(restored.message, Some(RestoreError::TooLarge));
+                    assert!(restored.bytes.is_none());
+                }
+                _ => {}
+            }
+        }
+    }
 }

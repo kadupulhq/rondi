@@ -425,6 +425,11 @@ enum Phase {
     Epilog,
 }
 
+/// Nesting the tokenizer accepts. RRDtool showed no limit up to 20000
+/// levels, and no dump nests deeper than four, so this only bounds the
+/// state an adversarial document can build.
+const MAX_DEPTH: usize = 100_000;
+
 const EXTRA_CONTENT: &str = "Extra content at the end of the document";
 
 struct Tokenizer<'a> {
@@ -440,7 +445,7 @@ struct Tokenizer<'a> {
     queue: VecDeque<Construct>,
     finished: bool,
     /// Entities declared in an internal DTD subset.
-    declared: Vec<String>,
+    declared: std::collections::HashSet<String>,
     line_pos: usize,
     line_no: usize,
     /// Whether any construct was produced yet.
@@ -484,7 +489,7 @@ impl<'a> Tokenizer<'a> {
             open: Vec::new(),
             queue: VecDeque::new(),
             finished: false,
-            declared: Vec::new(),
+            declared: std::collections::HashSet::new(),
             line_pos: 0,
             line_no: 1,
             progressed: false,
@@ -947,7 +952,7 @@ impl<'a> Tokenizer<'a> {
         let name = self.text[start + 1..name_end].to_owned();
         let next_gt = find(self.bytes(), b">", name_end).map(|at| at + 1);
         let mut at = name_end;
-        let mut attributes: Vec<String> = Vec::new();
+        let mut attributes = std::collections::HashSet::new();
         let outcome = loop {
             while at < len && is_blank(self.bytes()[at]) {
                 at += 1;
@@ -1006,16 +1011,24 @@ impl<'a> Tokenizer<'a> {
                 break Err(None);
             };
             at += close + 2;
-            if attributes.contains(&attr) {
+            if !attributes.insert(attr.clone()) {
                 break Err(Some((format!("Attribute {attr} redefined"), at, false)));
             }
-            attributes.push(attr);
         };
         match outcome {
             Ok((end, empty)) => {
                 self.pos = end;
                 if self.phase == Phase::Epilog {
                     self.fatal(start, Some(start + 2), EXTRA_CONTENT, start);
+                    return;
+                }
+                if !empty && self.open.len() >= MAX_DEPTH {
+                    self.fatal(
+                        start,
+                        Some(end),
+                        format!("Excessive depth in document: {MAX_DEPTH}"),
+                        start,
+                    );
                     return;
                 }
                 let line = self.line_at(start);
@@ -1311,7 +1324,7 @@ impl<'a> Tokenizer<'a> {
             // dropped rather than substituted (RS-11).
             // Provenance: black-box compatibility test
             // (`value-internal-entity`).
-            name if self.declared.iter().any(|declared| declared == name) => Ok(None),
+            name if self.declared.contains(name) => Ok(None),
             name => Err(Expansion::Undefined(name.to_owned())),
         }
     }

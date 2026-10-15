@@ -271,7 +271,7 @@ struct Archive {
     cf: Vec<u8>,
     pdp_per_row: u64,
     params: Slots,
-    /// One CDP record per data source.
+    /// CDP records given by `<cdp_prep>`; missing ones are zero.
     cdp: Vec<Slots>,
     /// Row values in dump order, one per data source per row.
     values: Vec<f64>,
@@ -766,12 +766,11 @@ impl Walk<'_, '_> {
     }
 
     fn archive(&mut self) -> Step {
-        let sources = self.dump.sources.len();
         let mut archive = Archive {
             cf: Vec::new(),
             pdp_per_row: 0,
             params: [0; 80],
-            cdp: vec![[0; 80]; sources],
+            cdp: Vec::new(),
             values: Vec::new(),
             rows: 0,
         };
@@ -882,11 +881,16 @@ impl Walk<'_, '_> {
         }
     }
 
-    /// RS-21: one `<ds>` per data source, then `</cdp_prep>`.
-    fn cdp_prep(&mut self, records: &mut [Slots]) -> Step {
-        for record in records.iter_mut() {
+    /// RS-21: one `<ds>` per data source, then `</cdp_prep>`. Records are
+    /// allocated only as their `<ds>` elements arrive, so memory follows
+    /// the input rather than the data source count.
+    fn cdp_prep(&mut self, records: &mut Vec<Slots>) -> Step {
+        for index in 0..self.dump.sources.len() {
             self.expect_element("ds")?;
-            self.cdp_record(record)?;
+            if records.len() <= index {
+                records.push([0; 80]);
+            }
+            self.cdp_record(&mut records[index])?;
         }
         self.expect_element("/cdp_prep")
     }
@@ -1010,7 +1014,15 @@ fn put_string(out: &mut Vec<u8>, value: &[u8], width: usize) {
 
 /// Lays the dump out as `rrdtool create` would on a 64-bit little-endian
 /// platform (RS-50 to RS-53, RS-61, RS-62).
-fn serialize(dump: &Dump) -> Result<Vec<u8>, RestoreError> {
+/// The largest file a restore writes: generous for any real dump, whose
+/// XML is several times larger than the file it describes, while refusing
+/// a few bytes of XML that would expand into gigabytes of implicit zeros
+/// (many data sources times many archives without `<cdp_prep>`).
+fn size_limit(input_len: usize) -> usize {
+    input_len.saturating_mul(32).saturating_add(64 << 20)
+}
+
+fn serialize(dump: &Dump, input_len: usize) -> Result<Vec<u8>, RestoreError> {
     let sources = dump.sources.len();
     let archives = dump.archives.len();
     let rows: u64 = dump
@@ -1034,6 +1046,12 @@ fn serialize(dump: &Dump) -> Result<Vec<u8>, RestoreError> {
             .checked_add(values)
     })()
     .ok_or(RestoreError::TooLarge)?;
+    // Compatibility: RRDtool sets no limit (RS-72); Rondi bounds memory and
+    // disk use by the size of the dump instead.
+    // Provenance: specification (RS-72 allows a bound).
+    if size > size_limit(input_len) {
+        return Err(RestoreError::TooLarge);
+    }
     let mut out = Vec::new();
     out.try_reserve_exact(size)
         .map_err(|_| RestoreError::TooLarge)?;
@@ -1079,8 +1097,8 @@ fn serialize(dump: &Dump) -> Result<Vec<u8>, RestoreError> {
         out.extend_from_slice(&slots);
     }
     for archive in &dump.archives {
-        for record in &archive.cdp {
-            out.extend_from_slice(record);
+        for index in 0..sources {
+            out.extend_from_slice(archive.cdp.get(index).unwrap_or(&[0; 80]));
         }
     }
     // RS-61: any pointer works as long as the rows rotate with it. Rows are
@@ -1208,7 +1226,7 @@ fn restore_bytes(
         dump: Dump::default(),
     };
     match walk.root() {
-        Ok(()) => match serialize(&walk.dump) {
+        Ok(()) => match serialize(&walk.dump, xml.len()) {
             Ok(bytes) => Restored {
                 bytes: Some(bytes),
                 message: walk.message,
