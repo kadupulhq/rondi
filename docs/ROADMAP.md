@@ -164,6 +164,8 @@ Reaching tier 2 requires Cairo and Pango bindings; a pure-Rust rasterizer cannot
 
 SVG, EPS, PDF; PNG pixels and fonts (tier 2); legend `coords` under `--zoom` on Linux (reported in #93); text in fonts other than the default; Cairo strokes and gradients; the 10 million row limit for collected fetches, which needs graph and xport to consume rows as a stream; the PREDICT last-row difference.
 
+The clean-room specification of the graph front end is [compatibility/graph.md](compatibility/graph.md), with 1,796 frozen cases in `crates/rondi-cli/tests/data/graph_spec_vectors.json` replayed against the live oracle by `graph_spec_vectors.rs`. It lists 38 defect cases (some on one platform only) and 21 policy cases against the current `graph.rs`, `graph_layout.rs` and `graph_options.rs` (EXECUTED on macOS arm64 and in the Linux aarch64 and emulated x86_64 oracle images), among them a panic on a long `--vertical-label`, `--lazy` replacing a newer file, `--x-grid` time formats and `--add-jsontime` ignored in data exports, and unchecked duration axis formats. Those three modules are the next clean-room replacement; the specification's unsettled questions (legend justification with `\g`, `--allow-shrink`, `--y-grid` and the east/west legend width) need black-box work first.
+
 ### Effort
 
 Estimated at `de820e9`: 18 to 26 engineer-weeks, mostly a port of `rrd_graph.c` and `rrd_graph_helper.c` onto Cairo and Pango. Layout metadata and option parsing, which were part of that estimate, are now done, so the remaining work is concentrated in rendering. Budget 4 weeks for pixel work after the renderer lands and stop when the corpus metric plateaus. Streaming collected fetches is a separate 1 to 2 weeks (not estimated before).
@@ -312,7 +314,7 @@ Status: mostly done. Done: TCP and multiple listeners, `-U`/`-G`, journal format
 Status: not started; the license question in the C ABI section is open.
 
 **M5: graph (18 to 26 weeks).** Cairo and Pango renderer crate; all elements, options, formats; `graphv` metadata. Exit: `graphv` output identical for the whole corpus; data formats identical; PNG hash-identical for at least 95 percent of the corpus in the pinned container; SSIM of at least 0.98 elsewhere; Cacti, Munin, and Smokeping graph pages render with unchanged templates.
-Status: data preparation, options and `graphv` layout match for the tested cases (#92, #93). Open: the Cairo and Pango renderer, SVG, PDF and EPS, streaming collected fetches past 10 million rows (RD-017), RD-020, and the corpus.
+Status: data preparation, options and `graphv` layout match for the tested cases (#92, #93); the front end is specified in [compatibility/graph.md](compatibility/graph.md). Open: the clean-room replacement of the graph front end against that specification, the Cairo and Pango renderer, SVG, PDF and EPS, streaming collected fetches past 10 million rows (RD-017), RD-020, and the corpus.
 
 **M6: packaging and release (2 to 3 weeks, partly parallel).** Distro packages with alternatives, man pages, tested rollback. Exit: install, run all suites, uninstall, reinstall upstream, in clean containers for four distributions.
 Status: not started; no release exists.
