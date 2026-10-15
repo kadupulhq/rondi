@@ -340,11 +340,15 @@ fn bare_host_daemon_address_uses_the_default_port() {
         };
         let upstream = default_port_case(&listener, Path::new("rrdtool"), &directory, address);
         let actual = default_port_case(&listener, &alias, &directory, address);
-        assert_eq!(
-            upstream.0.as_deref(),
-            Some("UPDATE a.rrd 1000000300:1\n"),
-            "address={address:?}, upstream={upstream:?}"
-        );
+        // AI_ADDRCONFIG drops ::1 on hosts without a non-loopback IPv6
+        // address, such as the CI containers, so only IPv4 must connect.
+        if address == "127.0.0.1" {
+            assert_eq!(
+                upstream.0.as_deref(),
+                Some("UPDATE a.rrd 1000000300:1\n"),
+                "address={address:?}, upstream={upstream:?}"
+            );
+        }
         assert_eq!(actual, upstream, "address={address:?}");
     }
 }
