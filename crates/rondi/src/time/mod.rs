@@ -196,13 +196,32 @@ enum DaylightSaving {
 
 /// Applies `shift` to an instant (TS-43). Calendar amounts go through the
 /// instant's local fields and one conversion; seconds are added after.
+///
+/// Compatibility: the instant goes through the local-time conversion even
+/// without a calendar amount. glibc resolves a repeated local hour from the
+/// offset of its previous conversion, so skipping this one (for the default
+/// `now` end, say) changes which instance a later written time gets.
+/// Provenance: black-box compatibility test (the `dst-overlap` vectors
+/// against the live oracle on Linux); see docs/compatibility/time-spec.md
+/// TS-52.
 fn shift_instant(
     instant: i64,
     shift: Shift,
     daylight_saving: DaylightSaving,
 ) -> Result<i64, TimeSpecError> {
     if !shift.calendar {
-        return Ok(instant.wrapping_add(shift.seconds));
+        let converted = Fields::of(instant).map(|mut fields| {
+            if daylight_saving == DaylightSaving::Unknown {
+                fields.forget_daylight_saving();
+            }
+            fields.to_instant()
+        });
+        // An instant the C library cannot represent is kept as written.
+        let base = match converted {
+            Some(converted) if converted != -1 => converted,
+            _ => instant,
+        };
+        return Ok(base.wrapping_add(shift.seconds));
     }
     let mut fields = Fields::of(instant).ok_or(TimeSpecError::OutOfRange)?;
     if daylight_saving == DaylightSaving::Unknown {
