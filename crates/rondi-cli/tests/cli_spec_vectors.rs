@@ -185,94 +185,19 @@ const KNOWN_DIVERGENCES: &[(&str, &[&str], &str)] = &[
         "non-UTF-8 bytes in error messages are replaced by U+FFFD",
     ),
     (
-        "format-badprint-041",
-        ALL,
-        "very large field widths and precisions are rejected instead of printed",
-    ),
-    (
-        "format-badgprint-041",
-        ALL,
-        "very large field widths and precisions are rejected instead of printed",
-    ),
-    (
-        "format-badprint-042",
-        ALL,
-        "very large field widths and precisions are rejected instead of printed",
-    ),
-    (
-        "format-badgprint-042",
-        ALL,
-        "very large field widths and precisions are rejected instead of printed",
-    ),
-    (
-        "format-bounds-020",
-        ALL,
-        "very large field widths and precisions are rejected instead of printed",
-    ),
-    (
-        "format-duration-048",
-        &["macos", "linux-aarch64"],
-        "duration fields of 1e20 ms differ in the last digits",
-    ),
-    (
         "pipe-session-144",
         &["linux-aarch64"],
         "non-UTF-8 bytes in error messages are replaced by U+FFFD",
     ),
     (
-        "format-bounds-003",
-        ALL,
-        "strftime output longer than the reference buffer prints an empty line",
-    ),
-    (
-        "format-bounds-006",
-        ALL,
-        "strftime output longer than the reference buffer prints an empty line",
-    ),
-    (
-        "format-bounds-009",
-        ALL,
-        "strftime output longer than the reference buffer prints an empty line",
-    ),
-    (
-        "format-bounds-012",
-        ALL,
-        "strftime output longer than the reference buffer prints an empty line",
-    ),
-    (
-        "format-bounds-015",
-        ALL,
-        "strftime output longer than the reference buffer prints an empty line",
-    ),
-    (
-        "format-bounds-018",
-        ALL,
-        "strftime output longer than the reference buffer prints an empty line",
-    ),
-    (
-        "format-bounds-021",
-        ALL,
-        "strftime output longer than the reference buffer prints an empty line",
-    ),
-    (
-        "format-bounds-032",
-        ALL,
-        "strftime output longer than the reference buffer prints an empty line",
-    ),
-    (
         "format-bounds-033",
-        ALL,
-        "strftime output longer than the reference buffer prints an empty line",
+        &["linux-x86_64", "linux-aarch64"],
+        "glibc strftime overflow: RRDtool prints bytes past the formatted text",
     ),
     (
         "format-bounds-034",
-        ALL,
-        "strftime output longer than the reference buffer prints an empty line",
-    ),
-    (
-        "format-bounds-035",
-        ALL,
-        "strftime output longer than the reference buffer prints an empty line",
+        &["linux-x86_64", "linux-aarch64"],
+        "glibc strftime overflow: RRDtool prints bytes past the formatted text",
     ),
 ];
 
