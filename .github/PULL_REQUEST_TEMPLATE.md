@@ -22,3 +22,16 @@
 - [ ] Commits are signed off (`git commit -s`)
 - [ ] Tests cover the changed behaviour, including the failure paths
 - [ ] No security boundary is widened
+
+## Provenance
+
+See [docs/PROVENANCE.md](../docs/PROVENANCE.md).
+
+- [ ] Implementation came from documentation/specification/test behavior.
+- [ ] No RRDtool C code was translated.
+- [ ] No GPL comments were copied.
+- [ ] Internal architecture was independently designed.
+- [ ] Compatibility quirks have tests.
+- [ ] Source-inspection-derived behavior is documented.
+- [ ] Implementation is idiomatic Rust rather than C-shaped Rust.
+- [ ] Any uncertain provenance has been flagged.

@@ -10,6 +10,7 @@ follows [Semantic Versioning](VERSIONING.md).
 
 - `tune` performs the `rrd_modify` operations `DEL:`, `DS:`, `DELRRA:`, `RRA#n:[+-=]rows`, `RRA:` and `--step` (#91).
 - Criterion fetch and graph calculation benchmarks for 120-row and 7,200-row archives (#79).
+- Independent-implementation rules for contributors and coding agents in `AGENTS.md` and `docs/PROVENANCE.md`, with a provenance checklist in the pull request template.
 
 ### Changed
 
