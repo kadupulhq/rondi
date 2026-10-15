@@ -297,6 +297,7 @@ fn a14_updatev_return_value_on_failure() {
         &[
             step(&["updatev", "t.rrd", "1000000010:3", "1000000020:abc"]),
             step(&["updatev", "t.rrd", "1000000005:3"]),
+            step(&["updatev", "missing.rrd", "1000000030:3"]),
         ],
     );
 }
@@ -380,6 +381,45 @@ fn a18_rrd_strtod_whitespace_and_exponent_wrap() {
             step(&["update", "t.rrd", "1000000020:\u{b}5"]),
         ],
     );
+}
+
+// A19: get_time_from_reading converts a time past 2^63 to time_t out of
+// range (rrd_update.c:1409-1410). aarch64 saturates and leaves a huge
+// unknown_sec; x86_64 stores LONG_MIN and rejects the update. Separately,
+// calculate_elapsed_steps returns the step count as int.
+#[test]
+fn a19_huge_times_follow_the_cpu_and_wrap_elapsed_steps() {
+    let create: &[&str] = &[
+        "--start",
+        "1000000000",
+        "--step",
+        "300",
+        "DS:g:GAUGE:600:U:U",
+        "DS:h:GAUGE:99999999999999999:U:U",
+        "RRA:AVERAGE:0.5:1:4",
+        "RRA:MAX:0.5:7:4",
+        "RRA:AVERAGE:0.9:5:4",
+    ];
+    for time in ["99999999999999999999", "9223372036854775807"] {
+        assert_same(
+            create,
+            &[
+                step(&["updatev", "t.rrd", &format!("{time}:5:6")]),
+                step(&["info", "t.rrd"]),
+            ],
+        );
+    }
+    // 2^32 + 1 and 2^31 steps after the first PDP boundary.
+    for time in ["1289490189017.25", "645245094317"] {
+        assert_same(
+            create,
+            &[
+                step(&["updatev", "t.rrd", "1000000100:5:6"]),
+                step(&["updatev", "t.rrd", &format!("{time}:7:8")]),
+                step(&["info", "t.rrd"]),
+            ],
+        );
+    }
 }
 
 // Control: the consolidation path itself matches byte-for-byte.

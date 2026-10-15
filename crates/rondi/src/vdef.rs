@@ -3,8 +3,16 @@
 //! This evaluates the aggregation functions accepted by RRDtool 1.11.0 VDEF
 //! expressions. It does not parse graph scripts or render graphs.
 
-use crate::rrd_binary::rrd_nan;
 use thiserror::Error;
+
+use crate::rrd_binary::{rrd_mul_add, rrd_nan};
+
+/// The pinned Linux aarch64 oracle is built with GCC, which contracts across
+/// statements (`-ffp-contract=fast`) and after expanding `pow(x, 2.0)`, while
+/// the macOS build uses Clang, which only fuses within one expression. They
+/// also split `a * b - c * d` differently. x86_64 never fuses, so there both
+/// forms round the same.
+const GCC_CONTRACTION: bool = cfg!(all(target_arch = "aarch64", target_os = "linux"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VdefFunction {
@@ -111,27 +119,7 @@ pub fn evaluate_vdef(
                 no_time(sorted[index])
             }
         }
-        VdefFunction::Maximum | VdefFunction::Minimum => {
-            let Some(mut index) = values.iter().position(|value| !value.is_nan()) else {
-                return Ok(no_time(rrd_nan()));
-            };
-            let mut best = values[index];
-            for (next_index, value) in values.iter().copied().enumerate().skip(index + 1) {
-                // The initial value is accepted even if infinite; later values
-                // are considered only when finite, matching RRDtool's source.
-                if value.is_finite()
-                    && ((function == VdefFunction::Maximum && value > best)
-                        || (function == VdefFunction::Minimum && value < best))
-                {
-                    best = value;
-                    index = next_index;
-                }
-            }
-            VdefResult {
-                value: best,
-                timestamp: Some(interval_timestamp(start, index, step)?),
-            }
-        }
+        VdefFunction::Maximum | VdefFunction::Minimum => extrema(function, values, start, step)?,
         VdefFunction::First => match values.iter().position(|value| !value.is_nan()) {
             Some(index) => VdefResult {
                 value: values[index],
@@ -161,12 +149,17 @@ pub fn evaluate_vdef(
                 let value = match function {
                     VdefFunction::Average => average,
                     VdefFunction::Total => sum * step as f64,
-                    VdefFunction::Stdev => (finite
-                        .iter()
-                        .map(|value| (value - average).powi(2))
-                        .sum::<f64>()
-                        / finite.len() as f64)
-                        .sqrt(),
+                    VdefFunction::Stdev => {
+                        let squares = finite.iter().fold(0.0, |sum, value| {
+                            let deviation = value - average;
+                            if GCC_CONTRACTION {
+                                rrd_mul_add(deviation, deviation, sum)
+                            } else {
+                                sum + deviation * deviation
+                            }
+                        });
+                        (squares / finite.len() as f64).sqrt()
+                    }
                     _ => unreachable!(),
                 };
                 no_time(value)
@@ -182,16 +175,26 @@ pub fn evaluate_vdef(
                     count += 1.0;
                     sum_x += x;
                     sum_y += value;
-                    sum_xy += x * value;
-                    sum_xx += x * x;
-                    sum_yy += value * value;
+                    sum_xy = rrd_mul_add(x, value, sum_xy);
+                    // C squares the unsigned step index before converting it.
+                    sum_xx += index.wrapping_mul(index) as f64;
+                    sum_yy = rrd_mul_add(value, value, sum_yy);
                 }
             }
             if count == 0.0 {
                 no_time(rrd_nan())
             } else {
-                let slope = (sum_x * sum_y - count * sum_xy) / (sum_x * sum_x - count * sum_xx);
-                let intercept = (sum_y - slope * sum_x) / count;
+                // Clang rounds the count products and fuses the others; GCC
+                // does the reverse. The correlation below stays unfused in
+                // both because each product feeds a division first.
+                let slope = if GCC_CONTRACTION {
+                    rrd_mul_add(-sum_xy, count, sum_x * sum_y)
+                        / rrd_mul_add(-sum_xx, count, sum_x * sum_x)
+                } else {
+                    rrd_mul_add(sum_x, sum_y, -(count * sum_xy))
+                        / rrd_mul_add(sum_x, sum_x, -(count * sum_xx))
+                };
+                let intercept = rrd_mul_add(-slope, sum_x, sum_y) / count;
                 let correlation = (sum_xy - sum_x * sum_y / count)
                     / ((sum_xx - sum_x * sum_x / count) * (sum_yy - sum_y * sum_y / count)).sqrt();
                 no_time(match function {
@@ -204,6 +207,36 @@ pub fn evaluate_vdef(
         }
     };
     Ok(result)
+}
+
+fn extrema(
+    function: VdefFunction,
+    values: &[f64],
+    start: i64,
+    step: u64,
+) -> Result<VdefResult, VdefError> {
+    let Some(mut index) = values.iter().position(|value| !value.is_nan()) else {
+        return Ok(VdefResult {
+            value: rrd_nan(),
+            timestamp: None,
+        });
+    };
+    let mut best = values[index];
+    for (next_index, value) in values.iter().copied().enumerate().skip(index + 1) {
+        // The initial value is accepted even if infinite; later values
+        // are considered only when finite, matching RRDtool's source.
+        if value.is_finite()
+            && ((function == VdefFunction::Maximum && value > best)
+                || (function == VdefFunction::Minimum && value < best))
+        {
+            best = value;
+            index = next_index;
+        }
+    }
+    Ok(VdefResult {
+        value: best,
+        timestamp: Some(interval_timestamp(start, index, step)?),
+    })
 }
 
 impl VdefFunction {

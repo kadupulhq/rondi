@@ -796,14 +796,36 @@ pub fn drop_rrdcached_privileges(
     Ok(())
 }
 
+/// Asynchronous signals whose default action would stop or kill the daemon.
+/// install_signal_receiver blocks every signal and handles them in one
+/// thread: INT and TERM shut down, USR1 and USR2 shut down with and without
+/// a final flush, and the rest are logged and ignored.
+pub(crate) const RRDCACHED_SIGNALS: [libc::c_int; 14] = [
+    libc::SIGINT,
+    libc::SIGTERM,
+    libc::SIGUSR1,
+    libc::SIGUSR2,
+    libc::SIGHUP,
+    libc::SIGQUIT,
+    libc::SIGALRM,
+    libc::SIGVTALRM,
+    libc::SIGPROF,
+    libc::SIGXCPU,
+    libc::SIGXFSZ,
+    libc::SIGTSTP,
+    libc::SIGTTIN,
+    libc::SIGTTOU,
+];
+
 fn shutdown_signal_mask(how: libc::c_int) {
     // SAFETY: the set is initialized by sigemptyset before use and the old
     // mask pointer may be null.
     unsafe {
         let mut set = std::mem::zeroed::<libc::sigset_t>();
         libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGINT);
-        libc::sigaddset(&mut set, libc::SIGTERM);
+        for signal in RRDCACHED_SIGNALS {
+            libc::sigaddset(&mut set, signal);
+        }
         // pthread_sigmask fails only for an invalid `how`, which the two
         // callers below never pass.
         let status = libc::pthread_sigmask(how, &set, std::ptr::null_mut());
@@ -811,7 +833,7 @@ fn shutdown_signal_mask(how: libc::c_int) {
     }
 }
 
-/// Hold SIGINT and SIGTERM from before the pid file and sockets exist until
+/// Hold the daemon's signals from before the pid file and sockets exist until
 /// the daemon's handlers are installed, so an early signal cannot kill the
 /// process with the default action and leave both behind. Threads spawned
 /// meanwhile inherit the mask, so delivery goes to the unblocking thread.

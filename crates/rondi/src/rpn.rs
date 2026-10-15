@@ -6,7 +6,11 @@
 //! data pointers, so mixed-resolution expressions see the same rows upstream
 //! sees.
 
-use crate::{StoreError, rrd_binary::rrd_nan, rrd_number::parse_rrd_number};
+use crate::{
+    StoreError,
+    rrd_binary::{rrd_mul_add, rrd_nan},
+    rrd_number::parse_rrd_number,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Op {
@@ -216,18 +220,24 @@ pub(crate) fn rpn_parse(
         }) {
             node.op = *op;
             expr = &expr[name.len()..];
-        } else if expr.starts_with(b"PREV(") && vname_len(&expr[5..]) > 0 && {
+        } else if expr.starts_with(b"PREV(") && vname_len(&expr[5..]) > 0 {
             // sscanf("PREV(%255[...])") succeeds on the name alone; the
-            // closing parenthesis is only implied by the length check.
-            let length = 4 + vname_len(&expr[5..]) + 2;
-            matches!(at(expr, length), b',' | 0)
-        } {
+            // closing parenthesis is only implied by the length check. When
+            // that check fails match_op_param still owns the token but leaves
+            // expr in place, so the separator test below reports garbage.
             let name_len = vname_len(&expr[5..]);
+            let length = 4 + name_len + 2;
+            if !matches!(at(expr, length), b',' | 0) {
+                return Err(error(format!(
+                    "garbage in RPN: '{}'",
+                    String::from_utf8_lossy(expr)
+                )));
+            }
             let name = String::from_utf8_lossy(&expr[5..5 + name_len]).into_owned();
             node.op = Op::PrevOther;
             node.ptr =
                 lookup(&name).ok_or_else(|| error(format!("variable '{name}' not found")))?;
-            expr = &expr[(4 + name_len + 2).min(expr.len())..];
+            expr = &expr[length.min(expr.len())..];
         } else if let Some(ptr) = Some(vname_len(expr))
             .filter(|len| *len > 0 && matches!(at(expr, *len), b',' | 0))
             .and_then(|len| lookup(&String::from_utf8_lossy(&expr[..len])).map(|ptr| (ptr, len)))
@@ -783,7 +793,7 @@ pub(crate) fn rpn_calc<'a>(
                             let value = read(data, source.data - offset as isize);
                             if !value.is_nan() {
                                 sum += value;
-                                sum2 += value * value;
+                                sum2 = rrd_mul_add(value, value, sum2);
                                 if op == Op::PredictPerc {
                                     extra.push(value);
                                 }
@@ -802,7 +812,8 @@ pub(crate) fn rpn_calc<'a>(
                     }
                     Op::PredictSigma => {
                         if count > 1 {
-                            value = f64::from(count) * sum2 - sum * sum;
+                            // Clang rounds sum * sum and fuses the other product.
+                            value = rrd_mul_add(f64::from(count), sum2, -(sum * sum));
                             value = if value < 0.0 {
                                 rrd_nan()
                             } else {
@@ -823,7 +834,7 @@ pub(crate) fn rpn_calc<'a>(
                                 value = extra[idx as usize];
                                 if deltax != 0.0 {
                                     let deltay = extra[idx as usize + 1] - extra[idx as usize];
-                                    value += deltay * deltax;
+                                    value = rrd_mul_add(deltay, deltax, value);
                                 }
                             }
                         }
@@ -956,7 +967,7 @@ pub(crate) fn rpn_calc<'a>(
                     n += 1;
                     let delta = datum - mean;
                     mean += delta / f64::from(n);
-                    mean2 += delta * (datum - mean);
+                    mean2 = rrd_mul_add(delta, datum - mean, mean2);
                 }
                 stptr += 1;
                 stack.set(

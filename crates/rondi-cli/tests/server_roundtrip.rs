@@ -25,6 +25,12 @@ fn start_server(root: &std::path::Path, socket: &std::path::Path) -> Child {
         .unwrap()
 }
 
+/// rrdcached rejects a `-b` that is not its own realpath, as upstream does,
+/// and the system temporary directory is a symlink on macOS.
+fn canonical_tempdir() -> tempfile::TempDir {
+    tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
+}
+
 fn wait_for_socket(child: &mut Child, socket: &std::path::Path) {
     let deadline = Instant::now() + common::io_timeout();
     while Instant::now() < deadline {
@@ -681,7 +687,7 @@ fn rrdtool_xport_daemon_flushes_pending_values_like_upstream() {
         oracle_skip!("skipping xport daemon differential: upstream RRDtool is not installed");
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = canonical_tempdir();
     let root = dir.path().join("data");
     std::fs::create_dir_all(&root).unwrap();
     let file = root.join("metric.rrd");
@@ -1093,7 +1099,7 @@ fn rrdtool_xport_daemon_flushes_pending_values_like_upstream() {
 
 #[test]
 fn rrdcached_recursive_create_requires_and_honors_dash_r() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = canonical_tempdir();
     for (name, recursive) in [("default", false), ("recursive", true)] {
         let run_dir = dir.path().join(name);
         std::fs::create_dir_all(&run_dir).unwrap();
@@ -1224,7 +1230,7 @@ fn rrdcached_unconfined_create_matches_upstream_through_symlinks_and_no_overwrit
 
 #[test]
 fn rrdcached_accepts_attached_arguments_and_cacti_options() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = canonical_tempdir();
     let root = dir.path().join("data");
     let socket = dir.path().join("cacti.sock");
     std::fs::create_dir_all(&root).unwrap();
@@ -1529,7 +1535,7 @@ fn rrdcached_socket_group_matches_upstream() {
 
 #[test]
 fn rrdcached_pid_file_tracks_owner_and_prevents_a_second_instance() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = canonical_tempdir();
     let root = dir.path().join("root");
     let socket = dir.path().join("run/rrdcached.sock");
     let second_socket = dir.path().join("run/second.sock");
@@ -1627,7 +1633,7 @@ fn rrdcached_pid_file_tracks_owner_and_prevents_a_second_instance() {
 
 #[test]
 fn rrdcached_log_option_appends_structured_lifecycle_events() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = canonical_tempdir();
     let root = dir.path().join("root");
     let socket = dir.path().join("run/rrdcached.sock");
     let log_file = dir.path().join("run/rrdcached.log");
@@ -1886,7 +1892,7 @@ fn rrdtool_fetch_daemon_resolution_matches_upstream_protocol_behavior() {
         return;
     }
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = canonical_tempdir();
     let root = dir.path().join("data");
     std::fs::create_dir_all(&root).unwrap();
     let file = root.join("multi-resolution.rrd");
@@ -2830,7 +2836,7 @@ fn rrdcached_fractional_update_timestamps_flush_byte_for_byte_like_rrdtool() {
         return;
     }
 
-    let dir = tempfile::tempdir().unwrap();
+    let dir = canonical_tempdir();
     let root = dir.path().join("rrds");
     let socket = dir.path().join("run/rrdcached.sock");
     let alias = dir.path().join("rrdcached");
@@ -2942,7 +2948,7 @@ fn rrdtool_update_daemon_and_environment_route_writes_through_rrdcached() {
         oracle_skip!("skipping rrdtool --daemon integration: RRDtool is not installed");
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
+    let dir = canonical_tempdir();
     let root = dir.path().join("rra");
     let socket = dir.path().join("run/rrdcached.sock");
     let rrdcached = dir.path().join("rrdcached");
@@ -3866,7 +3872,7 @@ fn rrdcached_writes_queued_values_without_waiting_for_the_flush_interval() {
 #[test]
 fn rrdcached_update_waiting_on_an_rrd_lock_does_not_stall_other_clients() {
     use std::os::fd::AsRawFd;
-    let dir = tempfile::tempdir().unwrap();
+    let dir = canonical_tempdir();
     let root = dir.path().join("rra");
     let socket = dir.path().join("run/rrdcached.sock");
     let alias = dir.path().join("rrdcached");
@@ -3942,7 +3948,7 @@ fn rrdcached_update_waiting_on_an_rrd_lock_does_not_stall_other_clients() {
 
 #[test]
 fn rrdcached_idle_client_does_not_block_shutdown_flush() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = canonical_tempdir();
     let root = dir.path().join("rra");
     let socket = dir.path().join("run/rrdcached.sock");
     let alias = dir.path().join("rrdcached");

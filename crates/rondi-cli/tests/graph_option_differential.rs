@@ -128,11 +128,52 @@ impl Fixture {
         assert_eq!(text(&rondi), text(&upstream), "{args:?}");
     }
 
+    /// Compares status, stdout, stderr and the written file of a command
+    /// whose output file is graph-output.png. PNG files compare by their
+    /// IHDR size, anything else byte for byte.
+    fn assert_same_output(&self, args: &[String]) {
+        let file = self.temp.path().join("graph-output.png");
+        let outcome = |program: &Path| {
+            let _ = std::fs::remove_file(&file);
+            let output = self.run(program, args);
+            let written = std::fs::read(&file).ok().map(|bytes| {
+                if bytes.starts_with(b"\x89PNG\r\n\x1a\n") && bytes.len() >= 24 {
+                    let size =
+                        |at: usize| u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap());
+                    format!("png {}x{}", size(16), size(20))
+                } else {
+                    format!("{bytes:?}")
+                }
+            });
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let head: Vec<_> = stdout
+                .lines()
+                .take_while(|l| !l.starts_with("image = "))
+                .collect();
+            (
+                output.status.code(),
+                head.join("\n"),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+                written,
+            )
+        };
+        let upstream = outcome(Path::new("rrdtool"));
+        let rondi = outcome(&self.alias);
+        assert_eq!(rondi, upstream, "{args:?}");
+    }
+
     fn assert_all_same(&self, cases: &[Vec<String>]) {
+        self.assert_all(cases, Self::assert_same);
+    }
+
+    fn assert_all_same_output(&self, cases: &[Vec<String>]) {
+        self.assert_all(cases, Self::assert_same_output);
+    }
+
+    fn assert_all(&self, cases: &[Vec<String>], check: fn(&Self, &[String])) {
         let mut failures = Vec::new();
         for args in cases {
-            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.assert_same(args)))
-                .is_err()
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check(self, args))).is_err()
             {
                 failures.push(format!("{args:?}"));
             }
@@ -342,7 +383,7 @@ fn png_dimension_limit_applies_before_data_processing() {
         assert_eq!(output.status.code(), Some(1), "{extra:?}");
         assert_eq!(
             String::from_utf8_lossy(&output.stderr),
-            "ERROR: PNG graph dimensions exceed the 4096 pixel safety limit\n",
+            "ERROR: PNG graph exceeds the 16777216 pixel safety limit\n",
             "{extra:?}"
         );
     }
@@ -353,4 +394,141 @@ fn png_dimension_limit_applies_before_data_processing() {
         &["LINE1:x#ff0000"],
     );
     assert_eq!(xml.status.code(), Some(0));
+}
+
+// graph_cairo_setup sizes the surface as int(ximg * zoom) and image_info
+// reports (long)(zoom * ximg), while graphv's image_width stays unscaled.
+// A surface cairo cannot create or write fails the save after image_info.
+#[test]
+fn zoom_scales_the_written_image_and_image_info() {
+    let Some(f) = fixture() else { return };
+    let info = ["--imginfo", "%s %lu %lu"];
+    let line = "LINE1:x#ff0000";
+    let cases: Vec<Vec<String>> = [
+        vec!["--zoom", "2", line],
+        vec!["--zoom", "2", info[0], info[1], line],
+        vec!["--zoom", "1.5", info[0], info[1], line],
+        vec!["--zoom", "0.333", info[0], info[1], line],
+        vec!["--zoom", "2", "--only-graph", line],
+        vec![
+            "--zoom",
+            "2",
+            "--full-size-mode",
+            "-w",
+            "300",
+            "-h",
+            "200",
+            line,
+        ],
+        vec!["--zoom", "0.001", info[0], info[1], line],
+        vec!["--zoom", "100", info[0], info[1], line],
+        vec!["--zoom", "1e30", info[0], info[1], line],
+        vec!["--zoom", "nan", info[0], info[1], line],
+        vec!["--zoom", "2", info[0], info[1], "PRINT:x:AVERAGE:%lf"],
+        vec![info[0], info[1], "-a", "CSV", line],
+    ]
+    .iter()
+    .flat_map(|extra| {
+        let mut graphv = f.graph(extra);
+        graphv[0] = String::from("graphv");
+        [f.graph(extra), graphv]
+    })
+    .collect();
+    f.assert_all_same_output(&cases);
+}
+
+// An infinite --upper-limit or --lower-limit makes si_unit's magfact infinite,
+// so calc_horizontal_grid sees a NaN scaled range and graph_paint stops
+// without an error: no file, no output, exit 0. --logarithmic is left out
+// because the pinned build loops forever there.
+#[test]
+fn infinite_limits_abandon_the_graph_silently() {
+    let Some(f) = fixture() else { return };
+    let line = "LINE1:x#ff0000";
+    let cases: Vec<Vec<String>> = [
+        vec!["-u", "inf", line],
+        vec!["-u", "1e400", line],
+        vec!["-l", "-inf", line],
+        vec!["-l", "-inf", line, "PRINT:x:AVERAGE:%lf"],
+        vec!["-u", "inf", "-r", line],
+        vec!["-u", "inf", "-l", "-inf", line],
+        vec!["-u", "inf", "-A", line],
+        vec!["-u", "inf", "-y", "10:2", line],
+        vec!["-u", "inf", "--imginfo", "%s %lu %lu", line],
+        vec!["-u", "inf", "-j", line],
+        vec!["-l", "inf", line],
+        vec!["-u", "-inf", line],
+        vec!["-u", "nan", line],
+        vec!["-u", "1e308", line],
+        vec!["-u", "inf", "PRINT:x:AVERAGE:%lf"],
+        vec!["-u", "inf", "-a", "CSV", line],
+    ]
+    .iter()
+    .flat_map(|extra| {
+        let mut graphv = f.graph(extra);
+        graphv[0] = String::from("graphv");
+        [f.graph(extra), graphv]
+    })
+    .collect();
+    f.assert_all_same_output(&cases);
+}
+
+// --units-length is an atoi value; a negative one shrinks the y-label space
+// below zero. graph_left and image_width are unsigned longs in graphv while
+// the graph WxH line prints them signed, and a negative image is a cairo
+// surface error. The zoomed case has no legend: on Linux pango measures
+// legend text through the zoomed cairo context, and Rondi's text metrics
+// do not model that hinting.
+#[test]
+fn negative_units_length_moves_the_graph_origin() {
+    let Some(f) = fixture() else { return };
+    let line = "LINE1:x#ff0000:legend";
+    let cases: Vec<Vec<String>> = [
+        vec!["--units-length", "-3", line],
+        vec!["--units-length", "-60", line],
+        vec!["--units-length", "-1000", line],
+        vec!["--units-length", "-1000", "--imginfo", "%s %lu %lu", line],
+        vec!["--units-length", "-3", "--right-axis", "1:0", line],
+        vec!["--units-length", "-3", "--legend-position", "west", line],
+        vec!["--units-length", "-3", "--legend-position", "east", line],
+        vec!["--units-length", "-3", "--full-size-mode", line],
+        vec!["--units-length", "-3", "--zoom", "2", "LINE1:x#ff0000"],
+        vec!["--units-length", "-3", "PRINT:x:AVERAGE:%lf"],
+    ]
+    .iter()
+    .flat_map(|extra| {
+        let mut graphv = f.graph(extra);
+        graphv[0] = String::from("graphv");
+        [f.graph(extra), graphv]
+    })
+    .collect();
+    f.assert_all_same_output(&cases);
+}
+
+// Tall and wide graphs up to cairo's 32767-pixel side render like rrdtool
+// while the pixel count stays under Rondi's 2^24 safety limit; one more
+// pixel of height is cairo's surface error. A large square canvas is still
+// refused (RD-016).
+#[test]
+fn tall_and_wide_png_graphs_match_up_to_the_cairo_limit() {
+    let Some(f) = fixture() else { return };
+    let line = "LINE1:x#ff0000";
+    let cases: Vec<Vec<String>> = [
+        vec!["-h", "32000", line],
+        vec!["-h", "32726", line],
+        vec!["-h", "32727", line],
+        vec!["-w", "32000", line],
+        vec!["-w", "4000", "-h", "4000", line],
+        vec!["-h", "8000", "--zoom", "2", "--imginfo", "%s %lu %lu", line],
+    ]
+    .iter()
+    .map(|extra| f.graph(extra))
+    .collect();
+    f.assert_all_same_output(&cases);
+    let square = f.run(&f.alias, &f.graph(&["-w", "20000", "-h", "20000", line]));
+    assert_eq!(square.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&square.stderr),
+        "ERROR: PNG graph exceeds the 16777216 pixel safety limit\n"
+    );
 }

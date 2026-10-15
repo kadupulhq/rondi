@@ -61,7 +61,7 @@ impl Fixture {
         let mut image = GraphImage::new(self.start, self.end, 1);
         let resolve = |_: Option<&str>, _: Option<&str>, start: i64, end: i64| Ok((start, end));
         image.graph_script(script, &resolve).unwrap();
-        image.data_fetch(&mut |_, _| Ok(())).unwrap();
+        image.data_fetch(&mut |_, _| Ok(None)).unwrap();
         image.data_calc().unwrap();
         let data = image.xport(false).unwrap();
         (image, data)

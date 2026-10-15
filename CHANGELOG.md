@@ -12,6 +12,7 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ### Changed
 
+- License Rondi under `MIT OR Apache-2.0`, replacing `GPL-2.0-or-later WITH RRDtool-FLOSS-exception-2.0`. `COPYRIGHT` now carries RRDtool's unmodified notice as third-party attribution, and the GPL version 2 text moves to `LICENSE-GPL-2.0`.
 - Replace the library entry point `run(config)` with `prepare_server(config)`, called before threads start, and `run(prepared)`. Library callers must update (breaking API change).
 
 ### Fixed
@@ -30,3 +31,8 @@ follows [Semantic Versioning](VERSIONING.md).
 - Publish the JSON daemon socket from private staging with mode `0600` already set.
 - Keep daemon RRD reads on checked `O_NOFOLLOW` descriptors through inspection, fetch, and dump; reuse checked descriptors for update and tune metadata.
 - Limit the initial CodeQL matrix to workflow analysis until application source is added.
+- Handle SIGUSR1 (shut down after flushing), SIGUSR2 (shut down without flushing), and SIGHUP (ignored) in rrdcached as upstream does, removing the pid file and sockets on exit.
+- Validate rrdcached `-b` during option parsing with upstream messages and exit statuses, and report an unusable base directory without Rust debug formatting.
+- Repeat an unknown rrdcached `-P` permission name as given instead of uppercased.
+- Report an uncreatable rrdcached pid file directory twice and end with `FATAL: Fail to create/open PID file`, as check_pidfile does.
+- Without `-o`, write only error-level rrdcached log lines, to stderr instead of stdout, matching upstream's default foreground logging.

@@ -67,29 +67,56 @@ pub fn c_strtol(text: &str, base: u32) -> (i64, usize) {
     (value, end)
 }
 
-/// `errno = 0; strtoll(text, NULL, base)`: the value and whether errno
-/// became ERANGE.
-pub(crate) fn c_strtoll_errno(text: &str, base: u32) -> (i64, bool) {
-    let (negative, magnitude, overflow, _) = strtol_parts(text, base);
+/// Whether the host libc sets EINVAL when strtol/strtoul convert nothing.
+/// FreeBSD-derived libcs (Apple's included) do; glibc and musl leave errno
+/// alone, so RRDtool's `errno > 0` checks only reject an empty or
+/// non-numeric field on the former.
+const NO_CONVERSION_EINVAL: bool = cfg!(any(
+    target_vendor = "apple",
+    target_os = "freebsd",
+    target_os = "dragonfly"
+));
+
+/// The errno a strtol-family call leaves after `errno = 0`.
+fn strtol_errno(converted: bool, out_of_range: bool) -> i32 {
+    if out_of_range {
+        libc::ERANGE
+    } else if !converted && NO_CONVERSION_EINVAL {
+        libc::EINVAL
+    } else {
+        0
+    }
+}
+
+/// `errno = 0; strtoll(text, NULL, base)`: the value and the errno it
+/// leaves, ERANGE past the 64-bit range or EINVAL (on some libcs) when
+/// nothing converts.
+pub fn c_strtoll_errno(text: &str, base: u32) -> (i64, i32) {
+    let (negative, magnitude, overflow, end) = strtol_parts(text, base);
     let limit = if negative {
         i64::MIN.unsigned_abs()
     } else {
         i64::MAX as u64
     };
-    (c_strtol(text, base).0, overflow || magnitude > limit)
+    (
+        c_strtol(text, base).0,
+        strtol_errno(end > 0, overflow || magnitude > limit),
+    )
 }
 
 /// `errno = 0; strtoul(text, NULL, base)`: a leading `-` negates in
-/// unsigned arithmetic, and only a magnitude past ULONG_MAX sets ERANGE.
-pub(crate) fn c_strtoul_errno(text: &str, base: u32) -> (u64, bool) {
-    let (negative, magnitude, overflow, _) = strtol_parts(text, base);
-    if overflow {
-        (u64::MAX, true)
+/// unsigned arithmetic, only a magnitude past ULONG_MAX sets ERANGE, and
+/// some libcs set EINVAL when nothing converts.
+pub(crate) fn c_strtoul_errno(text: &str, base: u32) -> (u64, i32) {
+    let (negative, magnitude, overflow, end) = strtol_parts(text, base);
+    let value = if overflow {
+        u64::MAX
     } else if negative {
-        (magnitude.wrapping_neg(), false)
+        magnitude.wrapping_neg()
     } else {
-        (magnitude, false)
-    }
+        magnitude
+    };
+    (value, strtol_errno(end > 0, overflow))
 }
 
 /// The parse shared by the strtol family: sign, magnitude (wrapping),
@@ -328,7 +355,7 @@ pub(crate) fn parse_rrd_decimal(input: &str) -> Option<(f64, usize)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{c_strtol, parse_rrd_number};
+    use super::{c_strtol, c_strtoll_errno, c_strtoul_errno, parse_rrd_number};
 
     #[test]
     fn strtol_follows_c_prefixes_and_saturation() {
@@ -343,6 +370,32 @@ mod tests {
         assert_eq!(c_strtol("99999999999999999999", 10).0, i64::MAX);
         assert_eq!(c_strtol("-99999999999999999999", 10).0, i64::MIN);
         assert_eq!(c_strtol("-9223372036854775808", 10).0, i64::MIN);
+    }
+
+    #[test]
+    fn strtol_errno_follows_the_host_libc() {
+        let none = if cfg!(target_vendor = "apple") {
+            libc::EINVAL
+        } else if cfg!(all(target_os = "linux", target_env = "gnu")) {
+            0
+        } else {
+            return;
+        };
+        assert_eq!(c_strtoul_errno("abc", 0), (0, none));
+        assert_eq!(c_strtoul_errno("", 0), (0, none));
+        assert_eq!(c_strtoul_errno("-", 0), (0, none));
+        assert_eq!(c_strtoll_errno("x", 0), (0, none));
+        assert_eq!(c_strtoul_errno("0x", 0), (0, 0));
+        assert_eq!(c_strtoul_errno("12abc", 0), (12, 0));
+        assert_eq!(c_strtoul_errno("-1", 0), (u64::MAX, 0));
+        assert_eq!(
+            c_strtoul_errno("99999999999999999999", 0),
+            (u64::MAX, libc::ERANGE)
+        );
+        assert_eq!(
+            c_strtoll_errno("-99999999999999999999", 0),
+            (i64::MIN, libc::ERANGE)
+        );
     }
 
     #[test]
