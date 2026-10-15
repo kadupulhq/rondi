@@ -299,9 +299,16 @@ quarter-hour zones and DST transitions (`ltime-03` to `ltime-06`,
   UTC, the 01:00 local row). [doc] [bb]
 - `NEWWEEK` pushes 1 when the row's local weekday is the first day of the
   week and differs from the weekday of `row time - STEPWIDTH`. [bb]
-- Rondi always starts the week on Sunday. That matches macOS and the CI
-  glibc image; a glibc host whose locale starts the week on Monday is not
-  matched.
+- On glibc the first weekday comes from the locale the environment selects
+  as for `setlocale(LC_ALL, "")`: `LC_ALL` wins over `LC_TIME`, which wins
+  over `LANG`, and if any category names a locale that is not installed the
+  whole selection falls back to C. The first weekday is the weekday of the
+  locale's `week` start date (`19971130`, a Sunday, in every probed locale)
+  plus `first_weekday - 1`. Probed in the CI image (glibc, Debian): C,
+  POSIX, `en_US` and `he_IL` start on Sunday, `de_DE`, `en_GB` and `fr_FR`
+  on Monday, `ar_EG` on Saturday; `LANG=de_DE.UTF-8 LC_TIME=C` and
+  `LC_ALL=C LC_TIME=de_DE.UTF-8` start on Sunday; an uninstalled locale in
+  any variable gives Sunday. [bb]
 - The first day of the week is platform dependent: on macOS it is always
   Sunday, independent of locale (`newweek-05` uses `LC_ALL=en_GB.UTF-8`
   and still starts on Sunday). On glibc it is derived from the locale's

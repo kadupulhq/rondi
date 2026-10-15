@@ -57,14 +57,85 @@ pub(super) fn starts_new(period: Period, time: i64, step: u64) -> bool {
     let before = local_fields(earlier);
     match period {
         Period::Day => (now.year, now.year_day) != (before.year, before.year_day),
-        // Compatibility: weeks start on Sunday. macOS ignores the locale here
-        // and the CI glibc image matches; locales whose week starts on
-        // another day are not consulted.
-        // Provenance: black-box compatibility test (newweek-01 to newweek-05).
-        Period::Week => now.week_day == 0 && before.week_day != 0,
+        Period::Week => {
+            let first = first_weekday();
+            now.week_day == first && before.week_day != first
+        }
         Period::Month => (now.year, now.month) != (before.year, before.month),
         Period::Year => now.year != before.year,
     }
+}
+
+/// The first day of the week, zero being Sunday.
+///
+/// Compatibility: macOS always starts on Sunday whatever the locale. glibc
+/// takes it from the locale the environment selects, as for
+/// `setlocale(LC_ALL, "")` (`LC_ALL`, then `LC_TIME`, then `LANG`; if any
+/// category names a missing locale the whole selection falls back to C):
+/// the weekday of the locale's `week` start date plus `first_weekday - 1`.
+/// So `de_DE` and `en_GB` start on Monday, `ar_EG` on Saturday, C and
+/// `en_US` on Sunday.
+/// Provenance: black-box compatibility test (newweek-05;
+/// alias_modes::rpn_newweek_matches_locale_first_weekday_from_rrdtool) and
+/// probes of the Linux oracle; see "NEWDAY, NEWWEEK, NEWMONTH, NEWYEAR" in
+/// docs/compatibility/rpn.md.
+fn first_weekday() -> i64 {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        static FIRST: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+        *FIRST.get_or_init(glibc_first_weekday)
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    {
+        0
+    }
+}
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn glibc_first_weekday() -> i64 {
+    // glibc's LC_TIME items for the `week` start date (YYYYMMDD, carried in
+    // the returned pointer value) and `first_weekday` (1 to 7, first byte).
+    const WEEK_START_DATE: libc::nl_item = 0x2_0066;
+    const FIRST_WEEKDAY: libc::nl_item = 0x2_0068;
+    // SAFETY: newlocale reads the environment and returns an owned locale
+    // or null; both items are read from that locale before it is freed.
+    unsafe {
+        let mut locale = libc::newlocale(libc::LC_ALL_MASK, c"".as_ptr(), std::ptr::null_mut());
+        if locale.is_null() {
+            locale = libc::newlocale(libc::LC_ALL_MASK, c"C".as_ptr(), std::ptr::null_mut());
+            if locale.is_null() {
+                return 0;
+            }
+        }
+        let date = libc::nl_langinfo_l(WEEK_START_DATE, locale) as usize as i64;
+        let first = libc::nl_langinfo_l(FIRST_WEEKDAY, locale);
+        let first = if first.is_null() {
+            1
+        } else {
+            i64::from(*first.cast::<u8>())
+        };
+        libc::freelocale(locale);
+        (weekday_of_date(date) + first - 1).rem_euclid(7)
+    }
+}
+
+/// The weekday (zero is Sunday) of a YYYYMMDD date in the proleptic
+/// Gregorian calendar; Sunday for a value that is not a date.
+#[cfg_attr(not(all(target_os = "linux", target_env = "gnu")), allow(dead_code))]
+fn weekday_of_date(date: i64) -> i64 {
+    let (year, month, day) = (date / 10_000, date / 100 % 100, date % 100);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return 0;
+    }
+    // Days since 1970-01-01 (a Thursday) from a March-based year.
+    let shifted_year = if month <= 2 { year - 1 } else { year };
+    let era = shifted_year.div_euclid(400);
+    let year_of_era = shifted_year.rem_euclid(400);
+    let month_index = (month + 9) % 12;
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    (days + 4).rem_euclid(7)
 }
 
 #[cfg(unix)]
@@ -169,6 +240,16 @@ mod tests {
         assert_eq!((leap_day_end.month, leap_day_end.year_day), (1, 59));
         let new_years_eve = utc_fields(NEW_YEAR_2021 - 1);
         assert_eq!((new_years_eve.year, new_years_eve.year_day), (120, 365));
+    }
+
+    #[test]
+    fn weekday_of_week_start_dates() {
+        // glibc's usual `week` start date, a Sunday, and the day after.
+        assert_eq!(weekday_of_date(19_971_130), 0);
+        assert_eq!(weekday_of_date(19_971_201), 1);
+        assert_eq!(weekday_of_date(20_240_101), 1);
+        assert_eq!(weekday_of_date(20_000_229), 2);
+        assert_eq!(weekday_of_date(0), 0);
     }
 
     #[test]
