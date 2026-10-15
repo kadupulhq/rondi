@@ -16,8 +16,7 @@ use optparse::{ArgType, LongOpt, OptParse, opt};
 
 use clap::{Parser, Subcommand};
 use rondi::time::{
-    UpdateTimestamp, parse_rrd_update_timestamp, resolve_rrd_range_times, rrd_parsetime,
-    rrd_proc_start_end,
+    UpdateTimestamp, parse_time_spec, parse_update_timestamp, resolve_start_end, resolve_window,
 };
 use rondi::{
     DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, DatabaseConfig, RrdDataSourceTune, RrdDumpHeader,
@@ -1493,7 +1492,7 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             _ if option == optparse::DONE => break,
             Ok('d') => daemon_address = Some(value),
             Ok('b') => {
-                start = rrd_parsetime(&value, now)
+                start = parse_time_spec(&value, now)
                     .map_err(|error| format!("start time: {error}"))?
                     .absolute()
                     .ok_or(
@@ -1749,8 +1748,8 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
-    let mut start_tv = rrd_parsetime("end-24h", now)?;
-    let mut end_tv = rrd_parsetime("now", now)?;
+    let mut start_tv = parse_time_spec("end-24h", now)?;
+    let mut end_tv = parse_time_spec("now", now)?;
     let mut resolution = 1_u64;
     let mut align_start = false;
     let mut daemon_address = None::<String>;
@@ -1760,11 +1759,11 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         match u8::try_from(option).map(char::from) {
             _ if option == optparse::DONE => break,
             Ok('s') => {
-                start_tv = rrd_parsetime(options.value(), now)
+                start_tv = parse_time_spec(options.value(), now)
                     .map_err(|error| format!("start time: {error}"))?;
             }
             Ok('e') => {
-                end_tv = rrd_parsetime(options.value(), now)
+                end_tv = parse_time_spec(options.value(), now)
                     .map_err(|error| format!("end time: {error}"))?;
             }
             Ok('a') => align_start = true,
@@ -1774,7 +1773,7 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             _ => {}
         }
     }
-    let (mut start, mut end) = rrd_proc_start_end(&mut start_tv, &mut end_tv)?;
+    let (mut start, mut end) = resolve_start_end(&start_tv, &end_tv)?;
     if start < 315_360_000 {
         return Err("the first entry to fetch should be after 1980".into());
     }
@@ -2440,14 +2439,7 @@ fn prepare_graph_image(
     // newGraphDescription starts each DEF window as absolute times at the
     // image window and parses only the given `start=`/`end=`.
     let resolve = |start_spec: Option<&str>, end_spec: Option<&str>, start: i64, end: i64| {
-        let start_text = start.to_string();
-        let end_text = end.to_string();
-        resolve_rrd_range_times(
-            Some(start_spec.unwrap_or(&start_text)),
-            Some(end_spec.unwrap_or(&end_text)),
-            now,
-        )
-        .map_err(|error| error.to_string())
+        resolve_window(start_spec, end_spec, (start, end), now)
     };
     match im.graph_script(request.elements, &resolve) {
         Ok(()) => Ok((im, false)),
@@ -4855,7 +4847,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs_f64();
         let update_time = if at_style {
-            let seconds = rrd_parsetime(timestamp, update_now.floor() as i64)
+            let seconds = parse_time_spec(timestamp, update_now.floor() as i64)
                 .map_err(|error| format!("{}: ds time: {timestamp}: {error}", filename.display()))?
                 .absolute()
                 .ok_or_else(|| {
@@ -4869,7 +4861,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 microseconds: 0,
             }
         } else {
-            parse_rrd_update_timestamp(timestamp, update_now).map_err(|_| {
+            parse_update_timestamp(timestamp, update_now).map_err(|_| {
                 format!(
                     "{}: error while parsing time in get_time_from_reading - Cannot convert '{timestamp}' to float",
                     filename.display()
@@ -4881,7 +4873,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
             .map(|value| value.as_deref().unwrap_or("U"))
             .collect::<Vec<_>>()
             .join(":");
-        daemon_samples.push(format!("{}:{encoded_values}", update_time.format_rrd()));
+        daemon_samples.push(format!("{}:{encoded_values}", update_time));
     }
     if let Some(address) = daemon_address
         && !daemon_samples.is_empty()
