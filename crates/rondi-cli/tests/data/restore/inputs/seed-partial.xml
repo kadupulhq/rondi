@@ -1,0 +1,119 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE rrd SYSTEM "https://oss.oetiker.ch/rrdtool/rrdtool.dtd">
+<!-- Round Robin Database Dump -->
+<rrd>
+	<version>0003</version>
+	<step>60</step> <!-- Seconds -->
+	<lastupdate>1000001427</lastupdate> <!-- 2001-09-09 02:10:27 +0000 -->
+
+	<ds>
+		<name> x </name>
+		<type> GAUGE </type>
+		<minimal_heartbeat>120</minimal_heartbeat>
+		<min>NaN</min>
+		<max>NaN</max>
+
+		<!-- PDP Status -->
+		<last_ds>U</last_ds>
+		<value>NaN</value>
+		<unknown_sec> 27 </unknown_sec>
+	</ds>
+
+	<ds>
+		<name> y </name>
+		<type> COUNTER </type>
+		<minimal_heartbeat>120</minimal_heartbeat>
+		<min>0.0000000000e+00</min>
+		<max>NaN</max>
+
+		<!-- PDP Status -->
+		<last_ds>2400</last_ds>
+		<value>5.7446808511e+01</value>
+		<unknown_sec> 0 </unknown_sec>
+	</ds>
+
+	<!-- Round Robin Archives -->
+	<rra>
+		<cf>AVERAGE</cf>
+		<pdp_per_row>5</pdp_per_row> <!-- 300 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>7.8666666667e+00</primary_value>
+			<secondary_value>1.0000000000e+01</secondary_value>
+			<value>0.0000000000e+00</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+			<ds>
+			<primary_value>1.6973995272e+00</primary_value>
+			<secondary_value>1.8203309693e+00</secondary_value>
+			<value>0.0000000000e+00</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:55:00 +0000 / 1000000500 --> <row><v>7.5333333333e+00</v><v>1.6666666667e+00</v></row>
+			<!-- 2001-09-09 02:00:00 +0000 / 1000000800 --> <row><v>1.0200000000e+01</v><v>1.6666666667e+00</v></row>
+			<!-- 2001-09-09 02:05:00 +0000 / 1000001100 --> <row><v>7.2000000000e+00</v><v>1.6666666667e+00</v></row>
+			<!-- 2001-09-09 02:10:00 +0000 / 1000001400 --> <row><v>7.8666666667e+00</v><v>1.6973995272e+00</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>MIN</cf>
+		<pdp_per_row>5</pdp_per_row> <!-- 300 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>3.6666666667e+00</primary_value>
+			<secondary_value>1.0000000000e+01</secondary_value>
+			<value>inf</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+			<ds>
+			<primary_value>1.6666666667e+00</primary_value>
+			<secondary_value>1.8203309693e+00</secondary_value>
+			<value>inf</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:55:00 +0000 / 1000000500 --> <row><v>4.6666666667e+00</v><v>1.6666666667e+00</v></row>
+			<!-- 2001-09-09 02:00:00 +0000 / 1000000800 --> <row><v>5.6666666667e+00</v><v>1.6666666667e+00</v></row>
+			<!-- 2001-09-09 02:05:00 +0000 / 1000001100 --> <row><v>2.6666666667e+00</v><v>1.6666666667e+00</v></row>
+			<!-- 2001-09-09 02:10:00 +0000 / 1000001400 --> <row><v>3.6666666667e+00</v><v>1.6666666667e+00</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>LAST</cf>
+		<pdp_per_row>7</pdp_per_row> <!-- 420 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>1.1666666667e+01</primary_value>
+			<secondary_value>1.1666666667e+01</secondary_value>
+			<value>1.0000000000e+01</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+			<ds>
+			<primary_value>1.6666666667e+00</primary_value>
+			<secondary_value>1.6666666667e+00</secondary_value>
+			<value>1.8203309693e+00</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:51:00 +0000 / 1000000260 --> <row><v>5.3333333333e+00</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:58:00 +0000 / 1000000680 --> <row><v>5.6666666667e+00</v><v>1.6666666667e+00</v></row>
+			<!-- 2001-09-09 02:05:00 +0000 / 1000001100 --> <row><v>1.1666666667e+01</v><v>1.6666666667e+00</v></row>
+		</database>
+	</rra>
+</rrd>

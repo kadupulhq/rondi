@@ -1,0 +1,1 @@
+<rrd><version>0003</version><step>60</step><lastupdate>0</lastupdate><ds><name>a</name><type>GAUGE</type><min>1e1025</min></ds><rra><cf>AVERAGE</cf><pdp_per_row>1</pdp_per_row><params><xff>0.5</xff></params><cdp_prep><ds><value>1</value></ds></cdp_prep><database><row><v>1</v></row></database></rra></rrd>
