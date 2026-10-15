@@ -16,8 +16,8 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-rondi = { path = "../rondi" }
-rondi-server = { path = "../rondi-server" }
+rondi.workspace = true
+rondi-server.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

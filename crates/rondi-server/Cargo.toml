@@ -11,7 +11,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-rondi = { path = "../rondi" }
+rondi.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
