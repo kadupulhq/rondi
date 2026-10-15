@@ -1,13 +1,6 @@
 //! Port of RRDtool 1.11.0 `rrd_restore.c`: the libxml2 pull-parser walk in
-//! `parse_file` and its `parse_tag_*` helpers, and `write_file`.
-//!
-//! `XmlReader` stands in for libxml2's `xmlTextReader`. It yields the same
-//! element, end-element and text nodes for well-formed input and reports
-//! `xmlTextReaderGetParserLineNumber` the way the reader advances: it pushes
-//! the document to the parser in a 4-byte chunk and then 512-byte chunks, so
-//! the line is the one reached at the end of the chunk that completed the
-//! current node. Malformed XML fails with Rondi's own description where
-//! libxml2 prints its parser diagnostics.
+//! `parse_file` and its `parse_tag_*` helpers, and `write_file`. The
+//! `xmlTextReader` it pulls nodes from is modelled in `xml_reader`.
 
 use crate::rrd_binary::{
     CDP_PREP_LEN, DS_DEF_LEN, FLOAT_COOKIE, LIVE_HEAD_LEN, PDP_PREP_LEN, RRA_DEF_LEN,
@@ -15,271 +8,10 @@ use crate::rrd_binary::{
 };
 use crate::rrd_number::{c_strtoll_errno, c_strtoul_errno, parse_rrd_decimal};
 use crate::storage::StoreError;
+use crate::xml_reader::{NodeType, Source, XmlReader};
 use std::io::Write;
 
 const MAX_PAR: usize = 10;
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum NodeType {
-    Element,
-    EndElement,
-    Text,
-    Other,
-}
-
-struct XmlReader<'a> {
-    data: &'a [u8],
-    position: usize,
-    /// End of the furthest token the parser has had to see.
-    parsed: usize,
-    node: NodeType,
-    name: String,
-    value: String,
-    open: Vec<String>,
-    root_closed: bool,
-}
-
-impl<'a> XmlReader<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self {
-            data,
-            position: 0,
-            parsed: 0,
-            node: NodeType::Other,
-            name: String::new(),
-            value: String::new(),
-            open: Vec::new(),
-            root_closed: false,
-        }
-    }
-
-    /// `xmlTextReaderGetParserLineNumber`.
-    fn line(&self) -> usize {
-        let chunk_end = if self.parsed <= 4 {
-            4
-        } else {
-            4 + (self.parsed - 4).div_ceil(512) * 512
-        };
-        let end = chunk_end.min(self.data.len());
-        1 + self.data[..end]
-            .iter()
-            .filter(|byte| **byte == b'\n')
-            .count()
-    }
-
-    fn find(&self, needle: &[u8]) -> Option<usize> {
-        self.data[self.position..]
-            .windows(needle.len())
-            .position(|window| window == needle)
-            .map(|offset| self.position + offset)
-    }
-
-    fn consume_to(&mut self, end: usize) {
-        self.position = end;
-        self.parsed = self.parsed.max(end);
-    }
-
-    /// `xmlTextReaderRead`: 1 with a node, 0 at the end, Err on bad XML.
-    fn read(&mut self) -> Result<bool, String> {
-        loop {
-            if self.position >= self.data.len() {
-                return self.read_end();
-            }
-            let rest = &self.data[self.position..];
-            if rest.starts_with(b"<?") {
-                return self.skip_to(b"?>", "unterminated processing instruction");
-            }
-            if rest.starts_with(b"<!--") {
-                return self.skip_to(b"-->", "Comment not terminated");
-            }
-            if rest.starts_with(b"<![CDATA[") {
-                return self.skip_to(b"]]>", "CData section not finished");
-            }
-            if rest.starts_with(b"<!") {
-                return self.read_doctype();
-            }
-            if rest.starts_with(b"</") {
-                return self.read_end_tag();
-            }
-            if rest.starts_with(b"<") {
-                return self.read_start_tag();
-            }
-            if let Some(read) = self.read_text()? {
-                return Ok(read);
-            }
-        }
-    }
-
-    fn read_end(&mut self) -> Result<bool, String> {
-        self.parsed = self.data.len();
-        if let Some(open) = self.open.last() {
-            return Err(format!("Premature end of data in tag {open}"));
-        }
-        if !self.root_closed {
-            return Err("Start tag expected, '<' not found".into());
-        }
-        Ok(false)
-    }
-
-    /// Comments, processing instructions and CDATA are nodes neither
-    /// get_xml_element nor get_xml_text looks at.
-    fn skip_to(&mut self, terminator: &[u8], unterminated: &str) -> Result<bool, String> {
-        let end = self.find(terminator).ok_or(unterminated)?;
-        self.consume_to(end + terminator.len());
-        self.node = NodeType::Other;
-        Ok(true)
-    }
-
-    /// DOCTYPE, with an optional internal subset.
-    fn read_doctype(&mut self) -> Result<bool, String> {
-        let mut depth = 0;
-        let end = self.data[self.position + 2..]
-            .iter()
-            .position(|byte| {
-                match byte {
-                    b'[' => depth += 1,
-                    b']' => depth -= 1,
-                    b'>' if depth <= 0 => return true,
-                    _ => {}
-                }
-                false
-            })
-            .ok_or("DOCTYPE improperly terminated")?;
-        self.consume_to(self.position + 2 + end + 1);
-        self.node = NodeType::Other;
-        Ok(true)
-    }
-
-    fn read_end_tag(&mut self) -> Result<bool, String> {
-        let end = self.find(b">").ok_or("expected '>'")?;
-        let name = String::from_utf8_lossy(&self.data[self.position + 2..end])
-            .trim_end()
-            .to_owned();
-        self.consume_to(end + 1);
-        match self.open.pop() {
-            Some(open) if open == name => {}
-            Some(open) => {
-                return Err(format!(
-                    "Opening and ending tag mismatch: {open} and {name}"
-                ));
-            }
-            None => return Err("Extra content at the end of the document".into()),
-        }
-        self.root_closed = self.open.is_empty();
-        self.node = NodeType::EndElement;
-        self.name = name;
-        Ok(true)
-    }
-
-    fn read_start_tag(&mut self) -> Result<bool, String> {
-        if self.root_closed {
-            return Err("Extra content at the end of the document".into());
-        }
-        let name_start = self.position + 1;
-        let name_len = self.data[name_start..]
-            .iter()
-            .take_while(|byte| !matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'/' | b'>'))
-            .count();
-        let name =
-            String::from_utf8_lossy(&self.data[name_start..name_start + name_len]).into_owned();
-        if name.is_empty() {
-            return Err("StartTag: invalid element name".into());
-        }
-        let mut quote = None;
-        let end = self.data[name_start + name_len..]
-            .iter()
-            .position(|byte| match quote {
-                Some(open) => {
-                    if *byte == open {
-                        quote = None;
-                    }
-                    false
-                }
-                None if matches!(byte, b'"' | b'\'') => {
-                    quote = Some(*byte);
-                    false
-                }
-                None => *byte == b'>',
-            })
-            .map(|offset| name_start + name_len + offset)
-            .ok_or_else(|| format!("Couldn't find end of Start Tag {name}"))?;
-        let empty = self.data[end - 1] == b'/';
-        self.consume_to(end + 1);
-        if empty {
-            self.root_closed = self.open.is_empty();
-        } else {
-            self.open.push(name.clone());
-        }
-        self.node = NodeType::Element;
-        self.name = name;
-        Ok(true)
-    }
-
-    /// Character data up to the next '<'. Blank text inside an element is a
-    /// whitespace node; blank text outside the root is skipped (None).
-    fn read_text(&mut self) -> Result<Option<bool>, String> {
-        let end = self.find(b"<").unwrap_or(self.data.len());
-        let raw = String::from_utf8_lossy(&self.data[self.position..end]).into_owned();
-        // Character data is complete once the parser has seen the '<'.
-        self.position = end;
-        self.parsed = self.parsed.max((end + 1).min(self.data.len()));
-        let blank = raw
-            .bytes()
-            .all(|byte| matches!(byte, b' ' | b'\t' | b'\n' | b'\r'));
-        if self.open.is_empty() {
-            if blank {
-                return Ok(None);
-            }
-            return Err(if self.root_closed {
-                "Extra content at the end of the document".into()
-            } else {
-                "Start tag expected, '<' not found".into()
-            });
-        }
-        if blank {
-            self.node = NodeType::Other;
-        } else {
-            self.value = decode_entities(&raw)?;
-            self.node = NodeType::Text;
-        }
-        Ok(Some(true))
-    }
-}
-
-fn decode_entities(raw: &str) -> Result<String, String> {
-    let mut out = String::with_capacity(raw.len());
-    let mut rest = raw;
-    while let Some(start) = rest.find('&') {
-        out.push_str(&rest[..start]);
-        let end = rest[start..]
-            .find(';')
-            .map(|offset| start + offset)
-            .ok_or("EntityRef: expecting ';'")?;
-        let entity = &rest[start + 1..end];
-        let decoded = match entity {
-            "lt" => '<',
-            "gt" => '>',
-            "amp" => '&',
-            "quot" => '"',
-            "apos" => '\'',
-            _ => {
-                let code = if let Some(hex) = entity.strip_prefix("#x") {
-                    u32::from_str_radix(hex, 16).ok()
-                } else if let Some(decimal) = entity.strip_prefix('#') {
-                    decimal.parse().ok()
-                } else {
-                    return Err(format!("Entity '{entity}' not defined"));
-                };
-                code.and_then(char::from_u32)
-                    .ok_or_else(|| format!("xmlParseCharRef: invalid xmlChar value {entity}"))?
-            }
-        };
-        out.push(decoded);
-        rest = &rest[end + 1..];
-    }
-    out.push_str(rest);
-    Ok(out)
-}
 
 /// The rrd_t that parse_file fills, as the byte blocks write_fh writes.
 #[derive(Default)]
@@ -310,6 +42,8 @@ const MAX_RESTORE_DATA_SOURCES: usize = 4096;
 const MAX_RESTORE_ROWS: usize = 1_000_000;
 const MAX_RESTORE_VALUES: usize = 1_000_000;
 const MAX_RESTORE_ARCHIVES: usize = 4096;
+/// Consecutive reader failures get_xml_text tolerates before giving up.
+const MAX_READ_FAILURES: usize = 64;
 
 type Status = Result<(), ()>;
 
@@ -329,33 +63,36 @@ impl Restore<'_> {
 
     /// `get_xml_element`.
     fn get_xml_element(&mut self) -> Option<String> {
-        loop {
-            match self.reader.read() {
-                Ok(true) => {}
-                Ok(false) => {
-                    self.set_error("the xml ended while we were looking for an element".into());
-                    return None;
-                }
-                Err(message) => {
-                    self.set_error(format!("error reading/parsing XML: {message}"));
-                    return None;
-                }
+        let rc = loop {
+            let rc = self.reader.read();
+            if rc != 1 {
+                break rc;
             }
-            match self.reader.node {
+            match self.reader.node_type() {
                 NodeType::Text => {
                     let message = format!(
                         "line {}: expected element but found text '{}'",
                         self.reader.line(),
-                        self.reader.value
+                        self.reader.value()
                     );
                     self.set_error(message);
                     return None;
                 }
-                NodeType::Other => continue,
-                NodeType::EndElement => return Some(format!("/{}", self.reader.name)),
-                NodeType::Element => return Some(self.reader.name.clone()),
+                NodeType::EndElement => return Some(format!("/{}", self.reader.name())),
+                NodeType::Element => return Some(self.reader.name().to_owned()),
+                NodeType::None | NodeType::Other => {}
             }
+        };
+        if rc == 0 {
+            self.set_error("the xml ended while we were looking for an element".into());
+        } else {
+            let message = format!(
+                "error reading/parsing XML: {}",
+                self.reader.last_error_text()
+            );
+            self.set_error(message);
         }
+        None
     }
 
     /// `expect_element`; its message names the two tags the other way round.
@@ -374,8 +111,8 @@ impl Restore<'_> {
 
     /// `expect_element_end`.
     fn expect_element_end(&mut self, expected: &str) -> Status {
-        let name = if self.reader.node == NodeType::EndElement {
-            format!("/{}", self.reader.name)
+        let name = if self.reader.node_type() == NodeType::EndElement {
+            format!("/{}", self.reader.name())
         } else {
             self.get_xml_element().ok_or(())?
         };
@@ -391,33 +128,46 @@ impl Restore<'_> {
     }
 
     /// `get_xml_text`: the first white-space-delimited word of the next text
-    /// node, or "" when an end element comes first.
+    /// node, or "" when an end element comes first. Like upstream it keeps
+    /// reading after the reader fails (`while (xmlTextReaderRead(reader))`)
+    /// and looks at the node the reader stopped on.
     fn get_xml_text(&mut self) -> Option<String> {
+        let mut failures = 0;
         loop {
             match self.reader.read() {
-                Ok(true) => {}
-                Ok(false) => break,
-                Err(message) => {
-                    self.set_error(format!("error reading/parsing XML: {message}"));
-                    return None;
+                0 => break,
+                1 => failures = 0,
+                _ => {
+                    // Upstream spins here for good when the failed node is
+                    // neither text nor an element; stop instead.
+                    failures += 1;
+                    if failures > MAX_READ_FAILURES {
+                        let message = format!(
+                            "error reading/parsing XML: {}",
+                            self.reader.last_error_text()
+                        );
+                        self.set_error(message);
+                        return None;
+                    }
                 }
             }
-            match self.reader.node {
+            match self.reader.node_type() {
                 NodeType::Element => {
                     let message = format!(
                         "line {}: expected a value but found a <{}> element",
                         self.reader.line(),
-                        self.reader.name
+                        self.reader.name()
                     );
                     self.set_error(message);
                     return None;
                 }
                 NodeType::EndElement => return Some(String::new()),
-                NodeType::Other => continue,
+                NodeType::None | NodeType::Other => continue,
                 NodeType::Text => {
                     let is_space =
                         |c: char| matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r');
-                    let text = self.reader.value.trim_start_matches(is_space);
+                    let value = self.reader.value();
+                    let text = value.trim_start_matches(is_space);
                     let word = text.split(is_space).next().unwrap_or_default();
                     return Some(word.to_owned());
                 }
@@ -440,9 +190,9 @@ impl Restore<'_> {
 
     fn get_xml_time_t(&mut self) -> Result<i64, ()> {
         let text = self.get_xml_text().ok_or(())?;
-        let (value, erange) = c_strtoll_errno(&text, 0);
-        self.errno = if erange { libc::ERANGE } else { 0 };
-        if erange {
+        let (value, errno) = c_strtoll_errno(&text, 0);
+        self.errno = errno;
+        if errno > 0 {
             let message = format!(
                 "ling {}: get_xml_time_t from '{text}' {}",
                 self.reader.line(),
@@ -456,9 +206,9 @@ impl Restore<'_> {
 
     fn get_xml_ulong(&mut self) -> Result<u64, ()> {
         let text = self.get_xml_text().ok_or(())?;
-        let (value, erange) = c_strtoul_errno(&text, 0);
-        self.errno = if erange { libc::ERANGE } else { 0 };
-        if erange {
+        let (value, errno) = c_strtoul_errno(&text, 0);
+        self.errno = errno;
+        if errno > 0 {
             let message = format!(
                 "ling {}: get_xml_ulong from '{text}' {}",
                 self.reader.line(),
@@ -565,9 +315,17 @@ impl Restore<'_> {
         }
         // RRDtool picks a random cur_row and rotates the rows to match;
         // the last row keeps them in order. With no rows it divides by
-        // zero (rrd_restore.c:450).
+        // zero (rrd_restore.c:473): x86-64 traps with SIGFPE, while
+        // aarch64 divides by zero to 0, so cur_row is the random number
+        // itself and the rotation buffer size wraps; malloc fails
+        // (rrd_restore.c:505-510).
         if row_cnt == 0 {
-            self.set_error("restore of an RRA without rows is not supported".into());
+            let message = if cfg!(target_arch = "aarch64") && ds_cnt > 0 {
+                "parse_tag_rra: malloc failed."
+            } else {
+                "restore of an RRA without rows is not supported"
+            };
+            self.set_error(message.into());
             return Err(());
         }
         rrd.rra_ptrs[rra] = row_cnt - 1;
@@ -973,13 +731,47 @@ pub fn restore_rrd_file(
     force_overwrite: bool,
     range_check: bool,
 ) -> Result<(), StoreError> {
+    restore_rrd_input(
+        RestoreInput::Stdin(xml.as_bytes()),
+        path,
+        force_overwrite,
+        range_check,
+        &mut std::io::sink(),
+    )
+}
+
+/// Where `rrdtool restore` reads its XML from; libxml2 reads the two
+/// differently (rrd_restore.c:1242-1263).
+#[derive(Clone, Copy)]
+pub enum RestoreInput<'a> {
+    /// A named file, with the name libxml2 puts in its diagnostics.
+    File { name: &'a str, xml: &'a [u8] },
+    /// Standard input, already cut at the first ctrl-Z.
+    Stdin(&'a [u8]),
+}
+
+/// `rrd_restore` after option parsing, as [`restore_rrd_file`], for XML
+/// read from a file or from stdin. libxml2's parser diagnostics for a named
+/// file are written to `diagnostics` before the result is returned;
+/// upstream silences them for stdin.
+pub fn restore_rrd_input(
+    input: RestoreInput<'_>,
+    path: impl AsRef<std::path::Path>,
+    force_overwrite: bool,
+    range_check: bool,
+    diagnostics: &mut dyn Write,
+) -> Result<(), StoreError> {
     if !cfg!(target_pointer_width = "64") || cfg!(target_endian = "big") {
         return Err(StoreError::RrdUnsupported(
             "RRD restore currently requires a 64-bit little-endian target".into(),
         ));
     }
+    let reader = match input {
+        RestoreInput::File { name, xml } => XmlReader::new(xml, Source::File, name),
+        RestoreInput::Stdin(xml) => XmlReader::new(xml, Source::Stdin, "-"),
+    };
     let mut restore = Restore {
-        reader: XmlReader::new(xml.as_bytes()),
+        reader,
         error: None,
         errno: 0,
         range_check,
@@ -989,6 +781,10 @@ pub fn restore_rrd_file(
         .expect_element("rrd")
         .and_then(|()| restore.parse_tag_rrd(&mut rrd));
     let error = restore.error.take();
+    if !restore.reader.diagnostics.is_empty() {
+        let _ = diagnostics.write_all(&restore.reader.diagnostics);
+        let _ = diagnostics.flush();
+    }
     if parsed.is_err() {
         // A parse that fails without setting an error (an empty <params>
         // block) writes nothing and rrd_tool.c reports nothing.
@@ -1056,7 +852,7 @@ mod tests {
 
     fn parser(xml: &str) -> Restore<'_> {
         Restore {
-            reader: XmlReader::new(xml.as_bytes()),
+            reader: XmlReader::new(xml.as_bytes(), Source::Stdin, "-"),
             error: None,
             errno: 0,
             range_check: false,
@@ -1112,19 +908,5 @@ mod tests {
         assert!(restore.parse_tag_rra_database(&mut rrd).is_err());
         assert!(rrd.values.is_empty());
         assert_eq!(rrd.rows, MAX_RESTORE_ROWS);
-    }
-
-    #[test]
-    fn line_follows_the_parser_chunks() {
-        let mut document = b"<rrd>".to_vec();
-        document.extend(std::iter::repeat_n(b'\n', 600));
-        document.extend_from_slice(b"<x/></rrd>");
-        let mut reader = XmlReader::new(&document);
-        assert!(reader.read().unwrap());
-        // "<rrd>" ends inside the second chunk, which covers bytes 4..516.
-        assert_eq!(reader.line(), 512);
-        assert!(reader.read().unwrap());
-        assert!(reader.read().unwrap());
-        assert_eq!(reader.line(), 601);
     }
 }

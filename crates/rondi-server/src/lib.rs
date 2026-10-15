@@ -3423,9 +3423,9 @@ fn rrdcached_fetch_data(
         let Some(text) = fields.get(index) else {
             return Ok(default);
         };
-        let ((value, end), (_, erange)) =
+        let ((value, end), (_, errno)) =
             (rondi::c_strtol(text, 0), rondi::c_strtoll_errno(text, 0));
-        if end == 0 || erange {
+        if end == 0 || errno != 0 {
             return Err(format!(
                 "Cannot parse {name} time `{text}': Only simple integers are allowed."
             ));

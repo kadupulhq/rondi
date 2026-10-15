@@ -21,6 +21,7 @@ pub mod safe_fs;
 pub(crate) mod storage;
 pub mod time;
 pub mod vdef;
+mod xml_reader;
 
 pub use format::{
     ArchivePoint, DatabaseConfig, FORMAT_VERSION, FetchResult, RrdFetchResult, RrdFetchRow, Update,
@@ -42,6 +43,6 @@ pub use rrd_create::rrd_create_r2;
 pub use rrd_modify::{RrdRraOp, modify_rrd_file};
 pub use rrd_number::{c_strtol, c_strtoll_errno, parse_rrd_number};
 pub use rrd_resize::resize_rrd_file;
-pub use rrd_restore::restore_rrd_file;
+pub use rrd_restore::{RestoreInput, restore_rrd_file, restore_rrd_input};
 pub use storage::{DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, Store, StoreError, StoreOptions};
 pub use vdef::{VdefError, VdefFunction, VdefResult, evaluate_vdef};
