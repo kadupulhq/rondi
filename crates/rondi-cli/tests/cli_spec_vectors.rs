@@ -155,31 +155,6 @@ const KNOWN_DIVERGENCES: &[(&str, &[&str], &str)] = &[
         "create --source requires the start time to match the source last update",
     ),
     (
-        "cli-truncate-014",
-        ALL,
-        "error messages are not cut to 4095 bytes",
-    ),
-    (
-        "cli-truncate-015",
-        ALL,
-        "error messages are not cut to 4095 bytes",
-    ),
-    (
-        "cli-truncate-016",
-        ALL,
-        "error messages are not cut to 4095 bytes",
-    ),
-    (
-        "cli-truncate-017",
-        ALL,
-        "error messages are not cut to 4095 bytes",
-    ),
-    (
-        "pipe-session-121",
-        ALL,
-        "error messages are not cut to 4095 bytes",
-    ),
-    (
         "cli-commands-160",
         ALL,
         "graph /dev/null with no graph elements prints 0x0",
@@ -240,19 +215,9 @@ const KNOWN_DIVERGENCES: &[(&str, &[&str], &str)] = &[
         "duration fields of 1e20 ms differ in the last digits",
     ),
     (
-        "pipe-session-143",
-        &["linux-aarch64"],
-        "bytes 128 to 255 at line ends are trimmed and printed as U+FFFD",
-    ),
-    (
         "pipe-session-144",
         &["linux-aarch64"],
-        "bytes 128 to 255 at line ends are trimmed and printed as U+FFFD",
-    ),
-    (
-        "pipe-session-146",
-        &["linux-aarch64"],
-        "bytes 128 to 255 at line ends are trimmed and printed as U+FFFD",
+        "non-UTF-8 bytes in error messages are replaced by U+FFFD",
     ),
     (
         "format-bounds-003",

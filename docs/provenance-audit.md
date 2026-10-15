@@ -143,6 +143,7 @@ Risk tiers:
 - Compatibility requirement: argument permutation, `--` handling, bundled short options and error messages for every command.
 - Likely source: black-box observation; the bundled parser's behaviour is close to GNU `getopt_long`, which is documented.
 - Remediation: replace by spec and fresh implementation; this is small and well pinned by `rrdtool_optparse.rs` (25 tests) and `rrdtool_command_options.rs`. FLAG: the C copy shipped in RRDtool has no file-level notice; its upstream origin and license should be confirmed before deciding whether this is a GPL concern at all.
+- Status: removed. `crates/rondi-cli/src/frontend/options.rs` replaces it, written from `docs/compatibility/cli.md`, its vectors and black-box runs of RRDtool 1.11.0 without reading this module or the C source.
 
 **`crates/rondi/src/rrd_snprintf.rs`: `rrd_snprintf`, `fmtflt`, `fmtint`, `fmtstr`, `convert`, `getexponent`, `getnumsep`, `mypow10`, `myround`, `float_digits`, `exponent_digits`, `emit_digits`**
 
@@ -164,6 +165,7 @@ Risk tiers:
 - Compatibility requirement: `rrdtool -` stdin mode (used by Cacti and Kadupul pollers), command dispatch, `list` output order, PRINT/GPRINT `%s`, `strftime` and duration formats.
 - Likely source: man pages (`rrdtool`, `rrdgraph_graph` for GPRINT and duration formats) and black-box observation.
 - Remediation: replace by spec and fresh implementation; the stdin tokenizer and `list` are small. Tests: `alias_modes.rs` (90), `cli_list_and_aliases.rs`, `graph_data_differential.rs`.
+- Status: the dispatcher, usage, alias programs and pipe mode (`rrdtool_usage` through `rrdtool_batch`) are replaced by `crates/rondi-cli/src/frontend/`, written from `docs/compatibility/cli.md`, `docs/compatibility/pipe-mode.md`, their vectors and black-box runs without reading the removed functions or the C source. `print_calc`, `strfduration`, `time_clean` and the `list` helpers are not part of that change.
 
 **`crates/rondi-cli/src/help/*.txt` and the `RRDCACHED_HELP` string in `main.rs`**
 
