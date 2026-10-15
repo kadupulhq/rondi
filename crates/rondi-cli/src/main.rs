@@ -6168,8 +6168,7 @@ fn connect_rrdcached_network(
         let mut last_error = std::io::Error::from_raw_os_error(0);
         let mut entry = list;
         let mut connected = None;
-        while !entry.is_null() {
-            let info = &*entry;
+        while let Some(info) = entry.as_ref() {
             entry = info.ai_next;
             let fd = libc::socket(info.ai_family, info.ai_socktype, info.ai_protocol);
             if fd < 0 {
