@@ -1,19 +1,23 @@
 //! The `-p` pid file, removed again when its guard is dropped.
 
 use super::error_text;
+use super::listener::{identity_of, stat_at};
+use std::ffi::CString;
 use std::fs::File;
 use std::io::{Read, Write};
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// The fatal line for a pid file that could not be created or opened.
 const OPEN_FAILED: &str = "FATAL: Fail to create/open PID file ";
 
-/// Holds the pid file this process wrote; dropping it removes the file if
-/// it is still the same inode.
+/// Holds the pid file this process wrote; dropping it removes the entry,
+/// through its directory's descriptor, if it is still the same inode.
 #[derive(Debug)]
 pub(crate) struct PidFile {
-    path: PathBuf,
+    directory: File,
+    name: CString,
     identity: (u64, u64),
 }
 
@@ -75,8 +79,23 @@ impl PidFile {
         let metadata = file
             .metadata()
             .map_err(|_| PidFileError(OPEN_FAILED.to_owned()))?;
+        let directory = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let name = path
+            .file_name()
+            .and_then(|name| CString::new(name.as_encoded_bytes()).ok());
+        let directory = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY)
+            .open(directory);
+        let (Ok(directory), Some(name)) = (directory, name) else {
+            return Err(PidFileError(OPEN_FAILED.to_owned()));
+        };
         Ok(Self {
-            path: path.to_path_buf(),
+            directory,
+            name,
             identity: (metadata.dev(), metadata.ino()),
         })
     }
@@ -84,10 +103,12 @@ impl PidFile {
 
 impl Drop for PidFile {
     fn drop(&mut self) {
-        let ours = std::fs::symlink_metadata(&self.path)
-            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == self.identity);
+        let ours = stat_at(&self.directory, &self.name)
+            .is_ok_and(|found| identity_of(&found) == self.identity);
         if ours {
-            let _ = std::fs::remove_file(&self.path);
+            // SAFETY: the descriptor is open and the name NUL terminated;
+            // unlinkat removes the entry and never follows a link.
+            unsafe { libc::unlinkat(self.directory.as_raw_fd(), self.name.as_ptr(), 0) };
         }
     }
 }

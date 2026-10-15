@@ -109,7 +109,7 @@ pub fn run(config: DaemonConfig) -> i32 {
         },
         None => None,
     };
-    let Ok(listeners) = listener::open_all(&config.listeners, &mut stderr) else {
+    let Ok(listeners) = listener::open_all(&config.listeners, &mut stderr, true) else {
         let _ = writeln!(stderr, "{DAEMONIZE_FAILED}");
         return 1;
     };

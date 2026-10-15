@@ -6,7 +6,7 @@ use super::{errno_text, error_text};
 use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -25,11 +25,13 @@ pub(crate) enum BoundSocket {
     Tcp(std::net::TcpListener),
 }
 
-/// A published Unix socket file. Dropping it removes the file if it is
-/// still the inode this process bound.
+/// A published Unix socket file. Dropping it removes the directory entry,
+/// through the directory descriptor held since publication, if it is still
+/// the inode this process bound.
 #[derive(Debug)]
 pub(crate) struct SocketFile {
-    path: PathBuf,
+    directory: Option<std::fs::File>,
+    name: CString,
     identity: Option<(u64, u64)>,
 }
 
@@ -44,20 +46,23 @@ impl SocketFile {
 pub(crate) fn tests_socket_file(path: &Path) -> SocketFile {
     let metadata = std::fs::symlink_metadata(path).unwrap();
     SocketFile {
-        path: path.to_path_buf(),
+        directory: Some(open_directory(path.parent().unwrap()).unwrap()),
+        name: CString::new(path.file_name().unwrap().as_encoded_bytes()).unwrap(),
         identity: Some((metadata.dev(), metadata.ino())),
     }
 }
 
 impl Drop for SocketFile {
     fn drop(&mut self) {
-        let Some(identity) = self.identity else {
+        let (Some(identity), Some(directory)) = (self.identity, &self.directory) else {
             return;
         };
-        let ours = std::fs::symlink_metadata(&self.path)
-            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == identity);
+        let ours =
+            stat_at(directory, &self.name).is_ok_and(|found| identity_of(&found) == identity);
         if ours {
-            let _ = std::fs::remove_file(&self.path);
+            // SAFETY: the descriptor is open and the name NUL terminated;
+            // unlinkat removes the entry and never follows a link.
+            unsafe { libc::unlinkat(directory.as_raw_fd(), self.name.as_ptr(), 0) };
         }
     }
 }
@@ -69,15 +74,24 @@ impl Drop for SocketFile {
 // Rondi policy: a listener that fails stops startup even when others
 // opened, and the sockets already published are removed (RCD-5), so a
 // configured listener and its `-P` scope are never silently missing.
-pub(crate) fn open_all(specs: &[ListenerSpec], notes: &mut dyn Write) -> Result<Vec<Listener>, ()> {
+///
+/// `before_threads` says the process has a single thread yet (see
+/// `open_unix`).
+pub(crate) fn open_all(
+    specs: &[ListenerSpec],
+    notes: &mut dyn Write,
+    before_threads: bool,
+) -> Result<Vec<Listener>, ()> {
     let mut opened = Vec::new();
     let mut failed = false;
     for spec in specs {
         let permissions: Option<Arc<[String]>> = spec.permissions.as_deref().map(Arc::from);
         let sockets = match &spec.address {
-            ListenAddress::Unix(path) => open_unix(path, spec.access.mode(), spec.access.group)
-                .map(|(listener, file)| vec![BoundSocket::Unix(listener, file)])
-                .map_err(|reason| vec![reason]),
+            ListenAddress::Unix(path) => {
+                { open_unix(path, spec.access.mode(), spec.access.group, before_threads) }
+                    .map(|(listener, file)| vec![BoundSocket::Unix(listener, file)])
+                    .map_err(|reason| vec![reason])
+            }
             ListenAddress::Network(text) => open_network(text),
         };
         match sockets {
@@ -104,161 +118,350 @@ pub(crate) fn open_all(specs: &[ListenerSpec], notes: &mut dyn Write) -> Result<
 }
 
 /// The JSON daemon's socket: mode 0600, published like an rrdcached Unix
-/// listener and left in place for the caller to remove.
+/// listener and left in place for the caller to remove. Called before the
+/// JSON daemon starts any thread.
 pub(crate) fn open_json_listener(path: &Path) -> std::io::Result<UnixListener> {
-    let (listener, file) = open_unix(path, 0o600, None).map_err(std::io::Error::other)?;
+    let (listener, file) = open_unix(path, 0o600, None, true).map_err(std::io::Error::other)?;
     file.keep();
     Ok(listener)
 }
 
 /// Binds a Unix socket and publishes it at `path` with its final mode and
 /// group already set.
-// Rondi policy: the socket is bound and given its mode inside a private
-// directory and then renamed into place, so it is never reachable with a
-// wider mode and no chmod or chown can follow a path swapped in by
-// another user; a live socket at the path is refused rather than replaced,
-// as is any file that is not a socket; and the socket's directory and its
-// ancestors must not be writable by another user (RCD-5, RCD-11).
+///
+/// `before_threads` says the process has a single thread, so the process
+/// umask may be narrowed around the bind.
+// Rondi policy: the socket is bound inside a private 0700 directory, given
+// its group and mode there and renamed into place, so it is never reachable
+// with a wider mode; every step after the directory checks goes through
+// directory descriptors and checks the socket's identity, so no chown,
+// chmod, rename or unlink can follow a path swapped in by another user; a
+// live socket at the path is refused rather than replaced, as is any file
+// that is not a socket; and the socket's directory and its ancestors must
+// not be writable by another user (RCD-5, RCD-11).
 fn open_unix(
     path: &Path,
     mode: u32,
     group: Option<u32>,
+    before_threads: bool,
 ) -> Result<(UnixListener, SocketFile), String> {
     let shown = path.display();
     let bind_failed = |reason: String| format!("bind({shown}) failed: {reason}.");
+    let io_failed = |error: std::io::Error| bind_failed(error_text(&error));
     if path.as_os_str().is_empty() {
         return Err(bind_failed(errno_text(libc::ENOENT)));
     }
     let target = if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir()
-            .map_err(|error| bind_failed(error_text(&error)))?
-            .join(path)
+        std::env::current_dir().map_err(io_failed)?.join(path)
     };
-    let directory = target
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or(Path::new("/"))
-        .to_path_buf();
+    let (Some(directory), Some(name)) = (target.parent(), target.file_name()) else {
+        return Err(bind_failed(errno_text(libc::EISDIR)));
+    };
+    let directory = if directory.as_os_str().is_empty() {
+        Path::new("/")
+    } else {
+        directory
+    };
+    let name =
+        CString::new(name.as_encoded_bytes()).map_err(|_| bind_failed(errno_text(libc::EINVAL)))?;
     // Compatibility: a missing socket directory is created (opt-050).
     // Provenance: black-box compatibility test.
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o755)
-        .create(&directory)
-        .map_err(|error| bind_failed(error_text(&error)))?;
-    check_directory_chain(&directory)?;
-    match std::fs::symlink_metadata(&target) {
-        Ok(metadata) if metadata.file_type().is_socket() => {
+        .create(directory)
+        .map_err(io_failed)?;
+    let parent = check_directory_chain(directory)?;
+    match stat_at(&parent, &name) {
+        Ok(found) if found.st_mode & libc::S_IFMT == libc::S_IFSOCK => {
             if UnixStream::connect(&target).is_ok() {
                 return Err(format!("socket is already active: {shown}"));
             }
         }
         Ok(_) => return Err(format!("refusing to replace {shown}: not a socket")),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(bind_failed(error_text(&error))),
+        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+        Err(error) => return Err(io_failed(error)),
     }
-    let stage = Stage::create(&directory).map_err(|error| bind_failed(error_text(&error)))?;
-    let staged = stage.path.join("s");
-    let listener = bind_unix(&stage.path).map_err(|error| bind_failed(error_text(&error)))?;
+    let stage = Stage::create(&parent, directory).map_err(io_failed)?;
+    let listener = stage.bind(before_threads).map_err(io_failed)?;
+    let bound = stage.socket_identity().map_err(io_failed)?;
     if let Some(gid) = group {
-        std::os::unix::fs::chown(&staged, None, Some(gid))
-            .map_err(|error| format!("chown({shown}) failed: {}", error_text(&error)))?;
+        // SAFETY: the descriptor is open, the name is NUL terminated, and
+        // AT_SYMLINK_NOFOLLOW keeps a swapped-in link from being followed.
+        let changed = unsafe {
+            libc::fchownat(
+                stage.directory.as_raw_fd(),
+                SOCKET_NAME.as_ptr(),
+                u32::MAX,
+                gid,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        if changed != 0 || stage.socket_identity().ok() != Some(bound) {
+            let error = std::io::Error::last_os_error();
+            return Err(format!("chown({shown}) failed: {}", error_text(&error)));
+        }
     }
-    std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(mode))
+    stage
+        .set_mode(mode, bound)
         .map_err(|error| format!("chmod({shown}) failed: {}", error_text(&error)))?;
-    std::fs::rename(&staged, &target).map_err(|error| bind_failed(error_text(&error)))?;
-    let metadata =
-        std::fs::symlink_metadata(&target).map_err(|error| bind_failed(error_text(&error)))?;
+    // SAFETY: both descriptors are open directories and both names are NUL
+    // terminated; renameat replaces a stale socket entry atomically.
+    let renamed = unsafe {
+        libc::renameat(
+            stage.directory.as_raw_fd(),
+            SOCKET_NAME.as_ptr(),
+            parent.as_raw_fd(),
+            name.as_ptr(),
+        )
+    };
+    if renamed != 0 {
+        return Err(io_failed(std::io::Error::last_os_error()));
+    }
+    let published = stat_at(&parent, &name).map_err(io_failed)?;
+    if identity_of(&published) != bound {
+        // What was renamed into place is not the bound socket; take the
+        // entry back out rather than publish it.
+        // SAFETY: the descriptor is open and the name NUL terminated;
+        // unlinkat never follows a link.
+        unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) };
+        return Err(bind_failed(
+            "socket was replaced while it was published".to_owned(),
+        ));
+    }
     drop(stage);
     Ok((
         listener,
         SocketFile {
-            path: target,
-            identity: Some((metadata.dev(), metadata.ino())),
+            directory: Some(parent),
+            name,
+            identity: Some(bound),
         },
     ))
 }
 
-/// A private directory for binding a socket, removed with whatever is
-/// left in it.
+/// The name a socket is bound under inside its staging directory.
+const SOCKET_NAME: &CStr = c"s";
+
+/// `fstatat` without following a final symbolic link.
+pub(super) fn stat_at(directory: &std::fs::File, name: &CStr) -> std::io::Result<libc::stat> {
+    // SAFETY: an all-zero stat is a valid out-parameter.
+    let mut found: libc::stat = unsafe { std::mem::zeroed() };
+    // SAFETY: the descriptor is open, the name is NUL terminated and
+    // `found` is valid for writing.
+    let status = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            &mut found,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(found)
+}
+
+/// Device and inode, the identity compared before acting on an entry.
+// The field types differ between platforms (st_dev is 32 bits on macOS).
+#[allow(clippy::unnecessary_cast)]
+pub(super) fn identity_of(found: &libc::stat) -> (u64, u64) {
+    (found.st_dev as u64, found.st_ino as u64)
+}
+
+/// Opens a directory without following a final symbolic link.
+pub(super) fn open_directory(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .open(path)
+}
+
+/// A private directory, made by this process and held open, in which a
+/// socket is bound. Dropping it removes whatever is left in it.
 struct Stage {
+    parent: std::fs::File,
+    name: CString,
+    directory: std::fs::File,
     path: PathBuf,
 }
 
 impl Stage {
-    fn create(directory: &Path) -> std::io::Result<Self> {
+    fn create(parent: &std::fs::File, shown: &Path) -> std::io::Result<Self> {
+        let parent = parent.try_clone()?;
         let pid = std::process::id();
         for attempt in 0..100u32 {
-            let path = directory.join(format!(".rrdcached-{pid}-{attempt}"));
-            match std::fs::DirBuilder::new().mode(0o700).create(&path) {
-                Ok(()) => return Ok(Self { path }),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(error) => return Err(error),
+            let name = CString::new(format!(".rrdcached-{pid}-{attempt}"))
+                .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+            // SAFETY: the descriptor is open and the name NUL terminated.
+            if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EEXIST) {
+                    continue;
+                }
+                return Err(error);
             }
+            // SAFETY: as above; O_NOFOLLOW refuses a link swapped in.
+            let fd = unsafe {
+                libc::openat(
+                    parent.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: fd is a new descriptor owned by nothing else.
+            let directory = unsafe { std::fs::File::from_raw_fd(fd) };
+            let path = shown.join(name.to_string_lossy().as_ref());
+            let stage = Self {
+                parent,
+                name,
+                directory,
+                path,
+            };
+            let metadata = stage.directory.metadata()?;
+            // SAFETY: geteuid has no preconditions.
+            let owner = unsafe { libc::geteuid() };
+            if metadata.uid() != owner || metadata.mode() & 0o7777 != 0o700 {
+                return Err(std::io::Error::other(format!(
+                    "staging directory in {} is not private",
+                    shown.display()
+                )));
+            }
+            return Ok(stage);
         }
         Err(std::io::Error::from_raw_os_error(libc::EEXIST))
+    }
+
+    /// Binds `s` in the stage. With `before_threads` the umask is narrowed
+    /// so the socket is created 0600 rather than widened later.
+    fn bind(&self, before_threads: bool) -> std::io::Result<UnixListener> {
+        // SAFETY: umask only swaps the process mask; it is restored below.
+        let previous_mask = before_threads.then(|| unsafe { libc::umask(0o077) });
+        let bound = self.bind_by_name(before_threads);
+        if let Some(mask) = previous_mask {
+            // SAFETY: as above.
+            unsafe { libc::umask(mask) };
+        }
+        bound
+    }
+
+    /// Binds `s` in the stage by path when the path fits a socket address.
+    /// A longer path is bound by name from inside the stage, which changes
+    /// the process directory and so is done only before any thread starts.
+    /// Either way the caller then checks, through the stage descriptor, that
+    /// the socket landed in this stage.
+    fn bind_by_name(&self, before_threads: bool) -> std::io::Result<UnixListener> {
+        let staged = self.path.join(SOCKET_NAME.to_string_lossy().as_ref());
+        // SAFETY: an all-zero sockaddr_un is valid; only its size is read.
+        let capacity = unsafe { std::mem::zeroed::<libc::sockaddr_un>() }
+            .sun_path
+            .len();
+        if staged.as_os_str().len() < capacity {
+            return UnixListener::bind(&staged);
+        }
+        if !before_threads {
+            return Err(std::io::Error::from_raw_os_error(libc::ENAMETOOLONG));
+        }
+        let previous = std::fs::File::open(".")?;
+        // SAFETY: the stage descriptor is an open directory.
+        if unsafe { libc::fchdir(self.directory.as_raw_fd()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let bound = UnixListener::bind(SOCKET_NAME.to_string_lossy().as_ref());
+        // SAFETY: `previous` is an open directory descriptor.
+        if unsafe { libc::fchdir(previous.as_raw_fd()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        bound
+    }
+
+    /// Device and inode of the bound socket, which must be a socket owned
+    /// by this process's user.
+    fn socket_identity(&self) -> std::io::Result<(u64, u64)> {
+        let found = stat_at(&self.directory, SOCKET_NAME)?;
+        // SAFETY: geteuid has no preconditions.
+        let owner = unsafe { libc::geteuid() };
+        if found.st_mode & libc::S_IFMT != libc::S_IFSOCK || found.st_uid != owner {
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+        }
+        Ok(identity_of(&found))
+    }
+
+    /// Sets the socket's mode after checking it is still the bound socket.
+    fn set_mode(&self, mode: u32, bound: (u64, u64)) -> std::io::Result<()> {
+        if self.socket_identity()? != bound {
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+        }
+        let call = |flags| {
+            // SAFETY: the descriptor is open and the name NUL terminated.
+            unsafe {
+                libc::fchmodat(
+                    self.directory.as_raw_fd(),
+                    SOCKET_NAME.as_ptr(),
+                    mode as libc::mode_t,
+                    flags,
+                )
+            }
+        };
+        if call(libc::AT_SYMLINK_NOFOLLOW) == 0 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        // Some C libraries cannot change a mode without following links;
+        // the entry was just checked to be the bound socket in a directory
+        // only this user can write, so the plain call is used then.
+        if !matches!(
+            error.raw_os_error(),
+            Some(libc::EOPNOTSUPP) | Some(libc::ENOTSUP)
+        ) {
+            return Err(error);
+        }
+        if call(0) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
     }
 }
 
 impl Drop for Stage {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(self.path.join("s"));
-        let _ = std::fs::remove_dir(&self.path);
+        // SAFETY: descriptors are open and names NUL terminated; unlinkat
+        // removes the entry itself and never follows a link.
+        unsafe {
+            libc::unlinkat(self.directory.as_raw_fd(), SOCKET_NAME.as_ptr(), 0);
+            libc::unlinkat(
+                self.parent.as_raw_fd(),
+                self.name.as_ptr(),
+                libc::AT_REMOVEDIR,
+            );
+        }
     }
-}
-
-/// Binds `<stage>/s`. A staging path too long for a socket address is
-/// bound by name from inside the directory, which is safe only while the
-/// process has one thread; the daemon binds before its runtime starts.
-fn bind_unix(stage: &Path) -> std::io::Result<UnixListener> {
-    let staged = stage.join("s");
-    // SAFETY: an all-zero sockaddr_un is valid; only its size is read.
-    let capacity = unsafe { std::mem::zeroed::<libc::sockaddr_un>() }
-        .sun_path
-        .len();
-    if staged.as_os_str().len() < capacity {
-        return UnixListener::bind(&staged);
-    }
-    let previous = std::fs::File::open(".")?;
-    let stage_name = CString::new(stage.as_os_str().as_encoded_bytes())
-        .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
-    // SAFETY: the name is NUL terminated and outlives the call.
-    if unsafe { libc::chdir(stage_name.as_ptr()) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let bound = UnixListener::bind("s");
-    // SAFETY: `previous` is an open directory descriptor.
-    let restored = unsafe { libc::fchdir(previous.as_raw_fd()) };
-    if restored != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    bound
 }
 
 /// Refuses a socket directory that a user other than root or the daemon's
 /// own could write, checking every component of its real path: each must
 /// belong to root or the daemon's user, and must not be writable by others
-/// or by a group other than root's unless it is sticky.
-fn check_directory_chain(directory: &Path) -> Result<(), String> {
-    let real = std::fs::canonicalize(directory).map_err(|error| {
-        format!(
-            "bind({}) failed: {}.",
-            directory.display(),
-            error_text(&error)
-        )
-    })?;
+/// or by a group other than root's unless it is sticky. Returns the
+/// directory, opened without following a link and checked to be the one
+/// examined.
+fn check_directory_chain(directory: &Path) -> Result<std::fs::File, String> {
+    let failed = |path: &Path, error: std::io::Error| {
+        format!("bind({}) failed: {}.", path.display(), error_text(&error))
+    };
+    let real = std::fs::canonicalize(directory).map_err(|error| failed(directory, error))?;
     // SAFETY: geteuid has no preconditions.
     let euid = unsafe { libc::geteuid() };
+    let mut last = None;
     for component in real.ancestors().collect::<Vec<_>>().into_iter().rev() {
-        let metadata = std::fs::symlink_metadata(component).map_err(|error| {
-            format!(
-                "bind({}) failed: {}.",
-                component.display(),
-                error_text(&error)
-            )
-        })?;
+        let metadata =
+            std::fs::symlink_metadata(component).map_err(|error| failed(component, error))?;
         let trusted_owner = metadata.uid() == 0 || metadata.uid() == euid;
         // Group write is shared unless the group is root's own.
         let writable =
@@ -270,8 +473,19 @@ fn check_directory_chain(directory: &Path) -> Result<(), String> {
                 component.display()
             ));
         }
+        last = Some((metadata.dev(), metadata.ino()));
     }
-    Ok(())
+    let opened = open_directory(&real).map_err(|error| failed(directory, error))?;
+    let held = opened
+        .metadata()
+        .map_err(|error| failed(directory, error))?;
+    if last != Some((held.dev(), held.ino())) {
+        return Err(format!(
+            "refusing socket directory {}: it changed while it was checked",
+            real.display()
+        ));
+    }
+    Ok(opened)
 }
 
 /// Splits a network `-l` argument into host and port text.
@@ -427,6 +641,12 @@ fn bind_tcp(address: &libc::addrinfo, text: &str) -> Result<std::net::TcpListene
 mod tests {
     use super::super::config::SocketAccess;
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    // Tests run on many threads, so they never narrow the umask.
+    fn open_all(specs: &[ListenerSpec], notes: &mut dyn Write) -> Result<Vec<Listener>, ()> {
+        super::open_all(specs, notes, false)
+    }
 
     fn unix_spec(path: &Path, access: SocketAccess) -> ListenerSpec {
         ListenerSpec {
@@ -609,9 +829,56 @@ mod tests {
         assert!(reasons[0].starts_with("getaddrinfo(rondi-no-such-host.invalid) failed: "));
     }
 
+    /// Another process keeps replacing the staged socket with a link to a
+    /// victim file between the bind and the chown and chmod. Same-user
+    /// races are the worst case: the staging directory keeps out every
+    /// other user. The victim must never change, and a published socket
+    /// must be the one that was bound.
+    #[test]
+    fn swapping_the_staged_socket_never_touches_its_target() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (_dir, root) = private_dir();
+        let victim = root.join("victim");
+        std::fs::write(&victim, b"keep").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let racer = {
+            let (stop, root, victim) = (Arc::clone(&stop), root.clone(), victim.clone());
+            std::thread::spawn(move || {
+                let pid = std::process::id();
+                while !stop.load(Ordering::Relaxed) {
+                    for attempt in 0..2 {
+                        let staged = root.join(format!(".rrdcached-{pid}-{attempt}/s"));
+                        if std::fs::remove_file(&staged).is_ok() {
+                            let _ = std::os::unix::fs::symlink(&victim, &staged);
+                        }
+                    }
+                }
+            })
+        };
+        // SAFETY: getegid has no preconditions.
+        let gid = unsafe { libc::getegid() };
+        let socket = root.join("s.sock");
+        for _ in 0..300 {
+            if let Ok((listener, file)) = open_unix(&socket, 0o666, Some(gid), false) {
+                let metadata = std::fs::symlink_metadata(&socket).unwrap();
+                assert!(std::os::unix::fs::FileTypeExt::is_socket(
+                    &metadata.file_type()
+                ));
+                assert_eq!(metadata.mode() & 0o7777, 0o666);
+                drop((listener, file));
+            }
+            assert_eq!(std::fs::metadata(&victim).unwrap().mode() & 0o7777, 0o600);
+        }
+        stop.store(true, Ordering::Relaxed);
+        racer.join().unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"keep");
+        assert!(!socket.exists());
+    }
+
     #[test]
     fn empty_unix_path_fails_like_bind() {
-        let reason = open_unix(Path::new(""), 0o600, None).unwrap_err();
+        let reason = open_unix(Path::new(""), 0o600, None, false).unwrap_err();
         assert_eq!(reason, "bind() failed: No such file or directory.");
     }
 }
