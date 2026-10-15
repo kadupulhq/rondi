@@ -459,16 +459,16 @@ def build_cases() -> None:
         f'CREATE n.rrd -b 1000000000 DS:a:GAUGE:120:U:U {D1}\n',
         f'CREATE n.rrd -b 1000000000 {D1} RRA:\n',
         f'CREATE n.rrd -b 1000000000 -s 60 {D1}\nLAST n.rrd\nFIRST n.rrd 0\n'
-        'FETCH n.rrd AVERAGE 1000000000 1000000300\n',
+        + 'FETCH n.rrd AVERAGE 1000000000 1000000300\n',
         'CREATE n.rrd -b 1000000000 -s 60 DS:a:COUNTER:120:0:100 '
-        'DS:b:DERIVE:120:U:U DS:c:ABSOLUTE:120:U:U RRA:MIN:0.5:1:3 '
-        'RRA:MAX:0.5:2:3 RRA:LAST:0.5:3:3\nFIRST n.rrd 2\n'
-        'FETCH n.rrd LAST 1000000000 1000000600\n',
+        + 'DS:b:DERIVE:120:U:U DS:c:ABSOLUTE:120:U:U RRA:MIN:0.5:1:3 '
+        + 'RRA:MAX:0.5:2:3 RRA:LAST:0.5:3:3\nFIRST n.rrd 2\n'
+        + 'FETCH n.rrd LAST 1000000000 1000000600\n',
         f'CREATE a.rrd -b 1000000000 {D1}\nFETCH a.rrd AVERAGE 1000000000 1000000300\n',
         f'CREATE a.rrd -b 1000000000 -O {D1}\nINFO a.rrd\n',
         f'create n.rrd -b 1000000000 {D1}\nLAST n.rrd\n',
         f'CREATE n.rrd -b 1000000000 {D1}\nUPDATE n.rrd 1000000060:5\n'
-        'FLUSH n.rrd\nFETCH n.rrd AVERAGE 1000000000 1000000300\n',
+        + 'FLUSH n.rrd\nFETCH n.rrd AVERAGE 1000000000 1000000300\n',
         f'CREATE n.rrd -b 1000000000 -s 300 -r a.rrd {D1}\n',
         f'CREATE n.rrd -b 1000000000 -t a.rrd {D1}\n',
         'CREATE n.rrd -b 1000000000 -s 300 DS:a:COMPUTE:x,2,* RRA:AVERAGE:0.5:1:5\n',
@@ -1042,6 +1042,8 @@ def talk(ctx: dict, step: dict) -> str:
             if step['end'] == 'quit':
                 sock.sendall(b'QUIT\n')
         except OSError:
+            # The daemon may close first (DUMP, QUIT, an over-long line);
+            # whatever it sent before closing is still read below.
             pass
         if step['end'] == 'linger':
             sock.settimeout(LINGER)
