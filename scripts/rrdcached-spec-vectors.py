@@ -102,6 +102,7 @@ def layout(root: Path) -> None:
     (base / 'empty.rrd').write_bytes(b'')
     (base / 'notes.txt').write_bytes(b'x\n')
     (root / 'outside.rrd').write_bytes(a)
+    (root / 'outside.txt').write_bytes(b'not an RRD file\n' * 200)
     os.symlink('a.rrd', base / 'link.rrd')
     os.symlink('sub', base / 'lnk')
     os.symlink('../outside.rrd', base / 'escape.rrd')
@@ -232,7 +233,7 @@ def build_cases() -> None:
                'notes.txt', '{ROOT}/b/a.rrd', '{ROOT}/outside.rrd',
                '../outside.rrd', 'sub/../a.rrd', './a.rrd', 'sub/d.rrd',
                '/sub/d.rrd', 'link.rrd', 'lnk/d.rrd', 'escape.rrd',
-               'a.rrd/', 'missing/x.rrd', '/etc/hosts', '']
+               'a.rrd/', 'missing/x.rrd', '{ROOT}/outside.txt', '']
     commands = [
         ('UPDATE', 'UPDATE {f} 1000000300:1:2'),
         ('FLUSH', 'FLUSH {f}'),
@@ -252,7 +253,7 @@ def build_cases() -> None:
     for opts, tag in (([], 'p'), (['-B'], 'pB')):
         for name, template in commands:
             for target in targets:
-                if name == 'CREATE' and target == '/etc/hosts':
+                if name == 'CREATE' and target == '{ROOT}/outside.txt':
                     continue
                 if name != 'CREATE' and target == 'missing/x.rrd':
                     continue
@@ -1320,12 +1321,19 @@ def record(program: str, out: Path, jobs: int) -> int:
     return 0
 
 
+MMAP_ERROR = re.compile(r"(mmaping file '[^'\n]*': )[^\n]*")
+
+
 def canonical(item: dict, results: list) -> list:
-    """Sorts reply lines of a case that lists a directory."""
+    """The form in which results are compared: the error text of mapping a
+    directory depends on the file system (EINVAL, ENODEV), so it is masked,
+    and the reply lines of a case that lists a directory are sorted."""
+    out = [MMAP_ERROR.sub(r'\1{ERRNO}', r) if isinstance(r, str) else r
+           for r in results]
     if 'unordered' not in item['tags']:
-        return results
+        return out
     return ['\n'.join(sorted(r.split('\n'))) if isinstance(r, str) else r
-            for r in results]
+            for r in out]
 
 
 def check(program: str, table_path: Path, only: set[str], jobs: int,

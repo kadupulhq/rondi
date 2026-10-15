@@ -95,6 +95,7 @@ fn layout(root: &Path) {
     std::fs::write(base.join("empty.rrd"), b"").unwrap();
     std::fs::write(base.join("notes.txt"), b"x\n").unwrap();
     std::fs::write(root.join("outside.rrd"), FIXTURE_A).unwrap();
+    std::fs::write(root.join("outside.txt"), b"not an RRD file\n".repeat(200)).unwrap();
     std::os::unix::fs::symlink("a.rrd", base.join("link.rrd")).unwrap();
     std::os::unix::fs::symlink("sub", base.join("lnk")).unwrap();
     std::os::unix::fs::symlink("../outside.rrd", base.join("escape.rrd")).unwrap();
@@ -568,23 +569,51 @@ fn uses_tcp(steps: &[Value]) -> bool {
     steps.iter().any(|step| step.to_string().contains("PORT"))
 }
 
-/// Sorts the lines of every reply when the case lists a directory, whose
-/// order depends on the file system.
+/// Replaces the error text after `mmaping file '<path>': ` with `{ERRNO}`:
+/// mapping a directory fails with EINVAL or ENODEV depending on the file
+/// system.
+fn mask_mmap_error(text: &str) -> String {
+    const MARK: &str = "mmaping file '";
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(at) = rest.find(MARK) {
+        let after = &rest[at + MARK.len()..];
+        let Some(end) = after
+            .find("': ")
+            .filter(|&end| !after[..end].contains('\n'))
+        else {
+            out.push_str(&rest[..at + MARK.len()]);
+            rest = after;
+            continue;
+        };
+        out.push_str(&rest[..at + MARK.len() + end + 3]);
+        out.push_str("{ERRNO}");
+        let tail = &after[end + 3..];
+        rest = &tail[tail.find('\n').unwrap_or(tail.len())..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The form in which results are compared: mapping errors masked, and the
+/// lines of every reply sorted when the case lists a directory, whose order
+/// depends on the file system.
 fn canonical(case: &Value, results: &[Value]) -> Vec<Value> {
-    let unordered = case["tags"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|t| t == "unordered");
+    let unordered = tagged(case, "unordered");
     results
         .iter()
         .map(|result| match result.as_str() {
-            Some(text) if unordered => {
-                let mut lines: Vec<&str> = text.split('\n').collect();
-                lines.sort_unstable();
-                json!(lines.join("\n"))
+            Some(text) => {
+                let text = mask_mmap_error(text);
+                if unordered {
+                    let mut lines: Vec<&str> = text.split('\n').collect();
+                    lines.sort_unstable();
+                    json!(lines.join("\n"))
+                } else {
+                    json!(text)
+                }
             }
-            _ => result.clone(),
+            None => result.clone(),
         })
         .collect()
 }
@@ -721,10 +750,14 @@ fn rrdcached_spec_vectors_match() {
         .collect();
     let failures = Mutex::new(Vec::<String>::new());
     let next = Mutex::new(0usize);
-    let workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4)
-        .clamp(2, 8);
+    // A case spends most of its time waiting: the reference daemon takes
+    // about a second to exit after SIGTERM. Many more workers than cores
+    // keep the whole table well under a minute.
+    let workers = std::env::var("RONDI_RRDCACHED_JOBS")
+        .ok()
+        .and_then(|jobs| jobs.parse().ok())
+        .unwrap_or(32usize)
+        .max(1);
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| {
