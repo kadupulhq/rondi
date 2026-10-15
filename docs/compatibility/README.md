@@ -2,7 +2,11 @@
 
 This directory holds implementation-neutral specifications of RRDtool
 behavior that Rondi reproduces, one file per area (for example `update.md`).
-The specifications are being written; none are published yet.
+The specifications are being written.
+
+| Area | Specification | Tests |
+|---|---|---|
+| RPN expressions in CDEF, VDEF and xport | [rpn.md](rpn.md) | `crates/rondi-cli/tests/rpn_spec_vectors.rs` |
 
 Each specification states the observable behavior, how it was established
 (documentation, black-box test, or reference-source inspection), and the
