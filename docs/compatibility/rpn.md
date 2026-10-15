@@ -40,9 +40,27 @@ Vector tags:
 | Tag | Meaning | Replay rule |
 |---|---|---|
 | `undefined` | The reference crashed, or its result depends on memory contents. | Not compared; the replacement must exit without a signal. |
-| `host-sort` | The result depends on the C library sort with an inconsistent comparator (see [Ordering](#ordering-used-by-sort-median-percent-and-predictperc)). | Frozen value compared on macOS only; the live oracle comparison runs everywhere. |
-| `first-weekday` | `NEWWEEK`, whose first weekday comes from the platform. | Frozen value compared on macOS only. |
+| `host-sort` | The result depends on the C library sort with an inconsistent comparator (see [Ordering](#ordering-used-by-sort-median-percent-and-predictperc)). | Compared against `expect_platform` where recorded, otherwise on macOS only; the live oracle comparison runs everywhere. |
+| `first-weekday` | `NEWWEEK`, whose first weekday comes from the platform. | As `host-sort`. |
 | `fma` | The last bit depends on fused multiply-add. | Exact on aarch64; relative tolerance 1e-9 elsewhere. |
+
+The main `expect` was captured on macOS arm64. Where the Linux builds of
+the reference produce a different result, the vector also carries
+`expect_platform.linux-aarch64` or `expect_platform.linux-x86_64`, and the
+replay test uses that value on the matching target. Those entries are
+produced by `scripts/rpn-vectors.py --record-platform` inside the CI image
+and merged with `--merge-platform`. The current recordings:
+
+- `linux-aarch64` (13 vectors, recorded with the oracle in the CI image):
+  every `host-sort` vector whose input mixes infinities with other values
+  (`sort-10`, `sort-12`, `sort-14`, `sort-18`, `sort-19`, `sort-23`,
+  `median-02`, `median-04`, `percent-17` to `percent-19`,
+  `predictperc-15`, `vdef-22`). All other vectors, including
+  `first-weekday` and every time zone vector, match the macOS capture.
+- `linux-x86_64` (3 vectors, taken from the CI x86_64 job, where Rondi's
+  output matched the live oracle): `rounding-06`, `vdef-21` (`-nan`, the
+  sign of the platform's unknown value) and `vdef-22`. The other `host-sort`
+  vectors are covered on x86_64 by the live oracle comparison only.
 
 Known divergences are listed in `KNOWN_DIVERGENCES` in the test file. Their
 expected value stays RRDtool's.
@@ -328,7 +346,10 @@ is `RPN stack underflow`. [doc] [bb]
 
 - `n,SORT` sorts the `n` values in place, smallest deepest, using the
   [ordering](#ordering-used-by-sort-median-percent-and-predictperc) below.
-  `n,REV` reverses them. A negative count is treated as 0. [doc] [bb]
+  `n,REV` reverses them. A negative `REV` count is treated as 0. A
+  negative `SORT` count leaves the stack unchanged on macOS but crashes the
+  glibc builds (`sort-06`, tagged `undefined`); the replacement may treat
+  it as 0 or reject it. [doc] [bb]
 - `n,AVG`: mean of the non-unknown values; unknown when none. A negative
   count pops nothing and pushes unknown. The sum starts at +0, so the mean
   of negative zeros is +0 (pinned in `rpn_differential.rs`). [doc] [bb]
@@ -374,9 +395,12 @@ comparison of `x` against `y`: [rsi] [bb]
 Unknown values therefore always sort first. Infinities make the comparison
 inconsistent, so the final order depends on the sort algorithm: two-value
 results on macOS are pinned by `sort-15` to `sort-28`, and every vector
-whose result depends on this is tagged `host-sort`. The `rrdgraph_rpn(1)`
-description of PERCENT ordering (NaN < -INF < finite < INF) applies to the
-VDEF `PERCENT`, not to these operators.
+whose result depends on this is tagged `host-sort`. The glibc results for
+the same two-value vectors (`expect_platform.linux-aarch64` of `sort-18`,
+`sort-19`, `sort-23`) confirm the signed classification in step 2: for
+example `NEGINF,-1,2,SORT` leaves `-inf` deepest on glibc and `-1` deepest
+on macOS. The VDEF `PERCENT` sort is also platform dependent once
+infinities are present (`vdef-22`: `-inf` on macOS, `inf` on Linux).
 
 ## Window operators
 
@@ -389,7 +413,9 @@ VDEF `PERCENT`, not to these operators.
   `30,a,TREND`). The window operand `w` is itself popped from the stack
   and must be present (`a,TREND` is `RPN stack underflow`).
 - Let `S` be the variable's step and `N = ceil(w / S)` (at least 1;
-  `w <= 0` and unknown `w` give 1). In rows whose zero-based index is less
+  `w <= 0` gives 1). An unknown `w` is undefined: the aarch64 builds
+  behave as `N = 1` and the x86_64 build crashes (`trend-10`,
+  `trendnan-10`, tagged `undefined`); the replacement may reject it. In rows whose zero-based index is less
   than `N - 1` the result is unknown. Otherwise the result is the mean of
   the `N` most recent samples of the variable ending at the current one.
 - `TREND` includes unknown samples, so one unknown makes the result
@@ -490,9 +516,19 @@ printed as `ERROR: <text>` with exit status 1. [bb]
 - Results of single IEEE operations (`+ - * /`, comparisons, `FLOOR`,
   `CEIL`, `ROUND`, `ABS`, `SQRT`) are exact and identical on every
   platform. Transcendental functions follow the platform C library. The
-  frozen vectors were captured on macOS arm64 and are expected to hold at
-  the ten significant digits that `xport` prints; the Linux CI jobs, which
-  also compare against a live oracle, are the check for glibc. [bb]
+  frozen vectors were captured on macOS arm64. The Linux aarch64 oracle
+  agrees on every vector outside the sort ordering cases. In the x86_64 CI
+  job the frozen table failed only for the vectors now listed under
+  `expect_platform.linux-x86_64` and the two TREND cases now tagged
+  `undefined`; `host-sort` vectors were not frozen-compared there. [bb]
+- Unknown results print as `NaN` in `xport` on every
+  platform, but VDEF `PRINT` with `%le` shows the sign of the platform's
+  unknown value: `nan` on aarch64 and `-nan` on x86_64 (`vdef-21`). [bb]
+- `0.49999999999999994,ROUND` gives 0 on aarch64 and 1 on x86_64
+  (`rounding-06`). Whether the difference lies in reading the literal or
+  in rounding is not settled; numeric literals with more than 15
+  significant digits should be treated as platform dependent in the last
+  bit. [bb]
 - Vectors with a named `TZ` are compared against the frozen table only when
   the host has that zone in `/usr/share/zoneinfo`.
 - Results that accumulate products (`STDEV`, `PREDICTSIGMA`, VDEF `STDEV`
@@ -511,6 +547,8 @@ replacement need not reproduce them and must not crash; returning an error
 such as `RPN stack underflow` is acceptable.
 
 - `COPY` with a negative count (crash).
+- `SORT` with a negative count (crash on glibc; no effect on macOS).
+- `TREND` and `TRENDNAN` with an unknown window (crash on x86_64).
 - `MEDIAN` with a negative count (crash), `INDEX` with a negative index.
 - `ROLL` windows that reach stack slots never written in the current
   evaluation.

@@ -5,11 +5,18 @@ Usage:
   scripts/rpn-vectors.py [--rrdtool PATH] [--out FILE]
   scripts/rpn-vectors.py --probe 'CDEF expression'   # print one xport result
   scripts/rpn-vectors.py --check PATH                # diff PATH against FILE
+  scripts/rpn-vectors.py --rrdtool PATH --record-platform KEY --platform-out F
+  scripts/rpn-vectors.py --merge-platform KEY F
 
 The fixture commands and every case are listed here; the output file is the
 frozen table that crates/rondi-cli/tests/rpn_spec_vectors.rs replays. Each
 case runs in a fresh copy of the fixture directory with TZ (default UTC) and
 LC_ALL=C. Regenerate only with RRDtool 1.11.0 and review the diff.
+
+The table is captured on macOS arm64. Results that differ on another
+platform are recorded per vector under expect_platform.<KEY>, where KEY is
+linux-x86_64 or linux-aarch64: run --record-platform with that build of the
+oracle (for example inside docker/Dockerfile.test), then --merge-platform.
 """
 
 from __future__ import annotations
@@ -412,7 +419,9 @@ def cases() -> list[dict]:
         k(op, 'normal', f'4,3,2,1,2.9,{op}' + dump(4))
         k(op, 'boundary', f'4,3,2,1,1,{op}' + dump(4))
         k(op, 'boundary', f'4,3,2,1,0,{op}' + dump(4))
-        k(op, 'boundary', f'4,3,2,1,-1,{op}' + dump(4))
+        # A negative SORT count crashes the glibc build of the reference.
+        k(op, 'boundary', f'4,3,2,1,-1,{op}' + dump(4),
+          tags=['undefined'] if op == 'SORT' else [])
         k(op, 'error', f'4,3,2,1,5,{op}' + dump(4))
         x(op, 'normal', f'a,b,c,3,{op},+,+')
     for slot in ['POP,POP', 'POP,EXC,POP', 'EXC,POP,EXC,POP']:
@@ -473,8 +482,10 @@ def cases() -> list[dict]:
     for op in ['TREND', 'TRENDNAN']:
         for window in ['10', '20', '30', '35', '60', '5', '0', '-10', '1e9',
                        'UNKN']:
+            # An unknown window crashes the x86_64 build of the reference.
             x(op, 'normal' if window in ('30', '60') else 'boundary',
-              f'b,{window},{op}')
+              f'b,{window},{op}',
+              tags=['undefined'] if window == 'UNKN' else [])
         x(op, 'normal', f'a,40,{op}')
         x(op, 'boundary', f'a,40,{op}',
           defs=['DEF:a=f.rrd:a:AVERAGE:start=' + str(BASE + 1900)])
@@ -547,6 +558,8 @@ def cases() -> list[dict]:
                  'd,MAXIMUM', 'd,MINIMUM', 'd,AVERAGE', 'd,0,PERCENT',
                  'd,100,PERCENT', 'b,TOTAL', 'b,STDEV', 'b,LSLSLOPE']:
         tags = ['fma'] if any(f in vdef for f in ('STDEV', 'LSL')) else []
+        if vdef.startswith('d,') and 'PERCENT' in vdef:
+            tags.append('host-sort')
         add('VDEF', 'normal', graph([f'VDEF:v={vdef}', 'PRINT:v:%.10le',
                                      'PRINT:v:%s:strftime']), tags=tags)
     for vdef in ['a,PREV', 'a,1,+', 'a,FOO', 'a,101,PERCENT', 'a',
@@ -624,9 +637,49 @@ def main() -> None:
     parser.add_argument('--probe', nargs='*')
     parser.add_argument('--check')
     parser.add_argument('--tz', default='UTC')
+    parser.add_argument('--record-platform', metavar='KEY')
+    parser.add_argument('--merge-platform', nargs=2, metavar=('KEY', 'FILE'))
+    parser.add_argument('--platform-out')
     options = parser.parse_args()
 
+    if options.merge_platform:
+        key, source = options.merge_platform
+        table = json.loads(Path(options.out).read_text())
+        results = json.loads(Path(source).read_text())
+        for case in table['vectors']:
+            case.get('expect_platform', {}).pop(key, None)
+            if case['id'] in results:
+                result = results[case['id']]
+                if result.get('crash') or result.get('unstable'):
+                    sys.exit(f'{case["id"]} is not stable on {key}; tag it')
+                case.setdefault('expect_platform', {})[key] = result
+            if case.get('expect_platform') == {}:
+                del case['expect_platform']
+        Path(options.out).write_text(render(table))
+        print(f'{len(results)} {key} expectations merged')
+        return
+
     with tempfile.TemporaryDirectory() as tmp:
+        if options.record_platform:
+            # Run the frozen table through another build of the reference
+            # and keep the results that differ from the frozen expectation.
+            table = json.loads(Path(options.out).read_text())
+            fixture = Path(tmp) / 'fixture'
+            fixture.mkdir()
+            setup(options.rrdtool, fixture)
+            results = {}
+            for case in table['vectors']:
+                if 'undefined' in case['tags']:
+                    continue
+                got = run_case(options.rrdtool, fixture, case)
+                if got != run_case(options.rrdtool, fixture, case):
+                    got = {'unstable': True}
+                if got != case['expect']:
+                    results[case['id']] = got
+            Path(options.platform_out).write_text(
+                json.dumps(results, indent=1, sort_keys=True) + '\n')
+            print(f'{len(results)} differ on {options.record_platform}')
+            return
         fixture = Path(tmp) / 'fixture'
         fixture.mkdir()
         if options.probe is not None:

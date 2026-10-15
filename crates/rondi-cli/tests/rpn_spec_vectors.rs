@@ -31,6 +31,20 @@ struct Vector {
     env: Vec<(String, String)>,
     tags: Vec<String>,
     expect: Value,
+    /// Expectations recorded on other platforms, keyed `linux-x86_64` or
+    /// `linux-aarch64`, where the reference differs from the macOS capture.
+    expect_platform: Value,
+}
+
+/// The `expect_platform` key for this build target; macOS uses `expect`.
+fn platform_key() -> Option<&'static str> {
+    if cfg!(target_os = "linux") && cfg!(target_arch = "x86_64") {
+        Some("linux-x86_64")
+    } else if cfg!(target_os = "linux") && cfg!(target_arch = "aarch64") {
+        Some("linux-aarch64")
+    } else {
+        None
+    }
 }
 
 impl Vector {
@@ -38,22 +52,28 @@ impl Vector {
         self.tags.iter().any(|t| t == tag)
     }
 
-    /// Whether the frozen expectation applies on this build target.
-    /// `host-sort` and `first-weekday` results were captured on macOS and
-    /// depend on the C library; `fma` results are compared with a tolerance
-    /// off aarch64. A named time zone needs the host's zoneinfo file, which
-    /// slim container images may lack. The live oracle comparison covers
+    /// The frozen expectation for this build target, if one applies.
+    /// A per-platform recording wins. Otherwise `host-sort` and
+    /// `first-weekday` results, which depend on the C library, apply on
+    /// macOS only, and a named time zone needs the host's zoneinfo file,
+    /// which slim container images may lack. `fma` results are compared
+    /// with a tolerance off aarch64. The live oracle comparison covers
     /// every platform.
-    fn frozen_applies(&self) -> bool {
-        if self.tagged("host-sort") || self.tagged("first-weekday") {
-            return cfg!(target_os = "macos");
+    fn frozen(&self) -> Option<&Value> {
+        if let Some(recorded) = platform_key().and_then(|key| self.expect_platform.get(key)) {
+            return Some(recorded);
         }
-        self.env.iter().all(|(key, zone)| {
+        if (self.tagged("host-sort") || self.tagged("first-weekday")) && !cfg!(target_os = "macos")
+        {
+            return None;
+        }
+        let zones_present = self.env.iter().all(|(key, zone)| {
             key != "TZ"
                 || zone == "UTC"
                 || zone == "Not/A_Zone"
                 || Path::new("/usr/share/zoneinfo").join(zone).is_file()
-        })
+        });
+        zones_present.then_some(&self.expect)
     }
 }
 
@@ -88,6 +108,7 @@ fn load() -> (Vec<Vec<String>>, Vec<Vector>) {
                 .collect(),
             tags: strings(&case["tags"]),
             expect: case["expect"].clone(),
+            expect_platform: case.get("expect_platform").cloned().unwrap_or(Value::Null),
         })
         .collect();
     (fixture, vectors)
@@ -245,9 +266,11 @@ fn rpn_vectors_match_rrdtool() {
         }
         let mut ok = true;
         let mut detail = String::new();
-        if vector.frozen_applies() && !same(&vector.expect, &got, loose && vector.tagged("fma")) {
+        if let Some(frozen) = vector.frozen()
+            && !same(frozen, &got, loose && vector.tagged("fma"))
+        {
             ok = false;
-            detail = format!("frozen {}\n  rondi  {}", vector.expect, got);
+            detail = format!("frozen {frozen}\n  rondi  {got}");
         }
         if live {
             let reference = run(Path::new("rrdtool"), &up, &vector.args, &vector.env);
