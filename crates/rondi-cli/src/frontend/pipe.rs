@@ -316,12 +316,10 @@ fn respond(
 
 /// `d <name>` for each directory, `- <name>` for each `.rrd` file.
 fn list_directory() -> Result<Vec<u8>, i32> {
-    let entries = std::fs::read_dir(".").map_err(|error| errno_of(&error))?;
-    let mut text = b"d .\nd ..\n".to_vec();
-    for entry in entries.flatten() {
-        let name = super::path_bytes(std::path::Path::new(&entry.file_name()));
+    let mut text = Vec::new();
+    for name in directory_names()? {
         // Symbolic links count as what they point to.
-        let Ok(meta) = std::fs::metadata(entry.path()) else {
+        let Ok(meta) = std::fs::metadata(super::os_path(&name)) else {
             continue;
         };
         let marker: &[u8] = if meta.is_dir() {
@@ -336,6 +334,47 @@ fn list_directory() -> Result<Vec<u8>, i32> {
         text.push(b'\n');
     }
     Ok(text)
+}
+
+/// The entry names of the working directory in the order the system
+/// returns them, `.` and `..` included wherever they fall.
+// Compatibility: `ls` does not sort, and `.` and `..` keep their place in
+// the enumeration (last on some Linux file systems).
+// Provenance: black-box compatibility test (PM-22, rrdtool_optparse.rs).
+#[cfg(unix)]
+fn directory_names() -> Result<Vec<Vec<u8>>, i32> {
+    // SAFETY: the stream is checked for NULL, read until readdir returns
+    // NULL, and closed exactly once; each entry name is copied out before
+    // the next readdir call can reuse its storage.
+    unsafe {
+        let stream = libc::opendir(c".".as_ptr());
+        if stream.is_null() {
+            return Err(super::last_os_errno());
+        }
+        let mut names = Vec::new();
+        loop {
+            let entry = libc::readdir(stream);
+            if entry.is_null() {
+                break;
+            }
+            let name = std::ffi::CStr::from_ptr((*entry).d_name.as_ptr());
+            names.push(name.to_bytes().to_vec());
+        }
+        libc::closedir(stream);
+        Ok(names)
+    }
+}
+
+#[cfg(not(unix))]
+fn directory_names() -> Result<Vec<Vec<u8>>, i32> {
+    let entries = std::fs::read_dir(".").map_err(|error| errno_of(&error))?;
+    let mut names = vec![b".".to_vec(), b"..".to_vec()];
+    names.extend(
+        entries
+            .flatten()
+            .map(|entry| super::path_bytes(std::path::Path::new(&entry.file_name()))),
+    );
+    Ok(names)
 }
 
 // Compatibility: `ls` lists a file when its name is longer than the
