@@ -1,288 +1,732 @@
-//! Port of RRDtool 1.11.0 `rrd_resize.c` after its argument checks. Both
-//! files are handled the way rrd_open maps them: the input is read whole,
-//! the output is created O_RDWR|O_CREAT|O_TRUNC at the size computed from
-//! the copied header, and every read, write and seek keeps rrd_file's
-//! position rules, so short and overlong layouts behave as upstream.
+//! `rrdtool resize`: adding unknown rows to, or removing the oldest rows
+//! from, one archive of an RRD, writing the result to a new file.
+//!
+//! The behavior is specified in docs/compatibility/resize.md, whose rule
+//! numbers (RZ-n) are cited below. The input's layout is read into a
+//! [`Layout`]; [`Plan::new`] turns it and the request into the output header
+//! and a short list of row operations, without touching any file; a
+//! [`Transfer`] then carries the operations out between the two files, so
+//! the archives never have to fit in memory.
 
-use crate::rrd_binary::{
-    CDP_PREP_LEN, DS_DEF_LEN, LIVE_HEAD_LEN, PDP_PREP_LEN, RRA_DEF_LEN, RRA_PTR_LEN, RrdFileLock,
-    RrdResizeAction, STAT_HEAD_LEN, VALUE_LEN, open_output_file, open_rrd_write, read_info,
-    require_rows_in_file, rrd_nan, rrd_strerror,
-};
-use crate::storage::StoreError;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::fs::File;
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-/// An rrd_file_t over a mapped buffer: `pos` may run past `len` and
-/// rrd_read/rrd_write clamp or refuse exactly as rrd_open.c:1004-1094.
-struct Mapped {
-    bytes: Vec<u8>,
-    pos: u64,
+use crate::rrd_binary::{
+    DS_DEF_LEN, RRA_DEF_LEN, RRA_PTR_LEN, RrdResizeAction, STAT_HEAD_LEN, VALUE_LEN, read_info,
+    rrd_nan, rrd_strerror,
+};
+use crate::storage::StoreError;
+
+const ROWS_OFFSET: usize = 24;
+/// Microseconds that a version 3 live header adds after the last update.
+const LIVE_USEC_LEN: usize = 8;
+
+fn rrd_error(message: impl Into<String>) -> StoreError {
+    StoreError::Rrd(message.into())
 }
 
-impl Mapped {
-    /// Reads up to one value into `buffer`, keeping its old bytes past a
-    /// short read; returns the count, 0 at the end.
-    fn read(&mut self, buffer: &mut [u8; VALUE_LEN]) -> usize {
-        let len = self.bytes.len() as u64;
-        if self.pos > len {
-            return 0;
-        }
-        let available = (len - self.pos).min(VALUE_LEN as u64) as usize;
-        let start = self.pos as usize;
-        buffer[..available].copy_from_slice(&self.bytes[start..start + available]);
-        self.pos += available as u64;
-        available
+/// What the input's header says about where everything is.
+#[derive(Debug, Clone)]
+struct Layout {
+    version: String,
+    /// Length of everything before the first row.
+    head_len: u64,
+    /// Offset of the archive current-row words.
+    pointers_offset: u64,
+    /// Offset of the last update.
+    live_offset: u64,
+    /// Whether the live header lacks the microseconds (before version 3).
+    legacy_live_head: bool,
+    sources: u64,
+    /// Rows and current row of each archive.
+    archives: Vec<(u64, u64)>,
+}
+
+impl Layout {
+    fn row_len(&self) -> u64 {
+        self.sources * VALUE_LEN as u64
     }
 
-    fn write(&mut self, data: &[u8], error: &mut Option<String>) {
-        if data.is_empty() {
-            return;
-        }
-        let len = self.bytes.len() as u64;
-        if self.pos + data.len() as u64 > len {
-            *error = Some(format!(
-                "attempting to write beyond end of file ({} + {} > {})",
-                self.pos as i64,
-                data.len(),
-                len
-            ));
-            return;
-        }
-        let start = self.pos as usize;
-        self.bytes[start..start + data.len()].copy_from_slice(data);
-        self.pos += data.len() as u64;
+    /// Length of all rows, or `None` when it overflows.
+    fn data_len(&self) -> Option<u64> {
+        self.archives.iter().try_fold(0_u64, |total, (rows, _)| {
+            total.checked_add(rows.checked_mul(self.row_len())?)
+        })
     }
 }
 
-/// `rrd_read` one value into the shared buffer and `rrd_write` it out.
-fn copy_value(
-    input: &mut Mapped,
-    out: &mut Mapped,
-    buffer: &mut [u8; VALUE_LEN],
-    error: &mut Option<String>,
-) {
-    input.read(buffer);
-    out.write(&buffer[..], error);
+/// One step of the row copy. Counts are in values, not bytes, and are wide
+/// enough for any current row a file can hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    /// Copy values from the input to the output.
+    Copy(u128),
+    /// Move the input position forward over values.
+    Skip(u128),
+    /// Write unknown values.
+    Unknown(u128),
 }
 
-struct Copy<'a> {
-    input: &'a mut Mapped,
-    out: &'a mut Mapped,
-    buffer: &'a mut [u8; VALUE_LEN],
-    error: &'a mut Option<String>,
+/// The complete description of the output.
+#[derive(Debug, Clone, PartialEq)]
+struct Plan {
+    head: Vec<u8>,
+    /// Length the output is created with.
+    output_len: u64,
+    steps: Vec<Step>,
 }
 
-impl Copy<'_> {
-    /// rrd_resize.c:212-248: drop rows after the cursor, wrapping to the
-    /// start of the archive when they run past its end.
-    fn shrink(&mut self, ds: u64, cur_row: &mut u64, row_cnt: &mut u64, modify: &mut i64) {
-        let row_bytes = (VALUE_LEN as u64).wrapping_mul(ds);
-        // (cur_row - modify) % row_cnt in unsigned long, stored in a long.
-        let mut remove_end = (cur_row.wrapping_sub(*modify as u64) % *row_cnt) as i64;
-        if remove_end <= *cur_row as i64 {
-            while remove_end >= 0 {
-                self.input.pos = self.input.pos.wrapping_add(row_bytes);
-                *cur_row = cur_row.wrapping_sub(1);
-                *row_cnt = row_cnt.wrapping_sub(1);
-                remove_end -= 1;
-                *modify += 1;
+impl Plan {
+    /// Builds the output header from the input's `head` bytes and the steps
+    /// that move the rows (RZ-5 to RZ-11, RZ-17).
+    fn new(
+        layout: &Layout,
+        input_head: &[u8],
+        archive: usize,
+        action: RrdResizeAction,
+        rows: u64,
+    ) -> Result<Self, StoreError> {
+        let too_large = || rrd_error("the resized file would be too large");
+        let (old_rows, current) = layout.archives[archive];
+        let new_rows = match action {
+            RrdResizeAction::Grow => old_rows.checked_add(rows).ok_or_else(too_large)?,
+            RrdResizeAction::Shrink => old_rows - rows,
+        };
+        let row_len = layout.row_len();
+        let resized_data = layout
+            .data_len()
+            .and_then(|length| length.checked_sub(old_rows * row_len))
+            .and_then(|length| length.checked_add(new_rows.checked_mul(row_len)?))
+            .ok_or_else(too_large)?;
+        // Compatibility: the output is sized from the input's own layout,
+        // so a version 0001 file (8-byte live header) gets a file 8 bytes
+        // too short for the version 0003 header written into it (RZ-17).
+        // Provenance: black-box compatibility test.
+        let output_len = layout
+            .head_len
+            .checked_add(resized_data)
+            .filter(|length| *length <= i64::MAX as u64)
+            .ok_or_else(too_large)?;
+
+        let sources = u128::from(layout.sources);
+        let n = i128::from(old_rows);
+        let c = i128::from(current);
+        let k = i128::from(rows);
+        let values = |count: i128| (count.max(0) as u128) * sources;
+        let before_target: u128 = layout.archives[..archive]
+            .iter()
+            .map(|(rows, _)| u128::from(*rows) * sources)
+            .sum();
+        let mut steps = vec![Step::Copy(before_target)];
+        let mut new_current = c;
+        match action {
+            // RZ-5: the new rows follow the current row, as the oldest.
+            RrdResizeAction::Grow => {
+                steps.extend([Step::Copy(values(c + 1)), Step::Unknown(values(k))]);
+            }
+            // RZ-6: the oldest rows go, first those after the current row.
+            RrdResizeAction::Shrink => {
+                let after = n - 1 - c;
+                if k <= after {
+                    steps.extend([Step::Copy(values(c + 1)), Step::Skip(values(k))]);
+                } else {
+                    let before = k - after;
+                    new_current = c - before;
+                    steps.extend([
+                        Step::Skip(values(before)),
+                        Step::Copy(values(c + 1 - before)),
+                        Step::Skip(values(after)),
+                    ]);
+                }
             }
         }
-        let mut row = 0_u64;
-        while row <= *cur_row {
-            for _ in 0..ds {
-                copy_value(self.input, self.out, self.buffer, self.error);
+
+        let mut head = input_head.to_vec();
+        if layout.legacy_live_head {
+            head[4..8].copy_from_slice(b"0003");
+            let usec = (layout.live_offset + 8) as usize;
+            head.splice(usec..usec, [0_u8; LIVE_USEC_LEN]);
+        }
+        let definition = STAT_HEAD_LEN
+            + layout.sources as usize * DS_DEF_LEN
+            + archive * RRA_DEF_LEN
+            + ROWS_OFFSET;
+        head[definition..definition + 8].copy_from_slice(&new_rows.to_le_bytes());
+        let pointer = layout.pointers_offset as usize
+            + if layout.legacy_live_head {
+                LIVE_USEC_LEN
+            } else {
+                0
             }
-            row += 1;
-        }
-        while *modify < 0 {
-            self.input.pos = self.input.pos.wrapping_add(row_bytes);
-            *row_cnt = row_cnt.wrapping_sub(1);
-            *modify += 1;
-        }
+            + archive * RRA_PTR_LEN;
+        // RZ-9: a current row out of range is carried, not corrected.
+        head[pointer..pointer + 8].copy_from_slice(&(new_current as u64).to_le_bytes());
+        Ok(Self {
+            head,
+            output_len,
+            steps,
+        })
     }
 }
 
-fn u64_at(bytes: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+/// Copies between the input and the output the way the reference does:
+/// every value write past the output's length fails without moving the
+/// write position, and every value read past the input's end repeats the
+/// previous value, with a partial value overlaid on it.
+struct Transfer<'a> {
+    input: &'a mut File,
+    input_len: u64,
+    read_at: u64,
+    output: BufWriter<&'a mut File>,
+    output_len: u64,
+    write_at: u64,
+    previous: [u8; VALUE_LEN],
+    /// Where the first write that did not fit was attempted.
+    overflow_at: Option<u64>,
 }
 
-/// Resize archive `rra_index` of `input_path` into `output_path` by
-/// `row_count` rows (rrd_resize.c:59-301).
+impl<'a> Transfer<'a> {
+    fn room(&self) -> u64 {
+        self.output_len - self.write_at
+    }
+
+    /// Writes whole values from `bytes`, as many as fit.
+    fn emit(&mut self, bytes: &[u8]) -> io::Result<()> {
+        let fits = (bytes.len() as u64).min(self.room()) as usize;
+        self.output.write_all(&bytes[..fits])?;
+        self.write_at += fits as u64;
+        if fits < bytes.len() {
+            self.overflow_at.get_or_insert(self.write_at);
+        }
+        Ok(())
+    }
+
+    /// Writes `count` copies of one value.
+    fn emit_repeated(&mut self, value: [u8; VALUE_LEN], count: u128) -> io::Result<()> {
+        const BATCH: usize = 4096;
+        let fitting = (self.room() / VALUE_LEN as u64) as u128;
+        let mut remaining = count.min(fitting) as u64;
+        let batch: Vec<u8> = std::iter::repeat_n(value, BATCH).flatten().collect();
+        while remaining > 0 {
+            let values = remaining.min(BATCH as u64) as usize;
+            self.emit(&batch[..values * VALUE_LEN])?;
+            remaining -= values as u64;
+        }
+        if count > fitting {
+            self.overflow_at.get_or_insert(self.write_at);
+        }
+        Ok(())
+    }
+
+    /// Copies `length` bytes from the current read position.
+    fn copy_bytes(&mut self, length: u64) -> io::Result<()> {
+        if length == 0 {
+            return Ok(());
+        }
+        self.input.seek(SeekFrom::Start(self.read_at))?;
+        let mut chunk = vec![0_u8; 1 << 16];
+        let mut remaining = length;
+        while remaining > 0 {
+            let part = remaining.min(chunk.len() as u64) as usize;
+            self.input.read_exact(&mut chunk[..part])?;
+            self.emit(&chunk[..part])?;
+            remaining -= part as u64;
+        }
+        self.read_at += length;
+        Ok(())
+    }
+
+    fn copy_values(&mut self, count: u128) -> io::Result<()> {
+        let value_len = VALUE_LEN as u64;
+        let available = self.input_len.saturating_sub(self.read_at);
+        let whole = count.min(u128::from(available / value_len)) as u64;
+        if whole > 0 {
+            // Only what fits is written; the rest of the reads still happen.
+            let written = (whole * value_len).min(self.room());
+            self.copy_bytes(written)?;
+            self.read_at += whole * value_len - written;
+            self.input.seek(SeekFrom::Start(self.read_at - value_len))?;
+            self.input.read_exact(&mut self.previous)?;
+            if written < whole * value_len {
+                self.overflow_at.get_or_insert(self.write_at);
+            }
+        }
+        let mut remaining = count - u128::from(whole);
+        let partial = self.input_len.saturating_sub(self.read_at);
+        if remaining > 0 && partial > 0 {
+            self.input.seek(SeekFrom::Start(self.read_at))?;
+            self.input
+                .read_exact(&mut self.previous[..partial as usize])?;
+            let value = self.previous;
+            self.emit(&value)?;
+            self.read_at += value_len;
+            remaining -= 1;
+        }
+        if remaining > 0 {
+            self.emit_repeated(self.previous, remaining)?;
+            let skipped = u64::try_from(remaining.saturating_mul(u128::from(value_len)));
+            self.read_at = self.read_at.saturating_add(skipped.unwrap_or(u64::MAX));
+        }
+        Ok(())
+    }
+
+    fn run(&mut self, steps: &[Step]) -> io::Result<()> {
+        for step in steps {
+            match *step {
+                Step::Copy(values) => self.copy_values(values)?,
+                Step::Skip(values) => {
+                    let bytes = values.saturating_mul(VALUE_LEN as u128);
+                    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+                    self.read_at = self.read_at.saturating_add(bytes);
+                }
+                Step::Unknown(values) => self.emit_repeated(rrd_nan().to_le_bytes(), values)?,
+            }
+        }
+        // RZ-15: whatever follows is copied while the output has room.
+        let rest = self.room().min(self.input_len.saturating_sub(self.read_at));
+        self.copy_bytes(rest)
+    }
+}
+
+/// Resizes archive `archive` of `input` by `rows` and writes the result to
+/// `output`, which must not exist yet.
+///
+/// When the input holds bytes the result leaves out (trailing bytes, or the
+/// last 8 bytes of a version 0001 file), `on_ignored_bytes` receives their
+/// number before the function returns, also when it then fails.
 pub fn resize_rrd_file(
-    input_path: impl AsRef<Path>,
-    output_path: impl AsRef<Path>,
-    rra_index: usize,
+    input: impl AsRef<Path>,
+    output: impl AsRef<Path>,
+    archive: usize,
     action: RrdResizeAction,
-    row_count: u64,
+    rows: u64,
+    on_ignored_bytes: &mut dyn FnMut(u64),
 ) -> Result<(), StoreError> {
-    let input_path = input_path.as_ref();
-    let output_path = output_path.as_ref();
-    if input_path == Path::new("resize.rrd") {
-        return Err(StoreError::Rrd("resize.rrd is a reserved name".into()));
-    }
-    if row_count == 0 {
-        return Err(StoreError::Rrd(
-            "Please grow or shrink with at least 1 row".into(),
+    let (input, output) = (input.as_ref(), output.as_ref());
+    // Compatibility: the input is opened for reading and writing, so a
+    // read-only file or a directory fails here, though nothing is written
+    // to it (RZ-10).
+    // Provenance: black-box compatibility test.
+    let mut source = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(input)
+        .map_err(|error| {
+            StoreError::RrdFile(format!(
+                "opening '{}': {}",
+                input.display(),
+                rrd_strerror(&error)
+            ))
+        })?;
+    let info = read_info(&mut source, input)?;
+    let input_len = source.metadata()?.len();
+    let live_offset = (STAT_HEAD_LEN
+        + info.data_sources.len() * DS_DEF_LEN
+        + info.archives.len() * RRA_DEF_LEN) as u64;
+    let layout = Layout {
+        version: info.version.clone(),
+        head_len: info.header_size as u64,
+        pointers_offset: info.header_size as u64 - (info.archives.len() * RRA_PTR_LEN) as u64,
+        live_offset,
+        legacy_live_head: info.live_head_len < 16,
+        sources: info.data_sources.len() as u64,
+        archives: info
+            .archives
+            .iter()
+            .map(|archive| (archive.rows, archive.current_row))
+            .collect(),
+    };
+    // RZ-20: rows whose unwrapped size passes the end of the file.
+    if layout
+        .data_len()
+        .and_then(|length| length.checked_add(layout.head_len))
+        .is_none_or(|end| end > input_len)
+    {
+        return Err(StoreError::RrdFormat(
+            "RRA rows extend past the end of the file".into(),
         ));
     }
-    let mut modify = row_count as i64;
-    if action == RrdResizeAction::Shrink {
-        modify = -modify;
+    if archive >= layout.archives.len() {
+        return Err(rrd_error("no such RRA in this RRD"));
     }
+    if action == RrdResizeAction::Shrink && rows >= layout.archives[archive].0 {
+        return Err(rrd_error("This RRA is not that big"));
+    }
+    let mut input_head = vec![0_u8; info.header_size];
+    source.seek(SeekFrom::Start(0))?;
+    source.read_exact(&mut input_head)?;
+    let plan = Plan::new(&layout, &input_head, archive, action, rows)?;
 
-    let mut input_file = RrdFileLock::exclusive(open_rrd_write(input_path)?)?;
-    let info = read_info(&mut input_file, input_path)?;
-    let mut old = Vec::new();
-    input_file.seek(SeekFrom::Start(0))?;
-    input_file.read_to_end(&mut old)?;
-    // The copy loops below run once per stored value, so a damaged row_cnt
-    // would size them, and the new file, from the unwrapped count.
-    for archive in &info.archives {
-        require_rows_in_file(&info, archive, old.len() as u64)?;
-    }
-    let ds_cnt = info.data_sources.len();
-    let rra_cnt = info.archives.len();
-    let rra_start = STAT_HEAD_LEN + ds_cnt * DS_DEF_LEN;
-    let live_start = rra_start + rra_cnt * RRA_DEF_LEN;
-    let pdp_start = live_start + info.live_head_len;
-    let pointer_start = info.header_size - rra_cnt * RRA_PTR_LEN;
-
-    if rra_index >= rra_cnt {
-        return Err(StoreError::Rrd("no such RRA in this RRD".into()));
-    }
-    let row_cnt_offset = |rra: usize| RRA_DEF_LEN * rra + 24;
-    let mut rra_defs = old[rra_start..live_start].to_vec();
-    if modify < 0 && (info.archives[rra_index].rows as i64) <= -modify {
-        return Err(StoreError::Rrd("This RRA is not that big".into()));
-    }
-
-    // rrd_open(RRD_CREAT) sizes the file from the copied header, whose
-    // version is still the input's.
-    let target_rows = u64_at(&rra_defs, row_cnt_offset(rra_index)).wrapping_add(modify as u64);
-    rra_defs[row_cnt_offset(rra_index)..row_cnt_offset(rra_index) + 8]
-        .copy_from_slice(&target_rows.to_le_bytes());
-    let values = (0..rra_cnt).fold(0_u64, |total, rra| {
-        total.wrapping_add(u64_at(&rra_defs, row_cnt_offset(rra)))
-    });
-    let newfile_size = (info.header_size as u64).wrapping_add(
-        (VALUE_LEN as u64)
-            .wrapping_mul(values)
-            .wrapping_mul(ds_cnt as u64),
-    );
-    let create_error = |error: std::io::Error| {
-        StoreError::Rrd(format!(
+    let cannot_create = |error: &io::Error| {
+        rrd_error(format!(
             "Can't create '{}': {}",
-            output_path.display(),
-            rrd_strerror(&error)
+            output.display(),
+            rrd_strerror(error)
         ))
     };
-    // Deliberately require a new destination instead of upstream O_TRUNC.
-    let output_file = open_output_file(output_path, true).map_err(create_error)?;
-    let mut output_file = RrdFileLock::exclusive(output_file)?;
-    output_file.set_len(0).map_err(create_error)?;
-    output_file.set_len(newfile_size).map_err(create_error)?;
-    let new_len = usize::try_from(newfile_size)
-        .map_err(|_| create_error(std::io::Error::from_raw_os_error(libc::EFBIG)))?;
-    let mut out = Mapped {
-        bytes: vec![0; new_len],
-        pos: 0,
-    };
-    let target_rows = u64_at(&rra_defs, row_cnt_offset(rra_index)).wrapping_sub(modify as u64);
-    rra_defs[row_cnt_offset(rra_index)..row_cnt_offset(rra_index) + 8]
-        .copy_from_slice(&target_rows.to_le_bytes());
-    let mut rra_ptrs = (0..rra_cnt)
-        .map(|rra| u64_at(&old, pointer_start + rra * RRA_PTR_LEN))
-        .collect::<Vec<_>>();
-
-    let mut stat_head = old[..STAT_HEAD_LEN].to_vec();
-    match crate::rrd_number::c_strtol(&info.version, 10).0 as i32 {
-        3 | 4 => {}
-        1 => stat_head[7] = b'3',
-        _ => {
-            return Err(StoreError::Rrd(format!(
+    let directory = output
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    // RZ-19: refuse what cannot be written before creating anything.
+    if crate::rrd_create::available_space(directory)
+        .is_some_and(|available| plan.output_len > available)
+    {
+        return Err(cannot_create(&io::Error::from_raw_os_error(enospc())));
+    }
+    // Compatibility: RRDtool truncates and rewrites an existing output, and
+    // follows a symbolic link there; Rondi creates it exclusively, private
+    // to the user, and never replaces anything, its input included
+    // (RZ-div-existing-output, RZ-13).
+    // Provenance: black-box compatibility test.
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut target = options
+        .open(output)
+        .map_err(|error| cannot_create(&error))?;
+    let result = write_output(&mut source, input_len, &mut target, &layout, &plan);
+    match result {
+        Ok(ignored) => {
+            if let Some(ignored) = ignored.ignored_bytes {
+                on_ignored_bytes(ignored);
+            }
+            match ignored.overflow_at {
+                // RZ-17: a version 0001 file whose last write does not fit.
+                Some(position) => Err(rrd_error(format!(
+                    "attempting to write beyond end of file ({position} + {VALUE_LEN} > {})",
+                    plan.output_len
+                ))),
+                None => Ok(()),
+            }
+        }
+        Err(WriteFailure::Version) => {
+            // RZ-14: the output was sized and is left zero-filled.
+            Err(rrd_error(format!(
                 "Do not know how to handle RRD version {}",
-                info.version
-            )));
+                layout.version
+            )))
+        }
+        Err(WriteFailure::Io(error)) => {
+            drop(target);
+            let _ = std::fs::remove_file(output);
+            Err(error.into())
         }
     }
+}
 
-    let mut error = None;
-    out.write(&stat_head, &mut error);
-    out.write(&old[STAT_HEAD_LEN..rra_start], &mut error);
-    out.write(&rra_defs, &mut error);
-    let mut live_head = [0_u8; LIVE_HEAD_LEN];
-    live_head[..8].copy_from_slice(&info.last_update.to_le_bytes());
-    live_head[8..].copy_from_slice(&info.last_update_usec.to_le_bytes());
-    out.write(&live_head, &mut error);
-    let cdp_start = pdp_start + ds_cnt * PDP_PREP_LEN;
-    out.write(&old[pdp_start..cdp_start], &mut error);
-    out.write(&old[cdp_start..pointer_start], &mut error);
-    out.write(&old[pointer_start..info.header_size], &mut error);
+#[cfg(unix)]
+fn enospc() -> i32 {
+    libc::ENOSPC
+}
 
-    let mut input = Mapped {
-        bytes: old,
-        pos: info.header_size as u64,
+#[cfg(not(unix))]
+fn enospc() -> i32 {
+    28
+}
+
+struct Written {
+    ignored_bytes: Option<u64>,
+    overflow_at: Option<u64>,
+}
+
+enum WriteFailure {
+    Version,
+    Io(io::Error),
+}
+
+impl From<io::Error> for WriteFailure {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+fn write_output(
+    source: &mut File,
+    input_len: u64,
+    target: &mut File,
+    layout: &Layout,
+    plan: &Plan,
+) -> Result<Written, WriteFailure> {
+    target.set_len(plan.output_len)?;
+    // Compatibility: only these version strings are resized; others fail
+    // after the output was created (RZ-14).
+    // Provenance: black-box compatibility test.
+    if !matches!(layout.version.as_str(), "0001" | "0003" | "0004") {
+        return Err(WriteFailure::Version);
+    }
+    let mut transfer = Transfer {
+        input: source,
+        input_len,
+        read_at: layout.head_len,
+        output: BufWriter::with_capacity(1 << 16, target),
+        output_len: plan.output_len,
+        write_at: 0,
+        previous: [0; VALUE_LEN],
+        overflow_at: None,
     };
-    let ds = ds_cnt as u64;
-    // rrd_resize.c keeps one `buffer` for every copy.
-    let mut buffer = [0_u8; VALUE_LEN];
-    let before = (0..rra_index).fold(0_u64, |total, rra| {
-        total.wrapping_add(ds.wrapping_mul(u64_at(&rra_defs, row_cnt_offset(rra))))
-    });
-    for _ in 0..before {
-        copy_value(&mut input, &mut out, &mut buffer, &mut error);
-    }
-    if modify > 0 {
-        for _ in 0..ds.wrapping_mul(rra_ptrs[rra_index].wrapping_add(1)) {
-            copy_value(&mut input, &mut out, &mut buffer, &mut error);
-        }
-        buffer = rrd_nan().to_le_bytes();
-        for _ in 0..ds.wrapping_mul(modify as u64) {
-            out.write(&buffer, &mut error);
-        }
-    } else {
-        let mut row_cnt = u64_at(&rra_defs, row_cnt_offset(rra_index));
-        let mut copy = Copy {
-            input: &mut input,
-            out: &mut out,
-            buffer: &mut buffer,
-            error: &mut error,
-        };
-        copy.shrink(ds, &mut rra_ptrs[rra_index], &mut row_cnt, &mut modify);
-        rra_defs[row_cnt_offset(rra_index)..row_cnt_offset(rra_index) + 8]
-            .copy_from_slice(&row_cnt.to_le_bytes());
-    }
-    loop {
-        let read = input.read(&mut buffer);
-        if read == 0 {
-            break;
-        }
-        if out.pos + read as u64 > out.bytes.len() as u64 {
-            eprintln!(
-                "WARNING: ignoring last {read} bytes\nWARNING: if you see this message multiple times for a single file you're in trouble"
-            );
-            continue;
-        }
-        out.write(&buffer[..read], &mut error);
-    }
-    let row_cnt = u64_at(&rra_defs, row_cnt_offset(rra_index)).wrapping_add(modify as u64);
-    rra_defs[row_cnt_offset(rra_index)..row_cnt_offset(rra_index) + 8]
-        .copy_from_slice(&row_cnt.to_le_bytes());
-    out.pos = (STAT_HEAD_LEN + DS_DEF_LEN * ds_cnt) as u64;
-    out.write(&rra_defs, &mut error);
-    out.pos += (LIVE_HEAD_LEN + PDP_PREP_LEN * ds_cnt + CDP_PREP_LEN * ds_cnt * rra_cnt) as u64;
-    let pointers = rra_ptrs
-        .iter()
-        .flat_map(|pointer| pointer.to_le_bytes())
-        .collect::<Vec<_>>();
-    out.write(&pointers, &mut error);
+    transfer.emit(&plan.head)?;
+    transfer.run(&plan.steps)?;
+    transfer.output.flush()?;
+    let ignored = input_len.saturating_sub(transfer.read_at);
+    Ok(Written {
+        ignored_bytes: (ignored > 0).then_some(ignored),
+        overflow_at: transfer.overflow_at,
+    })
+}
 
-    output_file.seek(SeekFrom::Start(0))?;
-    output_file.write_all(&out.bytes)?;
-    match error {
-        Some(message) => Err(StoreError::Rrd(message)),
-        None => Ok(()),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file with `sources` data sources and archives of the given rows
+    /// and current rows; every stored value is its own byte offset.
+    fn file(sources: u64, archives: &[(u64, u64)], legacy: bool) -> Vec<u8> {
+        let live = if legacy { 8 } else { 16 };
+        let mut bytes = b"RRD\0".to_vec();
+        bytes.extend_from_slice(if legacy { b"0001" } else { b"0003" });
+        bytes.resize(16, 0);
+        bytes.extend_from_slice(&crate::rrd_binary::FLOAT_COOKIE.to_le_bytes());
+        bytes.extend_from_slice(&sources.to_le_bytes());
+        bytes.extend_from_slice(&(archives.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&60_u64.to_le_bytes());
+        bytes.resize(STAT_HEAD_LEN, 0);
+        for index in 0..sources {
+            let mut record = [0_u8; DS_DEF_LEN];
+            record[0] = b'a' + index as u8;
+            record[20..25].copy_from_slice(b"GAUGE");
+            bytes.extend_from_slice(&record);
+        }
+        for (rows, _) in archives {
+            let mut record = [0_u8; RRA_DEF_LEN];
+            record[..7].copy_from_slice(b"AVERAGE");
+            record[24..32].copy_from_slice(&rows.to_le_bytes());
+            record[32..40].copy_from_slice(&1_u64.to_le_bytes());
+            bytes.extend_from_slice(&record);
+        }
+        bytes.extend_from_slice(&1_000_000_000_u64.to_le_bytes());
+        bytes.resize(bytes.len() + live - 8, 0);
+        let prep = 112 * sources as usize + 80 * sources as usize * archives.len();
+        bytes.resize(bytes.len() + prep, 0);
+        for (_, current) in archives {
+            bytes.extend_from_slice(&current.to_le_bytes());
+        }
+        let total: u64 = archives.iter().map(|(rows, _)| rows * sources).sum();
+        for _ in 0..total {
+            let offset = bytes.len() as f64;
+            bytes.extend_from_slice(&offset.to_le_bytes());
+        }
+        bytes
+    }
+
+    fn resize(
+        input: &[u8],
+        archive: usize,
+        action: RrdResizeAction,
+        rows: u64,
+    ) -> (Result<(), String>, Option<Vec<u8>>, u64) {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("in.rrd");
+        let out = temp.path().join("resize.rrd");
+        std::fs::write(&path, input).unwrap();
+        let mut ignored = 0;
+        let result = resize_rrd_file(&path, &out, archive, action, rows, &mut |bytes| {
+            ignored += bytes;
+        })
+        .map_err(|error| error.to_string());
+        (result, std::fs::read(&out).ok(), ignored)
+    }
+
+    fn values(bytes: &[u8], from: usize) -> Vec<f64> {
+        bytes[from..]
+            .chunks(8)
+            .map(|chunk| f64::from_le_bytes(chunk.try_into().unwrap()))
+            .collect()
+    }
+
+    fn word(bytes: &[u8], offset: usize) -> u64 {
+        u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+    }
+
+    /// Offset of the first row of a version 3 file built by `file`.
+    fn data_start(sources: usize, archives: usize) -> usize {
+        128 + 120 * (sources + archives)
+            + 16
+            + 112 * sources
+            + 80 * sources * archives
+            + 8 * archives
+    }
+
+    #[test]
+    fn grow_inserts_unknown_rows_after_the_current_row() {
+        let input = file(1, &[(5, 2)], false);
+        let start = data_start(1, 1);
+        let (result, output, ignored) = resize(&input, 0, RrdResizeAction::Grow, 2);
+        result.unwrap();
+        let output = output.unwrap();
+        assert_eq!(ignored, 0);
+        assert_eq!(word(&output, 128 + 120 + 24), 7);
+        assert_eq!(word(&output, start - 8), 2);
+        let old = values(&input, start);
+        let new = values(&output, start);
+        assert_eq!(&new[..3], &old[..3]);
+        assert!(new[3].is_nan() && new[4].is_nan());
+        assert_eq!(&new[5..], &old[3..]);
+    }
+
+    #[test]
+    fn shrink_removes_the_oldest_rows() {
+        // RZ-6's examples with n = 5.
+        let start = data_start(1, 1);
+        for (current, rows, kept, new_current) in [
+            (0, 4, vec![0], 0),
+            (2, 4, vec![2], 0),
+            (4, 1, vec![1, 2, 3, 4], 3),
+        ] {
+            let input = file(1, &[(5, current)], false);
+            let (result, output, _) = resize(&input, 0, RrdResizeAction::Shrink, rows);
+            result.unwrap();
+            let output = output.unwrap();
+            let old = values(&input, start);
+            let expected: Vec<f64> = kept.iter().map(|row: &usize| old[*row]).collect();
+            assert_eq!(values(&output, start), expected, "current {current}");
+            assert_eq!(word(&output, start - 8), new_current);
+        }
+    }
+
+    #[test]
+    fn other_archives_and_trailing_bytes() {
+        let mut input = file(2, &[(3, 1), (4, 0)], false);
+        let start = data_start(2, 2);
+        input.extend_from_slice(&[7; 13]);
+        let (result, output, ignored) = resize(&input, 1, RrdResizeAction::Shrink, 1);
+        result.unwrap();
+        let output = output.unwrap();
+        assert_eq!(ignored, 13);
+        assert_eq!(output.len(), input.len() - 13 - 16);
+        // The first archive is untouched; the second loses its row 1.
+        assert_eq!(output[start..start + 48], input[start..start + 48]);
+        assert_eq!(
+            output[start + 48..start + 64],
+            input[start + 48..start + 64]
+        );
+        assert_eq!(output[start + 64..], input[start + 80..input.len() - 13]);
+    }
+
+    #[test]
+    fn legacy_files_are_written_as_version_3() {
+        let input = file(2, &[(5, 2), (3, 1)], true);
+        let (result, output, ignored) = resize(&input, 0, RrdResizeAction::Grow, 1);
+        result.unwrap();
+        let output = output.unwrap();
+        assert_eq!(&output[4..8], b"0003");
+        assert_eq!(output.len(), input.len() + 16);
+        assert_eq!(ignored, 8);
+        // The microseconds are inserted; the last value does not fit.
+        let live = 128 + 120 * 4;
+        assert_eq!(output[live..live + 8], input[live..live + 8]);
+        assert_eq!(word(&output, live + 8), 0);
+        let prep = 112 * 2 + 80 * 4;
+        assert_eq!(
+            output[live + 16..live + 16 + prep],
+            input[live + 8..live + 8 + prep]
+        );
+        let input_rows = live + 8 + prep + 16;
+        let output_rows = live + 16 + prep + 16;
+        // Rows 0 to 2, one unknown row, rows 3 and 4 less their last value.
+        assert_eq!(
+            output[output_rows..output_rows + 48],
+            input[input_rows..input_rows + 48]
+        );
+        assert!(
+            values(&output, output_rows + 48)[..2]
+                .iter()
+                .all(|v| v.is_nan())
+        );
+        assert_eq!(
+            output[output_rows + 64..],
+            input[input_rows + 48..input.len() - 8]
+        );
+        let (result, output, ignored) = resize(&input, 1, RrdResizeAction::Shrink, 1);
+        let length = input.len() - 16;
+        assert_eq!(
+            result.unwrap_err(),
+            format!("attempting to write beyond end of file ({length} + 8 > {length})")
+        );
+        assert_eq!(output.unwrap().len(), length);
+        assert_eq!(ignored, 0);
+    }
+
+    #[test]
+    fn checks_and_refusals() {
+        let input = file(1, &[(5, 2)], false);
+        assert_eq!(
+            resize(&input, 1, RrdResizeAction::Grow, 1).0.unwrap_err(),
+            "no such RRA in this RRD"
+        );
+        assert_eq!(
+            resize(&input, 0, RrdResizeAction::Shrink, 5).0.unwrap_err(),
+            "This RRA is not that big"
+        );
+        let mut v5 = input.clone();
+        v5[4..8].copy_from_slice(b"0005");
+        let (result, output, _) = resize(&v5, 0, RrdResizeAction::Grow, 2);
+        assert_eq!(
+            result.unwrap_err(),
+            "Do not know how to handle RRD version 0005"
+        );
+        let output = output.unwrap();
+        assert_eq!(output.len(), input.len() + 16);
+        assert!(output.iter().all(|byte| *byte == 0));
+        // The row count wraps to the stored length, so only the unwrapped
+        // size shows that the rows do not fit.
+        let mut huge = input.clone();
+        huge[128 + 120 + 24..128 + 120 + 32].copy_from_slice(&((1_u64 << 61) + 5).to_le_bytes());
+        let (result, output, _) = resize(&huge, 0, RrdResizeAction::Grow, 1);
+        assert_eq!(
+            result.unwrap_err(),
+            "invalid RRD file: RRA rows extend past the end of the file"
+        );
+        assert!(output.is_none());
+        let (result, output, _) = resize(&input, 0, RrdResizeAction::Grow, u64::MAX);
+        assert!(result.is_err());
+        assert!(output.is_none());
+    }
+
+    #[test]
+    fn existing_output_is_never_replaced() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("resize.rrd");
+        let input = file(1, &[(5, 2)], false);
+        std::fs::write(&path, &input).unwrap();
+        let error = resize_rrd_file(&path, &path, 0, RrdResizeAction::Grow, 1, &mut |_| {})
+            .unwrap_err()
+            .to_string();
+        assert!(error.ends_with("File exists"), "{error}");
+        assert_eq!(std::fs::read(&path).unwrap(), input);
+    }
+
+    /// Current rows out of range read past their archive and, at the end of
+    /// the input, repeat the last value read; nothing panics or loops.
+    #[test]
+    fn out_of_range_current_rows_stay_bounded() {
+        for current in [5, 9, u64::MAX / 2, u64::MAX] {
+            for action in [RrdResizeAction::Grow, RrdResizeAction::Shrink] {
+                let input = file(2, &[(5, current), (3, 1)], false);
+                let (_, output, _) = resize(&input, 0, action, 2);
+                let output = output.unwrap();
+                let grown: i64 = if action == RrdResizeAction::Grow {
+                    32
+                } else {
+                    -32
+                };
+                assert_eq!(output.len() as i64, input.len() as i64 + grown);
+            }
+        }
     }
 }

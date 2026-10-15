@@ -39,7 +39,21 @@ fuzz_target!(|data: &[u8]| {
     let _ = rondi::fetch_rrd_file(&path, "AVERAGE", last - 600, last + 600, 1);
     let resized = rondi_fuzz::scratch().join("resize.out");
     let _ = std::fs::remove_file(&resized);
-    let _ = rondi::resize_rrd_file(&path, &resized, 0, rondi::RrdResizeAction::Grow, 3);
+    let _ = rondi::resize_rrd_file(
+        &path,
+        &resized,
+        0,
+        rondi::RrdResizeAction::Grow,
+        3,
+        &mut |_| {},
+    );
     let _ = std::fs::remove_file(&resized);
-    let _ = rondi::resize_rrd_file(&path, &resized, 0, rondi::RrdResizeAction::Shrink, 1);
+    let _ = rondi::resize_rrd_file(
+        &path,
+        &resized,
+        0,
+        rondi::RrdResizeAction::Shrink,
+        1,
+        &mut |_| {},
+    );
 });

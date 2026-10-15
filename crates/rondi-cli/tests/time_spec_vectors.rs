@@ -26,16 +26,7 @@ const VECTORS: &str = include_str!("data/time_spec_vectors.json");
 /// expectation stays RRDtool's; these ids are reported instead of failing.
 /// A listed vector that starts matching fails the test so the entry is
 /// removed.
-const KNOWN_DIVERGENCES: &[(&str, &str)] = &[
-    (
-        "ref-139",
-        "graph start of exactly 315360000 from an offset fails with a month error",
-    ),
-    (
-        "ref-140",
-        "graph start of exactly 315360000 from an offset fails with a month error",
-    ),
-];
+const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
 
 struct Vector {
     id: String,

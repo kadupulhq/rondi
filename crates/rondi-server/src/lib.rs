@@ -4204,6 +4204,26 @@ mod rrdcached_queue_tests {
         assert!(!outside.join("pinned.rrd").exists());
     }
 
+    #[test]
+    fn create_refuses_files_over_the_daemon_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let base = test_base(&root);
+        let rows = format!("RRA:AVERAGE:0.5:1:{}", rondi::DAEMON_CREATE_MAX_BYTES / 8);
+        let error = rrdcached_create(
+            &base,
+            &["big.rrd", "-b", "1000000000", "DS:x:GAUGE:20:U:U", &rows],
+            false,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "RRD Error: file would exceed the 64 MiB CREATE limit"
+        );
+        assert!(!root.join("big.rrd").exists());
+    }
+
     fn test_base(root: &Path) -> RrdcachedBase {
         RrdcachedBase::new(Some(root), true).unwrap()
     }

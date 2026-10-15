@@ -153,7 +153,8 @@ fn time_of_day_and_date_forms() {
         "12:00 Jan 1",
         "16:30 01/02",
         "12:4294967295",
-        "99999999999999999999",
+        // A number past the 64-bit range gives a memory-dependent value
+        // upstream; TS-32 lets Rondi reject it, so it is not compared.
     ] {
         fx.assert_create_start("UTC", spec);
     }

@@ -240,7 +240,11 @@ more characters (including `009` and `001`) do not and are read as a date
 **TS-20** (bb; must). An hour may be followed by `:` and a number of
 minutes. The minutes number may have any number of digits; a value above
 59 fails with `parsing HH:MM syntax, got MM = <n> (>59!)`, `<n>` being the
-decimal value (`12:123` reports 123). A second `:` is not accepted
+decimal value (`12:123` reports 123). The value is reduced to its low 32
+bits as a signed number before the check and in the message, so
+`12:4294967356` reports 60 and `12:99999999999999999999` is accepted as
+minute −1 (11:59). A `:` not followed by a number fails with `Parsing
+HH:MM syntax, expecting MM as number, got none`. A second `:` is not accepted
 (`12:30:45` leaves `:45` as trailing text). `HH.MM` is documented but does
 not exist: a number followed by `.` is a `DD.MM` date (`12.30` fails with
 `did you really mean month 30?`). [doc conflict]
@@ -343,7 +347,10 @@ or `HH:MM`, each optionally with `am`/`pm` (`01/02/2003 12:30pm`,
 numeric date (`01/02/2003`, `20030102`, `02.01.03`) is at 00:00:00, while a
 month-name date (`Jan 2 2003`, `Oct 12`) keeps the current local time of
 day including seconds (`now` group, for example `Jan 2` matches
-`{H}:{M} 01/02/{Y} +{S}s`).
+`{H}:{M} 01/02/{Y} +{S}s`). A `+` or `-` right after a numeric date with
+no time of day is swallowed, so `01/02/2003 +1d` fails with `unparsable
+trailing text: '...1d'` (`tod-050`) and `01/02/2003 +` is midnight, while
+`01/02/2003 pm +1d` and `Jan 2 2003 +1d` apply the offset.
 
 ## 8. Seconds since the epoch
 
@@ -409,6 +416,11 @@ hours), a `.`, `:` or `/` (`+1.5d` is one second plus five days, `+1:5` six
 seconds), or another number (`+1 2` is one second, `+1 2 3` four seconds,
 `+1 2 3 4` four seconds). A word that then follows a swallowed number is
 trailing text: `+1 2h` fails with `unparsable trailing text: '...h'`.
+A `+` or `-` directly after an amount's number is swallowed the same way
+and does not change the sign: `+5-1h` adds five seconds and one hour,
+`+5-1h-1h` adds five seconds, `-1-1` subtracts two seconds, and
+`epoch+1000000000-1h` is 1000003599 on macOS (`ref-113`). Only a sign after
+a unit word starts a new offset.
 [doc conflict: the manual implies plural abbreviations are accepted]
 
 **TS-38** (bb; must). In offset position `s` means seconds, and `e` is an
@@ -598,6 +610,7 @@ the archive it reads, as `rrdfetch(1)` describes; the vectors in the
 | `'start' or 'end' MUST be followed by +\|- offset` | TS-15, TS-16 |
 | `There should be number after '<sign>'` | TS-35 |
 | `parsing HH:MM syntax, got MM = <n> (>59!)` | TS-20 |
+| `Parsing HH:MM syntax, expecting MM as number, got none` | TS-20 (`12:`, `12:x`) |
 | `there cannot be more than 12 AM or PM hours` | TS-21 |
 | `the day of the month should follow month name` | TS-25 |
 | `did you really mean month <n>?` | TS-28, TS-29 |
@@ -683,12 +696,10 @@ the vectors where Rondi currently differs; their frozen expectation stays
 RRDtool's, and a listed vector that starts matching fails the test so the
 entry is removed.
 
-- `ref-139`, `ref-140` (TS-61): `graphv --start 315360002-2s --end
-  start+1` is accepted by RRDtool with `graph_start = 315360000`. Rondi
-  fails with `ERROR: start time: did you really mean month 315360000?`, as
-  if the resolved value were parsed again as a lone number (TS-28, rule 5).
-  A start of 315360001 or more, or one below 315360000, behaves the same in
-  both.
+None at present. `ref-139` and `ref-140` (a graph start of exactly
+315360000 reached through an offset) were listed until the DEF window was
+passed to the resolver as numbers instead of being printed and parsed
+again.
 
 Two findings while capturing are not time-parsing divergences and are
 avoided by the vectors rather than listed:

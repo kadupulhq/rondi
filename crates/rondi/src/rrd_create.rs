@@ -1,505 +1,471 @@
-//! Port of RRDtool 1.11.0 `rrd_create.c`: `rrd_create_r2`, `parseDS`,
-//! `parseGENERIC_DS`, `parseRRA`, `rrd_init_data` and `write_rrd`, for the
-//! DS types and consolidation functions Rondi updates. COMPUTE data sources
-//! and the Holt-Winters CFs are refused.
+//! `rrdtool create`: building a new RRD from definition words, an optional
+//! template, a start time and a step, and publishing it atomically.
+//!
+//! The behavior is specified in docs/compatibility/create.md, whose rule
+//! numbers (CR-n) are cited below. Definitions are parsed by
+//! [`crate::rrd_definitions`] into a [`NewRrd`], which knows the complete
+//! layout of the file before a byte is written. The bytes are then streamed
+//! to a temporary file beside the target, or to standard output for `-`, so
+//! the size of the archives never has to fit in memory.
+
+use std::fs::File;
+use std::io::{self, BufWriter, Write};
+use std::path::{Path, PathBuf};
 
 use crate::rrd_binary::{
     CDP_PREP_LEN, DS_DEF_LEN, FLOAT_COOKIE, LIVE_HEAD_LEN, PDP_PREP_LEN, RRA_DEF_LEN, RRA_PTR_LEN,
-    STAT_HEAD_LEN, VALUE_LEN, read_template_definitions, rrd_nan, rrd_scaled_duration,
+    STAT_HEAD_LEN, TemplateDefinitions, VALUE_LEN, read_template_definitions, rrd_nan,
+    rrd_strerror,
 };
-use crate::rrd_number::rrd_strtodbl;
+use crate::rrd_definitions::{
+    ArchiveDef, DataSourceDef, DefinitionError, is_holt_winters, stored_archive_shape, stored_cf,
+    stored_ds_name,
+};
 use crate::storage::StoreError;
-use std::io::Write;
-use std::path::Path;
 
-const DS_NAM_SIZE: usize = 20;
-const DST_SIZE: usize = 20;
+/// Step used when neither `--step` nor a template gives one (CR-12).
+const DEFAULT_STEP: u64 = 300;
+/// Seconds before now used as the last update by default (CR-11).
+const DEFAULT_START_OFFSET: i64 = 10;
+/// Values written per `write` call when filling archive rows.
+const FILL_VALUES: usize = 8192;
+/// Largest file the cache daemon's `CREATE` writes. A Rondi hardening
+/// limit with no RRDtool counterpart: a network client must not be able to
+/// make the daemon fill its disk. Local `create` has no such limit (CR-71).
+pub const DAEMON_CREATE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
-/// Maximum encoded archive allocation for one daemon CREATE, including its
-/// header. Local `rrdtool create` keeps upstream's unbounded size.
-pub const MAX_RRD_CREATE_BYTES: usize = 64 * 1024 * 1024;
-
-/// The C library's single error slot: `rrd_set_error` replaces the text and
-/// `rrd_test_error` asks whether any is set.
-#[derive(Default)]
-pub(crate) struct ErrorSlot(Option<String>);
-
-impl ErrorSlot {
-    fn set(&mut self, message: impl Into<String>) {
-        self.0 = Some(message.into());
-    }
-
-    fn is_set(&self) -> bool {
-        self.0.is_some()
-    }
-
-    pub(crate) fn take(&mut self) -> Option<String> {
-        self.0.take()
-    }
+/// The options of `create` other than its definition words.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CreateOptions<'a> {
+    /// `--step`; `None` takes the template's step or 300.
+    pub step: Option<u64>,
+    /// `--start`; `None` takes the template's last update or ten seconds
+    /// before now.
+    pub start: Option<i64>,
+    /// `--no-overwrite`.
+    pub no_overwrite: bool,
+    /// `--template`.
+    pub template: Option<&'a str>,
 }
 
-/// `rrd_create_r2` without `--source`. `last_up` is -1 when no start time was
-/// given and `pdp_step` 0 when no step was given, as rrd_create.c passes them.
-pub fn rrd_create_r2(
-    filename: &str,
-    pdp_step: u64,
-    last_up: i64,
-    no_overwrite: bool,
-    template: Option<&str>,
-    argv: &[String],
-) -> Result<(), StoreError> {
-    if no_overwrite && std::fs::metadata(filename).is_ok() {
-        return Err(StoreError::Rrd(format!(
-            "creating '{filename}': File exists"
-        )));
-    }
-    let bytes = create_bytes(pdp_step, last_up, template, argv, usize::MAX)?;
-    write_rrd(filename, &bytes, no_overwrite)
+/// A fully validated new file: everything needed to produce its bytes.
+#[derive(Debug)]
+struct NewRrd {
+    version: &'static [u8; 4],
+    step: u64,
+    last_update: i64,
+    sources: Vec<[u8; DS_DEF_LEN]>,
+    archives: Vec<[u8; RRA_DEF_LEN]>,
 }
 
-fn create_bytes(
-    pdp_step: u64,
-    last_up: i64,
-    template: Option<&str>,
-    argv: &[String],
-    max_bytes: usize,
-) -> Result<Vec<u8>, StoreError> {
-    if !cfg!(target_pointer_width = "64") || cfg!(target_endian = "big") {
-        return Err(StoreError::RrdUnsupported(
-            "RRD creation currently requires a 64-bit little-endian target".into(),
-        ));
-    }
-    let mut error = ErrorSlot::default();
-    let mut version = "0003";
-    let mut step = pdp_step;
-    let last_up_set = last_up > 0;
-    let mut live_last_up = if last_up_set {
-        last_up
-    } else {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs() as i64)
-            - 10
-    };
-    let mut ds_defs: Vec<[u8; DS_DEF_LEN]> = Vec::new();
-    let mut rra_defs: Vec<[u8; RRA_DEF_LEN]> = Vec::new();
-    let mut template_latest_last_up = 0;
-    if let Some(template) = template {
-        let definitions = read_template_definitions(Path::new(template))
-            .map_err(|_| StoreError::Rrd(format!("Cannot open template RRD {template}")))?;
-        if step == 0 {
-            step = definitions.pdp_step;
+fn cannot_allocate() -> StoreError {
+    // Compatibility: a file too large to build fails with this text and
+    // writes nothing (CR-70).
+    // Provenance: black-box compatibility test.
+    StoreError::Rrd("cannot allocate memory".into())
+}
+
+impl NewRrd {
+    /// Parses `words` after the template's definitions, applying the order
+    /// of CR-15 steps 3 to 5.
+    fn build(
+        step: u64,
+        last_update: i64,
+        template: Option<TemplateDefinitions>,
+        words: &[String],
+    ) -> Result<Self, StoreError> {
+        let (mut sources, mut archives) = match template {
+            Some(template) => (template.ds_defs, template.rra_defs),
+            None => (Vec::new(), Vec::new()),
+        };
+        let mut double_counters = false;
+        for word in words {
+            if let Some(spec) = word.strip_prefix("DS:") {
+                let def = DataSourceDef::parse(spec)?;
+                // CR-16: the stored name, before any `=` mapping, must be new.
+                if sources
+                    .iter()
+                    .any(|record| stored_ds_name(record) == def.name.as_bytes())
+                {
+                    return Err(StoreError::Rrd(format!("Duplicate DS name: {}", def.name)));
+                }
+                double_counters |= def.kind.needs_version_5();
+                sources.push(def.to_bytes());
+            } else if let Some(spec) = word.strip_prefix("RRA:") {
+                archives.push(ArchiveDef::parse(spec, step)?.to_bytes());
+            } else {
+                return Err(StoreError::Rrd(format!("can't parse argument '{word}'")));
+            }
         }
-        ds_defs = definitions.ds_defs;
-        rra_defs = definitions.rra_defs;
-        template_latest_last_up = definitions.last_up;
-    }
-    if step == 0 {
-        step = 300;
+        if archives.is_empty() {
+            return Err(StoreError::Rrd(
+                "you must define at least one Round Robin Archive".into(),
+            ));
+        }
+        if sources.is_empty() {
+            return Err(StoreError::Rrd(
+                "you must define at least one Data Source".into(),
+            ));
+        }
+        let rrd = Self {
+            // CR-37: template data sources never raise the version.
+            version: if double_counters { b"0005" } else { b"0003" },
+            step,
+            last_update,
+            sources,
+            archives,
+        };
+        rrd.total_len().ok_or_else(cannot_allocate)?;
+        Ok(rrd)
     }
 
-    for arg in argv {
-        if let Some(def) = arg.strip_prefix("DS:") {
-            let mut ds_def = [0_u8; DS_DEF_LEN];
-            parse_ds(def, &mut ds_def, &mut version, &mut error);
-            let name = c_string(&ds_def[..DS_NAM_SIZE]);
-            if ds_defs
-                .iter()
-                .any(|existing| c_string(&existing[..DS_NAM_SIZE]) == name)
-            {
-                error.set(format!(
-                    "Duplicate DS name: {}",
-                    String::from_utf8_lossy(name)
+    fn header_len(&self) -> Option<u64> {
+        let sources = self.sources.len() as u64;
+        let archives = self.archives.len() as u64;
+        let per_source = (DS_DEF_LEN + PDP_PREP_LEN) as u64;
+        let per_archive = (RRA_DEF_LEN + RRA_PTR_LEN) as u64;
+        let cdp = sources
+            .checked_mul(archives)?
+            .checked_mul(CDP_PREP_LEN as u64)?;
+        (STAT_HEAD_LEN as u64 + LIVE_HEAD_LEN as u64)
+            .checked_add(sources.checked_mul(per_source)?)?
+            .checked_add(archives.checked_mul(per_archive)?)?
+            .checked_add(cdp)
+    }
+
+    /// Number of stored values in all archives.
+    fn row_values(&self) -> Option<u64> {
+        let sources = self.sources.len() as u64;
+        self.archives.iter().try_fold(0_u64, |total, record| {
+            let (rows, _) = stored_archive_shape(record);
+            total.checked_add(rows.checked_mul(sources)?)
+        })
+    }
+
+    /// The file length, or `None` when it does not fit in 64 bits.
+    fn total_len(&self) -> Option<u64> {
+        let rows = self.row_values()?.checked_mul(VALUE_LEN as u64)?;
+        let total = self.header_len()?.checked_add(rows)?;
+        // A file offset is signed.
+        (total <= i64::MAX as u64).then_some(total)
+    }
+
+    /// Everything before the first row: header, definitions, last update,
+    /// PDP and CDP state and current-row words (CR-38 to CR-46).
+    fn head_bytes(&self) -> Result<Vec<u8>, StoreError> {
+        let length = self
+            .header_len()
+            .and_then(|length| usize::try_from(length).ok())
+            .ok_or_else(cannot_allocate)?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(length)
+            .map_err(|_| cannot_allocate())?;
+        let unknown = rrd_nan().to_le_bytes();
+
+        bytes.extend_from_slice(b"RRD\0");
+        bytes.extend_from_slice(self.version);
+        bytes.resize(16, 0);
+        bytes.extend_from_slice(&FLOAT_COOKIE.to_le_bytes());
+        bytes.extend_from_slice(&(self.sources.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&(self.archives.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&self.step.to_le_bytes());
+        bytes.resize(STAT_HEAD_LEN, 0);
+        for record in &self.sources {
+            bytes.extend_from_slice(record);
+        }
+        for record in &self.archives {
+            bytes.extend_from_slice(record);
+        }
+        bytes.extend_from_slice(&self.last_update.to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+
+        // CR-42: the remainder takes the signed last update as unsigned,
+        // the way the file's own arithmetic does.
+        let last_update = self.last_update as u64;
+        let unknown_seconds = last_update % self.step;
+        for _ in &self.sources {
+            let mut pdp = [0_u8; PDP_PREP_LEN];
+            pdp[0] = b'U';
+            pdp[32..40].copy_from_slice(&unknown_seconds.to_le_bytes());
+            pdp[40..48].copy_from_slice(&unknown);
+            bytes.extend_from_slice(&pdp);
+        }
+
+        // CR-45: the PDPs already in the current slot are unknown.
+        let slot_start = last_update - unknown_seconds;
+        for record in &self.archives {
+            let (_, pdp_per_row) = stored_archive_shape(record);
+            let slot = self.step.wrapping_mul(pdp_per_row);
+            if slot == 0 {
+                // Only a template archive can get here; parsed archives
+                // already refuse a zero slot.
+                return Err(StoreError::Rrd(
+                    "archive slot length is zero or overflows".into(),
                 ));
             }
-            ds_defs.push(ds_def);
-            if let Some(message) = error.0.take() {
-                return Err(StoreError::Rrd(message));
+            let unknown_pdps = (slot_start % slot) / self.step;
+            for _ in &self.sources {
+                let mut cdp = [0_u8; CDP_PREP_LEN];
+                cdp[0..8].copy_from_slice(&unknown);
+                cdp[8..16].copy_from_slice(&unknown_pdps.to_le_bytes());
+                bytes.extend_from_slice(&cdp);
             }
-        } else if arg.starts_with("RRA:") {
-            let mut rra_def = [0_u8; RRA_DEF_LEN];
-            parse_rra(arg, &mut rra_def, step, &mut error);
-            if let Some(message) = error.0.take() {
-                return Err(StoreError::Rrd(message));
-            }
-            rra_defs.push(rra_def);
-        } else {
-            return Err(StoreError::Rrd(format!("can't parse argument '{arg}'")));
         }
+        // Compatibility: RRDtool picks each current row at random; Rondi
+        // always starts at row 0, which no reader can tell apart (CR-46).
+        // Provenance: black-box compatibility test.
+        bytes.resize(bytes.len() + self.archives.len() * RRA_PTR_LEN, 0);
+        Ok(bytes)
     }
-    if rra_defs.is_empty() {
-        return Err(StoreError::Rrd(
-            "you must define at least one Round Robin Archive".into(),
-        ));
-    }
-    if ds_defs.is_empty() {
-        return Err(StoreError::Rrd(
-            "you must define at least one Data Source".into(),
-        ));
-    }
-    if !last_up_set && template_latest_last_up > 0 {
-        live_last_up = template_latest_last_up;
-    }
-    rrd_init_data(version, step, live_last_up, &ds_defs, &rra_defs, max_bytes)
-}
 
-/// `DS_RE` from rrd_create.c:310, matched the way GRegex does:
-/// `^([-a-zA-Z0-9_]{1,19})(?:=([-a-zA-Z0-9_]{1,19})(?:\[([0-9]+)\])?)?:([A-Z]{1,19}):(.+)$`.
-/// Returns the name, the type and the type arguments.
-fn match_ds_re(def: &str) -> Option<(&str, &str, &str)> {
-    let is_name = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-';
-    let bytes = def.as_bytes();
-    let run = |from: usize, accept: &dyn Fn(u8) -> bool| {
-        bytes[from..]
-            .iter()
-            .take_while(|byte| accept(**byte))
-            .count()
-    };
-    let name_len = run(0, &is_name);
-    if !(1..=19).contains(&name_len) {
-        return None;
-    }
-    let mut position = name_len;
-    if bytes.get(position) == Some(&b'=') {
-        let mapped = run(position + 1, &is_name);
-        if !(1..=19).contains(&mapped) {
-            return None;
-        }
-        position += 1 + mapped;
-        if bytes.get(position) == Some(&b'[') {
-            let digits = run(position + 1, &|byte| byte.is_ascii_digit());
-            if digits == 0 || bytes.get(position + 1 + digits) != Some(&b']') {
-                return None;
-            }
-            position += digits + 2;
-        }
-    }
-    if bytes.get(position) != Some(&b':') {
-        return None;
-    }
-    let dst_start = position + 1;
-    let dst_len = run(dst_start, &|byte| byte.is_ascii_uppercase());
-    if !(1..=19).contains(&dst_len) || bytes.get(dst_start + dst_len) != Some(&b':') {
-        return None;
-    }
-    let args = &def[dst_start + dst_len + 1..];
-    // `.` stops at a newline and `$` also matches before a final newline.
-    let args = args.strip_suffix('\n').unwrap_or(args);
-    if args.is_empty() || args.contains('\n') {
-        return None;
-    }
-    Some((&def[..name_len], &def[dst_start..dst_start + dst_len], args))
-}
-
-/// rrd_create.c:328 `parseDS`.
-pub(crate) fn parse_ds(
-    def: &str,
-    ds_def: &mut [u8; DS_DEF_LEN],
-    version: &mut &str,
-    error: &mut ErrorSlot,
-) {
-    let Some((name, dst, dst_args)) = match_ds_re(def) else {
-        error.set("invalid DS format");
-        return;
-    };
-    copy_c_string(&mut ds_def[..DS_NAM_SIZE], name);
-    let known = matches!(
-        dst,
-        "COUNTER" | "ABSOLUTE" | "GAUGE" | "DERIVE" | "COMPUTE" | "DCOUNTER" | "DDERIVE"
-    );
-    if !known {
-        // dst_conv reports the unknown name before parseDS replaces it.
-        error.set(format!("unknown data acquisition function '{dst}'"));
-    }
-    if matches!(dst, "DCOUNTER" | "DDERIVE") && *version < "0005" {
-        *version = "0005";
-    }
-    match dst {
-        "COUNTER" | "ABSOLUTE" | "GAUGE" | "DERIVE" | "DCOUNTER" | "DDERIVE" => {
-            copy_c_string(&mut ds_def[DS_NAM_SIZE..DS_NAM_SIZE + DST_SIZE], dst);
-            parse_generic_ds(dst_args, ds_def, error);
-        }
-        "COMPUTE" => error.set("COMPUTE data sources are not supported by Rondi"),
-        _ => error.set(format!("invalid DS type specified ({dst})")),
-    }
-}
-
-/// rrd_create.c:1098 `parseGENERIC_DS`.
-fn parse_generic_ds(def: &str, ds_def: &mut [u8; DS_DEF_LEN], error: &mut ErrorSlot) {
-    let failure = (|| -> Result<(), &'static str> {
-        let colon = def.find(':').ok_or("missing separator")?;
-        if colon >= 32 {
-            return Err("heartbeat too long");
-        }
-        let heartbeat = rrd_scaled_duration(&def[..colon], 1)?;
-        put_u64(ds_def, 40, heartbeat);
-        let Some((min, max)) = scan_min_max(&def[colon + 1..]) else {
-            return Err("failed to extract min:max");
-        };
-        let mut parse_bound = |text: &str, offset: usize, context: &str| {
-            let value = if text == "U" {
-                rrd_nan()
-            } else {
-                match rrd_strtodbl(text, context) {
-                    Ok(value) => value,
-                    Err(message) => {
-                        error.set(message);
-                        return None;
-                    }
-                }
-            };
-            put_u64(ds_def, offset, value.to_bits());
-            Some(value)
-        };
-        let Some(min) = parse_bound(&min, 48, "parsing min val") else {
-            return Ok(());
-        };
-        let Some(max) = parse_bound(&max, 56, "parsing max val") else {
-            return Ok(());
-        };
-        if min >= max {
-            return Err("min must be less than max in DS definition");
+    /// Writes the whole file: the head, then every row filled with unknown.
+    fn write_to(&self, head: &[u8], out: &mut impl Write) -> io::Result<()> {
+        out.write_all(head)?;
+        let fill: Vec<u8> = std::iter::repeat_n(rrd_nan().to_le_bytes(), FILL_VALUES)
+            .flatten()
+            .collect();
+        let mut remaining = self.row_values().unwrap_or(0);
+        while remaining > 0 {
+            let values = remaining.min(FILL_VALUES as u64) as usize;
+            out.write_all(&fill[..values * VALUE_LEN])?;
+            remaining -= values as u64;
         }
         Ok(())
-    })();
-    if let Err(reason) = failure {
-        error.set(format!("failed to parse data source {def}: {reason}"));
     }
 }
 
-/// `sscanf(text, "%18[^:]:%18[^:]", min, max) == 2`.
-///
-/// sscanf counts bytes, so a field can end inside a multibyte character; the
-/// cut bytes are kept lossily because the error text only echoes them.
-fn scan_min_max(text: &str) -> Option<(String, String)> {
-    let field = |from: usize| {
-        let length = text.as_bytes()[from..]
-            .iter()
-            .take(18)
-            .take_while(|byte| **byte != b':')
-            .count();
-        (length > 0).then(|| {
-            (
-                String::from_utf8_lossy(&text.as_bytes()[from..from + length]).into_owned(),
-                from + length,
-            )
-        })
-    };
-    let (min, end) = field(0)?;
-    if text.as_bytes().get(end) != Some(&b':') {
-        return None;
-    }
-    let (max, _) = field(end + 1)?;
-    Some((min, max))
+fn now_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
 }
 
-/// rrd_create.c:480 `parseRRA` for AVERAGE, MIN, MAX and LAST.
-pub(crate) fn parse_rra(
-    def: &str,
-    rra_def: &mut [u8; RRA_DEF_LEN],
-    pdp_step: u64,
-    error: &mut ErrorSlot,
-) {
-    let mut cf_nam = String::new();
-    let mut pdp_cnt = 0_u64;
-    let mut token_idx = 0;
-    let token_min = 4;
-    // strtok_r skips empty fields, so "::" and a trailing ":" vanish.
-    for token in def[4..].split(':').filter(|token| !token.is_empty()) {
-        match token_idx {
-            0 => {
-                // sscanf(token, "%19[A-Z]", cf_nam)
-                cf_nam = token
-                    .bytes()
-                    .take(19)
-                    .take_while(u8::is_ascii_uppercase)
-                    .map(char::from)
-                    .collect();
-                if cf_nam.is_empty() {
-                    error.set("Failed to parse CF name");
-                }
-                copy_c_string(&mut rra_def[..20], &cf_nam);
-                match cf_nam.as_str() {
-                    "AVERAGE" | "MIN" | "MAX" | "LAST" => {}
-                    "HWPREDICT" | "MHWPREDICT" | "DEVPREDICT" | "SEASONAL" | "DEVSEASONAL"
-                    | "FAILURES" => error.set(format!(
-                        "Holt-Winters consolidation function {cf_nam} is not supported by Rondi"
-                    )),
-                    _ => error.set(format!("Unrecognized consolidation function {cf_nam}")),
-                }
-                pdp_cnt = 1;
-                put_u64(rra_def, 32, pdp_cnt);
-            }
-            1 => match crate::parse_rrd_number(token) {
-                Some(xff) if !(xff < 0.0 || xff >= 1.0) => put_u64(rra_def, 40, xff.to_bits()),
-                parsed => {
-                    error.set("Invalid xff: must be between 0 and 1");
-                    put_u64(rra_def, 40, parsed.unwrap_or(0.0).to_bits());
-                }
-            },
-            2 => match rrd_scaled_duration(token, pdp_step) {
-                Ok(value) => {
-                    pdp_cnt = value;
-                    put_u64(rra_def, 32, pdp_cnt);
-                }
-                Err(reason) => error.set(format!("Invalid step {token}: {reason}")),
-            },
-            3 => match rrd_scaled_duration(token, pdp_step.wrapping_mul(pdp_cnt)) {
-                Ok(rows) => put_u64(rra_def, 24, rows),
-                Err(reason) => error.set(format!("Invalid row count {token}: {reason}")),
-            },
-            4 => error.set(format!(
-                "Unexpected extra argument for consolidation function {cf_nam}"
-            )),
-            _ => error.set("Unknown error"),
-        }
-        if error.is_set() {
-            return;
-        }
-        token_idx += 1;
-    }
-    if token_idx < token_min {
-        error.set(format!(
-            "Expected at least {token_min} arguments for RRA but got {token_idx}"
-        ));
-    }
-}
-
-/// rrd_create.c:1310 `rrd_init_data` followed by `write_fh`'s layout.
-/// Rondi starts every archive at row 0; RRDtool picks a random row, and
-/// every row of a new archive is unknown either way.
-fn rrd_init_data(
-    version: &str,
-    pdp_step: u64,
-    last_up: i64,
-    ds_defs: &[[u8; DS_DEF_LEN]],
-    rra_defs: &[[u8; RRA_DEF_LEN]],
-    max_bytes: usize,
-) -> Result<Vec<u8>, StoreError> {
-    let ds_cnt = ds_defs.len();
-    let rra_cnt = rra_defs.len();
-    let row_counts = rra_defs
+/// Reads `--template` (CR-48). Its definitions are copied as stored, a
+/// `COMPUTE` data source included, but a Holt-Winters archive is refused:
+/// its initial state differs from the classic one this module writes.
+// Compatibility: refusing such templates is the resolution CR-div-template-hw
+// allows (CR-52, CR-80).
+// Provenance: black-box compatibility test.
+fn open_template(name: &str) -> Result<TemplateDefinitions, StoreError> {
+    let template = read_template_definitions(Path::new(name))
+        .map_err(|_| StoreError::Rrd(format!("Cannot open template RRD {name}")))?;
+    if let Some(record) = template
+        .rra_defs
         .iter()
-        .map(|def| u64_at(def, 24))
-        .collect::<Vec<_>>();
-    let values = row_counts
-        .iter()
-        .try_fold(0_u64, |total, rows| total.checked_add(*rows))
-        .and_then(|rows| rows.checked_mul(ds_cnt as u64))
-        .and_then(|values| usize::try_from(values).ok())
-        .and_then(|values| values.checked_mul(VALUE_LEN))
-        .ok_or_else(|| StoreError::Rrd("cannot allocate memory".into()))?;
-    let allocation_error =
-        || StoreError::Rrd("cannot allocate memory: RRD CREATE exceeds its size limit".into());
-    let header_len = [
-        Some(STAT_HEAD_LEN),
-        ds_cnt.checked_mul(DS_DEF_LEN),
-        rra_cnt.checked_mul(RRA_DEF_LEN),
-        Some(LIVE_HEAD_LEN),
-        ds_cnt.checked_mul(PDP_PREP_LEN),
-        ds_cnt
-            .checked_mul(rra_cnt)
-            .and_then(|count| count.checked_mul(CDP_PREP_LEN)),
-        rra_cnt.checked_mul(RRA_PTR_LEN),
-    ]
-    .into_iter()
-    .try_fold(0_usize, |total, size| total.checked_add(size?))
-    .ok_or_else(allocation_error)?;
-    let total_len = header_len
-        .checked_add(values)
-        .filter(|size| *size <= max_bytes)
-        .ok_or_else(allocation_error)?;
-    let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(total_len)
-        .map_err(|_| StoreError::Rrd("cannot allocate memory".into()))?;
-    bytes.resize(STAT_HEAD_LEN, 0);
-    bytes[0..4].copy_from_slice(b"RRD\0");
-    bytes[4..8].copy_from_slice(version.as_bytes());
-    put_u64(&mut bytes, 16, FLOAT_COOKIE.to_bits());
-    put_u64(&mut bytes, 24, ds_cnt as u64);
-    put_u64(&mut bytes, 32, rra_cnt as u64);
-    put_u64(&mut bytes, 40, pdp_step);
-    for def in ds_defs {
-        bytes.extend_from_slice(def);
+        .find(|record| is_holt_winters(stored_cf(record)))
+    {
+        let cf = String::from_utf8_lossy(stored_cf(record)).into_owned();
+        return Err(DefinitionError::HoltWintersRefused(cf).into());
     }
-    for def in rra_defs {
-        bytes.extend_from_slice(def);
-    }
-    bytes.extend_from_slice(&last_up.to_le_bytes());
-    bytes.extend_from_slice(&0_u64.to_le_bytes());
-    // reset_pdp_prep (rrd_create.c:1290); time_t % unsigned long is unsigned.
-    let unknown_seconds = (last_up as u64) % pdp_step;
-    for _ in 0..ds_cnt {
-        let offset = bytes.len();
-        bytes.resize(offset + PDP_PREP_LEN, 0);
-        bytes[offset] = b'U';
-        put_u64(&mut bytes, offset + 32, unknown_seconds);
-        put_u64(&mut bytes, offset + 40, rrd_nan().to_bits());
-    }
-    // init_cdp (rrd_create.c:1250).
-    for def in rra_defs {
-        let period = pdp_step.wrapping_mul(u64_at(def, 32));
-        if period == 0 {
-            return Err(StoreError::Rrd("RRA period is zero".into()));
-        }
-        let unknown_pdps = ((last_up as u64).wrapping_sub(unknown_seconds) % period) / pdp_step;
-        for _ in 0..ds_cnt {
-            let offset = bytes.len();
-            bytes.resize(offset + CDP_PREP_LEN, 0);
-            put_u64(&mut bytes, offset, rrd_nan().to_bits());
-            put_u64(&mut bytes, offset + 8, unknown_pdps);
-        }
-    }
-    bytes.resize(bytes.len() + rra_cnt * RRA_PTR_LEN, 0);
-    let unknown = rrd_nan().to_le_bytes();
-    for _ in 0..values / VALUE_LEN {
-        bytes.extend_from_slice(&unknown);
-    }
-    Ok(bytes)
+    Ok(template)
 }
 
-/// rrd_create.c:1406 `write_rrd`: "-" goes to stdout; anything else is
-/// written to `<name>XXXXXX` beside the target, given the target's mode or
-/// 0644 regardless of umask, and renamed over it.
-pub(crate) fn write_rrd(
-    filename: &str,
-    bytes: &[u8],
-    no_overwrite: bool,
+/// Creates the RRD `path` from `words` (`DS:` and `RRA:` definitions). The
+/// name `-` writes the file to standard output.
+pub fn create_rrd(
+    path: &str,
+    options: &CreateOptions<'_>,
+    words: &[String],
 ) -> Result<(), StoreError> {
-    if filename == "-" {
-        let mut stdout = std::io::stdout().lock();
-        stdout.write_all(bytes)?;
-        stdout.flush()?;
+    // CR-62: the existence check follows symbolic links and comes before
+    // the template and the definitions.
+    if options.no_overwrite && std::fs::metadata(path).is_ok() {
+        return Err(StoreError::Rrd(format!("creating '{path}': File exists")));
+    }
+    let template = options.template.map(open_template).transpose()?;
+    let step = options
+        .step
+        .or(template.as_ref().map(|template| template.pdp_step))
+        .unwrap_or(DEFAULT_STEP);
+    if step == 0 {
+        // Only a corrupt template stores a zero step; the option parser
+        // never yields one.
+        return Err(StoreError::Rrd(match options.template {
+            Some(name) if options.step.is_none() => format!("Cannot open template RRD {name}"),
+            _ => "step size: value must be positive".into(),
+        }));
+    }
+    let last_update = options
+        .start
+        .or(template.as_ref().map(|template| template.last_up))
+        .unwrap_or_else(|| now_seconds() - DEFAULT_START_OFFSET);
+    let rrd = NewRrd::build(step, last_update, template, words)?;
+    let head = rrd.head_bytes()?;
+    if path == "-" {
+        let mut out = BufWriter::new(io::stdout().lock());
+        rrd.write_to(&head, &mut out)?;
+        out.flush()?;
         return Ok(());
     }
-    let (temp_path, mut file) =
-        mkstemp(filename).map_err(|_| StoreError::Rrd("Cannot create temporary file".into()))?;
-    let result = (|| -> Result<(), StoreError> {
-        file.write_all(bytes)?;
-        file.flush()?;
-        chmod_like_write_rrd(&file, filename)
-            .map_err(|_| StoreError::Rrd("Cannot chmod temporary file!".into()))?;
-        drop(file);
-        // A hard link keeps --no-overwrite from replacing a file created
-        // after the stat above; RRDtool's rename would replace it.
-        let renamed = if no_overwrite {
-            std::fs::hard_link(&temp_path, filename)
-        } else {
-            std::fs::rename(&temp_path, filename)
-        };
-        renamed.map_err(|_| StoreError::Rrd("Cannot rename temporary file to final file!".into()))
-    })();
-    let _ = std::fs::remove_file(&temp_path);
-    result
+    publish_file(path, &rrd, &head, options.no_overwrite)
 }
 
-/// Daemon CREATE publishes through the already opened parent, never reopening
-/// its pathname after confinement checks. A private staging directory protects
-/// the unpublished file from replacement by another account.
+/// Writes the file beside `path` and moves it into place (CR-61 to CR-65).
+fn publish_file(
+    path: &str,
+    rrd: &NewRrd,
+    head: &[u8],
+    no_overwrite: bool,
+) -> Result<(), StoreError> {
+    let length = rrd.total_len().ok_or_else(cannot_allocate)?;
+    let directory = Path::new(path)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    if available_space(directory).is_some_and(|available| length > available) {
+        return Err(cannot_allocate());
+    }
+    let mode = target_mode(path);
+    let (temporary, file) = create_temporary(path)
+        .ok_or_else(|| StoreError::Rrd("Cannot create temporary file".into()))?;
+    let written = write_and_sync(rrd, head, file, mode);
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(StoreError::Rrd(format!(
+            "writing temporary file: {}",
+            rrd_strerror(&error)
+        )));
+    }
+    let published = if no_overwrite {
+        publish_exclusive(&temporary, Path::new(path))
+    } else {
+        std::fs::rename(&temporary, path)
+    };
+    published.map_err(|_| {
+        let _ = std::fs::remove_file(&temporary);
+        StoreError::Rrd("Cannot rename temporary file to final file!".into())
+    })
+}
+
+fn write_and_sync(rrd: &NewRrd, head: &[u8], file: File, mode: u32) -> io::Result<()> {
+    let mut out = BufWriter::with_capacity(1 << 16, file);
+    rrd.write_to(head, &mut out)?;
+    let file = out.into_inner().map_err(io::IntoInnerError::into_error)?;
+    // After the writes, which would clear set-user-ID and set-group-ID.
+    set_mode(&file, mode)?;
+    file.sync_all()
+}
+
+/// Moves `temporary` to `target` only if nothing is there, without a gap
+/// between the check and the move.
+// Compatibility: RRDtool checks and renames in two steps and replaces a
+// dangling symbolic link; Rondi refuses any existing entry
+// (CR-div-noclobber-dangling).
+// Provenance: black-box compatibility test.
+fn publish_exclusive(temporary: &Path, target: &Path) -> io::Result<()> {
+    match std::fs::hard_link(temporary, target) {
+        Ok(()) => {
+            // The target now names the file; only the temporary name goes.
+            let _ = std::fs::remove_file(temporary);
+            Ok(())
+        }
+        Err(error) if hard_links_unsupported(&error) => {
+            if std::fs::symlink_metadata(target).is_ok() {
+                return Err(io::ErrorKind::AlreadyExists.into());
+            }
+            std::fs::rename(temporary, target)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(unix)]
+fn hard_links_unsupported(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(libc::EPERM | libc::ENOTSUP | libc::EMLINK)
+    )
+}
+
+#[cfg(not(unix))]
+fn hard_links_unsupported(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::Unsupported
+}
+
+/// A fresh file named after `path` with a random suffix, in the same
+/// directory, created exclusively.
+fn create_temporary(path: &str) -> Option<(PathBuf, File)> {
+    use std::hash::{BuildHasher, Hasher};
+    for _ in 0..100 {
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u32(std::process::id());
+        let candidate = PathBuf::from(format!("{path}.{:012x}", hasher.finish() >> 16));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&candidate) {
+            Ok(file) => return Some((candidate, file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return None,
+        }
+    }
+    None
+}
+
+/// CR-64: a new file gets 0644 whatever the umask; a replaced one keeps
+/// its permission bits.
+#[cfg(unix)]
+fn target_mode(path: &str) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).map_or(0o644, |metadata| metadata.permissions().mode() & 0o7777)
+}
+
+#[cfg(not(unix))]
+fn target_mode(_path: &str) -> u32 {
+    0o644
+}
+
+#[cfg(unix)]
+fn set_mode(file: &File, mode: u32) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_mode(_file: &File, _mode: u32) -> io::Result<()> {
+    Ok(())
+}
+
+/// Bytes an unprivileged writer may still use in `directory`, when known.
+#[cfg(unix)]
+pub(crate) fn available_space(directory: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let path = std::ffi::CString::new(directory.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    // SAFETY: path is NUL terminated and stats is a valid output buffer.
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: a successful statvfs initialized the struct.
+    usable_bytes(&unsafe { stats.assume_init() })
+}
+
+/// The field widths differ between platforms (32-bit block counts on
+/// macOS), so the casts are only redundant on some of them.
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast)]
+fn usable_bytes(stats: &libc::statvfs) -> Option<u64> {
+    (stats.f_bavail as u64).checked_mul(stats.f_frsize as u64)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn available_space(_directory: &Path) -> Option<u64> {
+    None
+}
+
+/// Creates `name` in the open `directory` for the cache daemon's `CREATE`,
+/// from definition words only (no template or source). The file is staged
+/// in a private directory beside it, so other accounts never see it before
+/// it is complete, and published with a descriptor-relative rename that a
+/// swapped path component cannot redirect.
 #[cfg(unix)]
 pub fn create_rrd_at(
-    parent: &std::fs::File,
+    directory: &File,
     name: &std::ffi::OsStr,
     start: i64,
     step: u64,
@@ -508,283 +474,341 @@ pub fn create_rrd_at(
 ) -> Result<(), StoreError> {
     use std::os::fd::AsRawFd;
     use std::os::unix::ffi::OsStrExt;
-    if start < 315_360_000 {
-        return Err(StoreError::Rrd(
-            "the first entry to the RRD should be after 1980".into(),
-        ));
+
+    if step == 0 {
+        return Err(StoreError::Rrd("step size: value must be positive".into()));
     }
-    if name.as_bytes().contains(&b'/') || name == "." || name == ".." {
-        return Err(StoreError::InvalidName);
+    let name = std::ffi::CString::new(name.as_bytes())
+        .ok()
+        .filter(|name| {
+            !matches!(name.to_bytes(), b"" | b"." | b"..") && !name.to_bytes().contains(&b'/')
+        })
+        .ok_or_else(|| io::Error::from_raw_os_error(libc::EPERM))?;
+    // CR-62: an existing target is reported before any definition.
+    let existing = entry_status(directory, &name);
+    if no_overwrite && existing.is_some() {
+        return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
     }
-    let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| StoreError::InvalidName)?;
-    if no_overwrite {
-        let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: the directory and NUL-terminated name remain valid. As in
-        // rrd_create_r2, an existing target is reported before parsing.
-        let status = unsafe {
-            libc::fstatat(
-                parent.as_raw_fd(),
-                name.as_ptr(),
-                &mut metadata,
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if status == 0 {
-            return Err(std::io::Error::from_raw_os_error(libc::EEXIST).into());
-        }
+    let rrd = NewRrd::build(step, start, None, definitions)?;
+    // The length is computed with checked arithmetic and compared before
+    // anything is allocated or created.
+    if rrd
+        .total_len()
+        .is_none_or(|length| length > DAEMON_CREATE_MAX_BYTES)
+    {
+        return Err(StoreError::Rrd(format!(
+            "file would exceed the {} MiB CREATE limit",
+            DAEMON_CREATE_MAX_BYTES >> 20
+        )));
     }
-    let bytes = create_bytes(step, start, None, definitions, MAX_RRD_CREATE_BYTES)?;
-    let staging = crate::safe_fs::PrivateDirectory::create(parent)?;
-    let mut file = crate::safe_fs::open_at(
+    let head = rrd.head_bytes()?;
+    let mode = existing
+        .filter(|status| status.st_mode & libc::S_IFMT == libc::S_IFREG)
+        .map_or(0o644, |status| permission_bits(status.st_mode));
+
+    let staging = crate::safe_fs::PrivateDirectory::create(directory)?;
+    if let Some(available) = fd_available_space(&staging.directory)
+        && rrd.total_len().is_some_and(|length| length > available)
+    {
+        return Err(cannot_allocate());
+    }
+    let file = crate::safe_fs::open_at(
         &staging.directory,
         c"rrd",
         libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
         0o600,
     )?;
-    let mut metadata: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: the directory and NUL-terminated name remain valid. The
-    // existing entry is inspected without following a final symlink.
-    let status = unsafe {
-        libc::fstatat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            &mut metadata,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    let mode = if status == 0 {
-        if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
-            return Err(StoreError::Rrd(
-                "refusing to replace a linked or special target".into(),
-            ));
-        }
-        metadata.st_mode & 0o777
-    } else if std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
-        0o644
-    } else {
-        return Err(std::io::Error::last_os_error().into());
-    };
-    file.write_all(&bytes)?;
-    file.flush()?;
-    // SAFETY: file is the newly created descriptor owned by this function.
-    if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    // SAFETY: both names are single components relative to open directories.
+    write_and_sync(&rrd, &head, file, mode)?;
+    let source = staging.directory.as_raw_fd();
+    let target = directory.as_raw_fd();
+    // SAFETY: both descriptors are open and both names are NUL terminated.
     let status = unsafe {
         if no_overwrite {
-            libc::linkat(
-                staging.directory.as_raw_fd(),
-                c"rrd".as_ptr(),
-                parent.as_raw_fd(),
-                name.as_ptr(),
-                0,
-            )
+            libc::linkat(source, c"rrd".as_ptr(), target, name.as_ptr(), 0)
         } else {
-            libc::renameat(
-                staging.directory.as_raw_fd(),
-                c"rrd".as_ptr(),
-                parent.as_raw_fd(),
-                name.as_ptr(),
-            )
+            libc::renameat(source, c"rrd".as_ptr(), target, name.as_ptr())
         }
     };
     if status != 0 {
-        return Err(std::io::Error::last_os_error().into());
+        return Err(io::Error::last_os_error().into());
     }
+    // Dropping the staging directory removes the linked copy, if any.
+    drop(staging);
     Ok(())
 }
 
-/// rrd_create.c:1462-1476: chmod the temporary file to the target's mode,
-/// or to S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH when there is no target. chmod is
-/// not masked by the umask, so a new file is always 0644.
+/// `mode_t` is 16 bits on macOS and 32 on Linux.
 #[cfg(unix)]
-fn chmod_like_write_rrd(temp: &std::fs::File, filename: &str) -> std::io::Result<()> {
+#[allow(clippy::useless_conversion)]
+fn permission_bits(mode: libc::mode_t) -> u32 {
+    u32::from(mode) & 0o7777
+}
+
+/// `fstatat` without following a final symbolic link.
+#[cfg(unix)]
+fn entry_status(directory: &File, name: &std::ffi::CStr) -> Option<libc::stat> {
     use std::os::fd::AsRawFd;
-    use std::os::unix::fs::PermissionsExt;
-    let mode = match std::fs::metadata(filename) {
-        Ok(metadata) => metadata.permissions().mode() as libc::mode_t,
-        Err(_) => libc::S_IRUSR | libc::S_IWUSR | libc::S_IRGRP | libc::S_IROTH,
+    let mut status = std::mem::MaybeUninit::<libc::stat>::zeroed();
+    // SAFETY: the descriptor is open, the name is NUL terminated and the
+    // buffer is valid for one stat struct.
+    let result = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            status.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
     };
-    // fchmod on the descriptor mkstemp returned, so the path cannot be
-    // swapped for a link between creation and chmod.
-    // SAFETY: the descriptor is open for the duration of the call.
-    if unsafe { libc::fchmod(temp.as_raw_fd(), mode) } != 0 {
-        return Err(std::io::Error::last_os_error());
+    // SAFETY: a successful fstatat initialized the struct.
+    (result == 0).then(|| unsafe { status.assume_init() })
+}
+
+#[cfg(unix)]
+fn fd_available_space(directory: &File) -> Option<u64> {
+    use std::os::fd::AsRawFd;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
+    // SAFETY: the descriptor is open and stats is a valid output buffer.
+    if unsafe { libc::fstatvfs(directory.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
+        return None;
     }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn chmod_like_write_rrd(temp: &std::fs::File, filename: &str) -> std::io::Result<()> {
-    match std::fs::metadata(filename) {
-        Ok(metadata) => temp.set_permissions(metadata.permissions()),
-        Err(_) => Ok(()),
-    }
-}
-
-/// `mkstemp("<filename>XXXXXX")`: mode 0600, created exclusively.
-fn mkstemp(filename: &str) -> std::io::Result<(std::path::PathBuf, std::fs::File)> {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    const LETTERS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    let seed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_nanos() as u64)
-        ^ u64::from(std::process::id()).rotate_left(32);
-    let mut last_error = std::io::Error::from(std::io::ErrorKind::AlreadyExists);
-    for _ in 0..100 {
-        let mut value = seed
-            .wrapping_add(COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
-            .wrapping_mul(0x9e37_79b9_7f4a_7c15);
-        let suffix = (0..6)
-            .map(|_| {
-                let letter = LETTERS[(value % LETTERS.len() as u64) as usize];
-                value /= LETTERS.len() as u64;
-                char::from(letter)
-            })
-            .collect::<String>();
-        let path = std::path::PathBuf::from(format!("{filename}{suffix}"));
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        match options.open(&path) {
-            Ok(file) => return Ok((path, file)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                last_error = error;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-    Err(last_error)
-}
-
-fn c_string(field: &[u8]) -> &[u8] {
-    &field[..field
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(field.len())]
-}
-
-/// `strncpy` into a zeroed field of which the last byte stays NUL.
-fn copy_c_string(field: &mut [u8], value: &str) {
-    let count = value.len().min(field.len() - 1);
-    field[..count].copy_from_slice(&value.as_bytes()[..count]);
-}
-
-fn put_u64(bytes: &mut [u8], offset: usize, value: u64) {
-    bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
-}
-
-fn u64_at(bytes: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+    // SAFETY: a successful fstatvfs initialized the struct.
+    usable_bytes(&unsafe { stats.assume_init() })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{match_ds_re, scan_min_max};
+    use super::*;
+
+    fn words(list: &[&str]) -> Vec<String> {
+        list.iter().map(|word| (*word).to_owned()).collect()
+    }
+
+    fn build(list: &[&str]) -> Result<NewRrd, String> {
+        NewRrd::build(10, 1_000_000_000, None, &words(list)).map_err(|error| error.to_string())
+    }
 
     #[test]
-    fn create_rejects_overflow_and_oversized_archives_before_writing() {
-        let temp = tempfile::tempdir().unwrap();
-        for rows in ["2305843009213693951", "18446744073709551615"] {
-            let target = temp.path().join(format!("large-{rows}.rrd"));
-            let args = vec![
-                "DS:value:GAUGE:30:U:U".into(),
-                format!("RRA:AVERAGE:0.5:1:{rows}"),
-            ];
-            assert!(
-                super::rrd_create_r2(
-                    target.to_str().unwrap(),
-                    10,
-                    1_000_000_000,
-                    true,
-                    None,
-                    &args
-                )
-                .is_err()
-            );
-            assert!(!target.exists());
-        }
-        let parent = std::fs::File::open(temp.path()).unwrap();
-        let definitions = [
-            "DS:value:GAUGE:30:U:U".to_owned(),
-            "RRA:AVERAGE:0.5:1:8388608".to_owned(),
-        ];
-        assert!(
-            super::create_rrd_at(
-                &parent,
-                std::ffi::OsStr::new("daemon.rrd"),
-                1_000_000_000,
-                10,
-                &definitions,
-                true
-            )
-            .is_err()
+    fn words_are_checked_in_argument_order() {
+        assert_eq!(
+            build(&["DS:bad", "RRA:FOO:0.5:1:5"]).unwrap_err(),
+            "invalid DS format"
         );
-        assert!(!temp.path().join("daemon.rrd").exists());
+        assert_eq!(
+            build(&["RRA:FOO:0.5:1:5", "DS:bad"]).unwrap_err(),
+            "Unrecognized consolidation function FOO"
+        );
+        assert_eq!(
+            build(&["DS:x:GAUGE:20:U:U", "foo", "RRA:AVERAGE:0.5:1:5"]).unwrap_err(),
+            "can't parse argument 'foo'"
+        );
+        assert_eq!(
+            build(&["DS:x:GAUGE:20:U:U"]).unwrap_err(),
+            "you must define at least one Round Robin Archive"
+        );
+        assert_eq!(
+            build(&["RRA:AVERAGE:0.5:1:5"]).unwrap_err(),
+            "you must define at least one Data Source"
+        );
+        assert_eq!(
+            build(&[]).unwrap_err(),
+            "you must define at least one Round Robin Archive"
+        );
+    }
+
+    #[test]
+    fn duplicate_names_use_the_target_name() {
+        let rra = "RRA:AVERAGE:0.5:1:5";
+        assert_eq!(
+            build(&["DS:x=z:GAUGE:20:U:U", "DS:x=y:GAUGE:20:U:U", rra]).unwrap_err(),
+            "Duplicate DS name: x"
+        );
+        assert!(build(&["DS:x:GAUGE:20:U:U", "DS:y=x:GAUGE:20:U:U", rra]).is_ok());
+        assert!(build(&["DS:x=z:GAUGE:20:U:U", "DS:y=z:GAUGE:20:U:U", rra]).is_ok());
+    }
+
+    #[test]
+    fn version_rises_for_double_counters() {
+        let rra = "RRA:AVERAGE:0.5:1:5";
+        assert_eq!(build(&["DS:x:GAUGE:20:U:U", rra]).unwrap().version, b"0003");
+        assert_eq!(
+            build(&["DS:x:DDERIVE:20:U:U", rra]).unwrap().version,
+            b"0005"
+        );
+    }
+
+    #[test]
+    fn impossible_sizes_are_refused_before_writing() {
+        for rows in ["2305843009213693952", "18446744073709551615"] {
+            assert_eq!(
+                build(&["DS:x:GAUGE:20:U:U", &format!("RRA:AVERAGE:0.5:1:{rows}")]).unwrap_err(),
+                "cannot allocate memory"
+            );
+        }
+        assert_eq!(
+            build(&[
+                "DS:a:GAUGE:20:U:U",
+                "DS:b:GAUGE:20:U:U",
+                "RRA:AVERAGE:0.5:1:1152921504606846976"
+            ])
+            .unwrap_err(),
+            "cannot allocate memory"
+        );
+    }
+
+    /// The head and rows written for a small file read back through the
+    /// repository's own reader with the values CR-38 to CR-46 require.
+    #[test]
+    fn written_file_reads_back() {
+        let rrd = NewRrd::build(
+            7,
+            1_000_000_123,
+            None,
+            &words(&[
+                "DS:a:GAUGE:20:U:5",
+                "DS:b:COUNTER:1m:-1:U",
+                "RRA:AVERAGE:0.5:13:4",
+                "RRA:MAX:0:5:3",
+            ]),
+        )
+        .unwrap();
+        let head = rrd.head_bytes().unwrap();
+        let mut bytes = Vec::new();
+        rrd.write_to(&head, &mut bytes).unwrap();
+        assert_eq!(bytes.len() as u64, rrd.total_len().unwrap());
+        assert_eq!(bytes.len(), head.len() + (4 + 3) * 2 * 8);
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("t.rrd");
+        std::fs::write(&path, &bytes).unwrap();
+        let info = crate::inspect_rrd_file(&path).unwrap();
+        assert_eq!(info.version, "0003");
+        assert_eq!(
+            (info.step, info.last_update, info.last_update_usec),
+            (7, 1_000_000_123, 0)
+        );
+        assert_eq!(info.data_sources[0].name, "a");
+        assert_eq!(info.data_sources[0].maximum, Some(5.0));
+        assert_eq!(info.data_sources[1].kind, "COUNTER");
+        assert_eq!(info.data_sources[1].heartbeat, 60);
+        assert_eq!(info.data_sources[1].minimum, Some(-1.0));
+        for source in &info.data_sources {
+            assert_eq!(source.last_value, "U");
+            assert_eq!(source.unknown_seconds, 1_000_000_123 % 7);
+            assert!(source.pdp_value.is_nan());
+        }
+        // CR-45's example: 4 for 13 PDPs per row and 0 for 5.
+        let unknown: Vec<u64> = info
+            .archives
+            .iter()
+            .map(|archive| archive.cdp_prep[0].unknown_datapoints)
+            .collect();
+        assert_eq!(unknown, [4, 0]);
+        for archive in &info.archives {
+            assert_eq!(archive.current_row, 0);
+            assert!(archive.cdp_prep.iter().all(|cdp| cdp.value.is_nan()));
+        }
+        let rows = &bytes[head.len()..];
+        assert!(
+            rows.chunks(8)
+                .all(|value| value == rrd_nan().to_le_bytes().as_slice())
+        );
+    }
+
+    fn options() -> CreateOptions<'static> {
+        CreateOptions {
+            step: Some(10),
+            start: Some(1_000_000_000),
+            no_overwrite: false,
+            template: None,
+        }
+    }
+
+    /// A row count far beyond any disk fails at once, before a temporary
+    /// file is created, instead of streaming terabytes.
+    #[test]
+    fn local_create_of_a_huge_file_fails_fast() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("huge.rrd");
+        let started = std::time::Instant::now();
+        let defs = words(&["DS:x:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:1099511627776"]);
+        let error = create_rrd(path.to_str().unwrap(), &options(), &defs).unwrap_err();
+        assert_eq!(error.to_string(), "cannot allocate memory");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
     }
 
+    /// The daemon limit does not apply to local `create`.
     #[test]
     fn local_create_is_not_bound_by_the_daemon_size_limit() {
         let temp = tempfile::tempdir().unwrap();
-        let target = temp.path().join("local.rrd");
-        let args = vec![
-            "DS:value:GAUGE:30:U:U".into(),
-            "RRA:AVERAGE:0.5:1:8388608".into(),
-        ];
-        super::rrd_create_r2(
-            target.to_str().unwrap(),
-            10,
-            1_000_000_000,
-            true,
-            None,
-            &args,
-        )
-        .unwrap();
-        let length = usize::try_from(std::fs::metadata(&target).unwrap().len()).unwrap();
-        assert!(length > super::MAX_RRD_CREATE_BYTES);
+        let path = temp.path().join("big.rrd");
+        let rows = DAEMON_CREATE_MAX_BYTES / 8 + 1;
+        let defs = words(&["DS:x:GAUGE:20:U:U", &format!("RRA:AVERAGE:0.5:1:{rows}")]);
+        create_rrd(path.to_str().unwrap(), &options(), &defs).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() > DAEMON_CREATE_MAX_BYTES);
     }
 
+    #[cfg(unix)]
     #[test]
-    fn ds_regex_matches_like_gregex() {
+    fn daemon_create_is_capped_before_writing() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = File::open(temp.path()).unwrap();
+        let create = |rows: u64| {
+            create_rrd_at(
+                &directory,
+                std::ffi::OsStr::new("d.rrd"),
+                1_000_000_000,
+                10,
+                &words(&["DS:x:GAUGE:20:U:U", &format!("RRA:AVERAGE:0.5:1:{rows}")]),
+                true,
+            )
+        };
+        for rows in [DAEMON_CREATE_MAX_BYTES / 8, 1 << 40] {
+            assert_eq!(
+                create(rows).unwrap_err().to_string(),
+                "file would exceed the 64 MiB CREATE limit",
+                "{rows}"
+            );
+        }
+        // A size that overflows 64 bits fails while it is computed.
         assert_eq!(
-            match_ds_re("x:GAUGE:20:U:U"),
-            Some(("x", "GAUGE", "20:U:U"))
+            create(u64::MAX).unwrap_err().to_string(),
+            "cannot allocate memory"
         );
-        assert_eq!(match_ds_re("x=y[2]:GAUGE:1"), Some(("x", "GAUGE", "1")));
-        assert_eq!(match_ds_re("x=y:GAUGE:1\n"), Some(("x", "GAUGE", "1")));
-        assert_eq!(match_ds_re("x.y:GAUGE:1"), None);
-        assert_eq!(match_ds_re("x:GAUGE:"), None);
-        assert_eq!(match_ds_re("x:Gauge:1"), None);
-        assert_eq!(match_ds_re("abcdefghijklmnopqrst:GAUGE:1"), None);
-        assert_eq!(match_ds_re("x=y[]:GAUGE:1"), None);
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+        create(1000).unwrap();
+        assert!(temp.path().join("d.rrd").is_file());
     }
 
     #[test]
-    fn min_max_scan_stops_at_eighteen_bytes() {
-        let pair = |min: &str, max: &str| Some((min.to_owned(), max.to_owned()));
-        assert_eq!(scan_min_max("U:U:extra"), pair("U", "U"));
-        assert_eq!(scan_min_max("U"), None);
-        assert_eq!(scan_min_max(":U"), None);
-        assert_eq!(scan_min_max("1234567890123456789:U"), None);
+    fn create_publishes_atomically_and_honors_no_overwrite() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("o.rrd");
+        let name = path.to_str().unwrap();
+        let options = CreateOptions {
+            step: Some(10),
+            start: Some(1_000_000_000),
+            no_overwrite: true,
+            template: None,
+        };
+        let defs = words(&["DS:x:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:5"]);
+        create_rrd(name, &options, &defs).unwrap();
         assert_eq!(
-            scan_min_max("1:1234567890123456789"),
-            pair("1", "123456789012345678")
+            create_rrd(name, &options, &defs).unwrap_err().to_string(),
+            format!("creating '{name}': File exists")
         );
-    }
-
-    #[test]
-    fn min_max_scan_cut_inside_a_character_does_not_panic() {
-        // Byte 18 falls inside the two-byte "\u{e9}". A cut min no longer
-        // meets its ':' separator, and a cut max keeps the partial byte.
-        assert_eq!(scan_min_max("00000000000000000\u{e9}:U"), None);
-        let (min, max) = scan_min_max("U:00000000000000000\u{e9}").unwrap();
-        assert_eq!(min, "U");
-        assert_eq!(max, "00000000000000000\u{fffd}");
+        #[cfg(unix)]
+        {
+            let dangling = temp.path().join("d.rrd");
+            std::os::unix::fs::symlink("nowhere.rrd", &dangling).unwrap();
+            assert_eq!(
+                create_rrd(dangling.to_str().unwrap(), &options, &defs)
+                    .unwrap_err()
+                    .to_string(),
+                "Cannot rename temporary file to final file!"
+            );
+        }
+        let entries: Vec<_> = std::fs::read_dir(temp.path()).unwrap().collect();
+        assert_eq!(entries.len(), if cfg!(unix) { 2 } else { 1 });
     }
 }

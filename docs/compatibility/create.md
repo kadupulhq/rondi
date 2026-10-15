@@ -212,7 +212,12 @@ argument text (everything after the type and its colon). Errors that concern
    heartbeat saturates and wraps like the step (CR-13); there is no upper
    bound and no comparison with the step.
 2. If no `:` follows the heartbeat: `<reason>` = `missing separator`
-   (`DS:x:GAUGE:20`).
+   (`DS:x:GAUGE:20`). This is checked before the heartbeat is read, so
+   `DS:x:GAUGE:x` also reports `missing separator`. A heartbeat field of
+   32 bytes or more before its `:` fails with `<reason>` =
+   `heartbeat too long`, also before it is read
+   (`DS:x:GAUGE:12345678901234567890123456789012:U:U`). (black-box;
+   added during implementation.)
 3. The remainder must consist of a minimum field of 1 to 18 characters
    other than `:`, a `:`, and a maximum field of 1 to 18 characters other
    than `:`. If not: `<reason>` = `failed to extract min:max`
@@ -653,7 +658,10 @@ keep these entry points consistent with this specification:
   `crates/rondi-server/src/lib.rs`) build files with sections 4 to 10 and
   CR-61 to CR-64. The daemon passes its own start and step after its own
   argument handling (CR-72), applies the 128-definition cap, and does not
-  support templates or sources.
+  support templates or sources. As a Rondi hardening limit with no RRDtool
+  counterpart, the daemon refuses a file larger than 64 MiB
+  (`file would exceed the 64 MiB CREATE limit`) before allocating or
+  creating anything; local `create` has no such limit (CR-71).
 - The CLI (`crates/rondi-cli/src/main.rs`) implements sections 1 to 3 and
   dispatches templates, sources and the daemon.
 
@@ -684,10 +692,11 @@ Current Rondi against RRDtool 1.11.0, as of this specification:
   reached instead of creating locally; it also prints daemon errors without
   the `rrdcached@<address>: ` prefix and checks `--template` locally before
   contacting the daemon (CR-72, not pinned).
-- CR-div-template-hw (CR-52): with a template holding Holt-Winters
-  archives, Rondi writes classic CDP state for them instead of the
-  Holt-Winters state. Not intentional; a replacement should either
-  implement CR-52 or refuse such templates (CR-80).
+- CR-div-template-hw (CR-52): Rondi refuses a template holding
+  Holt-Winters archives with
+  `Holt-Winters consolidation function <CF> is not supported by Rondi`
+  and writes nothing (CR-80). A template holding a `COMPUTE` data
+  source is copied as stored, as RRDtool does (vector `365`).
 - CR-div-source (section 12): Rondi refuses every `--source` use except one
   source with the same definitions and last update, and in that case it
   copies data through the text dump, losing precision (vector `371`).

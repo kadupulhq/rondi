@@ -398,9 +398,11 @@ RS-34, signed 64-bit. A value outside the signed 64-bit range fails with
 `ling N: get_xml_time_t from '<token>' <ERANGE text>`.
 
 **RS-36** (black-box; must, platform specific). A token with no digits (empty,
-`abc`, `0x` alone) depends on the C library: on macOS it fails with
+`abc`, `-`, `+`) depends on the C library: on macOS it fails with
 `ling N: get_xml_ulong from '<token>' Invalid argument` (or `get_xml_time_t`),
-on Linux it is accepted as 0. The Linux overrides pin this.
+on Linux it is accepted as 0. The Linux overrides pin this. `0x` alone is
+not in this class: its `0` converts, so it reads as 0 on both platforms
+(black-box, `<step>0x</step>` restores with step 0 on macOS).
 
 **RS-37** (black-box; must). Doubles are read in this order. If the token
 contains `nan` in any case anywhere, the value is NaN. Otherwise if it
@@ -435,7 +437,9 @@ rounded:
 
 `1e`, `1e+`, `5.` and `.5` are accepted; `-`, `e5` and `.` fail at step 3;
 `0x10`, `2junk`, `1,5` and `1_0` fail at step 9; `1e309` is accepted as
-infinity; `0e400` is accepted as 0 × infinity, which is NaN.
+infinity. Zero times a power of ten is NaN only when the power used in step 7
+overflows: `0e400` stores 0 (no set bit of 400 needs more than 10^256) while
+`0e600` stores NaN (black-box, both checked against the pinned build).
 
 **RS-39** (black-box; must, platform specific). Step 2's multiply-add is
 fused (one rounding) on macOS arm64 and Linux aarch64 and is a separate
@@ -709,37 +713,41 @@ requires.
 
 ## Known divergences
 
-Current Rondi against RRDtool 1.11.0, as of this specification:
+Current Rondi against RRDtool 1.11.0, after the clean-room reimplementation
+of the restore path:
 
 - **RS-81** COMPUTE data sources are refused (RS-70; vectors `seed-compute`,
   `type-compute`, `walk-cdef-*`, expectation `unsupported`).
-- **RS-82** UTF-16 input with a byte order mark from a named file is refused
-  with `Document is empty`; RRDtool restores it (`doc-utf16le-bom`,
-  `doc-utf16be-bom`, expectation `diverge`).
-- **RS-83** A Latin-1 declared document is not transcoded, so a non-ASCII
-  name is stored as its Latin-1 bytes (`doc-latin1-name`); invalid UTF-8 in
-  a UTF-8 document is accepted instead of failing (`doc-bad-utf8`); an
-  entity declared in an internal DTD subset is reported as undefined
-  instead of being dropped (`value-internal-entity`). Expectation `diverge`.
-- **RS-84** The NUL-byte syntax error uses libxml2's other wording
-  (`PCDATA invalid Char value 0`), and `<!-->` from standard input uses the
-  Linux wording on every platform (RS-42). Both are within `xml-syntax`.
-- **RS-85** Opening a directory with `-f` reports
-  `I/O error: Is a directory (os error 21)` instead of
-  `creating '.': Is a directory` (`target-is-dir-force`, expectation
-  `text-differs`).
+- **RS-82** and **RS-83** are resolved: UTF-16 with a byte order mark,
+  Latin-1 transcoding, invalid UTF-8 and entities from an internal subset
+  now behave as RRDtool does, and their vectors are held to `same` (or
+  `xml-syntax` for `doc-bad-utf8`).
+- **RS-84** The library wording differs in two places, both within
+  `xml-syntax`: the comment text a `Double hyphen within comment` message
+  quotes for `<!-->` and similar openers, and binary input from standard
+  input (`Document is empty` instead of `Extra content at the end of the
+  document`).
+- **RS-85** is resolved: `-f` with a directory reports
+  `creating '.': Is a directory`. The case keeps its `text-differs`
+  expectation so that class stays covered.
 - **RS-86** `-f` over a longer file truncates it (RS-56; `opt-force-longer-file`,
   expectation `truncates`).
-- **RS-87** A second `<database>` restores with exit 0 instead of crashing
-  (RS-64), and the endless retry of RS-15a ends with the library error.
+- **RS-87** A second `<database>` appends its rows and restores with exit 0
+  instead of crashing (RS-64), and the endless retry of RS-15a ends with the
+  library error.
 - **RS-88** New files are created with mode 0600 rather than
   `0666 & ~umask` (RS-55), restores always place the row pointer at the last
   row (RS-61), and symbolic links and hard-linked files are refused as
   targets where RRDtool writes through them (outside this table; see
-  `crates/rondi-cli/tests/csrc_mutate.rs`).
+  `crates/rondi-cli/tests/csrc_mutate.rs`). On x86_64, where RRDtool dies
+  from SIGFPE on an archive without rows (RS-63), Rondi reports
+  `restore of an RRA without rows is not supported`.
 
 No other difference was found: Rondi matches every other vector on macOS
-arm64, including the exact line numbers.
+arm64, including the exact line numbers and the XML library's diagnostics,
+and it matches RRDtool's status, file outcome and message for every
+truncation of `seed-mini` (from a named file and from standard input) and of
+`seed-wide` (from a named file).
 
 ## Tests
 

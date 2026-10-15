@@ -1,6 +1,6 @@
 use super::cparse::{atoi, atol, buffer_text, c_string, rrd_strtodbl};
 use super::optparse::{ArgType, DONE, ERROR, LongOpt, OptParse, opt};
-use rondi::time::{TimeValue, rrd_parsetime, rrd_proc_start_end};
+use rondi::time::{TimeSpec, parse_time_spec, resolve_start_end};
 
 const LONGOPT_UNITS_SI: i32 = 255;
 const LONGOPT_ADD_JSONTIME: i32 = 254;
@@ -242,8 +242,8 @@ pub(crate) fn rrd_graph_options(args: &[String], now: i64) -> Result<GraphOption
     let mut primary_axis_formatter = AxisFormatter::Numeric;
     let mut second_axis_format = None::<String>;
     let mut second_axis_formatter = AxisFormatter::Numeric;
-    let mut start_tv = rrd_parsetime("end-24h", now)?;
-    let mut end_tv = rrd_parsetime("now", now)?;
+    let mut start_tv = parse_time_spec("end-24h", now)?;
+    let mut end_tv = parse_time_spec("now", now)?;
     let mut options = OptParse::new(args.to_vec());
     loop {
         let option = options.long(GRAPH_LONGOPTS);
@@ -295,11 +295,11 @@ pub(crate) fn rrd_graph_options(args: &[String], now: i64) -> Result<GraphOption
             _ if option == short(b'S') => graph.step = Some(atoi(&value)),
             _ if option == short(b's') => {
                 start_tv =
-                    rrd_parsetime(&value, now).map_err(|error| format!("start time: {error}"))?;
+                    parse_time_spec(&value, now).map_err(|error| format!("start time: {error}"))?;
             }
             _ if option == short(b'e') => {
                 end_tv =
-                    rrd_parsetime(&value, now).map_err(|error| format!("end time: {error}"))?;
+                    parse_time_spec(&value, now).map_err(|error| format!("end time: {error}"))?;
             }
             _ if option == short(b'x') => {
                 if value == "none" {
@@ -507,7 +507,7 @@ pub(crate) fn rrd_graph_options(args: &[String], now: i64) -> Result<GraphOption
             "for a logarithmic yaxis you must specify a lower-limit > 0",
         ));
     }
-    (graph.start, graph.end) = proc_start_end(&mut start_tv, &mut end_tv)?;
+    (graph.start, graph.end) = proc_start_end(&start_tv, &end_tv)?;
     graph.positionals = options.positionals().to_vec();
     Ok(graph)
 }
@@ -537,8 +537,8 @@ pub(crate) fn rrd_xport_options(args: &[String], now: i64) -> Result<XportOption
         enumds: false,
         positionals: Vec::new(),
     };
-    let mut start_tv = rrd_parsetime("end-24h", now)?;
-    let mut end_tv = rrd_parsetime("now", now)?;
+    let mut start_tv = parse_time_spec("end-24h", now)?;
+    let mut end_tv = parse_time_spec("now", now)?;
     let mut options = OptParse::new(args.to_vec());
     loop {
         let option = options.long(XPORT_LONGOPTS);
@@ -554,11 +554,11 @@ pub(crate) fn rrd_xport_options(args: &[String], now: i64) -> Result<XportOption
             _ if option == short(b't') => xport.showtime = true,
             _ if option == short(b's') => {
                 start_tv =
-                    rrd_parsetime(&value, now).map_err(|error| format!("start time: {error}"))?;
+                    parse_time_spec(&value, now).map_err(|error| format!("start time: {error}"))?;
             }
             _ if option == short(b'e') => {
                 end_tv =
-                    rrd_parsetime(&value, now).map_err(|error| format!("end time: {error}"))?;
+                    parse_time_spec(&value, now).map_err(|error| format!("end time: {error}"))?;
             }
             _ if option == short(b'm') => {
                 xport.maxrows = atol(&value);
@@ -575,14 +575,15 @@ pub(crate) fn rrd_xport_options(args: &[String], now: i64) -> Result<XportOption
             _ => {}
         }
     }
-    (xport.start, xport.end) = proc_start_end(&mut start_tv, &mut end_tv)?;
+    (xport.start, xport.end) = proc_start_end(&start_tv, &end_tv)?;
     xport.positionals = options.positionals().to_vec();
     Ok(xport)
 }
 
-/// `rrd_proc_start_end` plus the range checks both callers repeat.
-fn proc_start_end(start_tv: &mut TimeValue, end_tv: &mut TimeValue) -> Result<(i64, i64), String> {
-    let (start, end) = rrd_proc_start_end(start_tv, end_tv)?;
+/// Resolves the start and end options and applies the range checks both
+/// callers repeat.
+fn proc_start_end(start_tv: &TimeSpec, end_tv: &TimeSpec) -> Result<(i64, i64), String> {
+    let (start, end) = resolve_start_end(start_tv, end_tv)?;
     if start < 3600 * 24 * 365 * 10 {
         return Err(format!(
             "the first entry to fetch should be after 1980 ({start})"
