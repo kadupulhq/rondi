@@ -5,6 +5,15 @@
 
 use thiserror::Error;
 
+use crate::rrd_binary::rrd_mul_add;
+
+/// The pinned Linux aarch64 oracle is built with GCC, which contracts across
+/// statements (`-ffp-contract=fast`) and after expanding `pow(x, 2.0)`, while
+/// the macOS build uses Clang, which only fuses within one expression. They
+/// also split `a * b - c * d` differently. x86_64 never fuses, so there both
+/// forms round the same.
+const GCC_CONTRACTION: bool = cfg!(all(target_arch = "aarch64", target_os = "linux"));
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VdefFunction {
     Maximum,
@@ -140,12 +149,17 @@ pub fn evaluate_vdef(
                 let value = match function {
                     VdefFunction::Average => average,
                     VdefFunction::Total => sum * step as f64,
-                    VdefFunction::Stdev => (finite
-                        .iter()
-                        .map(|value| (value - average).powi(2))
-                        .sum::<f64>()
-                        / finite.len() as f64)
-                        .sqrt(),
+                    VdefFunction::Stdev => {
+                        let squares = finite.iter().fold(0.0, |sum, value| {
+                            let deviation = value - average;
+                            if GCC_CONTRACTION {
+                                rrd_mul_add(deviation, deviation, sum)
+                            } else {
+                                sum + deviation * deviation
+                            }
+                        });
+                        (squares / finite.len() as f64).sqrt()
+                    }
                     _ => unreachable!(),
                 };
                 no_time(value)
@@ -161,16 +175,26 @@ pub fn evaluate_vdef(
                     count += 1.0;
                     sum_x += x;
                     sum_y += value;
-                    sum_xy += x * value;
-                    sum_xx += x * x;
-                    sum_yy += value * value;
+                    sum_xy = rrd_mul_add(x, value, sum_xy);
+                    // C squares the unsigned step index before converting it.
+                    sum_xx += index.wrapping_mul(index) as f64;
+                    sum_yy = rrd_mul_add(value, value, sum_yy);
                 }
             }
             if count == 0.0 {
                 no_time(f64::NAN)
             } else {
-                let slope = (sum_x * sum_y - count * sum_xy) / (sum_x * sum_x - count * sum_xx);
-                let intercept = (sum_y - slope * sum_x) / count;
+                // Clang rounds the count products and fuses the others; GCC
+                // does the reverse. The correlation below stays unfused in
+                // both because each product feeds a division first.
+                let slope = if GCC_CONTRACTION {
+                    rrd_mul_add(-sum_xy, count, sum_x * sum_y)
+                        / rrd_mul_add(-sum_xx, count, sum_x * sum_x)
+                } else {
+                    rrd_mul_add(sum_x, sum_y, -(count * sum_xy))
+                        / rrd_mul_add(sum_x, sum_x, -(count * sum_xx))
+                };
+                let intercept = rrd_mul_add(-slope, sum_x, sum_y) / count;
                 let correlation = (sum_xy - sum_x * sum_y / count)
                     / ((sum_xx - sum_x * sum_x / count) * (sum_yy - sum_y * sum_y / count)).sqrt();
                 no_time(match function {

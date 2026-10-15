@@ -303,6 +303,11 @@ impl RrdcachedBase {
                 })
                 .unwrap_or(path));
         }
+        // An empty name becomes "<base>/", which passes upstream's string
+        // check; each command then fails on the directory itself.
+        if requested.is_empty() {
+            return Ok(self.root.clone());
+        }
         let denied = || format!("{}: Permission denied", self.abs(requested));
         if path
             .components()
@@ -2542,6 +2547,9 @@ fn handle_rrdcached_line(
                 }
             }
         }
+        // buffer_get_cache_item's syntax error still leaves no cache item,
+        // so the handler returns -1 and the connection closes.
+        "SUSPEND" | "RESUME" => return RrdcachedReply::TextThenClose(usage()),
         "SUSPENDALL" if fields.is_empty() => {
             let count = suspend_all_rrdcached_paths(queue);
             format!("0 {count} rrds suspend\n")
@@ -2773,7 +2781,8 @@ fn rrdcached_help(fields: &[&str]) -> String {
         "QUIT\n",
     ];
 
-    if let [command] = fields {
+    // handle_request_help reads one field and ignores the rest.
+    if let Some(command) = fields.first() {
         let command = command.to_ascii_uppercase();
         let entry = match command.as_str() {
             "UPDATE" => Some((
@@ -3008,11 +3017,180 @@ fn pending_entry_bytes(samples: &[String]) -> usize {
     )
 }
 
+/// rrd_tune_r's long options (rrd_tune.c:203); each one takes a value.
+const RRDCACHED_TUNE_OPTIONS: &[(&str, char)] = &[
+    ("heartbeat", 'h'),
+    ("minimum", 'i'),
+    ("maximum", 'a'),
+    ("data-source-type", 'd'),
+    ("data-source-rename", 'r'),
+    ("deltapos", 'p'),
+    ("deltaneg", 'n'),
+    ("window-length", 'w'),
+    ("failure-threshold", 'f'),
+    ("alpha", 'x'),
+    ("beta", 'y'),
+    ("gamma", 'z'),
+    ("gamma-deviation", 'v'),
+    ("smoothing-window", 's'),
+    ("smoothing-window-deviation", 'S'),
+    ("aberrant-reset", 'b'),
+    ("step", 't'),
+    ("daemon", 'D'),
+];
+
+/// TUNE's argv after argv[0] as optparse_long walks it: the options in
+/// order, the words it skips, and the error that stopped it, in optparse's
+/// 48-byte message buffer.
+fn parse_rrdcached_tune_options<'a>(
+    arguments: &[&'a str],
+) -> (Vec<(char, &'a str)>, Vec<&'a str>, Option<String>) {
+    let mut options = Vec::new();
+    let mut words = Vec::new();
+    let error = |message: String| {
+        let mut end = message.len().min(47);
+        while !message.is_char_boundary(end) {
+            end -= 1;
+        }
+        Some(message[..end].to_owned())
+    };
+    let mut index = 0;
+    while let Some(argument) = arguments.get(index) {
+        index += 1;
+        if *argument == "--" {
+            words.extend_from_slice(&arguments[index..]);
+            break;
+        }
+        if let Some(option) = argument
+            .strip_prefix("--")
+            .filter(|option| !option.is_empty())
+        {
+            let (name, value) = match option.split_once('=') {
+                Some((name, value)) => (name, Some(value)),
+                None => (option, None),
+            };
+            let Some(&(long, short)) = RRDCACHED_TUNE_OPTIONS
+                .iter()
+                .find(|(long, _)| *long == name)
+            else {
+                return (
+                    options,
+                    words,
+                    error(format!("invalid option -- '{option}'")),
+                );
+            };
+            let Some(value) = value.or_else(|| {
+                index += 1;
+                arguments.get(index - 1).copied()
+            }) else {
+                return (
+                    options,
+                    words,
+                    error(format!("option requires argument -- '{long}'")),
+                );
+            };
+            options.push((short, value));
+            continue;
+        }
+        let Some(short) = argument
+            .strip_prefix('-')
+            .and_then(|cluster| cluster.chars().next())
+        else {
+            words.push(argument);
+            continue;
+        };
+        if !RRDCACHED_TUNE_OPTIONS
+            .iter()
+            .any(|(_, known)| *known == short)
+        {
+            return (
+                options,
+                words,
+                error(format!("invalid option -- '{short}'")),
+            );
+        }
+        let attached = &argument[1 + short.len_utf8()..];
+        let value = if attached.is_empty() {
+            index += 1;
+            match arguments.get(index - 1) {
+                Some(value) => *value,
+                None => {
+                    return (
+                        options,
+                        words,
+                        error(format!("option requires an argument -- '{short}'")),
+                    );
+                }
+            }
+        } else {
+            attached
+        };
+        options.push((short, value));
+    }
+    (options, words, None)
+}
+
+/// sscanf `%<width>[set]`: at least one and at most `width` characters.
+fn scan_rrdcached_set(
+    text: &str,
+    width: usize,
+    set: impl Fn(char) -> bool,
+) -> Option<(&str, &str)> {
+    let end = text
+        .char_indices()
+        .take(width)
+        .take_while(|(_, character)| set(*character))
+        .last()
+        .map(|(index, character)| index + character.len_utf8())?;
+    Some(text.split_at(end))
+}
+
+/// DS_NAM_FMT, `%19[a-zA-Z0-9_-]`, optionally followed by `:`.
+fn scan_rrdcached_ds_name(text: &str) -> Option<(&str, &str)> {
+    scan_rrdcached_set(text, 19, |character| {
+        character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+    })
+}
+
+fn scan_rrdcached_ds_pair<'a>(
+    text: &'a str,
+    second: impl Fn(&'a str) -> Option<(&'a str, &'a str)>,
+) -> Option<(&'a str, &'a str)> {
+    let (name, rest) = scan_rrdcached_ds_name(text)?;
+    let (value, _) = second(rest.strip_prefix(':')?)?;
+    Some((name, value))
+}
+
+/// rrd_tune_r for the options Rondi supports. Holt-Winters parameters, step
+/// changes, and handle_modify's DS and RRA changes are refused before the
+/// file is touched. As upstream edits the header in its mapping, settings
+/// applied before a failing option are still written.
 fn tune_rrdcached_file(path: &Path, arguments: &[&str]) -> Result<(), String> {
     let file = open_rrdcached_write_target(path)?;
     let info =
         rondi::inspect_rrd_open_file(file.try_clone().map_err(|error| error.to_string())?, path)
             .map_err(|error| error.to_string())?;
+    let (options, words, parse_error) = parse_rrdcached_tune_options(arguments);
+    let basic = info.archives.iter().all(|archive| {
+        matches!(
+            archive.consolidation.as_str(),
+            "AVERAGE" | "MIN" | "MAX" | "LAST"
+        )
+    });
+    for (option, _) in &options {
+        // aberrant-reset only looks up its source when no archive keeps
+        // Holt-Winters state.
+        if !matches!(option, 'h' | 'i' | 'a' | 'd' | 'r' | 'D') && !(*option == 'b' && basic) {
+            return Err(format!("unsupported tune option -{option}"));
+        }
+    }
+    if let Some(word) = words.iter().find(|word| {
+        ["DEL:", "DS:", "RRA#", "RRA:", "DELRRA:"]
+            .iter()
+            .any(|prefix| word.starts_with(prefix))
+    }) {
+        return Err(format!("unsupported tune option {word}"));
+    }
     let mut changes = info
         .data_sources
         .iter()
@@ -3030,113 +3208,168 @@ fn tune_rrdcached_file(path: &Path, arguments: &[&str]) -> Result<(), String> {
         .iter()
         .map(|source| source.name.clone())
         .collect::<Vec<_>>();
-    let mut index = 0;
-    while index < arguments.len() {
-        let argument = arguments[index];
-        let (setting, inline_value) = if let Some(value) = argument.strip_prefix("--heartbeat=") {
-            ("heartbeat", Some(value))
-        } else if let Some(value) = argument.strip_prefix("--data-source-type=") {
-            ("type", Some(value))
-        } else if let Some(value) = argument.strip_prefix("--data-source-rename=") {
-            ("rename", Some(value))
-        } else if let Some(value) = argument.strip_prefix("--minimum=") {
-            ("minimum", Some(value))
-        } else if let Some(value) = argument.strip_prefix("--maximum=") {
-            ("maximum", Some(value))
-        } else {
-            let setting = match argument {
-                "-h" | "--heartbeat" => "heartbeat",
-                "-d" | "--data-source-type" => "type",
-                "-r" | "--data-source-rename" => "rename",
-                "-i" | "--minimum" => "minimum",
-                "-a" | "--maximum" => "maximum",
-                unsupported => return Err(format!("unsupported tune option {unsupported}")),
-            };
-            index += 1;
-            let value = arguments
-                .get(index)
-                .ok_or_else(|| format!("tune {setting} requires a value"))?;
-            (setting, Some(*value))
-        };
-        let value = inline_value.unwrap_or_default();
-        if setting == "rename" {
-            let (old_name, new_name) = value
-                .split_once(':')
-                .ok_or_else(|| "invalid arguments for data source rename".to_owned())?;
-            let ds_index = names
-                .iter()
-                .position(|name| name == old_name)
-                .ok_or_else(|| format!("No DS called {old_name}"))?;
-            changes[ds_index].new_name = Some(new_name.to_owned());
-            names[ds_index] = new_name.to_owned();
-        } else {
-            let (name, value) = value
-                .split_once(':')
-                .ok_or_else(|| format!("invalid arguments for {setting}"))?;
-            let ds_index = names
+    let applied = options.iter().try_for_each(|&(option, value)| {
+        let ds_match = |names: &[String], name: &str| {
+            names
                 .iter()
                 .position(|source| source == name)
-                .ok_or_else(|| format!("No DS called {name}"))?;
-            match setting {
-                "type" => changes[ds_index].kind = Some(value.to_owned()),
-                "heartbeat" => {
-                    changes[ds_index].heartbeat = Some(
-                        value
-                            .parse::<u64>()
-                            .map_err(|_| "invalid arguments for heartbeat".to_owned())?,
-                    );
-                }
-                "minimum" | "maximum" => {
-                    let bound = if value == "U" {
+                .ok_or_else(|| format!("unknown data source name '{name}'"))
+        };
+        match option {
+            'h' => {
+                let (name, heartbeat) = scan_rrdcached_ds_name(value)
+                    .and_then(|(name, rest)| {
+                        let (heartbeat, end) = rondi::c_strtol(rest.strip_prefix(':')?, 10);
+                        (end > 0).then_some((name, heartbeat))
+                    })
+                    .ok_or("invalid arguments for heartbeat")?;
+                let index = ds_match(&names, name)?;
+                // An unsigned long in the header, so a negative value wraps.
+                changes[index].heartbeat = Some(heartbeat as u64);
+            }
+            'i' | 'a' => {
+                let which = if option == 'i' { "minimum" } else { "maximum" };
+                let (name, bound) = scan_rrdcached_ds_pair(value, |rest| {
+                    scan_rrdcached_set(rest, 40, |character| {
+                        character.is_ascii_digit()
+                            || matches!(character, 'U' | '.' | 'e' | '+' | '-')
+                    })
+                })
+                .and_then(|(name, text)| {
+                    let bound = if text == "U" {
                         rondi::RrdTuneBound::Unbounded
                     } else {
-                        rondi::RrdTuneBound::Value(
-                            value
-                                .parse::<f64>()
-                                .map_err(|_| format!("invalid arguments for {setting} ds value"))?,
-                        )
+                        rondi::RrdTuneBound::Value(text.parse::<f64>().ok()?)
                     };
-                    if setting == "minimum" {
-                        changes[ds_index].minimum = Some(bound);
-                    } else {
-                        changes[ds_index].maximum = Some(bound);
-                    }
+                    Some((name, bound))
+                })
+                .ok_or_else(|| format!("invalid arguments for {which} ds value"))?;
+                let index = ds_match(&names, name)?;
+                if option == 'i' {
+                    changes[index].minimum = Some(bound);
+                } else {
+                    changes[index].maximum = Some(bound);
                 }
-                _ => unreachable!(),
             }
+            'd' => {
+                let (name, kind) = scan_rrdcached_ds_pair(value, |rest| {
+                    scan_rrdcached_set(rest, 19, |character| character.is_ascii_uppercase())
+                })
+                .ok_or("invalid arguments for data source type")?;
+                let index = ds_match(&names, name)?;
+                if !matches!(
+                    kind,
+                    "COUNTER"
+                        | "ABSOLUTE"
+                        | "GAUGE"
+                        | "DERIVE"
+                        | "COMPUTE"
+                        | "DCOUNTER"
+                        | "DDERIVE"
+                ) {
+                    return Err(format!("unknown data acquisition function '{kind}'"));
+                }
+                changes[index].kind = Some(kind.to_owned());
+            }
+            'r' => {
+                let (name, new_name) = scan_rrdcached_ds_pair(value, scan_rrdcached_ds_name)
+                    .ok_or("invalid arguments for data source type")?;
+                let index = ds_match(&names, name)?;
+                changes[index].new_name = Some(new_name.to_owned());
+                names[index] = new_name.to_owned();
+            }
+            'b' => {
+                let (name, _) =
+                    scan_rrdcached_ds_name(value).ok_or("invalid argument for aberrant-reset")?;
+                ds_match(&names, name)?;
+            }
+            _ => {}
         }
-        index += 1;
+        Ok(())
+    });
+    let changed = changes.iter().any(|change| {
+        change.kind.is_some()
+            || change.new_name.is_some()
+            || change.heartbeat.is_some()
+            || change.minimum.is_some()
+            || change.maximum.is_some()
+    });
+    if changed {
+        rondi::tune_rrd_data_sources_file(file, path, &changes)
+            .map_err(|error| error.to_string())?;
     }
-    rondi::tune_rrd_data_sources_file(file, path, &changes).map_err(|error| error.to_string())
+    applied?;
+    parse_error.map_or(Ok(()), Err)
 }
 
+/// rrd_list's test for an RRD name: the first `.rrd` ends the string.
+fn rrdcached_list_names_rrd(name: &str) -> bool {
+    name.find(".rrd")
+        .is_some_and(|index| index + 4 == name.len())
+}
+
+/// handle_request_list over rrd_list_r: names are relative to the listed
+/// path, and a path naming an RRD lists that file alone.
 fn rrdcached_list(base: &RrdcachedBase, fields: &[&str]) -> Result<String, String> {
-    let (recursive, requested) = match fields {
-        [path] => (false, *path),
-        ["RECURSIVE", path] => (true, *path),
-        _ => return Err("Usage: LIST [RECURSIVE] /[<path>]".to_owned()),
-    };
-    if !requested.starts_with('/') {
-        return Err("Usage: LIST [RECURSIVE] /[<path>]".to_owned());
-    }
-    if base.given.is_none() {
+    const USAGE: &str = "Usage: LIST [RECURSIVE] /[<path>]";
+    let Some(given) = &base.given else {
         return Err("No base directory defined".to_owned());
+    };
+    let mut fields = fields.iter();
+    let mut recursive = false;
+    let mut requested = None;
+    if let Some(first) = fields.next() {
+        if first.starts_with('/') {
+            requested = Some(*first);
+        } else if *first == "RECURSIVE" {
+            recursive = true;
+        } else {
+            return Err(USAGE.to_owned());
+        }
     }
-    let root = base.root.clone();
-    let relative = requested.trim_start_matches('/');
-    let directory = root.join(relative);
-    let canonical = std::fs::canonicalize(&directory).map_err(|error| {
+    let requested = match requested {
+        Some(requested) => requested,
+        None => fields.next().ok_or(USAGE)?,
+    };
+    let fullpath = format!(
+        "{}{}{requested}",
+        given.display(),
+        if requested.starts_with('/') { "" } else { "/" }
+    );
+    let failed = |error: std::io::Error| {
         format!(
-            "List {}: {}",
-            directory.display(),
+            "List {fullpath}: {}",
             rrdcached_strerror(error.raw_os_error().unwrap_or(0))
         )
-    })?;
-    if !canonical.starts_with(&root) {
-        return Err(format!("Cannot read: {}", directory.display()));
+    };
+    let root = &base.root;
+    let path = root.join(requested.trim_start_matches('/'));
+    if rrdcached_list_names_rrd(&fullpath) {
+        let metadata = std::fs::metadata(&path).map_err(failed)?;
+        if !metadata.is_file() {
+            return Err(failed(std::io::Error::from_raw_os_error(libc::ENXIO)));
+        }
+        let name = fullpath.rsplit('/').next().unwrap_or_default();
+        // As for directory entries, a symlink or a file outside -b is
+        // skipped rather than reported.
+        let inside = std::fs::symlink_metadata(&path)
+            .is_ok_and(|metadata| !metadata.file_type().is_symlink())
+            && std::fs::canonicalize(&path).is_ok_and(|canonical| canonical.starts_with(root));
+        return Ok(if inside {
+            format!("1 RRDs\n{name}\n")
+        } else {
+            "0 RRDs\n".to_owned()
+        });
+    }
+    let canonical = std::fs::canonicalize(&path).map_err(failed)?;
+    if !canonical.starts_with(root) {
+        return Err(format!("Cannot read: {fullpath}"));
+    }
+    if !canonical.is_dir() {
+        return Err(failed(std::io::Error::from_raw_os_error(libc::ENOTDIR)));
     }
     let mut entries = Vec::new();
-    collect_rrdcached_list(&root, &canonical, recursive, &mut entries)?;
+    collect_rrdcached_list(&canonical, &canonical, recursive, &mut entries)?;
     let body = entries
         .iter()
         .map(|path| format!("{path}\n"))
@@ -3144,8 +3377,11 @@ fn rrdcached_list(base: &RrdcachedBase, fields: &[&str]) -> Result<String, Strin
     Ok(format!("{} RRDs\n{body}", entries.len()))
 }
 
+/// rrd_list_rec: a regular file is listed only with an RRD name, and any
+/// other entry, including a directory when not recursing, is listed by name.
+/// Rondi skips symlinks rather than following them.
 fn collect_rrdcached_list(
-    root: &Path,
+    listed: &Path,
     directory: &Path,
     recursive: bool,
     entries: &mut Vec<String>,
@@ -3157,22 +3393,17 @@ fn collect_rrdcached_list(
         if metadata.file_type().is_symlink() {
             continue;
         }
-        if metadata.is_dir() {
-            if recursive {
-                collect_rrdcached_list(root, &path, recursive, entries)?;
-            } else {
-                let relative = path.strip_prefix(root).map_err(|error| error.to_string())?;
-                entries.push(relative.to_string_lossy().replace('\\', "/"));
-            }
-        } else if metadata.is_file() && path.extension().is_some_and(|ext| ext == "rrd") {
-            let canonical = std::fs::canonicalize(&path).map_err(|error| error.to_string())?;
-            if canonical.starts_with(root) {
-                let relative = canonical
-                    .strip_prefix(root)
-                    .map_err(|error| error.to_string())?;
-                entries.push(relative.to_string_lossy().replace('\\', "/"));
-            }
+        if metadata.is_dir() && recursive {
+            collect_rrdcached_list(listed, &path, recursive, entries)?;
+            continue;
         }
+        if metadata.is_file() && !rrdcached_list_names_rrd(&entry.file_name().to_string_lossy()) {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(listed)
+            .map_err(|error| error.to_string())?;
+        entries.push(relative.to_string_lossy().into_owned());
     }
     Ok(())
 }
@@ -3255,6 +3486,29 @@ fn rrdcached_fetch_data(
         return Err("Usage: FETCH <file> <CF> [<start> [<end>] [<column>...]]".to_owned());
     }
     let path = base.target(fields[0])?;
+    // handle_request_fetch_parse reads both times before rrd_fetch_r runs:
+    // strtol base 0, a value up to zero counts back from now, and an absent
+    // time defaults to the day before now.
+    let now = wall_time_seconds();
+    let time = |index: usize, name: &str, default: i64| -> Result<i64, String> {
+        let Some(text) = fields.get(index) else {
+            return Ok(default);
+        };
+        let ((value, end), (_, erange)) =
+            (rondi::c_strtol(text, 0), rondi::c_strtoll_errno(text, 0));
+        if end == 0 || erange {
+            return Err(format!(
+                "Cannot parse {name} time `{text}': Only simple integers are allowed."
+            ));
+        }
+        Ok(if value > 0 {
+            value
+        } else {
+            now.wrapping_add(value)
+        })
+    };
+    let start = time(2, "start", now - 86_400)?;
+    let end = time(3, "end", now)?;
     // rrd_fetch_r converts the CF before rrd_fetch_fn opens the file.
     const CONSOLIDATION_FUNCTIONS: [&str; 10] = [
         "AVERAGE",
@@ -3276,43 +3530,45 @@ fn rrdcached_fetch_data(
     }
     let file = rrdcached_rrd_open(&base.abs(fields[0]), &path, false)
         .map_err(|error| format!("rrd_fetch_r failed: {error}"))?;
-    let info =
-        rondi::inspect_rrd_open_file(file.try_clone().map_err(|error| error.to_string())?, &path)
-            .map_err(|error| error.to_string())?;
-    let start = fields
-        .get(2)
-        .map(|value| value.parse::<i64>().map_err(|error| error.to_string()))
-        .transpose()?
-        .unwrap_or(info.last_update.saturating_sub(86_400));
-    let end = fields
-        .get(3)
-        .map(|value| value.parse::<i64>().map_err(|error| error.to_string()))
-        .transpose()?
-        .unwrap_or(info.last_update);
     let result =
         rondi::fetch_rrd_open_file(file, &path, fields[1], start, end, 1).map_err(|error| {
-            let error = error.to_string();
-            if error.contains("no archive matching consolidation function") {
-                "rrd_fetch_r failed: the RRD does not contain an RRA matching the chosen CF"
-                    .to_owned()
-            } else {
-                error
+            match error {
+                StoreError::Rrd(message) => format!("rrd_fetch_r failed: {message}"),
+                error => {
+                    let error = error.to_string();
+                    if error.contains("no archive matching consolidation function") {
+                        "rrd_fetch_r failed: the RRD does not contain an RRA matching the chosen CF"
+                            .to_owned()
+                    } else {
+                        error
+                    }
+                }
             }
         })?;
-    let selected = if fields.len() > 4 {
-        fields[4..]
+    // The field index loop of handle_request_fetch_parse: the bound is checked
+    // before an empty field is skipped, and no field selects every source.
+    let mut selected = Vec::new();
+    for name in fields.iter().skip(4) {
+        if selected.len() >= result.data_sources.len() {
+            return Err("too many fields given - duplicates!".to_owned());
+        }
+        if name.is_empty() {
+            continue;
+        }
+        // Upstream formats the file name after freeing it; Rondi prints it.
+        let found = result
+            .data_sources
             .iter()
-            .map(|name| {
-                result
-                    .data_sources
-                    .iter()
-                    .position(|source| source == name)
-                    .ok_or_else(|| format!("Unknown data source: {name}"))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    } else {
-        (0..result.data_sources.len()).collect::<Vec<_>>()
-    };
+            .position(|source| source == name)
+            .ok_or_else(|| format!("field {name} not found in {}", base.abs(fields[0])))?;
+        if selected.contains(&found) {
+            return Err(format!("field {name} already used"));
+        }
+        selected.push(found);
+    }
+    if selected.is_empty() {
+        selected = (0..result.data_sources.len()).collect();
+    }
     Ok((result, selected))
 }
 
@@ -3641,14 +3897,20 @@ fn rrdcached_create(
     no_overwrite_default: bool,
     allow_recursive_mkdir: bool,
 ) -> Result<(), String> {
-    if fields.len() < 3 {
-        return Err(
-            "Usage: CREATE <filename> [-b start] [-s step] [-O] <DS definitions> <RRA definitions>"
-                .to_owned(),
-        );
+    const USAGE: &str =
+        "Usage: CREATE <filename> [-b start] [-s step] [-O] <DS definitions> <RRA definitions>";
+    /// MAX_CREATE_AV in handle_request_create.
+    const MAX_DEFINITIONS: usize = 128;
+    let Some((file, arguments)) = fields.split_first() else {
+        return Err(USAGE.to_owned());
+    };
+    // An empty name resolves to the base directory, which upstream would
+    // hand to rrd_create_r2. Rondi never creates over it.
+    if file.is_empty() {
+        return Err(format!("{}: Permission denied", base.abs(file)));
     }
-    let output = base.target(fields[0])?;
-    let display = base.abs(fields[0]);
+    let output = base.target(file)?;
+    let display = base.abs(file);
     let parent = output.parent().ok_or("invalid output path")?;
     let directory =
         rondi::safe_fs::open_directory(parent, allow_recursive_mkdir).map_err(|error| {
@@ -3670,50 +3932,54 @@ fn rrdcached_create(
     {
         return Err(format!("{}: Permission denied", output.display()));
     }
-    let mut step = 300_u64;
-    let mut start = 1_000_000_000_i64;
+    // handle_request_create matches each token by prefix (strncmp), reads
+    // values with atol, and passes step 0 and last_up -1 when they are absent;
+    // rrd_create_r2 then uses 300 and ten seconds before now.
+    let mut step = 0_u64;
+    let mut start = -1_i64;
     let mut no_overwrite = no_overwrite_default;
+    let mut unsupported = None;
     let mut definitions = Vec::new();
-    let mut index = 1;
-    while index < fields.len() {
-        match fields[index] {
-            "-s" | "--step" => {
-                index += 1;
-                step = fields
-                    .get(index)
-                    .ok_or("missing step")?
-                    .parse()
-                    .map_err(|_| "invalid step")?;
+    let mut tokens = arguments.iter();
+    while let Some(token) = tokens.next() {
+        if token.starts_with("-b") || token.starts_with("-s") {
+            let value = rondi::c_strtol(tokens.next().ok_or(USAGE)?, 10).0;
+            if token.starts_with("-b") {
+                start = value;
+            } else {
+                // An unsigned long, so a negative step wraps.
+                step = value as u64;
             }
-            "-b" | "--start" => {
-                index += 1;
-                start = fields
-                    .get(index)
-                    .ok_or("missing start")?
-                    .parse()
-                    .map_err(|_| "invalid start")?;
+        } else if token.starts_with("-r") || token.starts_with("-t") {
+            // Upstream reads source and template files by name relative to
+            // its working directory, outside -b. Rondi refuses them (RD-004).
+            tokens.next().ok_or(USAGE)?;
+            unsupported.get_or_insert(&token[..2]);
+        } else if token.starts_with("-O") {
+            no_overwrite = true;
+        } else if token.starts_with("DS:") || token.starts_with("RRA:") {
+            if definitions.len() >= MAX_DEFINITIONS {
+                return Err(format!(
+                    "Too many DS/RRA definitions (max {MAX_DEFINITIONS})"
+                ));
             }
-            "-O" | "--no-overwrite" => no_overwrite = true,
-            option if option.starts_with('-') => {
-                return Err(format!("unsupported CREATE option: {option}"));
-            }
-            definition => definitions.push(definition.to_owned()),
+            definitions.push((*token).to_owned());
+        } else {
+            return Err(USAGE.to_owned());
         }
-        index += 1;
     }
-    let sources = definitions
-        .iter()
-        .filter(|line| line.starts_with("DS:"))
-        .cloned()
-        .collect::<Vec<_>>();
-    let archives = definitions
-        .iter()
-        .filter(|line| line.starts_with("RRA:"))
-        .cloned()
-        .collect::<Vec<_>>();
-    if sources.len() + archives.len() != definitions.len() {
-        return Err("CREATE only supports DS and RRA definitions".to_owned());
+    if start != -1 && start < 3600 * 24 * 365 * 10 {
+        return Err("The first entry must be after 1980.".to_owned());
     }
+    if let Some(option) = unsupported {
+        return Err(format!("unsupported CREATE option: {option}"));
+    }
+    let start = if start > 0 {
+        start
+    } else {
+        wall_time_seconds() - 10
+    };
+    let step = if step == 0 { 300 } else { step };
     rondi::create_rrd_at(
         &directory,
         filename,
@@ -3728,7 +3994,7 @@ fn rrdcached_create(
         {
             format!("RRD Error: creating '{display}': File exists")
         }
-        error => error.to_string(),
+        error => format!("RRD Error: {error}"),
     })
 }
 

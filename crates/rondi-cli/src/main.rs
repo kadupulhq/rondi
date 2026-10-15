@@ -2062,13 +2062,13 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         }
         match print_calc(&mut im, si_base, &mut info)? {
             PrintCalc::Done(_) => {}
-            PrintCalc::Silent => return Ok(()),
+            PrintCalc::Silent => return pending_error(&im),
         }
     } else {
         flush_and_prepare_data(&mut im)?;
         let graph_elements = match print_calc(&mut im, si_base, &mut info)? {
             PrintCalc::Done(count) => count,
-            PrintCalc::Silent => return Ok(()),
+            PrintCalc::Silent => return pending_error(&im),
         };
         // graph_paint stops after print_calc when nothing is drawn.
         if graph_elements {
@@ -2271,6 +2271,15 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     }
     match save_error {
         Some(message) => Err(message.into()),
+        None => pending_error(&im),
+    }
+}
+
+/// The error `rrd_tool.c` still finds set when a graph or xport otherwise
+/// succeeded, such as a daemon that `data_fetch` could not reach.
+fn pending_error(im: &rondi::graph::GraphImage) -> Result<(), Box<dyn std::error::Error>> {
+    match &im.pending_error {
+        Some(message) => Err(message.clone().into()),
         None => Ok(()),
     }
 }
@@ -2413,14 +2422,24 @@ fn flush_and_prepare_data(
     let mut flushed = std::collections::HashSet::new();
     let mut flush_error = None::<Box<dyn std::error::Error>>;
     let mut hook = |address: &str, filename: &str| {
-        if flushed.insert((address.to_owned(), filename.to_owned()))
-            && let Err(error) = send_rrdcached_flush(address, filename)
-        {
-            let message = error.to_string();
-            flush_error = Some(error);
-            return Err(rondi::StoreError::RrdExpression(message));
+        let key = (address.to_owned(), filename.to_owned());
+        if flushed.contains(&key) {
+            return Ok(None);
         }
-        Ok(())
+        match send_rrdcached_flush(address, filename) {
+            Ok(()) => {
+                flushed.insert(key);
+                Ok(None)
+            }
+            // data_fetch treats a failed rrdc_connect as "no daemon" and
+            // reads the local file, leaving the error set.
+            Err(error) if error.is::<RrdcachedConnectError>() => Ok(Some(error.to_string())),
+            Err(error) => {
+                let message = error.to_string();
+                flush_error = Some(error);
+                Err(rondi::StoreError::RrdExpression(message))
+            }
+        }
     };
     let fetched = im.data_fetch(&mut hook);
     if let Some(error) = flush_error {
@@ -2506,10 +2525,21 @@ fn render_xport(args: &[String]) -> Result<(String, Option<String>), Box<dyn std
     if im.gdes.is_empty() {
         return Err("can't make an xport without contents".into());
     }
+    // Unlike graph, rrd_xport connects to the image-wide daemon up front
+    // and gives up when that fails.
+    #[cfg(unix)]
+    if let Some(address) = im
+        .daemon_addr
+        .as_deref()
+        .filter(|address| !address.is_empty())
+    {
+        connect_rrdcached(address)?;
+    }
     flush_and_prepare_data(&mut im)?;
     let data = im.xport(false)?;
     let flags = u8::from(json) | (u8::from(show_time) << 1) | (u8::from(enum_ds) << 2);
-    Ok(format_xport_xmljson(flags, &mut im, &data, 1000, false))
+    let (output, error) = format_xport_xmljson(flags, &mut im, &data, 1000, false);
+    Ok((output, error.or_else(|| im.pending_error.clone())))
 }
 
 /// Turns graph elements into the native renderer's series, with one column
