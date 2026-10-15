@@ -285,6 +285,62 @@ fn random_token_sequences_never_panic() {
     assert!(evaluated > 1_000, "only {evaluated} rows evaluated");
 }
 
+/// Every operand an expression controls, at extreme values, must finish
+/// quickly with a value or a clean error and without large allocations.
+#[test]
+fn extreme_operands_are_bounded() {
+    let extremes = [
+        "2147483648",
+        "-2147483649",
+        "9007199254740992",
+        "-9007199254740992",
+        "1e308",
+        "-1e308",
+        "1e1024",
+        "-1e1024",
+        "UNKN",
+        "-1",
+        "0",
+    ];
+    let templates = [
+        "a,1,2,3,{},COPY,DEPTH,+",
+        "a,1,2,3,{},INDEX,+,+,+,+",
+        "a,1,2,3,{},{},ROLL,+,+,+",
+        "a,1,2,3,{},SORT,+,+,+",
+        "a,1,2,3,{},REV,+,+,+",
+        "a,1,2,3,{},AVG",
+        "a,1,2,3,{},SMIN",
+        "a,1,2,3,{},SMAX",
+        "a,1,2,3,{},MEDIAN",
+        "a,1,2,3,{},STDEV",
+        "a,1,2,3,50,{},PERCENT",
+        "a,1,2,{},3,PERCENT",
+        "a,{},TREND",
+        "a,{},TRENDNAN",
+        "{},1,30,a,PREDICT",
+        "60,{},30,a,PREDICT",
+        "0,{},30,a,PREDICTSIGMA",
+        "60,1,{},a,PREDICT",
+        "60,-4,{},50,a,PREDICTPERC",
+        "60,-4,30,{},a,PREDICTPERC",
+    ];
+    let started = std::time::Instant::now();
+    for template in templates {
+        for extreme in extremes {
+            let text = template.replace("{}", extreme);
+            let _ = run(&text, A.len());
+        }
+    }
+    // Doubling the stack with COPY stops at the depth limit.
+    let doubling = format!("a{}", ",DEPTH,COPY".repeat(40));
+    assert!(matches!(first(&doubling), Err(RpnError::OutOfMemory(_))));
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_secs(20),
+        "took {elapsed:?}"
+    );
+}
+
 #[test]
 fn random_text_never_panics_the_parser() {
     let alphabet: Vec<char> = "ab,.e+-0123456789()PREVTNDUXA ".chars().collect();

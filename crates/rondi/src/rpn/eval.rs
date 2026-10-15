@@ -38,6 +38,8 @@ pub(crate) struct Evaluator<'a> {
     program: Vec<Step>,
     cursors: Vec<Cursor<'a>>,
     stack: Stack,
+    /// Sample buffer for the PREDICT family, reused across rows.
+    scratch: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -97,6 +99,12 @@ impl Cursor<'_> {
     }
 }
 
+/// Upper bound on the stack depth. RRDtool grows its stack without a fixed
+/// limit (3000 values evaluate normally); Rondi stops at a million values,
+/// which repeated COPY could otherwise double without end, and reports it
+/// with RRDtool's allocation-failure text.
+const MAX_STACK_DEPTH: usize = 1 << 20;
+
 /// Upper bound on the samples one PREDICT-family operator gathers per row.
 /// The reference has no such limit; it only matters for a negative shift
 /// count of enormous magnitude with a zero multiplier.
@@ -139,6 +147,7 @@ impl<'a> Evaluator<'a> {
             program,
             cursors,
             stack: Stack::default(),
+            scratch: Vec::new(),
         }
     }
 
@@ -160,6 +169,9 @@ impl<'a> Evaluator<'a> {
                     self.stack.push(value);
                 }
                 Step::Apply(operator) => self.apply(operator, position, row, &mut now)?,
+            }
+            if self.stack.len > MAX_STACK_DEPTH {
+                return Err(RpnError::OutOfMemory(self.stack.len as i64));
             }
         }
         // Compatibility: a variable moves to its next sample after each row
@@ -334,6 +346,9 @@ impl<'a> Evaluator<'a> {
             O::Copy => {
                 let count = stack.pop_count()?;
                 let count = stack.checked_count(count)?;
+                if stack.len + count > MAX_STACK_DEPTH {
+                    return Err(RpnError::OutOfMemory((stack.len + count) as i64));
+                }
                 let start = stack.len - count;
                 for index in start..start + count {
                     let value = stack.buffer[index];
@@ -436,7 +451,13 @@ impl<'a> Evaluator<'a> {
                 let cursor = self
                     .series_before(position, 1)
                     .ok_or(RpnError::MalformedPredict)?;
-                let value = predict(&mut self.stack, &self.cursors[cursor], operator, row)?;
+                let value = predict(
+                    &mut self.stack,
+                    &self.cursors[cursor],
+                    operator,
+                    row,
+                    &mut self.scratch,
+                )?;
                 self.stack.push(value);
             }
         }
@@ -549,16 +570,29 @@ fn trend(cursor: &Cursor<'_>, window: i64, row: &Row, skip_unknown: bool) -> f64
     if (row.index as f64) < warm_up - 1.0 {
         return rrd_nan();
     }
+    // Only the samples inside the series are visited, newest first, so a
+    // huge window costs at most the series length per row. Positions past
+    // the end are unknown: TREND is then unknown and TRENDNAN skips them.
+    // Positions before the start read as zero, which adds nothing to the
+    // sum but counts.
+    let newest = cursor.position.saturating_add(end);
+    let oldest = newest.saturating_sub(samples - 1);
+    let last_index = i64::try_from(cursor.values.len()).unwrap_or(i64::MAX) - 1;
+    if newest > last_index && !skip_unknown {
+        return rrd_nan();
+    }
     let mut sum = 0.0;
     let mut count = 0_u64;
-    for back in 0..samples {
-        let value = cursor.sample(end - back);
+    for index in (oldest.max(0)..=newest.min(last_index)).rev() {
+        let value = cursor.values[index as usize];
         if skip_unknown && value.is_nan() {
             continue;
         }
         sum += value;
         count += 1;
     }
+    let before_start = 0_i64.saturating_sub(oldest).min(samples).max(0);
+    count += before_start as u64;
     if count == 0 {
         rrd_nan()
     } else {
@@ -573,6 +607,7 @@ fn predict(
     cursor: &Cursor<'_>,
     operator: Operator,
     row: &Row,
+    scratch: &mut Vec<f64>,
 ) -> Result<f64, RpnError> {
     stack.pop()?;
     let percentile = if operator == Operator::PredictPercentile {
@@ -591,7 +626,8 @@ fn predict(
     let next = cursor.window_end(row.time) + 1;
     let row = i64::try_from(row.index).unwrap_or(i64::MAX);
     let span = ceil_div(window, cursor.step);
-    let mut samples = Vec::new();
+    let mut samples = std::mem::take(scratch);
+    samples.clear();
     let mut visited = 0_usize;
     // Gathers the samples for one shift: offsets D..=D+span that are below
     // the row index.
@@ -645,11 +681,13 @@ fn predict(
         }
     }
 
-    Ok(match (operator, percentile) {
+    let value = match (operator, percentile) {
         (Operator::PredictSigma, _) => sigma(&samples),
         (_, Some(percentile)) => interpolated_percentile(&mut samples, percentile),
-        _ => average(samples.into_iter()),
-    })
+        _ => average(samples.iter().copied()),
+    };
+    *scratch = samples;
+    Ok(value)
 }
 
 /// PREDICTSIGMA's spread: `sqrt((n*q - s*s) / (n*(n-1)))` over count,
