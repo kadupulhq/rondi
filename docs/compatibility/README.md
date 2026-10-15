@@ -11,6 +11,7 @@ The specifications are being written.
 | `rrdtool restore` from an XML dump | [restore.md](restore.md) | `crates/rondi-cli/tests/restore_spec_vectors.rs` |
 | `rrdtool create` definitions, layout and output file | [create.md](create.md) | `crates/rondi-cli/tests/create_spec_vectors.rs` |
 | `rrdtool resize` row changes and `resize.rrd` | [resize.md](resize.md) | `crates/rondi-cli/tests/resize_spec_vectors.rs` |
+| At-style time specifications, `update` timestamps, `dump` date comments | [time-spec.md](time-spec.md) | `crates/rondi-cli/tests/time_spec_vectors.rs` |
 
 Each specification states the observable behavior, how it was established
 (documentation, black-box test, or reference-source inspection), and the
