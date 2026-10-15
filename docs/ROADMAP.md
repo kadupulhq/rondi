@@ -13,7 +13,7 @@ The maintainer has decided the following. The work is in progress.
 - rrdcached implements `-U`, `-G`, and multiple `-l` options as upstream does. Done (#50, #97).
 - After "Unable to connect to rrdcached", the client prints upstream's local-fallback text. Done for `graph`, `graphv` and `xport` `daemon=` (#92); open for `fetch`, `first`, `last`, `info`, `lastupdate` and `dump` (RD-010).
 - All behavior differences listed in COMPATIBILITY_DEFECTS.md are closed. Documented exceptions are limited to behavior that depends on undefined memory (see Risks).
-- Rondi is licensed `MIT OR Apache-2.0`, replacing the GPL-2.0-or-later plus RRDtool FLOSS exception terms from #45. RRDtool's notice stays in `COPYRIGHT` as third-party attribution. Author audit, EXECUTED with `git log --format='%an <%ae>%n%(trailers:key=Signed-off-by,valueonly)'`: every human commit and sign-off is Thomas Vincent; the only other author is dependabot[bot], with two workflow SHA bumps (#33, #42).
+- Rondi is licensed `MIT OR Apache-2.0`. RRDtool's notice stays in `COPYRIGHT` as third-party attribution. Author audit, EXECUTED with `git log --format='%an <%ae>%n%(trailers:key=Signed-off-by,valueonly)'`: every human commit and sign-off is Thomas Vincent; the only other author is dependabot[bot], with two workflow SHA bumps (#33, #42).
 - CI runs on GitHub-hosted runners.
 
 ## Method and labels
