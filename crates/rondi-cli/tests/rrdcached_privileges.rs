@@ -171,8 +171,12 @@ fn rrdcached_binds_as_root_then_runs_as_the_requested_account() {
         assert_eq!(groups, expected_groups, "{name} Groups");
         for task in std::fs::read_dir(format!("/proc/{pid}/task")).unwrap() {
             let task = task.unwrap().file_name().into_string().unwrap();
-            let status =
-                std::fs::read_to_string(format!("/proc/{pid}/task/{task}/status")).unwrap();
+            // A thread that exited after read_dir listed it holds no ids.
+            let status = match std::fs::read_to_string(format!("/proc/{pid}/task/{task}/status")) {
+                Ok(status) => status,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => panic!("{name} thread {task}: {error}"),
+            };
             let thread_uids = status
                 .lines()
                 .find_map(|line| line.strip_prefix("Uid:"))
