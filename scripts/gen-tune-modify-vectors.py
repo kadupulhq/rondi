@@ -516,7 +516,8 @@ def run_case(rrdtool, src, args, workdir, pad):
     target = os.path.join(workdir, "case.rrd")
     shutil.copyfile(src, target)
     rc, out, err = run(rrdtool, ["tune", "case.rrd"] + args, cwd=workdir, pad=pad)
-    data = open(target, "rb").read()
+    with open(target, "rb") as handle:
+        data = handle.read()
     info = dump = None
     if rc == 0:
         irc, info, _ = run(rrdtool, ["info", "case.rrd"], cwd=workdir)
@@ -619,7 +620,8 @@ def write(rrdtool):
         lines = ["# id\tinput\texpect\targs... (tab separated)"]
         packed = {}
         for cid, inp, args, expect, (rc, out, err, data, info, dump) in results:
-            original = open(stored[inp], "rb").read()
+            with open(stored[inp], "rb") as handle:
+                original = handle.read()
             packed.setdefault(inp, b"")
             packed[inp] += render(cid, rc, out, err, data, info, dump,
                                   data == original, inspected(cid, args))
@@ -660,7 +662,8 @@ def overrides(rrdtool, platform):
     with tempfile.TemporaryDirectory() as tmp:
         for cid, inp, expect, args in load_cases():
             rc, out, err, data, info, dump = run_case(rrdtool, stored[inp], args, tmp, 0)
-            original = open(stored[inp], "rb").read()
+            with open(stored[inp], "rb") as handle:
+                original = handle.read()
             unchanged = data == original
             blob = render(cid, rc, out, err, data, info, dump, unchanged, inspected(cid, args))
             want = recorded[cid]
