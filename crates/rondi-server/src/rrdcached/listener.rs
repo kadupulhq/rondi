@@ -6,7 +6,7 @@ use super::{errno_text, error_text};
 use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -166,11 +166,11 @@ fn open_unix(
     };
     let name =
         CString::new(name.as_encoded_bytes()).map_err(|_| bind_failed(errno_text(libc::EINVAL)))?;
-    // Compatibility: a missing socket directory is created (opt-050).
+    // Compatibility: a missing socket directory is created with the mode
+    // the umask leaves, 0755 under umask 022 (opt-050).
     // Provenance: black-box compatibility test.
     std::fs::DirBuilder::new()
         .recursive(true)
-        .mode(0o755)
         .create(directory)
         .map_err(io_failed)?;
     let parent = check_directory_chain(directory)?;

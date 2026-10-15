@@ -94,7 +94,6 @@ pub fn open_log_file(value: &str) -> Result<LogFile, OptionFailure> {
     let file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
-        .mode(0o644)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
         .open(value)
         .map_err(|error| failure(error_text(&error)))?;

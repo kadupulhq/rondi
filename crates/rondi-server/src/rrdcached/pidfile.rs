@@ -6,7 +6,7 @@ use std::ffi::CString;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
 /// The fatal line for a pid file that could not be created or opened.
@@ -37,10 +37,7 @@ impl PidFile {
     pub(crate) fn create(path: &Path, notes: &mut dyn Write) -> Result<Self, PidFileError> {
         if let Some(directory) = path.parent().filter(|dir| !dir.as_os_str().is_empty())
             && !directory.exists()
-            && let Err(error) = std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o755)
-                .create(directory)
+            && let Err(error) = std::fs::DirBuilder::new().recursive(true).create(directory)
         {
             // Compatibility: the reference reports this twice.
             // Provenance: black-box compatibility test.
@@ -58,7 +55,6 @@ impl PidFile {
         let created = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o644)
             .custom_flags(libc::O_NOFOLLOW)
             .open(path);
         let file = match created {
@@ -199,7 +195,6 @@ fn write_beside(path: &Path, pid: u32) -> std::io::Result<File> {
         let mut file = match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .mode(0o644)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&staged)
         {
