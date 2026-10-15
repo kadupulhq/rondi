@@ -1545,14 +1545,13 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty());
     if source_files.is_empty() && daemon_address.is_none() {
-        rondi::rrd_create_r2(
-            &filename,
-            if step_was_set { step } else { 0 },
-            if start_was_set { start } else { -1 },
+        let options = rondi::CreateOptions {
+            step: step_was_set.then_some(step),
+            start: start_was_set.then_some(start),
             no_overwrite,
-            template_file.as_deref(),
-            &positional,
-        )?;
+            template: template_file.as_deref(),
+        };
+        rondi::create_rrd(&filename, &options, &positional)?;
         return Ok(());
     }
     let extra_data_sources = positional
@@ -5895,6 +5894,17 @@ fn rrdtool_resize(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         usize::try_from(target_rra).unwrap_or(usize::MAX),
         action,
         modify as u64,
+        &mut |mut ignored| {
+            // One warning pair per 8 ignored bytes (docs/compatibility/resize.md RZ-15).
+            while ignored > 0 {
+                let part = ignored.min(8);
+                eprintln!("WARNING: ignoring last {part} bytes");
+                eprintln!(
+                    "WARNING: if you see this message multiple times for a single file you're in trouble"
+                );
+                ignored -= part;
+            }
+        },
     )?;
     Ok(())
 }

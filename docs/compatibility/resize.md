@@ -103,7 +103,11 @@ not corrected; the vectors `currow.rrd` pin the result.
 
 **RZ-10** (documentation, black-box; must). The result is written to the
 file `resize.rrd` in the current working directory, wherever the input is.
-The input is opened read-only and never changed (same bytes and inode).
+The input is never changed (same bytes and inode). It is nevertheless
+opened for reading and writing: a mode 0444 input fails with
+`opening '<name>': Permission denied` and a directory with
+`opening '<name>': Is a directory` (black-box, observed during
+implementation).
 
 **RZ-11** (black-box; must). The output equals the input with the target
 archive's row count in its definition changed to *n* + *k* or *n* − *k*,
@@ -139,7 +143,9 @@ behavior.
 
 ## 4. Inputs that do not match their header
 
-**RZ-14** (black-box; must). Only versions `0001` to `0004` are resized. A
+**RZ-14** (black-box; must). Only the version strings `0001`, `0003` and
+`0004` are resized; `0002`, `0000` and other spellings such as `2` fail the
+same way as `0005` (observed during implementation). A
 version `0005` file (any file with a `DCOUNTER` or `DDERIVE` data source,
 `create.md` CR-37) fails with `Do not know how to handle RRD version 0005`
 after the output was opened, leaving a `resize.rrd` of the resized length
@@ -168,6 +174,15 @@ and RZ-15's warning is printed once for the missing microseconds (vector
 `attempting to write beyond end of file (<a> + 8 > <a>)` and leaves a
 partial `resize.rrd` (vector `v1.rrd 1 SHRINK 1`). Both are reference
 defects that the vectors pin and Rondi reproduces.
+
+More generally (black-box, observed during implementation): the output is
+the version 3 form of the result cut to the version 1 length. When the
+result's last 8 bytes would come from rows that follow the resized part
+(later rows of the target archive or later archives), they are dropped
+with the warning. When they would come from the resized part itself
+(`SHRINK` or `GROW` of the last archive with no kept row after the
+current row), the command fails with the error above, after printing any
+warnings for trailing bytes.
 
 **RZ-18** (black-box; defect). RZ-14 and RZ-17 leave a partial or invalid
 `resize.rrd` behind on failure. A replacement should not leave a partial
@@ -214,8 +229,8 @@ Current Rondi against RRDtool 1.11.0, as of this specification:
   `Can't create '<absolute path>': File exists` and changes nothing, where
   RRDtool rewrites the file in place, follows the link, or reports
   `Can't create 'resize.rrd': Is a directory`. A new file gets 0600 instead
-  of 0666 minus the umask. The first part is intentional (safer); the mode
-  and the absolute path in the message are not pinned by vectors.
+  of 0666 minus the umask. Both are intentional (safer); the mode and the
+  absolute path in the message are not pinned by vectors.
 
 No other difference was found: Rondi matches the other 87 vectors on macOS
 arm64.

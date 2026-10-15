@@ -11,7 +11,7 @@ use crate::rrd_binary::{
     CDP_PREP_LEN, DS_DEF_LEN, FLOAT_COOKIE, LIVE_HEAD_LEN, PDP_PREP_LEN, RRA_DEF_LEN, RRA_PTR_LEN,
     RrdFileLock, STAT_HEAD_LEN, VALUE_LEN, open_rrd_write, rrd_nan,
 };
-use crate::rrd_create::{ErrorSlot, parse_ds, parse_rra};
+use crate::rrd_definitions::{ArchiveDef, DataSourceDef};
 use crate::storage::StoreError;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
@@ -1030,15 +1030,14 @@ impl Plan {
             let RrdStructureOp::AddSource(spec) = op else {
                 continue;
             };
-            let mut def = [0_u8; DS_DEF_LEN];
-            let mut error = ErrorSlot::default();
             // tune keeps the file's version whatever the type (TM-21).
-            let mut version = "0003";
-            parse_ds(spec, &mut def, &mut version, &mut error);
-            if let Some(message) = error.take() {
-                source_error.get_or_insert(message);
-                continue;
-            }
+            let def = match DataSourceDef::parse(spec) {
+                Ok(def) => def.to_bytes(),
+                Err(error) => {
+                    source_error.get_or_insert(error.to_string());
+                    continue;
+                }
+            };
             let name = field_text(&def[..NAME_LEN]).to_vec();
             if names.contains(&name) {
                 return Err(StoreError::Rrd(format!(
@@ -1077,13 +1076,7 @@ impl Plan {
             let RrdStructureOp::AddArchive(spec) = op else {
                 continue;
             };
-            let mut def = [0_u8; RRA_DEF_LEN];
-            let mut error = ErrorSlot::default();
-            parse_rra(&format!("RRA:{spec}"), &mut def, step, &mut error);
-            if let Some(message) = error.take() {
-                return Err(StoreError::Rrd(message));
-            }
-            added_archives.push(def);
+            added_archives.push(ArchiveDef::parse(spec, step)?.to_bytes());
         }
 
         if let Some(message) = source_error {

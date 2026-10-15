@@ -16,8 +16,8 @@ About 12,400 lines of Rust (38 percent of non-test source) are rated High: modul
 | `crates/rondi/src/rpn.rs` | High | 1,084 | Declared port of the RPN parser and evaluator |
 | `crates/rondi/src/rrd_modify.rs` | Removed | 981 | Declared port; replaced by the clean-room `tune_modify.rs` |
 | `crates/rondi/src/rrd_restore.rs` | Replaced | 912 | Declared port; replaced by a clean-room rewrite from `docs/compatibility/restore.md` |
-| `crates/rondi/src/rrd_create.rs` | High | 790 | Declared port; C error-slot model and temp-file naming reproduced |
-| `crates/rondi/src/rrd_resize.rs` | High | 288 | Declared port, including file-position rules |
+| `crates/rondi/src/rrd_create.rs` | Removed | 790 | Declared port; replaced by the clean-room `rrd_create.rs` and `rrd_definitions.rs` |
+| `crates/rondi/src/rrd_resize.rs` | Removed | 288 | Declared port; replaced by a clean-room `rrd_resize.rs` |
 | `crates/rondi/src/graph.rs` | High | 2,357 | Declared port of graph script parsing and data preparation; 18 shared function names |
 | `crates/rondi/src/graph_layout.rs` | High | 1,011 | Declared port of image layout functions |
 | `crates/rondi-cli/src/graph_options.rs` | High | 880 | Option tables keyed to C line numbers |
@@ -106,6 +106,7 @@ Risk tiers:
 - Compatibility requirement: `create` accepts the documented `DS:` and `RRA:` syntax and writes a byte-compatible `.rrd`.
 - Likely source: `rrdcreate` man page and the on-disk format; edge cases (18-byte min/max cut, regex acceptance) from reference-source inspection.
 - Remediation: replace by spec and fresh implementation. The `.rrd` writer can be rebuilt from the format spec (shared with `rrd_binary.rs`); argument acceptance from a grammar spec. Tests: `crates/rondi-cli/tests/csrc_create.rs` (8) and in-module tests.
+- Status: removed. `crates/rondi/src/rrd_create.rs` (new) and `crates/rondi/src/rrd_definitions.rs` replace it, written from `docs/compatibility/create.md`, its vectors and black-box runs without reading this module or the C source.
 
 **`crates/rondi/src/rrd_resize.rs`: resize entry point and the in-memory `rrd_file` model**
 
@@ -113,6 +114,7 @@ Risk tiers:
 - Compatibility requirement: GROW and SHRINK row mapping relative to the ring pointer, fixed `resize.rrd` output name.
 - Likely source: `rrdresize` man page plus black-box observation; the short-file behaviour came from reference-source inspection.
 - Remediation: replace by spec and fresh implementation; specify the row mapping as a formula and decide whether malformed short-file behaviour is worth matching. Tests: `csrc_mutate.rs`.
+- Status: removed. A new `crates/rondi/src/rrd_resize.rs` replaces it, written from `docs/compatibility/resize.md`, its vectors and black-box runs without reading this module or the C source.
 
 **`crates/rondi/src/graph.rs`: `ParsedArgs::parse`, `GraphImage::{new_graph_description, graph_script, parse_def, parse_cvdef, parse_line_area, parse_hvrule, parse_gprint, parse_comment, parse_tick, parse_textalign, parse_shift, parse_xport, data_fetch, data_calc, cdef_calc, vdef_calc}`, `vdef_parse`, `reduce_data`, `legend_shift`, `gf_conv`, `find_var`**
 
