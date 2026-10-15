@@ -20,18 +20,19 @@ The maintainer has decided the following. The work is in progress.
 
 - Reference: `oetiker/rrdtool-1.x` tag `v1.11.0`. The tag object is `7a15cf6`; it points at commit `ddc7ca7`. Rondi pins the release tarball in `docker/Dockerfile.test` with its SHA-256.
 - Local oracle for the probes below: Homebrew `rrdtool 1.11.0` on macOS arm64. This is not the pinned Linux build. Results from it are marked "macOS probe"; CI repeats the differential tests in the pinned Linux container on x86_64 and aarch64.
-- Rondi under test: `main` at `26d8acf` (debug build for probes, `RONDI_REQUIRE_ORACLE=1 cargo test --workspace` for the suite).
-- **EXECUTED** means the command was run against `main` at `26d8acf` for this page. **READ-ONLY** means the claim comes from reading code, docs, or a merged pull request. RRDtool claims name the source file at `v1.11.0`.
+- Rondi under test: a debug build of `main` at `26d8acf` for the probes, re-run at `204f58a` for the VDEF rule forms; `RONDI_REQUIRE_ORACLE=1 cargo test --workspace` at `204f58a` for the suite. #79, merged between the two, changed graph PRINT, VDEF and rule handling only.
+- **EXECUTED** means the command was run against `main` for this page, at the commit named above. **READ-ONLY** means the claim comes from reading code, docs, or a merged pull request. RRDtool claims name the source file at `v1.11.0`.
 - The effort figures were estimated at `de820e9` and have not been re-estimated; the status lines next to them are current.
 
 ## Where Rondi stands
 
-EXECUTED: `RONDI_REQUIRE_ORACLE=1 cargo test --workspace --no-fail-fast` on macOS arm64 (Rust 1.98.0 from `.mise.toml`, Homebrew rrdtool 1.11.0): 548 passed, 0 failed, 0 ignored. CI run #356 of the Rust workflow on the same commit: 553 passed on Linux x86_64 and 554 on Linux aarch64, with none failed or ignored. The six extra Linux tests are root-only rrdcached privilege tests. Details are in [compatibility.md](compatibility.md#test-evidence).
+EXECUTED: `RONDI_REQUIRE_ORACLE=1 cargo test --workspace --no-fail-fast` at `204f58a` on macOS arm64 (Rust 1.98.0 from `.mise.toml`, Homebrew rrdtool 1.11.0): 560 passed, 0 failed, 0 ignored. CI run #366 of the Rust workflow on the same commit: 566 passed on Linux x86_64 and 566 on Linux aarch64, with none failed or ignored. The six extra Linux tests are root-only rrdcached privilege tests. Details are in [compatibility.md](compatibility.md#test-evidence).
 
-### Done in #86 to #98
+### Done in #79 and #86 to #100
 
-Each pull request below merged to `main` with differential tests against RRDtool 1.11.0 that failed before the change. Nothing has been released.
+Each behavior change below merged to `main` with differential tests against RRDtool 1.11.0. Nothing has been released.
 
+- #79: PRINT/GPRINT `%S` scaling and in-place rewrite as `print_calc` does (so graphv rescales and format errors quote the rewritten text), VDEF times in UTC under `--utc`, HRULE and VRULE painted after the data elements, all-unknown VDEF results filled with the target's DNAN bits, new differential tests for SHIFT, `%S`, rules and daemon FETCH, and the `rrd_queries` Criterion benchmark (results in [benchmarks.md](benchmarks.md)).
 - #86: socket ancestors another account can replace are refused, daemon RRD parents are walked without following symlinks, rrdcached CREATE is capped at 64 MiB, and native journals are checked before they are modified.
 - #87: command output may go to a character device such as `/dev/null`.
 - #88: a data graph whose output file cannot be opened prints the data and exits 0, as `rrd_graph_xport` does.
@@ -44,12 +45,9 @@ Each pull request below merged to `main` with differential tests against RRDtool
 - #97: rrdcached `-b`, `-P`, `-p`, default logging, and SIGUSR1, SIGUSR2 and SIGHUP match `rrd_daemon.c`.
 - #98: restore reads XML through a port of libxml2 2.9.14's `xmlTextReader`, so integer field errors, a byte order mark, trailing content and libxml2 error text match (RD-018 lists what is not modeled).
 
+- #100: Rondi is licensed `MIT OR Apache-2.0`; no behavior change.
+
 #89 and #90 were refactors with no behavior change.
-
-### Open work in progress
-
-- #79 is a draft against `review/rrdtool-compatibility-baseline`, not `main` (EXECUTED: `gh pr view 79`). It reports 196 passing tests, so it predates most of the work above, and its diff is about 37,600 added lines. What it still adds over `main` has not been re-checked; it needs that check before it is rebased or split.
-- #99 (this documentation update) is open. #100, which licenses Rondi under `MIT OR Apache-2.0`, merged as `4018b7f`; the compatibility work above is unaffected by it.
 
 ## Surface: on-disk `.rrd` format (RD-001, RD-003, RD-004, RD-005)
 
@@ -296,7 +294,7 @@ Effort: 2 to 3 engineer-weeks.
 
 ## Milestones
 
-Effort is for one engineer with IDE support, estimated at `de820e9` (58 to 82 engineer-weeks in total) and not re-estimated. The status line under each milestone is current at `26d8acf`.
+Effort is for one engineer with IDE support, estimated at `de820e9` (58 to 82 engineer-weeks in total) and not re-estimated. The status line under each milestone is current at `204f58a`.
 
 **M0: harness (1.5 to 2.5 weeks).** Run the upstream `tests/` scripts in the pinned container against Rondi as a CI job. Add the golden-file corpus format (argv, environment, stdin, expected stdout, stderr, exit code, output hashes). Add `cargo-fuzz` targets for the header parser, restore XML, rrdcached line parser, and time parser. Add a macOS job. Exit: the suite runs on every pull request and failures are visible, not skipped.
 Status: partly done. Fuzz targets exist and CI replays their seeds; `RONDI_REQUIRE_ORACLE=1` makes a missing oracle fail. No upstream `tests/` job, no golden corpus, no macOS CI job.
@@ -327,8 +325,7 @@ In rough order of value against effort:
 2. The `tune -s`/`-S` version bump (RD-002), the `update` error on unknown DS types and CF names (RD-021), and the `fetch` header bytes (RD-022).
 3. Trace RD-020 and decide whether it depends on reads past RRDtool's buffers; if so, record it as an intentional difference.
 4. M0: an upstream `tests/` CI job, so the M2 exit criterion can be measured.
-5. Decide what of #79 still applies to `main`.
-6. COMPUTE, then Holt-Winters (M1).
+5. COMPUTE, then Holt-Winters (M1).
 
 RRDProxy (RD-008) is a Cacti protocol, not part of RRDtool. Track it outside this roadmap.
 

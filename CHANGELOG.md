@@ -9,6 +9,7 @@ follows [Semantic Versioning](VERSIONING.md).
 ### Added
 
 - `tune` performs the `rrd_modify` operations `DEL:`, `DS:`, `DELRRA:`, `RRA#n:[+-=]rows`, `RRA:` and `--step` (#91).
+- Criterion fetch and graph calculation benchmarks for 120-row and 7,200-row archives (#79).
 
 ### Changed
 
@@ -17,6 +18,7 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ### Fixed
 
+- Scale PRINT/GPRINT `%S` and rewrite it in place as RRDtool does, format VDEF times in UTC under `--utc`, paint HRULE and VRULE after the data elements, and fill all-unknown VDEF results with the target's DNAN bits (#79).
 - Check Unix socket directory ownership for every daemon, publish the JSON socket from private staging, and keep daemon RRD reads on checked `O_NOFOLLOW` descriptors (#80).
 - Refuse root rrdcached without `-B -b` confinement, default Unix sockets to `0600`, restrict command outputs to owned, singly linked regular files created `0600`, and bound XML restore allocations (#81).
 - Match rrdtool for `fetch -a -r`, output file errors and non-UTF-8 argv (#82).

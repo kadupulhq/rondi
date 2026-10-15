@@ -16,7 +16,7 @@ The native `.rondi` store implements GAUGE values, fixed sampling steps, AVERAGE
 
 Rondi is pre-alpha and not a drop-in replacement. No release has been published; everything below describes `main`. Compatibility is checked against pinned RRDtool 1.11.0 C behavior, including file bytes, command output, errors, and daemon replies on disposable fixtures. Passing those cases does not establish complete drop-in compatibility.
 
-On `main` at `26d8acf`, `RONDI_REQUIRE_ORACLE=1 cargo test --workspace` passes 548 tests on macOS arm64 against Homebrew RRDtool 1.11.0, and CI passes 553 on Linux x86_64 and 554 on Linux aarch64 against RRDtool 1.11.0 built from the release tarball, with none failed or ignored. Most of those tests run the same input through both implementations and compare the results. The [compatibility matrix](docs/compatibility.md#test-evidence) records the runs and the per-platform differences Rondi reproduces.
+On `main` at `204f58a`, `RONDI_REQUIRE_ORACLE=1 cargo test --workspace` passes 560 tests on macOS arm64 against Homebrew RRDtool 1.11.0, and CI passes 566 on both Linux x86_64 and Linux aarch64 against RRDtool 1.11.0 built from the release tarball, with none failed or ignored. Most of those tests run the same input through both implementations and compare the results. The [compatibility matrix](docs/compatibility.md#test-evidence) records the runs and the per-platform differences Rondi reproduces.
 
 | Surface | Implemented scope | Remaining limits |
 | --- | --- | --- |

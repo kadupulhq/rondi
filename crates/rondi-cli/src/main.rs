@@ -2026,6 +2026,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     let grid_dash = options.grid_dash;
     let border_width = options.border;
     let si_base = options.base;
+    let force_utc = options.utc;
     let daemon_address = options.daemon;
     let requested_step = i64::from(options.step.unwrap_or(0));
     if !matches!(
@@ -2102,13 +2103,13 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         if buffered {
             image = Some(output.into_bytes());
         }
-        match print_calc(&mut im, si_base, &mut info)? {
+        match print_calc(&mut im, si_base, force_utc, &mut info)? {
             PrintCalc::Done(_) => {}
             PrintCalc::Silent => return pending_error(&im),
         }
     } else {
         flush_and_prepare_data(&mut im)?;
-        let graph_elements = match print_calc(&mut im, si_base, &mut info)? {
+        let graph_elements = match print_calc(&mut im, si_base, force_utc, &mut info)? {
             PrintCalc::Done(count) => count,
             PrintCalc::Silent => return pending_error(&im),
         };
@@ -2706,6 +2707,14 @@ fn local_tm(timestamp: i64) -> libc::tm {
     tm
 }
 
+/// `LOCALTIME_R(..., FORCE_UTC_TIME)` with `--utc`.
+fn utc_tm(timestamp: i64) -> libc::tm {
+    let timestamp = timestamp as libc::time_t;
+    let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
+    unsafe { libc::gmtime_r(&timestamp, &mut tm) };
+    tm
+}
+
 fn c_strftime(format: &str, tm: &libc::tm, max: usize) -> Option<String> {
     let format = std::ffi::CString::new(format).ok()?;
     let mut buffer = vec![0_u8; max];
@@ -2718,13 +2727,15 @@ fn c_strftime(format: &str, tm: &libc::tm, max: usize) -> Option<String> {
 fn print_calc(
     im: &mut rondi::graph::GraphImage,
     si_base: u32,
+    force_utc: bool,
     info: &mut GraphInfo,
 ) -> Result<PrintCalc, Box<dyn std::error::Error>> {
     use rondi::graph::{FMT_LEG_LEN, Gf, ValueFormatter};
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
-    let mut tmvdef = local_tm(now);
+    let breakdown = if force_utc { utc_tm } else { local_tm };
+    let mut tmvdef = breakdown(now);
     let mut graphelement = false;
     let mut si_scale = GraphSiScale::new(si_base);
     let mut prline_cnt = 0;
@@ -2734,10 +2745,11 @@ fn print_calc(
             Gf::Print | Gf::Gprint => {
                 let source = vidx.map(|vidx| &im.gdes[vidx]);
                 if let Some(source) = source.filter(|source| source.gf == Gf::Vdef) {
-                    tmvdef = local_tm(source.vf.when);
+                    tmvdef = breakdown(source.vf.when);
                 }
                 let printval = im.print_value(i);
                 let never = source.is_some_and(|source| source.vf.never);
+                let mut format = im.gdes[i].format.clone();
                 let element = &im.gdes[i];
                 // GPRINT writes into the FMT_LEG_LEN legend buffer: numeric
                 // formats through snprintf(FMT_LEG_LEN - 2), the `%.0f`
@@ -2759,15 +2771,14 @@ fn print_calc(
                         ValueFormatter::Numeric => {
                             match format_graph_numeric(
                                 printval,
-                                &element.format,
+                                &mut format,
                                 &mut si_scale,
                                 GraphPrintf::Libc,
                             ) {
                                 Ok(text) => Some(text),
                                 Err(_) => {
                                     return Err(format!(
-                                        "invalid format string '{}' (should match '{}')",
-                                        element.format, BAD_FORMAT_PRINT_PATTERN
+                                        "invalid format string '{format}' (should match '{BAD_FORMAT_PRINT_PATTERN}')"
                                     )
                                     .into());
                                 }
@@ -2781,10 +2792,11 @@ fn print_calc(
                         }
                     }
                 };
+                im.gdes[i].format = format;
                 let Some(text) = text else {
                     return Ok(PrintCalc::Silent);
                 };
-                if element.gf == Gf::Print {
+                if im.gdes[i].gf == Gf::Print {
                     info.push(format!("print[{prline_cnt}]"), InfoValue::Str(text));
                     prline_cnt += 1;
                 } else {
@@ -3299,7 +3311,14 @@ fn render_graph_png(
         }
     }
     let prepared_series = prepare_graph_series(graph, series);
-    for (series_index, item) in series.iter().enumerate() {
+    // graph_paint_timestring paints every HRULE and VRULE after the data, so
+    // a rule defined before a LINE still covers it.
+    let is_rule = |item: &GraphSeries| matches!(item.style, "hrule" | "vrule");
+    let paint_order = (0..series.len())
+        .filter(|&index| !is_rule(&series[index]))
+        .chain((0..series.len()).filter(|&index| is_rule(&series[index])));
+    for series_index in paint_order {
+        let item = &series[series_index];
         let prepared = &prepared_series[series_index];
         let color = item.color.unwrap_or([0, 0, 0, 0]);
         if item.style == "hrule" {
@@ -4085,21 +4104,33 @@ enum GraphPrintf {
     Rrd,
 }
 
+/// Format one numeric PRINT/GPRINT value. Like print_calc and rrd_xport.c,
+/// this rewrites the element's first "%S" to "%s" in place, so a later pass
+/// over the same element (graphv's xport, then print_calc) scales afresh.
 fn format_graph_numeric(
     value: f64,
-    format: &str,
+    format: &mut String,
     si_scale: &mut GraphSiScale,
     printf: GraphPrintf,
 ) -> Result<String, Box<dyn std::error::Error>> {
     use std::ffi::CString;
 
+    // The unit conversion is found with strstr on the raw format, so "%%S"
+    // and "%%s" also scale the value.
+    let scaling = match format.find("%S") {
+        Some(position) => {
+            format.replace_range(position + 1..position + 2, "s");
+            Some(true)
+        }
+        None => format.contains("%s").then_some(false),
+    };
+    let format = format.as_str();
     let parsed = parse_graph_numeric_format(format)
         .map_err(|_| format!("bad format for PRINT in \"{format}'"))?;
-    let scaled_value = match parsed.si_symbol {
-        Some(index) => {
+    let scaled_value = match scaling {
+        Some(reuse) => {
             // %S reuses the magnitude chosen by the first scaled value, unless
             // that value scaled to zero; %s always picks a new one.
-            let reuse = format.as_bytes()[parsed.substitutions[index].end - 1] == b'S';
             match si_scale.magnitude {
                 Some(magnitude) if reuse => value / magnitude,
                 _ => {
@@ -4114,14 +4145,8 @@ fn format_graph_numeric(
     };
     let si_symbol = si_scale.symbol;
     if printf == GraphPrintf::Rrd {
-        // RRDtool rewrites %S to %s before formatting.
-        let mut format = format.to_owned();
-        if let Some(index) = parsed.si_symbol {
-            let end = parsed.substitutions[index].end;
-            format.replace_range(end - 1..end, "s");
-        }
         return Ok(rondi::rrd_snprintf::rrd_snprintf(
-            &format,
+            format,
             &[
                 rondi::rrd_snprintf::Arg::Double(scaled_value),
                 rondi::rrd_snprintf::Arg::Str(si_symbol),
@@ -4175,7 +4200,6 @@ enum GraphFormatSubstitutionKind {
 
 struct ParsedGraphNumericFormat {
     substitutions: Vec<GraphFormatSubstitution>,
-    si_symbol: Option<usize>,
 }
 
 fn parse_graph_numeric_format(format: &str) -> Result<ParsedGraphNumericFormat, ()> {
@@ -4264,10 +4288,7 @@ fn parse_graph_numeric_format(format: &str) -> Result<ParsedGraphNumericFormat, 
             return Err(());
         }
     }
-    Ok(ParsedGraphNumericFormat {
-        substitutions,
-        si_symbol,
-    })
+    Ok(ParsedGraphNumericFormat { substitutions })
 }
 
 fn append_graph_format_literal(output: &mut String, literal: &str) {
@@ -4373,24 +4394,28 @@ fn format_xport_addprints(
                         dbuf = c_strftime(&element.format, &tmvdef, 1024).unwrap_or_default();
                     }
                 } else {
+                    // bad_format_print runs before the "%S" rewrite here.
+                    let original = element.format.clone();
+                    let mut format = original.clone();
                     match format_graph_numeric(
                         printval,
-                        &element.format,
+                        &mut format,
                         &mut si_scale,
                         GraphPrintf::Rrd,
                     ) {
                         Ok(text) => dbuf = text,
                         Err(_) => {
-                            return Err(format!("bad format for PRINT in \"{}'", element.format));
+                            return Err(format!("bad format for PRINT in \"{original}'"));
                         }
                     }
+                    im.gdes[i].format = format;
                 }
                 let text = if json {
                     escape_json(&dbuf)
                 } else {
                     dbuf.clone()
                 };
-                let (tag, buffer) = if element.gf == Gf::Print {
+                let (tag, buffer) = if im.gdes[i].gf == Gf::Print {
                     ("print", &mut prints)
                 } else {
                     ("gprint", &mut gprints)
