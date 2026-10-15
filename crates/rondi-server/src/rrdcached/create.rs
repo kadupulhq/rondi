@@ -186,12 +186,9 @@ fn open_parent(shared: &Shared, joined: &[u8], parent: &[u8]) -> Result<std::fs:
         let path = Path::new(OsStr::from_bytes(parent));
         return match super::files::open_directory_path(path) {
             Ok(directory) => Ok(directory),
+            // The umask sets the mode, less group and other write (RCD-13).
             Err(error) if error.raw_os_error() == Some(libc::ENOENT) && recursive => {
-                use std::os::unix::fs::DirBuilderExt;
-                std::fs::DirBuilder::new()
-                    .recursive(true)
-                    .mode(0o755)
-                    .create(path)
+                super::create_directories(path)
                     .and_then(|()| super::files::open_directory_path(path))
                     .map_err(failed)
             }

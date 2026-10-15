@@ -267,9 +267,7 @@ impl Command {
 
 /// The `HELP` reply for its first argument, if any (RC-20, RC-21).
 pub(crate) fn help(topic: Option<&[u8]>) -> Vec<u8> {
-    let entry = topic
-        .and_then(Command::find)
-        .and_then(|command| command.entry());
+    let entry = topic.and_then(Command::find).and_then(Command::entry);
     let mut reply = Vec::new();
     match entry {
         Some(entry) => {

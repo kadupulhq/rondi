@@ -131,62 +131,71 @@ fn read_options(words: &[Vec<u8>], info: &RrdInfo, sources: &mut [Source]) -> Re
             positional.extend(words[index..].iter());
             break;
         }
-        if let Some(long) = word.strip_prefix(b"--") {
-            let (name, attached) = match long.iter().position(|&byte| byte == b'=') {
-                Some(at) => (&long[..at], Some(long[at + 1..].to_vec())),
-                None => (long, None),
-            };
-            let Some(&(letter, full)) = OPTIONS.iter().find(|(_, full)| full.as_bytes() == name)
-            else {
-                return Err(format!(
-                    "invalid option -- '{}'",
-                    String::from_utf8_lossy(long)
-                ));
-            };
-            let argument = match attached {
-                Some(argument) => argument,
-                None => match words.get(index) {
-                    Some(next) => {
-                        index += 1;
-                        next.clone()
-                    }
-                    None => return Err(format!("option requires argument -- '{full}'")),
-                },
-            };
-            apply(letter, &argument, info, sources)?;
-            continue;
-        }
-        match word.as_slice() {
-            [b'-', letter, rest @ ..] => {
-                if !OPTIONS.iter().any(|(short, _)| short == letter) {
-                    return Err(format!(
-                        "invalid option -- '{}'",
-                        String::from_utf8_lossy(&[*letter])
-                    ));
-                }
-                let argument = if rest.is_empty() {
-                    match words.get(index) {
-                        Some(next) => {
-                            index += 1;
-                            next.clone()
-                        }
-                        None => {
-                            return Err(format!(
-                                "option requires an argument -- '{}'",
-                                char::from(*letter)
-                            ));
-                        }
-                    }
-                } else {
-                    rest.to_vec()
-                };
-                apply(*letter, &argument, info, sources)?;
-            }
-            _ => positional.push(word),
+        let option = match word.strip_prefix(b"--") {
+            Some(long) => Some(long_option(long, words, &mut index)?),
+            None => match word.as_slice() {
+                [b'-', letter, rest @ ..] => Some(short_option(*letter, rest, words, &mut index)?),
+                _ => None,
+            },
+        };
+        match option {
+            Some((letter, argument)) => apply(letter, &argument, info, sources)?,
+            None => positional.push(word),
         }
     }
-    // Rondi difference (known defect, RD-019): data source and archive
-    // changes are not supported; other words are ignored like upstream.
+    refuse_structure_words(&positional)
+}
+
+/// The next word, as an option's argument.
+fn take_argument(words: &[Vec<u8>], index: &mut usize) -> Option<Vec<u8>> {
+    let argument = words.get(*index)?.clone();
+    *index += 1;
+    Some(argument)
+}
+
+/// `--name` or `--name=value`: the option's letter and its argument.
+fn long_option(long: &[u8], words: &[Vec<u8>], index: &mut usize) -> Result<(u8, Vec<u8>), String> {
+    let (name, attached) = match long.iter().position(|&byte| byte == b'=') {
+        Some(at) => (&long[..at], Some(long[at + 1..].to_vec())),
+        None => (long, None),
+    };
+    let Some(&(letter, full)) = OPTIONS.iter().find(|(_, full)| full.as_bytes() == name) else {
+        return Err(format!(
+            "invalid option -- '{}'",
+            String::from_utf8_lossy(long)
+        ));
+    };
+    let argument = attached
+        .or_else(|| take_argument(words, index))
+        .ok_or_else(|| format!("option requires argument -- '{full}'"))?;
+    Ok((letter, argument))
+}
+
+/// `-x` with its argument attached or in the next word.
+fn short_option(
+    letter: u8,
+    rest: &[u8],
+    words: &[Vec<u8>],
+    index: &mut usize,
+) -> Result<(u8, Vec<u8>), String> {
+    if !OPTIONS.iter().any(|(short, _)| *short == letter) {
+        return Err(format!(
+            "invalid option -- '{}'",
+            String::from_utf8_lossy(&[letter])
+        ));
+    }
+    let argument = if rest.is_empty() {
+        take_argument(words, index)
+            .ok_or_else(|| format!("option requires an argument -- '{}'", char::from(letter)))?
+    } else {
+        rest.to_vec()
+    };
+    Ok((letter, argument))
+}
+
+// Rondi difference (known defect, RD-019): data source and archive
+// changes are not supported; other words are ignored like upstream.
+fn refuse_structure_words(positional: &[&Vec<u8>]) -> Result<(), String> {
     for word in positional {
         for prefix in [&b"DS:"[..], b"DEL:", b"DELRRA:", b"RRA:", b"RRA#"] {
             if word.starts_with(prefix) {
