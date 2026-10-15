@@ -1,0 +1,92 @@
+# id	expect	note	inputs	args... (tab separated)
+000-noargs	same	-	-	resize
+001-base-rrd	same	-	base	resize	base.rrd
+002-base-rrd-0	same	-	base	resize	base.rrd	0
+003-base-rrd-0-grow	same	-	base	resize	base.rrd	0	GROW
+004-base-rrd-0-grow-1-extra	same	-	base	resize	base.rrd	0	GROW	1	extra
+005-resize-rrd	same	-	-	resize	resize.rrd
+006-resize-rrd-0-grow-1	same	-	resize.rrd=base	resize	resize.rrd	0	GROW	1
+007-resize-rrd-0-grow-1	divergent	RZ-div-existing-output	resize.rrd=base	resize	./resize.rrd	0	GROW	1
+008-base-rrd-0-bad-0	same	-	base	resize	base.rrd	0	BAD	0
+009-base-rrd-0-grow-1	same	-	base	resize	base.rrd	0	grow	1
+010-base-rrd-0-growx-1	same	-	base	resize	base.rrd	0	GROWX	1
+011-base-rrd-0-shrink-1	same	-	base	resize	base.rrd	0	SHRINK 	1
+012-base-rrd-0-grow-0	same	-	base	resize	base.rrd	0	GROW	0
+013-base-rrd-0-shrink-0	same	-	base	resize	base.rrd	0	SHRINK	0
+014-base-rrd-0-grow-1	same	-	base	resize	base.rrd	0	GROW	-1
+015-base-rrd-0-shrink-3	same	-	base	resize	base.rrd	0	SHRINK	-3
+016-base-rrd-0-grow-abc	same	-	base	resize	base.rrd	0	GROW	abc
+017-base-rrd-0-bad-x	same	-	base	resize	base.rrd	0	BAD	x
+018-missing-rrd-0-grow-1	same	-	-	resize	missing.rrd	0	GROW	1
+019-missing-rrd-9-bad-0	same	-	-	resize	missing.rrd	9	BAD	0
+020-text-rrd-0-grow-1	same	-	text	resize	text.rrd	0	GROW	1
+021-base-rrd-3-grow-1	same	-	base	resize	base.rrd	3	GROW	1
+022-base-rrd-1-grow-1	same	-	base	resize	base.rrd	-1	GROW	1
+023-base-rrd-4294967296-grow-1	same	-	base	resize	base.rrd	4294967296	GROW	1
+024-base-rrd-18446744073709551616-grow-1	same	-	base	resize	base.rrd	18446744073709551616	GROW	1
+025-base-rrd-010-grow-010	same	-	base	resize	base.rrd	010	GROW	010
+026-base-rrd-0x1-grow-0x2	same	-	base	resize	base.rrd	0x1	GROW	0x2
+027-base-rrd-1x-grow-2y	same	-	base	resize	base.rrd	1x	GROW	2y
+028-base-rrd-1-grow-2	same	-	base	resize	base.rrd	 1	GROW	 2
+029-base-rrd-grow-1	same	-	base	resize	base.rrd		GROW	1
+030-base-rrd-x-grow-1	same	-	base	resize	base.rrd	x	GROW	1
+031-base-rrd-2-shrink-1	same	-	base	resize	base.rrd	+2	SHRINK	+1
+032-base-rrd-0-shrink-6	same	-	base	resize	base.rrd	0	SHRINK	6
+033-base-rrd-0-shrink-7	same	-	base	resize	base.rrd	0	SHRINK	7
+034-base-rrd-0-shrink-9223372036854775807	same	-	base	resize	base.rrd	0	SHRINK	9223372036854775807
+035-base-rrd-0-shrink-99999999999999999999	same	-	base	resize	base.rrd	0	SHRINK	99999999999999999999
+036-base-rrd-0-grow-1	same	-	base	resize	base.rrd	0	GROW	1
+037-base-rrd-0-grow-3	same	-	base	resize	base.rrd	0	GROW	3
+038-base-rrd-0-shrink-1	same	-	base	resize	base.rrd	0	SHRINK	1
+039-base-rrd-0-shrink-5	same	-	base	resize	base.rrd	0	SHRINK	5
+040-base-rrd-1-grow-1	same	-	base	resize	base.rrd	1	GROW	1
+041-base-rrd-1-grow-3	same	-	base	resize	base.rrd	1	GROW	3
+042-base-rrd-1-shrink-1	same	-	base	resize	base.rrd	1	SHRINK	1
+043-base-rrd-1-shrink-3	same	-	base	resize	base.rrd	1	SHRINK	3
+044-base-rrd-2-grow-1	same	-	base	resize	base.rrd	2	GROW	1
+045-base-rrd-2-grow-3	same	-	base	resize	base.rrd	2	GROW	3
+046-base-rrd-2-shrink-1	same	-	base	resize	base.rrd	2	SHRINK	1
+047-base-rrd-2-shrink-4	same	-	base	resize	base.rrd	2	SHRINK	4
+048-single-rrd-0-grow-4	same	-	single	resize	single.rrd	0	GROW	4
+049-single-rrd-0-shrink-3	same	-	single	resize	single.rrd	0	SHRINK	3
+050-single-rrd-0-shrink-4	same	-	single	resize	single.rrd	0	SHRINK	4
+051-ptr0-rrd-0-grow-2	same	-	ptr0	resize	ptr0.rrd	0	GROW	2
+052-ptr0-rrd-0-shrink-1	same	-	ptr0	resize	ptr0.rrd	0	SHRINK	1
+053-ptr0-rrd-0-shrink-2	same	-	ptr0	resize	ptr0.rrd	0	SHRINK	2
+054-ptr0-rrd-0-shrink-4	same	-	ptr0	resize	ptr0.rrd	0	SHRINK	4
+055-ptr0-rrd-1-grow-1	same	-	ptr0	resize	ptr0.rrd	1	GROW	1
+056-ptr0-rrd-1-shrink-2	same	-	ptr0	resize	ptr0.rrd	1	SHRINK	2
+057-ptrmid-rrd-0-grow-2	same	-	ptrmid	resize	ptrmid.rrd	0	GROW	2
+058-ptrmid-rrd-0-shrink-1	same	-	ptrmid	resize	ptrmid.rrd	0	SHRINK	1
+059-ptrmid-rrd-0-shrink-2	same	-	ptrmid	resize	ptrmid.rrd	0	SHRINK	2
+060-ptrmid-rrd-0-shrink-4	same	-	ptrmid	resize	ptrmid.rrd	0	SHRINK	4
+061-ptrmid-rrd-1-grow-1	same	-	ptrmid	resize	ptrmid.rrd	1	GROW	1
+062-ptrmid-rrd-1-shrink-2	same	-	ptrmid	resize	ptrmid.rrd	1	SHRINK	2
+063-ptrlast-rrd-0-grow-2	same	-	ptrlast	resize	ptrlast.rrd	0	GROW	2
+064-ptrlast-rrd-0-shrink-1	same	-	ptrlast	resize	ptrlast.rrd	0	SHRINK	1
+065-ptrlast-rrd-0-shrink-2	same	-	ptrlast	resize	ptrlast.rrd	0	SHRINK	2
+066-ptrlast-rrd-0-shrink-4	same	-	ptrlast	resize	ptrlast.rrd	0	SHRINK	4
+067-ptrlast-rrd-1-grow-1	same	-	ptrlast	resize	ptrlast.rrd	1	GROW	1
+068-ptrlast-rrd-1-shrink-2	same	-	ptrlast	resize	ptrlast.rrd	1	SHRINK	2
+069-hw-rrd-0-grow-2	same	-	hw	resize	hw.rrd	0	GROW	2
+070-hw-rrd-1-grow-2	same	-	hw	resize	hw.rrd	1	GROW	2
+071-hw-rrd-1-shrink-3	same	-	hw	resize	hw.rrd	1	SHRINK	3
+072-hw-rrd-2-grow-1	same	-	hw	resize	hw.rrd	2	GROW	1
+073-hw-rrd-3-shrink-1	same	-	hw	resize	hw.rrd	3	SHRINK	1
+074-hw-rrd-5-grow-2	same	-	hw	resize	hw.rrd	5	GROW	2
+075-v5-rrd-0-grow-2	same	-	v5	resize	v5.rrd	0	GROW	2
+076-v1-rrd-0-grow-1	same	-	v1	resize	v1.rrd	0	GROW	1
+077-v1-rrd-1-shrink-1	same	-	v1	resize	v1.rrd	1	SHRINK	1
+078-trailing-rrd-0-grow-1	same	-	trailing	resize	trailing.rrd	0	GROW	1
+079-trailing-rrd-1-shrink-1	same	-	trailing	resize	trailing.rrd	1	SHRINK	1
+080-short-rrd-0-grow-1	same	-	short	resize	short.rrd	0	GROW	1
+081-short-rrd-1-shrink-1	same	-	short	resize	short.rrd	1	SHRINK	1
+082-currow-rrd-0-shrink-1	same	-	currow	resize	currow.rrd	0	SHRINK	1
+083-currow-rrd-1-grow-1	same	-	currow	resize	currow.rrd	1	GROW	1
+084-base-rrd-0-grow-1	divergent	RZ-div-existing-output	base,@text:resize.rrd	resize	base.rrd	0	GROW	1
+085-base-rrd-0-grow-1	divergent	RZ-div-existing-output	base,@text:t.rrd,@link:resize.rrd>t.rrd	resize	base.rrd	0	GROW	1
+086-base-rrd-0-grow-1	divergent	RZ-div-existing-output	base,@dir:resize.rrd	resize	base.rrd	0	GROW	1
+087-base-rrd-0-shrink-9	same	-	base,@text:resize.rrd	resize	base.rrd	0	SHRINK	9
+088-trailing5-rrd-0-grow-1	same	-	trailing5	resize	trailing5.rrd	0	GROW	1
+089-trailing24-rrd-0-grow-1	same	-	trailing24	resize	trailing24.rrd	0	GROW	1
+090-trailing7-rrd-0-grow-1	same	-	trailing7	resize	trailing7.rrd	0	GROW	1
