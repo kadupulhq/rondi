@@ -27,12 +27,12 @@ About 12,400 lines of Rust (38 percent of non-test source) are rated High: modul
 | `crates/rondi-cli/src/main.rs` (front end, print/time helpers, list) | High | ~1,020 of 7,295 | Ports of the command dispatcher, batch-mode tokenizer, print_calc and helpers, directory listing |
 | `crates/rondi-cli/src/help/*.txt` | High (FLAG) | 354 text | Verbatim RRDtool help output |
 | `crates/rondi/src/rrd_binary.rs` | Review | 3,046 | Update path follows C helper boundaries with line citations; format reader is format-dictated |
-| `crates/rondi-server/src/lib.rs` | Review | 5,203 | Independent async design with ported handler fragments, command table and help strings |
+| `crates/rondi-server/src/lib.rs` | Replaced | 5,203 | rrdcached handlers, queue and journal replaced by the clean-room `rrdcached/` protocol modules; the JSON API remains |
 | `crates/rondi/src/xml_reader.rs` | Replaced | 1,958 | Modelled libxml2 internals; replaced by a clean-room rewrite from `docs/compatibility/restore.md` and black-box runs |
 | `crates/rondi-cli/src/main.rs` (rest except renderer) | Review | ~4,735 | Command handlers with C line citations; rrdcached client ported from an MIT-licensed C file |
 | `crates/rondi/src/rrd_number.rs` | Review | 451 | Number parsing algorithm from a BSD-licensed C file |
 | `crates/rondi-cli/src/cparse.rs` | Review | 217 | Same as above |
-| `crates/rondi/src/rrdc_proto.rs` | Review | 116 | Two small field-codec ports |
+| `crates/rondi/src/rrdc_proto.rs` | Removed | 116 | Two small field-codec ports; replaced by `rrdcached/protocol.rs` |
 | `crates/rondi/src/vdef.rs` | Low | 513 | Standard statistics; compiler contraction emulation documented |
 | `crates/rondi/src/storage.rs`, `consolidation.rs`, `data_source.rs`, `format.rs`, `import_export.rs`, `lib.rs`, `queries.rs`, `compatibility.rs`, `safe_fs.rs` | Low | 2,143 | Rondi's own store and helpers |
 | `crates/rondi-cli/src/main.rs` (PNG renderer, unit tests) | Low | ~1,535 | Independent bitmap renderer |
@@ -194,7 +194,8 @@ Risk tiers:
 - The daemon startup, signal, pid-file and listener code that lived here (`run_rrdcached` and its helpers, `PidFile`, `RrdcachedConfig`) was removed with the daemon-layer rewrite above; the request handlers, queue and journal remain for a second phase and are reached only through `rrdcached/engine.rs`.
 - `RRDCACHED_COMMAND_TABLE` copies the command usage strings. These are observable through `HELP` (category 1) but are text expression; treat with the help files above.
 - The C daemon is GPL-2.0 only.
-- Remediation: specify the line protocol, journal format and queue semantics from the `rrdcached` man page (which documents the protocol) and observation; rewrite the named handler ports; decide whether exact `TreeDepth` parity is worth an AVL implementation or whether the value should be specified as "height of a balanced tree over pending keys". Tests: `rrdcached_protocol_parity.rs` (11), `server_roundtrip.rs` (35), `rrdcached_client_paths.rs` (5), fuzz targets `rrdcached_protocol` and `rrdcached_journal`.
+- Status: replaced. The line parser, command handlers, cache, write queue, `TreeDepth` tree and journal are now `crates/rondi-server/src/rrdcached/` (`protocol.rs`, `commands.rs`, `session.rs`, `service.rs`, `cache.rs`, `depth.rs`, `journal.rs`, `files.rs`, `listing.rs`, `fetch.rs`, `create.rs`, `tune.rs`), written from `docs/compatibility/rrdcached.md`, `docs/compatibility/rrdcached-daemon.md`, their vectors, the existing tests and black-box runs of rrdcached 1.11.0, without reading the replaced handlers, queue and journal or the C source; they were deleted by line range with a script that printed only signatures. The usage and help texts are the recorded `HELP` output (vectors `help-*`) and stay under the help-text FLAG. `lib.rs` keeps only the JSON API, whose accept loop still cites a C line.
+- Remediation (before the replacement): specify the line protocol, journal format and queue semantics from the `rrdcached` man page (which documents the protocol) and observation; rewrite the named handler ports; decide whether exact `TreeDepth` parity is worth an AVL implementation or whether the value should be specified as "height of a balanced tree over pending keys". Tests: `rrdcached_protocol_parity.rs` (11), `server_roundtrip.rs` (35), `rrdcached_client_paths.rs` (5), fuzz targets `rrdcached_protocol` and `rrdcached_journal`.
 
 **`crates/rondi/src/xml_reader.rs`**
 
@@ -218,6 +219,7 @@ Risk tiers:
 
 - Two small codec functions documented as ports: field splitting from the daemon (GPL-2.0 only) and string escaping from the client (MIT). The escaping rules are the wire protocol (category 2).
 - Remediation: rewrite from a two-paragraph protocol spec; about 50 lines plus tests.
+- Status: removed. Field splitting is `crates/rondi-server/src/rrdcached/protocol.rs`, written from RC-7 to RC-12a; nothing else used the module.
 
 **Tests and documentation**
 
