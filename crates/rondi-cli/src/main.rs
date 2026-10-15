@@ -1135,15 +1135,35 @@ fn handle_input_line(argv: &[String], remote: bool) -> i32 {
     match result {
         Ok(()) => 0,
         Err(error) => {
-            if remote {
-                println!("ERROR: {error}");
-            } else {
-                eprintln!("ERROR: {error}");
+            let mut line = b"ERROR: ".to_vec();
+            match error.downcast_ref::<RawRrdError>() {
+                Some(RawRrdError(message)) => line.extend_from_slice(message),
+                None => line.extend_from_slice(error.to_string().as_bytes()),
             }
+            line.push(b'\n');
+            // Nothing is left to report a failed write to.
+            let _ = if remote {
+                std::io::stdout().write_all(&line)
+            } else {
+                std::io::stderr().write_all(&line)
+            };
             1
         }
     }
 }
+
+/// An `rrd_get_error()` text that quotes header bytes, printed unchanged
+/// because they need not be UTF-8.
+#[derive(Debug)]
+struct RawRrdError(Vec<u8>);
+
+impl std::fmt::Display for RawRrdError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&String::from_utf8_lossy(&self.0))
+    }
+}
+
+impl std::error::Error for RawRrdError {}
 
 /// Runs a libc call that takes one path and reports `errno` on failure.
 fn c_path_call(
@@ -1719,12 +1739,22 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let daemon_address = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty());
+    let mut name_error = None;
     let result = if let Some(address) = daemon_address {
         let escaped = escape_rrdcached_field(&filename.to_string_lossy());
         let command = format!("FETCH {escaped} {cf} {start} {end}");
         parse_rrdcached_fetch(&send_rrdcached_multiline_command(&address, &command)?)?
     } else {
-        fetch_rrd_file(&filename, cf, start, end, resolution)?
+        let result = fetch_rrd_file(&filename, cf, start, end, resolution)?;
+        // rrd_fetch_fn runs rrd_cf_conv over every RRA while it looks for a
+        // match and keeps going past a name it rejects, so the data prints
+        // and rrdtool still exits with that error.
+        name_error = inspect_rrd(&filename.to_string_lossy())?
+            .archives
+            .iter()
+            .rev()
+            .find_map(|archive| rondi::cf_conv_error(&archive.raw_consolidation));
+        result
     };
     // stdout is line buffered; one write per row dominates large fetches.
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
@@ -1744,7 +1774,10 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         writeln!(out)?;
     }
     out.flush()?;
-    Ok(())
+    match name_error {
+        Some(message) => Err(RawRrdError(message).into()),
+        None => Ok(()),
+    }
 }
 
 #[inline]
@@ -4572,7 +4605,14 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
     // tries once unless $RRD_LOCKING says otherwise. A directory-wide Rondi
     // lock would serialize unrelated files and stop parallel poller updates.
     if daemon_address.is_none() {
-        ensure_rrd_file_exists(&filename)?;
+        if let Err(error) = ensure_rrd_file_exists(&filename) {
+            // rrd_update_v pushes return_value before _rrd_updatex opens the
+            // file, so the open failure still prints it.
+            if verbose {
+                println!("return_value = -1");
+            }
+            return Err(error);
+        }
         let template = template.as_ref().map(|names| names.join(":"));
         let arguments = samples.iter().map(String::as_str).collect::<Vec<_>>();
         let (summaries, result) = rondi::with_rrd_locking(&locking, || {
@@ -4996,20 +5036,19 @@ fn rrdtool_lastupdate(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     }
     ensure_rrd_file_exists(std::path::Path::new(filename))?;
     let info = inspect_rrd(filename)?;
-    println!(
-        " {}",
-        info.data_sources
-            .iter()
-            .map(|ds| ds.name.as_str())
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
-    println!();
-    print!("{:>10}:", info.last_update);
-    for source in info.data_sources {
-        print!(" {}", source.last_value);
+    // rrd_tool.c prints the names and last_ds text with %s, byte for byte.
+    let mut out = Vec::new();
+    for source in &info.data_sources {
+        out.push(b' ');
+        out.extend_from_slice(&source.raw_name);
     }
-    println!();
+    write!(out, "\n\n{:>10}:", info.last_update)?;
+    for source in &info.data_sources {
+        out.push(b' ');
+        out.extend_from_slice(&source.raw_last_value);
+    }
+    out.push(b'\n');
+    std::io::stdout().write_all(&out)?;
     Ok(())
 }
 
@@ -5115,73 +5154,83 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     ensure_rrd_file_exists(std::path::Path::new(&filename))?;
     let info = inspect_rrd(&filename)?;
-    if info.data_sources.iter().any(|ds| {
-        !matches!(
-            ds.kind.as_str(),
-            "GAUGE" | "COUNTER" | "DERIVE" | "ABSOLUTE" | "DCOUNTER" | "DDERIVE"
-        )
-    }) || info.archives.iter().any(|archive| {
-        !matches!(
-            archive.consolidation.as_str(),
-            "AVERAGE" | "MIN" | "MAX" | "LAST"
-        )
-    }) {
+    // rrd_info prints a DS or RRA with a name dst_conv or rrd_cf_conv
+    // rejects through its default branch and reports the error afterwards.
+    if info.data_sources.iter().any(|ds| ds.kind == "COMPUTE")
+        || info.archives.iter().any(|archive| {
+            !matches!(
+                archive.consolidation.as_str(),
+                "AVERAGE" | "MIN" | "MAX" | "LAST"
+            ) && rondi::cf_conv_error(&archive.raw_consolidation).is_none()
+        })
+    {
         return Err(
             "rrdtool info output for this data-source or consolidation type is not implemented"
                 .into(),
         );
     }
-    println!("filename = \"{}\"", filename);
-    println!("rrd_version = \"{}\"", info.version);
-    println!("step = {}", info.step);
-    println!("last_update = {}", info.last_update);
-    println!("header_size = {}", info.header_size);
+    // rrd_info_print writes names and strings with %s, byte for byte.
+    let mut out = Vec::new();
+    writeln!(out, "filename = \"{filename}\"")?;
+    writeln!(out, "rrd_version = \"{}\"", info.version)?;
+    writeln!(out, "step = {}", info.step)?;
+    writeln!(out, "last_update = {}", info.last_update)?;
+    writeln!(out, "header_size = {}", info.header_size)?;
     for (index, source) in info.data_sources.iter().enumerate() {
-        println!("ds[{}].index = {index}", source.name);
-        println!("ds[{}].type = \"{}\"", source.name, source.kind);
-        println!(
-            "ds[{}].minimal_heartbeat = {}",
-            source.name, source.heartbeat
-        );
-        println!(
-            "ds[{}].min = {}",
-            source.name,
-            format_info_value(source.minimum)
-        );
-        println!(
-            "ds[{}].max = {}",
-            source.name,
-            format_info_value(source.maximum)
-        );
-        println!("ds[{}].last_ds = \"{}\"", source.name, source.last_value);
-        println!(
-            "ds[{}].value = {}",
-            source.name,
-            format_info_float(source.pdp_value)
-        );
-        println!(
-            "ds[{}].unknown_sec = {}",
-            source.name, source.unknown_seconds
-        );
+        let key = |out: &mut Vec<u8>, field: &str| {
+            out.extend_from_slice(b"ds[");
+            out.extend_from_slice(&source.raw_name);
+            out.extend_from_slice(b"].");
+            out.extend_from_slice(field.as_bytes());
+            out.extend_from_slice(b" = ");
+        };
+        let quoted = |out: &mut Vec<u8>, field: &str, value: &[u8]| {
+            key(out, field);
+            out.push(b'"');
+            out.extend_from_slice(value);
+            out.extend_from_slice(b"\"\n");
+        };
+        key(&mut out, "index");
+        writeln!(out, "{index}")?;
+        quoted(&mut out, "type", &source.raw_kind);
+        key(&mut out, "minimal_heartbeat");
+        writeln!(out, "{}", source.heartbeat)?;
+        key(&mut out, "min");
+        writeln!(out, "{}", format_info_value(source.minimum))?;
+        key(&mut out, "max");
+        writeln!(out, "{}", format_info_value(source.maximum))?;
+        quoted(&mut out, "last_ds", &source.raw_last_value);
+        key(&mut out, "value");
+        writeln!(out, "{}", format_info_float(source.pdp_value))?;
+        key(&mut out, "unknown_sec");
+        writeln!(out, "{}", source.unknown_seconds)?;
     }
     for (index, archive) in info.archives.iter().enumerate() {
-        println!("rra[{index}].cf = \"{}\"", archive.consolidation);
-        println!("rra[{index}].rows = {}", archive.rows);
-        println!("rra[{index}].cur_row = {}", archive.current_row);
-        println!("rra[{index}].pdp_per_row = {}", archive.pdp_per_row);
-        println!("rra[{index}].xff = {}", format_rrd_float(archive.xff));
+        write!(out, "rra[{index}].cf = \"")?;
+        out.extend_from_slice(&archive.raw_consolidation);
+        out.extend_from_slice(b"\"\n");
+        writeln!(out, "rra[{index}].rows = {}", archive.rows)?;
+        writeln!(out, "rra[{index}].cur_row = {}", archive.current_row)?;
+        writeln!(out, "rra[{index}].pdp_per_row = {}", archive.pdp_per_row)?;
+        writeln!(out, "rra[{index}].xff = {}", format_rrd_float(archive.xff))?;
         for (ds_index, prep) in archive.cdp_prep.iter().enumerate() {
-            println!(
+            writeln!(
+                out,
                 "rra[{index}].cdp_prep[{ds_index}].value = {}",
                 format_info_float(prep.value)
-            );
-            println!(
+            )?;
+            writeln!(
+                out,
                 "rra[{index}].cdp_prep[{ds_index}].unknown_datapoints = {}",
                 prep.unknown_datapoints
-            );
+            )?;
         }
     }
-    Ok(())
+    std::io::stdout().write_all(&out)?;
+    match rondi::rrd_name_error(&info) {
+        Some(message) => Err(RawRrdError(message).into()),
+        None => Ok(()),
+    }
 }
 
 fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -5230,22 +5279,27 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         send_rrdcached_flush(&address, &positional[0])?;
     }
     ensure_rrd_file_exists(std::path::Path::new(&positional[0]))?;
-    let xml = dump_rrd_file_with_header(&positional[0], header)?;
+    let xml = rondi::dump_rrd_file_with_header_bytes(&positional[0], header)?;
     if let Some(output) = positional.get(1) {
-        match write_output_file(output, xml.as_bytes()) {
+        match write_output_file(output, &xml) {
             Ok(()) => {}
             // rrd_dump_opt_r returns -1 from a failed fopen without setting
             // an error, so rrdtool reports nothing and exits 0.
-            Err(OutputError::Open(_)) => {}
+            Err(OutputError::Open(_)) => return Ok(()),
             Err(OutputError::Write(errno)) => {
                 return Err(format!("error writing output file: {}", rrd_strerror(errno)).into());
             }
             Err(error) => return Err(error.into()),
         }
     } else {
-        print!("{xml}");
+        std::io::stdout().write_all(&xml)?;
     }
-    Ok(())
+    // rrd_dump_opt_r finishes the dump before rrd_tool.c sees the error
+    // a rejected DS type or CF name left behind.
+    match rondi::rrd_name_error(&inspect_rrd(&positional[0])?) {
+        Some(message) => Err(RawRrdError(message).into()),
+        None => Ok(()),
+    }
 }
 
 fn rrdtool_restore(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
