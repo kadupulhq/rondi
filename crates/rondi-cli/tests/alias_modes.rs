@@ -4706,7 +4706,11 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
             let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
             let frame = reader.next_frame(&mut pixels).unwrap();
             pixels.truncate(frame.buffer_size());
-            let draws_red = pixels.chunks_exact(3).any(|pixel| pixel == [255, 0, 0]);
+            let draws_red = pixels
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .any(|pixel| pixel == &[255, 0, 0]);
             assert_eq!(
                 draws_red, should_draw,
                 "program={program:?}, fraction={fraction}"
@@ -4902,10 +4906,12 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
         (expected_info.width, expected_info.height)
     );
     let colors = pixels[..info.buffer_size()]
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .collect::<Vec<_>>();
-    assert!(colors.iter().any(|pixel| *pixel == [255, 0, 0]));
-    assert!(colors.iter().any(|pixel| *pixel == [0, 255, 0]));
+    assert!(colors.contains(&&[255, 0, 0]));
+    assert!(colors.contains(&&[0, 255, 0]));
 
     let stacked_images = [
         temp.path().join("native-stacked.png"),
@@ -4947,7 +4953,9 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
         let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(&mut pixels).unwrap();
         let plot_colors = pixels[..info.buffer_size()]
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .enumerate()
             .filter(|(pixel_index, _)| {
                 let x = *pixel_index as u32 % info.width;
@@ -5000,12 +5008,14 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
         let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
         let info = reader.next_frame(&mut pixels).unwrap();
         let red_ticks_in_plot = pixels[..info.buffer_size()]
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .enumerate()
             .filter(|(pixel_index, pixel)| {
                 let x = *pixel_index as u32 % info.width;
                 let y = *pixel_index as u32 / info.width;
-                *pixel == [255, 0, 0] && (51..211).contains(&x) && (15..79).contains(&y)
+                *pixel == &[255, 0, 0] && (51..211).contains(&x) && (15..79).contains(&y)
             })
             .count();
         assert!(
@@ -5056,12 +5066,14 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
         let info = reader.next_frame(&mut pixels).unwrap();
         assert!(
             pixels[..info.buffer_size()]
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .enumerate()
                 .any(|(pixel_index, pixel)| {
                     let x = pixel_index as u32 % info.width;
                     let y = pixel_index as u32 / info.width;
-                    pixel == [255, 0, 0] && (51..211).contains(&x) && (15..79).contains(&y)
+                    pixel == &[255, 0, 0] && (51..211).contains(&x) && (15..79).contains(&y)
                 })
         );
     }
@@ -5108,12 +5120,14 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
         let info = reader.next_frame(&mut pixels).unwrap();
         assert!(
             pixels[..info.buffer_size()]
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .enumerate()
                 .any(|(pixel_index, pixel)| {
                     let x = pixel_index as u32 % info.width;
                     let y = pixel_index as u32 / info.width;
-                    pixel == [255, 0, 0] && (51..211).contains(&x) && (15..79).contains(&y)
+                    pixel == &[255, 0, 0] && (51..211).contains(&x) && (15..79).contains(&y)
                 })
         );
     }

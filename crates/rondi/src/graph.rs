@@ -709,10 +709,10 @@ impl GraphImage {
         let mut rpn_text = bits.rpn.then(|| pa.get("rpn", 1)).flatten();
         let mut legend = bits.legend.then(|| pa.get("legend", 1)).flatten();
         let mut fraction = bits.fraction.then(|| pa.get("fraction", 1)).flatten();
-        if bits.format {
-            if let Some(format) = pa.get("format", 1) {
-                self.gdes[gdi].format = truncate_bytes(&format, FMT_LEG_LEN);
-            }
+        if bits.format
+            && let Some(format) = pa.get("format", 1)
+        {
+            self.gdes[gdi].format = truncate_bytes(&format, FMT_LEG_LEN);
         }
         if bits.strftime_vfmt {
             let strft = pa.get("strftime", 1);
@@ -732,21 +732,21 @@ impl GraphImage {
         if bits.skipscale {
             self.gdes[gdi].skipscale = pa.get("skipscale", 1).is_some();
         }
-        if bits.reduce {
-            if let Some(reduce) = pa.get("reduce", 1) {
-                match Cf::parse(&reduce) {
-                    Some(value) => {
-                        self.gdes[gdi].cf_reduce = value;
-                        self.gdes[gdi].cf_reduce_set = true;
-                    }
-                    None => return err(format!("bad reduce CF: {reduce}")),
+        if bits.reduce
+            && let Some(reduce) = pa.get("reduce", 1)
+        {
+            match Cf::parse(&reduce) {
+                Some(value) => {
+                    self.gdes[gdi].cf_reduce = value;
+                    self.gdes[gdi].cf_reduce_set = true;
                 }
+                None => return err(format!("bad reduce CF: {reduce}")),
             }
         }
-        if bits.daemon {
-            if let Some(daemon) = pa.get("daemon", 1) {
-                self.gdes[gdi].daemon = truncate_bytes(&daemon, 255);
-            }
+        if bits.daemon
+            && let Some(daemon) = pa.get("daemon", 1)
+        {
+            self.gdes[gdi].daemon = truncate_bytes(&daemon, 255);
         }
         if bits.xaxis {
             let mut xaxis = 0;
@@ -780,22 +780,22 @@ impl GraphImage {
             }
             self.gdes[gdi].linewidth = linewidth;
         }
-        if bits.gradheight {
-            if let Some(text) = pa.get("gradheight", 1).filter(|text| !text.is_empty()) {
-                match get_double(&text) {
-                    Some(value) => self.gdes[gdi].gradheight = value,
-                    None => return err(format!("Bad gradheight: {text}")),
-                }
+        if bits.gradheight
+            && let Some(text) = pa.get("gradheight", 1).filter(|text| !text.is_empty())
+        {
+            match get_double(&text) {
+                Some(value) => self.gdes[gdi].gradheight = value,
+                None => return err(format!("Bad gradheight: {text}")),
             }
         }
-        if bits.step {
-            if let Some(text) = pa.get("step", 1) {
-                let (status, value) = get_long(&text);
-                if status != 0 || value < 1 {
-                    return err(format!("Bad step value: {text}"));
-                }
-                self.gdes[gdi].step = value as u64;
+        if bits.step
+            && let Some(text) = pa.get("step", 1)
+        {
+            let (status, value) = get_long(&text);
+            if status != 0 || value < 1 {
+                return err(format!("Bad step value: {text}"));
             }
+            self.gdes[gdi].step = value as u64;
         }
         if bits.start || bits.end {
             let start = bits.start.then(|| pa.get("start", 1)).flatten();
@@ -895,10 +895,10 @@ impl GraphImage {
                     None => return err("No positional FRACTION"),
                 }
             }
-            if legend.is_none() {
-                if let Some(first) = pa.first_unused(1) {
-                    legend = pa.kv[first].keyvalue.clone();
-                }
+            if legend.is_none()
+                && let Some(first) = pa.first_unused(1)
+            {
+                legend = pa.kv[first].keyvalue.clone();
             }
         } else if bits.positional && bits.vnamedef && bits.rpn {
             if vname.is_none() || rpn_text.is_none() {
@@ -921,19 +921,19 @@ impl GraphImage {
             vname = Some(pa.kv[first].value.clone());
         }
 
-        if let Some(name) = vname.as_mut() {
-            if let Some((head, colors)) = name.clone().split_once('#') {
-                let (first, second) = match colors.split_once('#') {
-                    Some((first, second)) => (first.to_owned(), Some(second.to_owned())),
-                    None => (colors.to_owned(), None),
-                };
-                *name = head.to_owned();
-                if bits.color && color.is_none() {
-                    color = Some(first);
-                }
-                if bits.color2 && color2.is_none() {
-                    color2 = second;
-                }
+        if let Some(name) = vname.as_mut()
+            && let Some((head, colors)) = name.clone().split_once('#')
+        {
+            let (first, second) = match colors.split_once('#') {
+                Some((first, second)) => (first.to_owned(), Some(second.to_owned())),
+                None => (colors.to_owned(), None),
+            };
+            *name = head.to_owned();
+            if bits.color && color.is_none() {
+                color = Some(first);
+            }
+            if bits.color2 && color2.is_none() {
+                color2 = second;
             }
         }
 
@@ -1262,13 +1262,13 @@ impl GraphImage {
             )
         });
         legend_shift(&mut self.gdes[gdi].legend);
-        if let Some(vidx) = self.gdes[gdi].vidx {
-            if self.gdes[vidx].gf != Gf::Vdef {
-                return err(format!(
-                    "Using vname {} of wrong type in line {}\n",
-                    self.gdes[gdi].vname, pa.arg_orig
-                ));
-            }
+        if let Some(vidx) = self.gdes[gdi].vidx
+            && self.gdes[vidx].gf != Gf::Vdef
+        {
+            return err(format!(
+                "Using vname {} of wrong type in line {}\n",
+                self.gdes[gdi].vname, pa.arg_orig
+            ));
         }
         Ok(())
     }
@@ -1787,7 +1787,7 @@ fn reduce_data(
         *end = (*end as u64).wrapping_sub(end_offset).wrapping_add(*step) as i64;
         row_cnt = row_cnt.wrapping_sub(end_offset / cur_step);
     }
-    if row_cnt % factor != 0 {
+    if !row_cnt.is_multiple_of(factor) {
         return Err(StoreError::RrdExpression(format!(
             "SANITY CHECK: {row_cnt} rows cannot be reduced by {reduce_factor} \n"
         )));

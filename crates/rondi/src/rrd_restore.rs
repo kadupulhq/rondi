@@ -836,10 +836,11 @@ fn remove_created_output(path: &std::path::Path, file: &std::fs::File) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        if let (Ok(opened), Ok(named)) = (file.metadata(), std::fs::symlink_metadata(path)) {
-            if opened.dev() == named.dev() && opened.ino() == named.ino() {
-                let _ = std::fs::remove_file(path);
-            }
+        if let (Ok(opened), Ok(named)) = (file.metadata(), std::fs::symlink_metadata(path))
+            && opened.dev() == named.dev()
+            && opened.ino() == named.ino()
+        {
+            let _ = std::fs::remove_file(path);
         }
     }
     #[cfg(not(unix))]
