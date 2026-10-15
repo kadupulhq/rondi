@@ -1,1864 +1,1907 @@
-//! A model of the libxml2 2.9 `xmlTextReader` that rrd_restore.c pulls its
-//! nodes from: the reader feeding a push parser (xmlreader.c
-//! `xmlTextReaderPushData`, `xmlTextReaderRead`, `xmlTextReaderDoExpand`)
-//! and the parts of the push parser (parser.c `xmlParseChunk`,
-//! `xmlParseTryOrFinish`) a dump exercises.
+//! A pull reader for `rrdtool restore` dumps that releases nodes when the
+//! reference reader would.
 //!
-//! RRDtool reports `xmlTextReaderGetParserLineNumber`, the line the parser
-//! has consumed to, and keeps reading after the reader fails, so both depend
-//! on exactly when each chunk reaches the parser. A named file is read 4
-//! bytes and then 512-byte chunks at a time; stdin goes through
-//! rrd_restore.c's fgets callback, one line per read. Parse errors are raised
-//! with libxml2's messages, and for a named file printed the way its default
-//! handler prints them. The DTD internal subset is skipped rather than
-//! parsed, only UTF-8 input is decoded, and namespace checks are not made.
+//! Which walk step meets a syntax error, whether a restore still writes its
+//! file and the line numbers in its messages all depend on how much of the
+//! input the XML parser had seen when the walk asked for the next node
+//! (RS-41, RS-43). The reader therefore keeps two views of the dump: a
+//! tokenizer that splits the whole document into constructs, each tagged
+//! with how many bytes must have been delivered before a streaming parser
+//! can handle it, and a delivery schedule that hands those bytes over the
+//! way the reference does: a 4-byte probe and then 512-byte blocks for a
+//! named file, one line at a time for standard input.
+//!
+//! A hand-written tokenizer is used instead of the workspace's DOM parser
+//! because the observable behavior depends on partial documents, on where
+//! each construct ends and on errors met halfway through; a DOM parser only
+//! reports whether the whole text is well formed.
+//!
+//! Compatibility: delivery, availability and post-error rules reproduce
+//! RRDtool 1.11.0 linked with libxml2 2.9 (RS-9 to RS-15a, RS-40 to RS-44).
+//! Provenance: black-box compatibility tests; see
+//! docs/compatibility/restore.md.
 
-const CHUNK_SIZE: usize = 512;
-const BIG_BUFFER_SIZE: usize = 300;
-/// Context lines show at most this many bytes (xmlParserPrintFileContext).
-const CONTEXT_LEN: usize = 80;
+use std::borrow::Cow;
+use std::collections::VecDeque;
+use std::io::Write;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum NodeType {
-    None,
-    Element,
-    EndElement,
-    Text,
-    Other,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Source {
-    /// `xmlNewTextReaderFilename`; parse errors go to stderr.
+/// How the dump reaches the parser.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Delivery {
+    /// A named file, read in blocks.
     File,
-    /// `xmlReaderForIO` over rrd_restore.c's fgets callback, with errors
-    /// silenced by `ignoringErrorFunc`.
+    /// Standard input, read a line at a time.
     Stdin,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Document,
-    Dtd,
-    Element,
-    Text,
-    Cdata,
+/// A node or end tag as the walk sees it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Event {
+    Start { name: String, empty: bool },
+    End { name: String },
+    Text { text: String, blank: bool },
     Comment,
-    Pi,
-    EntityRef,
+    Instruction,
+    CData,
+    Doctype,
 }
 
-struct Node {
-    kind: Kind,
-    /// NODE_IS_EMPTY: written as `<name/>`.
-    empty: bool,
-    name: String,
-    content: Vec<u8>,
-    parent: Option<usize>,
-    first: Option<usize>,
-    last: Option<usize>,
-    next: Option<usize>,
-    prev: Option<usize>,
+impl Event {
+    fn is_node(&self) -> bool {
+        !matches!(self, Event::End { .. })
+    }
 }
 
-/// `xmlTextReaderState`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum State {
-    None,
-    Start,
-    Element,
-    End,
-    Backtrack,
-    Done,
-    Error,
-}
-
-/// `xmlTextReaderMode`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode {
-    Initial,
-    Interactive,
-    Error,
+/// The outcome of one read.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum Read {
+    Event(Event),
+    /// The document ended normally.
     Eof,
+    /// The parser reported a fatal error, available from [`Reader::failure`].
+    Failed,
 }
 
-/// `xmlParserInputState`, the states the push parser passes through here.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Inst {
-    Eof,
-    Start,
-    Misc,
+// ---------------------------------------------------------------------------
+// Input preparation.
+
+/// Block size the reference reader hands to the parser for a named file.
+const BLOCK: usize = 512;
+/// Size of each read from a named file into the reader's buffer.
+const READ_SIZE: usize = 4096;
+/// Bytes the reader takes up front to detect the encoding.
+const PROBE: usize = 4;
+
+/// Compatibility: standard input is read a line at a time as C strings, so
+/// a NUL ends the line early and a ctrl-Z ends the input (RS-9).
+/// Provenance: black-box compatibility test (`doc-nul-in-value@stdin`,
+/// `doc-tail-nul@stdin`, `doc-ctrl-z@stdin`).
+fn stdin_lines(input: &[u8]) -> (Vec<u8>, Vec<usize>) {
+    let mut stream = Vec::with_capacity(input.len());
+    let mut ends = Vec::new();
+    let mut rest = input;
+    while !rest.is_empty() {
+        let line_len = rest
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(rest.len(), |at| at + 1);
+        let line = &rest[..line_len];
+        rest = &rest[line_len..];
+        let stop = line.iter().position(|byte| *byte == 0x1a);
+        let usable = &line[..stop.unwrap_or(line.len())];
+        let kept = usable
+            .iter()
+            .position(|byte| *byte == 0)
+            .map_or(usable, |nul| &usable[..nul]);
+        stream.extend_from_slice(kept);
+        if !kept.is_empty() {
+            ends.push(stream.len());
+        }
+        if stop.is_some() {
+            break;
+        }
+    }
+    (stream, ends)
+}
+
+/// The order in which input bytes become visible to the parser.
+enum Feed {
+    File {
+        len: usize,
+        buffered: usize,
+        handed: usize,
+        eof: bool,
+        done: bool,
+    },
+    Lines {
+        ends: Vec<usize>,
+        next: usize,
+        len: usize,
+        done: bool,
+    },
+}
+
+impl Feed {
+    /// The next delivery: the stream offset delivered so far and whether
+    /// this delivery also signals the end of the input.
+    ///
+    /// Compatibility: a named file is buffered in 4096-byte reads after a
+    /// 4-byte probe and handed over in 512-byte blocks; a short final block
+    /// carries the end-of-input signal only once a read has returned
+    /// nothing. Provenance: black-box compatibility test (every truncation
+    /// of `seed-mini`, vectors `cut-*`).
+    fn next(&mut self) -> Option<(usize, bool)> {
+        match self {
+            Feed::File {
+                len,
+                buffered,
+                handed,
+                eof,
+                done,
+            } => {
+                if *done {
+                    return None;
+                }
+                if *buffered - *handed < BLOCK && !*eof {
+                    let read = READ_SIZE.min(*len - *buffered);
+                    if read == 0 {
+                        *eof = true;
+                    } else {
+                        *buffered += read;
+                    }
+                }
+                if *buffered - *handed >= BLOCK {
+                    *handed += BLOCK;
+                    Some((*handed, false))
+                } else {
+                    *handed = *buffered;
+                    *done = *eof;
+                    Some((*handed, *eof))
+                }
+            }
+            Feed::Lines {
+                ends,
+                next,
+                len,
+                done,
+            } => {
+                if *done {
+                    return None;
+                }
+                match ends.get(*next) {
+                    Some(end) => {
+                        *next += 1;
+                        Some((*end, false))
+                    }
+                    None => {
+                        *done = true;
+                        Some((*len, true))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Maps offsets in the decoded text back to the delivered stream.
+enum OffsetMap {
+    Shift(usize),
+    Table(Vec<usize>),
+}
+
+impl OffsetMap {
+    fn raw(&self, index: usize) -> usize {
+        match self {
+            OffsetMap::Shift(shift) => index + shift,
+            OffsetMap::Table(table) => table
+                .get(index)
+                .copied()
+                .unwrap_or_else(|| table.last().copied().unwrap_or(0)),
+        }
+    }
+}
+
+/// The document as UTF-8 text, with where tokenizing must stop and why.
+struct Decoded<'a> {
+    text: Cow<'a, str>,
+    map: OffsetMap,
+    /// A decoding error at the end of `text`, if the text stops early.
+    error: Option<String>,
+    /// Set when the declared encoding cannot be read at all.
+    unsupported: Option<String>,
+}
+
+/// The value of `encoding=` in a leading XML declaration, if any.
+fn declared_encoding(bytes: &[u8]) -> Option<String> {
+    if !bytes.starts_with(b"<?xml") {
+        return None;
+    }
+    let end = find(bytes, b"?>", 0).unwrap_or(bytes.len().min(512));
+    let head = &bytes[..end];
+    let at = find(head, b"encoding", 0)?;
+    let mut rest = &head[at + "encoding".len()..];
+    rest = trim_start(rest);
+    rest = rest.strip_prefix(b"=")?;
+    rest = trim_start(rest);
+    let quote = *rest.first()?;
+    if quote != b'"' && quote != b'\'' {
+        return None;
+    }
+    let close = rest[1..].iter().position(|byte| *byte == quote)?;
+    Some(String::from_utf8_lossy(&rest[1..1 + close]).into_owned())
+}
+
+fn trim_start(mut bytes: &[u8]) -> &[u8] {
+    while let [b' ' | b'\t' | b'\r' | b'\n', rest @ ..] = bytes {
+        bytes = rest;
+    }
+    bytes
+}
+
+fn find(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() {
+        return (from <= haystack.len()).then_some(from);
+    }
+    haystack
+        .get(from..)?
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .map(|at| at + from)
+}
+
+/// Decodes the delivered stream.
+///
+/// Compatibility: a UTF-8 byte order mark is skipped, UTF-16 with a byte
+/// order mark is accepted from a named file, a declared Latin-1 or ASCII
+/// encoding is converted to UTF-8, an unknown encoding is refused and
+/// invalid UTF-8 is a syntax error (RS-11). Provenance: black-box
+/// compatibility test (`doc-*` vectors).
+fn decode(stream: &[u8], delivery: Delivery) -> Decoded<'_> {
+    if let Some(rest) = stream.strip_prefix(b"\xef\xbb\xbf") {
+        return decode_utf8(rest, 3);
+    }
+    let utf16 = match stream {
+        [0xff, 0xfe, ..] => Some(false),
+        [0xfe, 0xff, ..] => Some(true),
+        _ => None,
+    };
+    if let Some(big_endian) = utf16 {
+        if delivery == Delivery::File {
+            return decode_utf16(stream, big_endian);
+        }
+        return Decoded {
+            text: Cow::Borrowed(""),
+            map: OffsetMap::Shift(0),
+            error: Some(EXTRA_CONTENT.into()),
+            unsupported: None,
+        };
+    }
+    match declared_encoding(stream).map(|name| name.to_ascii_lowercase()) {
+        None => decode_utf8(stream, 0),
+        Some(name) => match name.as_str() {
+            "utf-8" | "utf8" | "us-ascii" | "ascii" | "utf-16" => decode_utf8(stream, 0),
+            "iso-8859-1" | "iso_8859-1" | "latin1" | "latin-1" | "iso-latin-1" | "l1" => {
+                decode_latin1(stream)
+            }
+            // Only the declaration is kept, to place the diagnostic.
+            _ => Decoded {
+                text: Cow::Owned(
+                    String::from_utf8_lossy(
+                        &stream[..find(stream, b"?>", 0).map_or(stream.len(), |at| at + 2)],
+                    )
+                    .into_owned(),
+                ),
+                map: OffsetMap::Shift(0),
+                error: None,
+                unsupported: declared_encoding(stream),
+            },
+        },
+    }
+}
+
+fn decode_utf8(bytes: &[u8], shift: usize) -> Decoded<'_> {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => Decoded {
+            text: Cow::Borrowed(text),
+            map: OffsetMap::Shift(shift),
+            error: None,
+            unsupported: None,
+        },
+        Err(error) => {
+            let valid = error.valid_up_to();
+            let shown = bytes[valid..]
+                .iter()
+                .take(4)
+                .map(|byte| format!("0x{byte:02X}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            Decoded {
+                text: Cow::Borrowed(std::str::from_utf8(&bytes[..valid]).unwrap_or_default()),
+                map: OffsetMap::Shift(shift),
+                error: Some(format!(
+                    "Input is not proper UTF-8, indicate encoding !\nBytes: {shown}"
+                )),
+                unsupported: None,
+            }
+        }
+    }
+}
+
+fn decode_latin1(bytes: &[u8]) -> Decoded<'_> {
+    let mut text = String::with_capacity(bytes.len());
+    let mut table = Vec::with_capacity(bytes.len() + 1);
+    for (offset, byte) in bytes.iter().enumerate() {
+        let ch = char::from(*byte);
+        for _ in 0..ch.len_utf8() {
+            table.push(offset);
+        }
+        text.push(ch);
+    }
+    table.push(bytes.len());
+    Decoded {
+        text: Cow::Owned(text),
+        map: OffsetMap::Table(table),
+        error: None,
+        unsupported: None,
+    }
+}
+
+fn decode_utf16(bytes: &[u8], big_endian: bool) -> Decoded<'_> {
+    let units = bytes[2..].as_chunks::<2>().0.iter().map(|pair| {
+        if big_endian {
+            u16::from_be_bytes([pair[0], pair[1]])
+        } else {
+            u16::from_le_bytes([pair[0], pair[1]])
+        }
+    });
+    let mut text = String::new();
+    let mut table = Vec::new();
+    let mut offset = 2;
+    let mut error = None;
+    for decoded in char::decode_utf16(units) {
+        match decoded {
+            Ok(ch) => {
+                for _ in 0..ch.len_utf8() {
+                    table.push(offset);
+                }
+                text.push(ch);
+                offset += 2 * ch.len_utf16();
+            }
+            Err(_) => {
+                error = Some("Input is not proper UTF-16".to_owned());
+                break;
+            }
+        }
+    }
+    table.push(offset);
+    Decoded {
+        text: Cow::Owned(text),
+        map: OffsetMap::Table(table),
+        error,
+        unsupported: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tokenizer.
+
+/// One piece of the document and the delivery it needs.
+#[derive(Debug)]
+struct Construct {
+    /// Stream offset where the construct begins.
+    start: usize,
+    /// Stream bytes that must be delivered before the parser handles the
+    /// construct; `None` when only the end-of-input signal makes it final.
+    ready: Option<usize>,
+    item: Item,
+}
+
+#[derive(Debug)]
+enum Item {
+    Node(Event),
+    /// A well-formed end tag.
+    Close(String),
+    /// An end tag the parser rejected; it still stops a post-error walk.
+    BrokenClose,
+    /// A diagnostic that does not stop the parser.
+    Note {
+        message: String,
+        at: usize,
+        warning: bool,
+    },
+    Fatal {
+        message: String,
+        at: usize,
+        /// The input ended inside the document rather than inside a
+        /// construct.
+        document_end: bool,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Phase {
     Prolog,
-    StartTag,
     Content,
-    Cdata,
-    EndTag,
-    Dtd,
     Epilog,
 }
 
-/// `ctxt->progressive`: zero, one, or the state an incomplete construct
-/// is waiting in.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Progressive {
-    Off,
-    On,
-    Pi,
-    Dtd,
-    Comment,
-    StartTag,
-}
+/// Nesting the tokenizer accepts. RRDtool showed no limit up to 20000
+/// levels, and no dump nests deeper than four, so this only bounds the
+/// state an adversarial document can build.
+const MAX_DEPTH: usize = 100_000;
 
-pub(crate) struct XmlReader<'a> {
-    data: &'a [u8],
-    source: Source,
-    file_name: String,
-    /// libxml2's stderr output for a named file.
-    pub(crate) diagnostics: Vec<u8>,
-    // Input buffer: what the read callback has delivered.
-    taken: usize,
-    input_done: bool,
-    buf: Vec<u8>,
-    /// `reader->cur`: bytes handed to the parser.
-    pushed: usize,
-    // Push parser.
-    /// End of the parser's buffer; a trailing CR is held back while parsing.
-    pend: usize,
-    cur: usize,
-    line: usize,
-    inst: Inst,
-    progressive: Progressive,
-    charset: bool,
-    doc_started: bool,
-    node_tab: Vec<usize>,
-    /// Open element names, the line each started on and how many namespace
-    /// prefixes it bound (nameTab/pushTab).
-    name_tab: Vec<(String, usize, usize)>,
-    /// Bound namespace prefixes, innermost last ("" for the default).
-    ns_tab: Vec<String>,
-    unsupported_encoding: bool,
-    well_formed: bool,
-    err_no: bool,
-    disable_sax: bool,
-    external_subset: bool,
-    last_error: Option<String>,
-    // Tree.
-    nodes: Vec<Node>,
-    free: Vec<usize>,
-    // Reader.
-    node: Option<usize>,
-    state: State,
-    mode: Mode,
-    depth: isize,
-}
+const EXTRA_CONTENT: &str = "Extra content at the end of the document";
 
-const DOC: usize = 0;
+struct Tokenizer<'a> {
+    text: Cow<'a, str>,
+    map: OffsetMap,
+    /// Error to report where the decoded text stops early.
+    stop_error: Option<String>,
+    unsupported: Option<String>,
+    pos: usize,
+    phase: Phase,
+    /// Open elements: name and the line its start tag began on.
+    open: Vec<(String, usize)>,
+    queue: VecDeque<Construct>,
+    finished: bool,
+    /// Entities declared in an internal DTD subset.
+    declared: std::collections::HashSet<String>,
+    line_pos: usize,
+    line_no: usize,
+    /// Whether any construct was produced yet.
+    progressed: bool,
+}
 
 fn is_blank(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
-fn is_name_start(byte: u8) -> bool {
-    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b':') || byte >= 0x80
+fn is_name_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_' || ch == ':' || (ch as u32) >= 0xc0 && !is_bad_char(ch)
 }
 
-fn is_name_char(byte: u8) -> bool {
-    is_name_start(byte) || byte.is_ascii_digit() || matches!(byte, b'.' | b'-')
+fn is_name_char(ch: char) -> bool {
+    is_name_start(ch) || ch.is_ascii_digit() || ch == '-' || ch == '.' || ch == '\u{b7}'
 }
 
-fn is_xml_char(value: u32) -> bool {
-    matches!(value, 0x9 | 0xa | 0xd | 0x20..=0xd7ff | 0xe000..=0xfffd | 0x1_0000..=0x10_ffff)
+fn is_bad_char(ch: char) -> bool {
+    let code = ch as u32;
+    (code < 0x20 && !matches!(ch, '\t' | '\n' | '\r')) || code == 0xfffe || code == 0xffff
 }
 
-impl<'a> XmlReader<'a> {
-    /// `xmlNewTextReaderFilename` or `xmlReaderForIO`: the input buffer
-    /// starts with a 4-byte read, which seeds the push parser when complete.
-    pub(crate) fn new(data: &'a [u8], source: Source, file_name: &str) -> Self {
-        let mut reader = Self {
-            data,
-            source,
-            file_name: file_name.to_owned(),
-            diagnostics: Vec::new(),
-            taken: 0,
-            input_done: false,
-            buf: Vec::with_capacity(data.len().min(1 << 20)),
-            pushed: 0,
-            pend: 0,
-            cur: 0,
-            line: 1,
-            inst: Inst::Start,
-            progressive: Progressive::Off,
-            charset: false,
-            doc_started: false,
-            node_tab: Vec::new(),
-            name_tab: Vec::new(),
-            ns_tab: Vec::new(),
-            unsupported_encoding: false,
-            well_formed: true,
-            err_no: false,
-            disable_sax: false,
-            external_subset: false,
-            last_error: None,
-            nodes: vec![Node {
-                kind: Kind::Document,
-                empty: false,
-                name: String::new(),
-                content: Vec::new(),
-                parent: None,
-                first: None,
-                last: None,
-                next: None,
-                prev: None,
-            }],
-            free: Vec::new(),
-            node: None,
-            state: State::Start,
-            mode: Mode::Initial,
-            depth: 0,
-        };
-        reader.read_input(4);
-        if reader.buf.len() >= 4 {
-            reader.pushed = 4;
-            reader.pend = 4;
-        }
-        reader
+fn bad_char_message(ch: char) -> String {
+    if ch == '\0' {
+        "Char 0x0 out of allowed range".into()
+    } else {
+        format!("PCDATA invalid Char value {}", ch as u32)
     }
+}
 
-    /// `xmlParserInputBufferGrow` through the read callback.
-    fn read_input(&mut self, len: usize) -> usize {
-        if self.input_done {
-            return 0;
-        }
-        let rest = &self.data[self.taken..];
-        let added = match self.source {
-            Source::File => {
-                let count = len.min(rest.len());
-                self.buf.extend_from_slice(&rest[..count]);
-                self.taken += count;
-                count
-            }
-            Source::Stdin => {
-                // fgets(buffer, len) then strlen: up to len - 1 bytes or
-                // through a newline, cut at a NUL byte.
-                let limit = (len - 1).min(rest.len());
-                let line = rest[..limit]
-                    .iter()
-                    .position(|byte| *byte == b'\n')
-                    .map_or(limit, |newline| newline + 1);
-                let kept = rest[..line]
-                    .iter()
-                    .position(|byte| *byte == 0)
-                    .unwrap_or(line);
-                self.buf.extend_from_slice(&rest[..kept]);
-                self.taken += line;
-                kept
-            }
-        };
-        if added == 0 {
-            self.input_done = true;
-        }
-        added
-    }
-
-    // ---- Reader -------------------------------------------------------
-
-    /// `xmlTextReaderGetParserLineNumber`.
-    pub(crate) fn line(&self) -> usize {
-        self.line
-    }
-
-    /// `xmlGetLastError()->message` as rrd_restore.c's get_xml_element
-    /// cleans it: newlines become spaces and the text stops at the first
-    /// later non-printable byte.
-    pub(crate) fn last_error_text(&self) -> String {
-        let Some(message) = &self.last_error else {
-            return "?".into();
-        };
-        let mut bytes: Vec<u8> = message
-            .bytes()
-            .map(|byte| if byte == b'\n' { b' ' } else { byte })
-            .collect();
-        if let Some(cut) = bytes
-            .iter()
-            .skip(1)
-            .position(|byte| !(0x20..0x7f).contains(byte))
-        {
-            bytes.truncate(cut + 1);
-        }
-        String::from_utf8_lossy(&bytes).into_owned()
-    }
-
-    /// `xmlTextReaderNodeType`, collapsed to what rrd_restore.c tests.
-    pub(crate) fn node_type(&self) -> NodeType {
-        let Some(node) = self.node else {
-            return NodeType::None;
-        };
-        let node = &self.nodes[node];
-        match node.kind {
-            Kind::Element if matches!(self.state, State::End | State::Backtrack) => {
-                NodeType::EndElement
-            }
-            Kind::Element => NodeType::Element,
-            Kind::Text if node.content.iter().all(|byte| is_blank(*byte)) => NodeType::Other,
-            Kind::Text => NodeType::Text,
-            _ => NodeType::Other,
+impl<'a> Tokenizer<'a> {
+    fn new(decoded: Decoded<'a>) -> Self {
+        Self {
+            text: decoded.text,
+            map: decoded.map,
+            stop_error: decoded.error,
+            unsupported: decoded.unsupported,
+            pos: 0,
+            phase: Phase::Prolog,
+            open: Vec::new(),
+            queue: VecDeque::new(),
+            finished: false,
+            declared: std::collections::HashSet::new(),
+            line_pos: 0,
+            line_no: 1,
+            progressed: false,
         }
     }
 
-    /// `xmlTextReaderName` for an element.
-    pub(crate) fn name(&self) -> &str {
-        self.node.map_or("", |node| &self.nodes[node].name)
+    fn bytes(&self) -> &[u8] {
+        self.text.as_bytes()
     }
 
-    /// `xmlTextReaderValue` for a text node.
-    pub(crate) fn value(&self) -> String {
-        self.node.map_or_else(String::new, |node| {
-            String::from_utf8_lossy(&self.nodes[node].content).into_owned()
-        })
+    fn raw(&self, index: usize) -> usize {
+        self.map.raw(index)
     }
 
-    fn successor(&self, node: usize) -> Option<usize> {
-        let mut current = Some(node);
-        while let Some(index) = current {
-            if let Some(next) = self.nodes[index].next {
-                return Some(next);
-            }
-            current = self.nodes[index].parent;
+    fn line_at(&mut self, index: usize) -> usize {
+        if index < self.line_pos {
+            return self.line_no;
         }
-        None
-    }
-
-    /// `xmlTextReaderDoExpand`.
-    fn do_expand(&mut self) -> i32 {
-        let Some(node) = self.node else {
-            return -1;
-        };
-        loop {
-            if self.inst == Inst::Eof
-                || self.successor(node).is_some()
-                || (self.node_tab.len() as isize) < self.depth
-                || self.mode == Mode::Eof
-            {
-                return 1;
-            }
-            if self.push_data() < 0 {
-                self.mode = Mode::Error;
-                return -1;
-            }
-            if self.mode == Mode::Eof {
-                return 1;
-            }
-        }
-    }
-
-    /// `xmlTextReaderRead`: 1 with a node, 0 at the end, -1 on error.
-    pub(crate) fn read(&mut self) -> i32 {
-        if self.mode == Mode::Initial {
-            self.mode = Mode::Interactive;
-            loop {
-                if self.push_data() < 0 {
-                    self.mode = Mode::Error;
-                    self.state = State::Error;
-                    return -1;
-                }
-                if !(self.node_tab.is_empty()
-                    && self.mode != Mode::Eof
-                    && self.state != State::Done)
-                {
-                    break;
-                }
-            }
-            let first = if self.doc_started {
-                self.nodes[DOC].first
-            } else {
-                None
-            };
-            self.node = first.or_else(|| self.node_tab.first().copied());
-            if self.node.is_none() {
-                self.mode = Mode::Error;
-                self.state = State::Error;
-                return -1;
-            }
-            self.state = State::Element;
-            self.depth = 0;
-            return self.node_found();
-        }
-        let old_state = self.state;
-        let old_depth = self.node_tab.len();
-        let old_node = self.node;
-        let Some(node) = self.node else {
-            return if self.mode == Mode::Eof { 0 } else { -1 };
-        };
-        while self.nodes[node].next.is_none()
-            && self.node_tab.len() == old_depth
-            && (old_state == State::Backtrack
-                || self.nodes[node].first.is_none()
-                || self.nodes[node].kind == Kind::EntityRef
-                || self.nodes[node].first.is_some_and(|child| {
-                    self.nodes[child].kind == Kind::Text && self.nodes[child].next.is_none()
-                })
-                || matches!(self.nodes[node].kind, Kind::Dtd | Kind::Document))
-            && self
-                .node_tab
-                .last()
-                .is_none_or(|open| *open == node || Some(*open) == self.nodes[node].parent)
-            && self.inst != Inst::Eof
-        {
-            if self.push_data() < 0 {
-                self.mode = Mode::Error;
-                self.state = State::Error;
-                return -1;
-            }
-        }
-        let kind = self.nodes[node].kind;
-        let child = self.nodes[node].first;
-        if let (true, Some(child)) = (
-            old_state != State::Backtrack && !matches!(kind, Kind::EntityRef | Kind::Dtd),
-            child,
-        ) {
-            self.node = Some(child);
-            self.depth += 1;
-            self.state = State::Element;
-            return self.node_found();
-        }
-        let childless_open = old_state == State::Element
-            && kind == Kind::Element
-            && self.nodes[node].first.is_none()
-            && !self.nodes[node].empty;
-        if let Some(next) = self.nodes[node].next {
-            if childless_open {
-                self.state = State::End;
-                return self.node_found();
-            }
-            self.node = Some(next);
-            self.state = State::Element;
-            if let Some(prev) = self.nodes[next]
-                .prev
-                .filter(|prev| self.nodes[*prev].kind != Kind::Dtd)
-            {
-                self.unlink(prev);
-                self.free_tree(prev);
-            }
-            return self.node_found();
-        }
-        if childless_open {
-            self.state = State::End;
-            return self.node_found();
-        }
-        let parent = self.nodes[node].parent;
-        match parent {
-            None | Some(DOC) => {
-                if self.mode != Mode::Eof {
-                    let end = self.pend;
-                    let failed = self.parse_chunk(end, true) != 0;
-                    self.state = State::Done;
-                    if failed {
-                        self.node = parent;
-                        return -1;
-                    }
-                }
-                self.node = None;
-                self.depth = -1;
-                if let Some(old) = old_node.filter(|old| self.nodes[*old].kind != Kind::Dtd) {
-                    self.unlink(old);
-                    self.free_tree(old);
-                }
-                self.state = State::Done;
-                0
-            }
-            Some(parent) => {
-                self.node = Some(parent);
-                if let Some(last) = self.nodes[parent].last {
-                    self.unlink(last);
-                    self.free_tree(last);
-                }
-                self.depth -= 1;
-                self.state = State::Backtrack;
-                self.node_found()
-            }
-        }
-    }
-
-    /// The `node_found` tail of xmlTextReaderRead: an unfinished trailing
-    /// text or CDATA node is read to its end first.
-    fn node_found(&mut self) -> i32 {
-        let unfinished = self.node.is_some_and(|node| {
-            self.nodes[node].next.is_none()
-                && matches!(self.nodes[node].kind, Kind::Text | Kind::Cdata)
-        });
-        if unfinished && self.do_expand() < 0 {
-            return -1;
-        }
-        1
-    }
-
-    /// `xmlTextReaderPushData`.
-    fn push_data(&mut self) -> i32 {
-        let old_state = self.state;
-        self.state = State::None;
-        while self.state == State::None {
-            if self.buf.len() < self.pushed + CHUNK_SIZE {
-                if self.mode == Mode::Eof {
-                    break;
-                }
-                if self.read_input(4096) == 0 {
-                    self.mode = Mode::Eof;
-                    break;
-                }
-            }
-            if self.buf.len() >= self.pushed + CHUNK_SIZE {
-                let end = self.pushed + CHUNK_SIZE;
-                let status = self.parse_chunk(end, false);
-                self.pushed = end;
-                if status != 0 {
-                    self.well_formed = false;
-                }
-                if !self.well_formed {
-                    break;
-                }
-            } else {
-                let end = self.buf.len();
-                let status = self.parse_chunk(end, false);
-                self.pushed = end;
-                if status != 0 {
-                    self.well_formed = false;
-                }
-                break;
-            }
-        }
-        if self.mode == Mode::Eof && self.state != State::Done {
-            let end = self.buf.len();
-            let status = self.parse_chunk(end, true);
-            self.pushed = end;
-            self.state = State::Done;
-            if status != 0 {
-                if !self.well_formed {
-                    return -1;
-                }
-                self.well_formed = false;
-            }
-        }
-        self.state = old_state;
-        if !self.well_formed {
-            self.mode = Mode::Eof;
-            return -1;
-        }
-        0
-    }
-
-    // ---- Tree ---------------------------------------------------------
-
-    fn new_node(&mut self, kind: Kind, name: String, content: Vec<u8>) -> usize {
-        let node = Node {
-            kind,
-            empty: false,
-            name,
-            content,
-            parent: None,
-            first: None,
-            last: None,
-            next: None,
-            prev: None,
-        };
-        match self.free.pop() {
-            Some(index) => {
-                self.nodes[index] = node;
-                index
-            }
-            None => {
-                self.nodes.push(node);
-                self.nodes.len() - 1
-            }
-        }
-    }
-
-    fn add_child(&mut self, parent: usize, child: usize) {
-        self.nodes[child].parent = Some(parent);
-        match self.nodes[parent].last {
-            Some(last) => {
-                self.nodes[last].next = Some(child);
-                self.nodes[child].prev = Some(last);
-            }
-            None => self.nodes[parent].first = Some(child),
-        }
-        self.nodes[parent].last = Some(child);
-    }
-
-    fn unlink(&mut self, node: usize) {
-        let (parent, prev, next) = {
-            let entry = &self.nodes[node];
-            (entry.parent, entry.prev, entry.next)
-        };
-        match prev {
-            Some(prev) => self.nodes[prev].next = next,
-            None => {
-                if let Some(parent) = parent {
-                    self.nodes[parent].first = next;
-                }
-            }
-        }
-        match next {
-            Some(next) => self.nodes[next].prev = prev,
-            None => {
-                if let Some(parent) = parent {
-                    self.nodes[parent].last = prev;
-                }
-            }
-        }
-        let entry = &mut self.nodes[node];
-        entry.parent = None;
-        entry.prev = None;
-        entry.next = None;
-    }
-
-    /// `xmlTextReaderFreeNode`: the slot and its subtree become reusable.
-    fn free_tree(&mut self, node: usize) {
-        let mut pending = vec![node];
-        while let Some(index) = pending.pop() {
-            let mut child = self.nodes[index].first;
-            while let Some(current) = child {
-                child = self.nodes[current].next;
-                pending.push(current);
-            }
-            let entry = &mut self.nodes[index];
-            entry.content = Vec::new();
-            entry.name = String::new();
-            entry.first = None;
-            entry.last = None;
-            self.free.push(index);
-        }
-    }
-
-    // ---- SAX2 callbacks (only while !disableSAX) -----------------------
-
-    fn sax_parent(&self) -> usize {
-        self.node_tab.last().copied().unwrap_or(DOC)
-    }
-
-    fn start_element(&mut self, name: String) {
-        let parent = self.sax_parent();
-        let node = self.new_node(Kind::Element, name, Vec::new());
-        self.add_child(parent, node);
-        self.node_tab.push(node);
-        if self.at(self.cur) == b'/' && self.at(self.cur + 1) == b'>' {
-            self.nodes[node].empty = true;
-        }
-        self.state = State::Element;
-    }
-
-    fn characters(&mut self, text: &[u8]) {
-        let Some(&parent) = self.node_tab.last() else {
-            return;
-        };
-        if let Some(last) = self.nodes[parent]
-            .last
-            .filter(|last| self.nodes[*last].kind == Kind::Text)
-        {
-            self.nodes[last].content.extend_from_slice(text);
-            return;
-        }
-        let node = self.new_node(Kind::Text, String::new(), text.to_vec());
-        self.add_child(parent, node);
-    }
-
-    fn cdata_block(&mut self, text: &[u8]) {
-        let Some(&parent) = self.node_tab.last() else {
-            return;
-        };
-        if let Some(last) = self.nodes[parent]
-            .last
-            .filter(|last| self.nodes[*last].kind == Kind::Cdata)
-        {
-            self.nodes[last].content.extend_from_slice(text);
-            return;
-        }
-        let node = self.new_node(Kind::Cdata, String::new(), text.to_vec());
-        self.add_child(parent, node);
-    }
-
-    fn add_leaf(&mut self, kind: Kind, name: String) {
-        let parent = self.sax_parent();
-        let node = self.new_node(kind, name, Vec::new());
-        self.add_child(parent, node);
-    }
-
-    // ---- Errors -------------------------------------------------------
-
-    /// `__xmlRaiseError` through the default handler, which prints
-    /// `file:line: parser error : message` and two lines of context.
-    fn raise(&mut self, domain: &str, level: &str, message: String) {
-        if self.source == Source::File {
-            let mut out = format!(
-                "{}:{}: {domain} {level} : {message}",
-                self.file_name, self.line
-            )
-            .into_bytes();
-            if !message.ends_with('\n') {
-                out.push(b'\n');
-            }
-            self.context(&mut out);
-            self.diagnostics.extend_from_slice(&out);
-        }
-        self.last_error = Some(message);
-    }
-
-    /// `xmlParserPrintFileContextInternal`.
-    fn context(&self, out: &mut Vec<u8>) {
-        let mut start = self.cur;
-        while start > 0 && matches!(self.at(start), b'\n' | b'\r') {
-            start -= 1;
-        }
-        let mut count = 0;
-        while count < CONTEXT_LEN && start > 0 && !matches!(self.at(start), b'\n' | b'\r') {
-            count += 1;
-            start -= 1;
-        }
-        if matches!(self.at(start), b'\n' | b'\r') {
-            start += 1;
-        }
-        let column = self.cur.saturating_sub(start);
-        let mut content = Vec::new();
-        let mut position = start;
-        while content.len() < CONTEXT_LEN && !matches!(self.at(position), 0 | b'\n' | b'\r') {
-            content.push(self.at(position));
-            position += 1;
-        }
-        out.extend_from_slice(&content);
-        out.push(b'\n');
-        let mut index = 0;
-        while index < column && index < CONTEXT_LEN - 1 && index < content.len() {
-            out.push(if content[index] == b'\t' { b'\t' } else { b' ' });
-            index += 1;
-        }
-        out.extend_from_slice(b"^\n");
-    }
-
-    /// `xmlFatalErr` and its message variants.
-    fn fatal(&mut self, message: impl Into<String>) {
-        if self.disable_sax && self.inst == Inst::Eof {
-            return;
-        }
-        self.err_no = true;
-        self.raise("parser", "error", message.into());
-        self.well_formed = false;
-        self.disable_sax = true;
-    }
-
-    /// `xmlErrMsgStr`: an error that does not stop the parse.
-    fn error(&mut self, message: String) {
-        if self.disable_sax && self.inst == Inst::Eof {
-            return;
-        }
-        self.err_no = true;
-        self.raise("parser", "error", message);
-    }
-
-    /// `xmlNsErr`.
-    fn ns_error(&mut self, message: String) {
-        if self.disable_sax && self.inst == Inst::Eof {
-            return;
-        }
-        self.err_no = true;
-        self.raise("namespace", "error", message);
-    }
-
-    /// `xmlWarningMsg`.
-    fn warning(&mut self, message: String) {
-        if self.disable_sax && self.inst == Inst::Eof {
-            return;
-        }
-        self.raise("parser", "warning", message);
-    }
-
-    /// `xmlHaltParser`.
-    fn halt(&mut self) {
-        self.inst = Inst::Eof;
-        self.disable_sax = true;
-    }
-
-    // ---- Push parser --------------------------------------------------
-
-    fn at(&self, index: usize) -> u8 {
-        if index < self.pend {
-            self.buf[index]
-        } else {
-            0
-        }
-    }
-
-    fn advance(&mut self, count: usize) {
-        let end = (self.cur + count).min(self.pend.max(self.cur));
-        self.line += self.buf[self.cur..end]
+        let bytes = self.text.as_bytes();
+        let end = index.min(bytes.len());
+        self.line_no += bytes[self.line_pos..end]
             .iter()
             .filter(|byte| **byte == b'\n')
             .count();
-        self.cur += count;
+        self.line_pos = end;
+        self.line_no
     }
 
-    fn skip_blanks(&mut self) -> usize {
-        let start = self.cur;
-        while is_blank(self.at(self.cur)) {
-            self.advance(1);
-        }
-        self.cur - start
+    fn char_at(&self, index: usize) -> Option<char> {
+        self.text.get(index..)?.chars().next()
     }
 
-    /// `xmlParseLookupSequence`: the offset of `sequence` at or after
-    /// `from` in the buffer.
-    fn lookup(&self, from: usize, sequence: &[u8]) -> Option<usize> {
-        if from >= self.pend {
-            return None;
-        }
-        self.buf[from..self.pend]
-            .windows(sequence.len())
-            .position(|window| window == sequence)
-            .map(|offset| from + offset)
+    fn emit(&mut self, start: usize, ready: Option<usize>, item: Item) {
+        self.progressed = true;
+        let start = self.raw(start);
+        let ready = ready.map(|index| self.raw(index));
+        self.queue.push_back(Construct { start, ready, item });
     }
 
-    /// `xmlParseGetLasts`.
-    fn lasts(&self) -> (Option<usize>, Option<usize>) {
-        if self.progressive == Progressive::Off {
-            return (None, None);
-        }
-        let Some(lt) = self.buf[..self.pend].iter().rposition(|byte| *byte == b'<') else {
-            return (None, None);
-        };
-        let mut position = lt + 1;
-        while position < self.pend && self.buf[position] != b'>' {
-            let byte = self.buf[position];
-            position += 1;
-            if matches!(byte, b'\'' | b'"') {
-                while position < self.pend && self.buf[position] != byte {
-                    position += 1;
-                }
-                if position < self.pend {
-                    position += 1;
-                }
-            }
-        }
-        if position < self.pend {
-            return (Some(lt), Some(position));
-        }
-        (
-            Some(lt),
-            self.buf[..lt].iter().rposition(|byte| *byte == b'>'),
-        )
+    /// A fatal error the parser reports with its caret at `at` (an offset
+    /// into the decoded text).
+    fn fatal(&mut self, start: usize, ready: Option<usize>, message: impl Into<String>, at: usize) {
+        let at = self.raw(at);
+        self.fatal_at(start, ready, message.into(), at, false);
     }
 
-    /// `xmlParseCheckTransition`.
-    fn worth_parsing(&self, old: usize, new: usize) -> bool {
-        let waits_for_gt = matches!(
-            self.inst,
-            Inst::StartTag | Inst::Cdata | Inst::EndTag | Inst::Dtd
-        ) || matches!(
-            self.progressive,
-            Progressive::Comment | Progressive::Pi | Progressive::Dtd
+    /// A diagnostic printed before a fatal error at the same place.
+    fn note(&mut self, start: usize, ready: Option<usize>, message: impl Into<String>, at: usize) {
+        let at = self.raw(at);
+        self.emit(
+            start,
+            ready,
+            Item::Note {
+                message: message.into(),
+                at,
+                warning: false,
+            },
         );
-        !waits_for_gt || self.buf[old..new].contains(&b'>')
     }
 
-    /// `xmlParseChunk` with the bytes up to `end`: 0, or nonzero once the
-    /// parse has failed.
-    fn parse_chunk(&mut self, end: usize, terminate: bool) -> i32 {
-        if self.err_no && self.disable_sax {
-            return 1;
-        }
-        if self.inst == Inst::Eof {
-            return -1;
-        }
-        let mut held_cr = false;
-        let mut end = end;
-        if end > self.pend && !terminate && self.buf[end - 1] == b'\r' {
-            held_cr = true;
-            end -= 1;
-        }
-        let old = if end > self.pend { self.pend } else { 0 };
-        self.pend = self.pend.max(end);
-        if terminate || old == 0 || self.pend == 0 || self.worth_parsing(old, self.pend) {
-            self.try_or_finish(terminate);
-        }
-        if self.inst == Inst::Eof {
-            return i32::from(self.err_no);
-        }
-        if self.err_no && self.disable_sax {
-            return 1;
-        }
-        if held_cr {
-            self.pend += 1;
-        }
-        if terminate {
-            let remaining = self.pend - self.cur.min(self.pend);
-            if self.inst != Inst::Epilog || remaining > 0 {
-                self.fatal("Extra content at the end of the document\n");
-            }
-            self.inst = Inst::Eof;
-        }
-        i32::from(!self.well_formed)
+    fn fatal_at(
+        &mut self,
+        start: usize,
+        ready: Option<usize>,
+        message: String,
+        at: usize,
+        document_end: bool,
+    ) {
+        self.emit(
+            start,
+            ready,
+            Item::Fatal {
+                message,
+                at,
+                document_end,
+            },
+        );
+        self.finished = true;
     }
 
-    /// `xmlParseTryOrFinish`.
-    fn try_or_finish(&mut self, terminate: bool) {
-        let (mut last_lt, mut last_gt) = self.lasts();
-        while self.inst != Inst::Eof {
-            if self.err_no && self.disable_sax {
+    /// The end of the decoded text: either the real end of the input or a
+    /// decoding error.
+    fn at_end(&mut self, start: usize) {
+        let len = self.bytes().len();
+        if let Some(message) = self.stop_error.take() {
+            let ready = self.raw(len) + 1;
+            let at = self.raw(len);
+            self.queue.push_back(Construct {
+                start: self.raw(start),
+                ready: Some(ready),
+                item: Item::Fatal {
+                    message,
+                    at,
+                    document_end: false,
+                },
+            });
+            self.finished = true;
+            return;
+        }
+        match self.phase {
+            Phase::Epilog => self.finished = true,
+            _ => {
+                // The parser stops where its leftover begins, or at the very
+                // start when it never got past the encoding probe.
+                let at = if self.progressed || len >= PROBE {
+                    self.raw(start.min(len))
+                } else {
+                    self.raw(0)
+                };
+                self.fatal_at(start, None, EXTRA_CONTENT.to_owned(), at, true);
+            }
+        }
+    }
+
+    fn next(&mut self) -> Option<Construct> {
+        while self.queue.is_empty() && !self.finished {
+            self.step();
+        }
+        self.queue.pop_front()
+    }
+
+    fn step(&mut self) {
+        if let Some(name) = self.unsupported.take() {
+            let end = find(self.bytes(), b"?>", 0).map_or(self.bytes().len(), |at| at + 2);
+            let at = find(self.bytes(), name.as_bytes(), 0).map_or(end, |at| at + name.len() + 1);
+            self.fatal(0, Some(end), format!("Unsupported encoding {name}"), at);
+            return;
+        }
+        if self.pos == 0 && self.phase == Phase::Prolog && self.bytes().starts_with(b"<?xml") {
+            let next = self.bytes().get(5).copied();
+            if next.is_none() {
+                // Nothing after the target: the parser sees a misplaced
+                // declaration that never ends.
+                self.pos = 5;
+                self.note(
+                    0,
+                    None,
+                    "XML declaration allowed only at the start of the document",
+                    5,
+                );
+                self.note(0, None, "ParsePI: PI xml space expected", 5);
+                self.fatal(0, None, "ParsePI: PI xml never end ...", 5);
                 return;
             }
-            let avail = self.pend.saturating_sub(self.cur);
-            if avail < 1 {
+            if next.is_some_and(is_blank) {
+                self.declaration();
                 return;
             }
-            let (c, n) = (self.at(self.cur), self.at(self.cur + 1));
-            match self.inst {
-                Inst::Eof => return,
-                Inst::Start => {
-                    if !self.charset {
-                        if avail < 4 {
-                            return;
-                        }
-                        if self.buf[self.cur..].starts_with(b"\xef\xbb\xbf") {
-                            self.cur += 3;
-                        }
-                        self.charset = true;
-                        continue;
-                    }
-                    if avail < 2 {
-                        return;
-                    }
-                    if c == 0 {
-                        self.fatal("Document is empty\n");
-                        self.halt();
-                        return;
-                    }
-                    if c == b'<' && n == b'?' {
-                        if avail < 5 {
-                            return;
-                        }
-                        let end = self.lookup(self.cur, b"?>");
-                        if !terminate && end.is_none() {
-                            return;
-                        }
-                        if &self.buf[self.cur + 2..self.cur + 5] == b"xml"
-                            && is_blank(self.at(self.cur + 5))
-                        {
-                            self.parse_xml_decl();
-                            if self.unsupported_encoding {
-                                self.halt();
-                                return;
-                            }
-                        }
-                    }
-                    if !self.disable_sax {
-                        self.doc_started = true;
-                    }
-                    self.inst = Inst::Misc;
-                }
-                Inst::Misc | Inst::Prolog | Inst::Epilog => {
-                    self.skip_blanks();
-                    let avail = self.pend.saturating_sub(self.cur);
-                    if avail < 2 {
-                        return;
-                    }
-                    let state = self.inst;
-                    let (c, n) = (self.at(self.cur), self.at(self.cur + 1));
-                    if c == b'<' && n == b'?' {
-                        if !terminate && self.lookup(self.cur, b"?>").is_none() {
-                            self.progressive = Progressive::Pi;
-                            return;
-                        }
-                        self.parse_pi();
-                        if self.inst == Inst::Eof {
-                            return;
-                        }
-                        self.inst = state;
-                        self.progressive = Progressive::On;
-                    } else if c == b'<'
-                        && n == b'!'
-                        && self.at(self.cur + 2) == b'-'
-                        && self.at(self.cur + 3) == b'-'
-                    {
-                        if !terminate && self.lookup(self.cur, b"-->").is_none() {
-                            self.progressive = Progressive::Comment;
-                            return;
-                        }
-                        self.parse_comment();
-                        if self.inst == Inst::Eof {
-                            return;
-                        }
-                        self.inst = state;
-                        self.progressive = Progressive::On;
-                    } else if state == Inst::Misc
-                        && self.buf[self.cur..self.pend].starts_with(b"<!DOCTYPE")
-                    {
-                        if !terminate && self.lookup(self.cur, b">").is_none() {
-                            self.progressive = Progressive::Dtd;
-                            return;
-                        }
-                        self.progressive = Progressive::Off;
-                        self.parse_doctype();
-                        if self.inst == Inst::Eof {
-                            return;
-                        }
-                        self.inst = if self.at(self.cur) == b'[' {
-                            Inst::Dtd
-                        } else {
-                            Inst::Prolog
+        }
+        let len = self.bytes().len();
+        let start = self.pos;
+        if start >= len {
+            self.at_end(start);
+            return;
+        }
+        let byte = self.bytes()[start];
+        if byte != b'<' {
+            match self.phase {
+                Phase::Content => self.text_run(),
+                Phase::Prolog | Phase::Epilog => self.outside_text(),
+            }
+            return;
+        }
+        // The parser looks at two bytes before it decides what a `<` opens.
+        if start + 1 >= len {
+            self.pos = len;
+            self.at_end(start);
+            return;
+        }
+        let rest = &self.bytes()[start..];
+        // Compatibility: a `<!` that could still open a comment or a CDATA
+        // section waits for more input; at the end of the input it is left
+        // unparsed. Provenance: black-box compatibility test
+        // (`cut-1025@stdin`).
+        let undecided = |prefix: &[u8]| rest.len() < prefix.len() && prefix.starts_with(rest);
+        if undecided(b"<!--")
+            || undecided(b"<![CDATA[")
+            || undecided(b"<!DOCTYPE")
+            || undecided(b"<?xml ")
+        {
+            self.pos = len;
+            self.at_end(start);
+            return;
+        }
+        if rest.starts_with(b"<!--") {
+            self.comment();
+        } else if rest.starts_with(b"<?") {
+            self.instruction();
+        } else if rest.starts_with(b"<![CDATA[") {
+            self.cdata();
+        } else if rest.starts_with(b"<!DOCTYPE") {
+            self.doctype();
+        } else if rest.starts_with(b"<!") {
+            self.fatal(
+                start,
+                Some(start + 2),
+                "StartTag: invalid element name",
+                start + 1,
+            );
+        } else if rest.starts_with(b"</") {
+            self.end_tag();
+        } else {
+            self.start_tag();
+        }
+    }
+
+    /// Whitespace or text outside the root element.
+    fn outside_text(&mut self) {
+        let start = self.pos;
+        let len = self.bytes().len();
+        let mut at = start;
+        while at < len && is_blank(self.bytes()[at]) {
+            at += 1;
+        }
+        self.pos = at;
+        if at >= len || self.bytes()[at] == b'<' {
+            return;
+        }
+        let ready = (at + 2 <= len).then_some(at + 2);
+        // Compatibility: text after the root element is reported even when
+        // it is the last byte of the input. Provenance: black-box
+        // compatibility test (`doc-tail-char@stdin`).
+        let message = match self.phase {
+            Phase::Prolog => "Document is empty",
+            _ => EXTRA_CONTENT,
+        };
+        if ready.is_none() && self.stop_error.is_some() {
+            self.at_end(start);
+            return;
+        }
+        self.fatal(at, ready, message, at);
+    }
+
+    fn declaration(&mut self) {
+        let bytes = self.bytes();
+        let Some(close) = find(bytes, b"?>", 0) else {
+            let len = self.bytes().len();
+            self.fatal(0, None, "parsing XML declaration: '?>' expected", len);
+            return;
+        };
+        let end = close + 2;
+        let head = String::from_utf8_lossy(&bytes[..close]).into_owned();
+        self.pos = end;
+        self.progressed = true;
+        let Some(at) = head.find("version") else {
+            self.fatal(0, Some(end), "Malformed declaration expecting version", 5);
+            return;
+        };
+        let after = &head[at + "version".len()..];
+        let trimmed = after.trim_start().strip_prefix('=').map(str::trim_start);
+        let Some(value) = trimmed.and_then(|rest| {
+            let quote = rest.chars().next()?;
+            if quote != '"' && quote != '\'' {
+                return None;
+            }
+            let body = &rest[1..];
+            body.find(quote).map(|close| &body[..close])
+        }) else {
+            self.fatal(0, Some(end), "Malformed declaration expecting version", 5);
+            return;
+        };
+        let version = value.to_owned();
+        // The caret of the reference diagnostic sits just after the quoted
+        // version.
+        let quote_end = head
+            .find(&format!("{version}\""))
+            .or_else(|| head.find(&format!("{version}'")))
+            .map_or(close, |offset| offset + version.len() + 1);
+        if version == "1.0" {
+            return;
+        }
+        if version.starts_with("1.") {
+            let at = self.raw(quote_end);
+            self.emit(
+                0,
+                Some(end),
+                Item::Note {
+                    message: format!("Unsupported version '{version}'"),
+                    at,
+                    warning: true,
+                },
+            );
+        } else {
+            let at = self.raw(quote_end);
+            self.fatal_at(
+                0,
+                Some(end),
+                format!("Unsupported version '{version}'"),
+                at,
+                false,
+            );
+        }
+    }
+
+    fn comment(&mut self) {
+        let start = self.pos;
+        let Some(close) = find(self.bytes(), b"-->", start + 4) else {
+            if self.stop_error.is_some() {
+                self.at_end(start);
+            } else {
+                let len = self.bytes().len();
+                self.fatal(start, None, "Comment not terminated", len);
+            }
+            return;
+        };
+        let end = close + 3;
+        self.pos = end;
+        let body = &self.bytes()[start + 4..close];
+        if let Some(dashes) = find(body, b"--", 0) {
+            let shown = String::from_utf8_lossy(&body[..dashes]).into_owned();
+            self.fatal(
+                start,
+                Some(end),
+                format!("Double hyphen within comment: <!--{shown}"),
+                start + 4 + dashes,
+            );
+            return;
+        }
+        if let Some((offset, bad)) = self.text[start + 4..close]
+            .char_indices()
+            .find(|(_, ch)| is_bad_char(*ch))
+        {
+            self.fatal(start, Some(end), bad_char_message(bad), start + 4 + offset);
+            return;
+        }
+        self.node(start, Some(end), Event::Comment);
+    }
+
+    fn instruction(&mut self) {
+        let start = self.pos;
+        let mut name_end = start + 2;
+        while self.char_at(name_end).is_some_and(is_name_char) {
+            name_end += self.char_at(name_end).map_or(1, char::len_utf8);
+        }
+        let target = self.text[start + 2..name_end].to_owned();
+        let Some(close) = find(self.bytes(), b"?>", start + 2) else {
+            if self.stop_error.is_some() {
+                self.at_end(start);
+            } else {
+                let len = self.bytes().len();
+                self.fatal(
+                    start,
+                    None,
+                    format!("ParsePI: PI {target} never end ..."),
+                    len,
+                );
+            }
+            return;
+        };
+        let end = close + 2;
+        self.pos = end;
+        if target.is_empty() {
+            self.fatal(start, Some(end), "xmlParsePI : no target name", start + 2);
+        } else if target.eq_ignore_ascii_case("xml") {
+            self.fatal(
+                start,
+                Some(end),
+                "XML declaration allowed only at the start of the document",
+                name_end,
+            );
+        } else {
+            self.node(start, Some(end), Event::Instruction);
+        }
+    }
+
+    fn cdata(&mut self) {
+        let start = self.pos;
+        let Some(close) = find(self.bytes(), b"]]>", start + 9) else {
+            if self.stop_error.is_some() {
+                self.at_end(start);
+            } else {
+                let len = self.bytes().len();
+                self.fatal(start, None, "CData section not finished", len);
+            }
+            return;
+        };
+        let end = close + 3;
+        self.pos = end;
+        if self.phase != Phase::Content {
+            self.fatal(
+                start,
+                Some(end),
+                "StartTag: invalid element name",
+                start + 1,
+            );
+            return;
+        }
+        self.node(start, Some(end), Event::CData);
+    }
+
+    fn doctype(&mut self) {
+        let start = self.pos;
+        let bytes = self.bytes();
+        let mut at = start + 9;
+        let mut quote = None;
+        let mut subset = None;
+        let mut end = None;
+        while at < bytes.len() {
+            let byte = bytes[at];
+            match quote {
+                Some(open) if byte == open => quote = None,
+                Some(_) => {}
+                None => match byte {
+                    b'"' | b'\'' => quote = Some(byte),
+                    b'[' if subset.is_none() => {
+                        let Some(close) = subset_end(bytes, at + 1) else {
+                            break;
                         };
-                    } else if c == b'<'
-                        && n == b'!'
-                        && avail < if state == Inst::Misc { 9 } else { 4 }
-                    {
-                        return;
-                    } else if state == Inst::Epilog {
-                        self.fatal("Extra content at the end of the document\n");
-                        self.halt();
-                        return;
-                    } else {
-                        self.inst = Inst::StartTag;
-                        if state == Inst::Misc || self.progressive == Progressive::Off {
-                            self.progressive = Progressive::StartTag;
-                        }
-                        (last_lt, last_gt) = self.lasts();
+                        subset = Some((at + 1, close));
+                        at = close;
                     }
-                }
-                Inst::Dtd => {
-                    let Some(end) = self.internal_subset_end() else {
-                        return;
-                    };
-                    self.advance(end + 1 - self.cur);
-                    self.inst = Inst::Prolog;
-                }
-                Inst::StartTag => {
-                    if avail < 2 {
-                        return;
+                    b'>' => {
+                        end = Some(at + 1);
+                        break;
                     }
-                    if c != b'<' {
-                        self.fatal("Document is empty\n");
-                        self.halt();
-                        return;
-                    }
-                    if !terminate && last_gt.is_none_or(|gt| self.cur >= gt) {
-                        return;
-                    }
-                    let line = self.line;
-                    let Some((name, bound)) = self.parse_start_tag() else {
-                        self.halt();
-                        return;
-                    };
-                    if self.at(self.cur) == b'/' && self.at(self.cur + 1) == b'>' {
-                        self.cur += 2;
-                        if !self.disable_sax {
-                            self.node_tab.pop();
-                        }
-                        self.ns_tab.truncate(self.ns_tab.len() - bound);
-                        self.inst = if self.name_tab.is_empty() {
-                            Inst::Epilog
-                        } else {
-                            Inst::Content
-                        };
-                        self.progressive = Progressive::On;
-                        continue;
-                    }
-                    if self.at(self.cur) == b'>' {
-                        self.advance(1);
-                    } else {
-                        self.fatal(format!("Couldn't find end of Start Tag {name}\n"));
-                        self.node_tab.pop();
-                    }
-                    self.name_tab.push((name, line, bound));
-                    self.inst = Inst::Content;
-                    self.progressive = Progressive::On;
-                }
-                Inst::Content => {
-                    if avail < 2 {
-                        return;
-                    }
-                    let before = self.cur;
-                    if c == b'<' && n == b'/' {
-                        self.inst = Inst::EndTag;
-                        continue;
-                    } else if c == b'<' && n == b'?' {
-                        if !terminate && self.lookup(self.cur, b"?>").is_none() {
-                            self.progressive = Progressive::Pi;
-                            return;
-                        }
-                        self.parse_pi();
-                        self.inst = Inst::Content;
-                        self.progressive = Progressive::On;
-                    } else if c == b'<' && n != b'!' {
-                        self.inst = Inst::StartTag;
-                        continue;
-                    } else if c == b'<'
-                        && n == b'!'
-                        && self.at(self.cur + 2) == b'-'
-                        && self.at(self.cur + 3) == b'-'
-                    {
-                        if avail < 4 {
-                            return;
-                        }
-                        if !terminate && self.lookup(self.cur + 4, b"-->").is_none() {
-                            self.progressive = Progressive::Comment;
-                            return;
-                        }
-                        self.parse_comment();
-                        self.inst = Inst::Content;
-                        self.progressive = Progressive::On;
-                    } else if self.buf[self.cur..self.pend].starts_with(b"<![CDATA[") {
-                        self.cur += 9;
-                        self.inst = Inst::Cdata;
-                        continue;
-                    } else if c == b'<' && n == b'!' && avail < 9 {
-                        return;
-                    } else if c == b'&' {
-                        if !terminate && self.lookup(self.cur, b";").is_none() {
-                            return;
-                        }
-                        self.parse_reference();
-                    } else {
-                        if avail < BIG_BUFFER_SIZE
-                            && !terminate
-                            && last_lt.is_none_or(|lt| self.cur > lt)
-                        {
-                            return;
-                        }
-                        self.parse_char_data();
-                    }
-                    if self.cur == before && self.inst != Inst::Eof {
-                        self.fatal("internal error: detected an error in element content\n\n");
-                        self.halt();
-                    }
-                }
-                Inst::EndTag => {
-                    if avail < 2 {
-                        return;
-                    }
-                    if !terminate && last_gt.is_none_or(|gt| self.cur >= gt) {
-                        return;
-                    }
-                    self.parse_end_tag();
-                    if let Some((_, _, bound)) = self.name_tab.pop() {
-                        self.ns_tab.truncate(self.ns_tab.len() - bound);
-                    }
-                    if self.inst != Inst::Eof {
-                        self.inst = if self.name_tab.is_empty() {
-                            Inst::Epilog
-                        } else {
-                            Inst::Content
-                        };
-                    }
-                }
-                Inst::Cdata => match self.lookup(self.cur, b"]]>") {
-                    None => {
-                        if avail >= BIG_BUFFER_SIZE + 2 {
-                            let block = self.buf[self.cur..self.cur + BIG_BUFFER_SIZE].to_vec();
-                            if !self.disable_sax {
-                                self.cdata_block(&block);
-                            }
-                            self.advance(BIG_BUFFER_SIZE);
-                        }
-                        return;
-                    }
-                    Some(end) => {
-                        let block = self.buf[self.cur..end].to_vec();
-                        if !self.disable_sax
-                            && (!block.is_empty() || self.buf[..self.cur].ends_with(b"<![CDATA["))
-                        {
-                            self.cdata_block(&block);
-                        }
-                        self.advance(end + 3 - self.cur);
-                        self.inst = Inst::Content;
-                    }
+                    _ => {}
                 },
             }
+            at += 1;
         }
-    }
-
-    /// The `]` S? `>` that ends a DOCTYPE internal subset, outside quotes
-    /// and comments.
-    fn internal_subset_end(&self) -> Option<usize> {
-        let mut quote = None;
-        let mut position = self.cur;
-        while position < self.pend {
-            let byte = self.buf[position];
-            if let Some(open) = quote {
-                if byte == open {
-                    quote = None;
-                }
-            } else if byte == b'<' && self.buf[position..self.pend].starts_with(b"<!--") {
-                position = self.lookup(position + 4, b"-->")? + 2;
-            } else if matches!(byte, b'"' | b'\'') {
-                quote = Some(byte);
-            } else if byte == b']' {
-                if self.at(position + 1) == b']' {
-                    position += 1;
-                } else {
-                    let gt = position
-                        + 1
-                        + self.buf[position + 1..self.pend]
-                            .iter()
-                            .position(|byte| !is_blank(*byte))?;
-                    if self.buf[gt] == b'>' {
-                        return Some(gt);
-                    }
-                }
+        let Some(end) = end else {
+            if self.stop_error.is_some() {
+                self.at_end(start);
+            } else {
+                self.truncated_doctype(start);
             }
-            position += 1;
-        }
-        None
-    }
-
-    /// `xmlParseName` at the cursor.
-    fn parse_name(&mut self) -> Option<String> {
-        if !is_name_start(self.at(self.cur)) {
-            return None;
-        }
-        self.take_while(is_name_char)
-    }
-
-    /// `xmlParseNCName`: a name without colons.
-    fn parse_ncname(&mut self) -> Option<String> {
-        let byte = self.at(self.cur);
-        if byte == b':' || !is_name_start(byte) {
-            return None;
-        }
-        self.take_while(|byte| byte != b':' && is_name_char(byte))
-    }
-
-    fn take_while(&mut self, accept: impl Fn(u8) -> bool) -> Option<String> {
-        let start = self.cur;
-        while self.cur < self.pend && accept(self.buf[self.cur]) {
-            self.cur += 1;
-        }
-        (self.cur > start).then(|| String::from_utf8_lossy(&self.buf[start..self.cur]).into_owned())
-    }
-
-    /// `xmlParseQName`: the prefix, if one parsed, and the full name.
-    fn parse_qname(&mut self) -> Option<(Option<String>, String)> {
-        let Some(local) = self.parse_ncname() else {
-            if self.at(self.cur) == b':' {
-                let name = self.parse_name()?;
-                self.ns_error(format!("Failed to parse QName '{name}'\n"));
-                return Some((None, name));
-            }
-            return None;
+            return;
         };
-        if self.at(self.cur) != b':' {
-            return Some((None, local));
-        }
-        self.cur += 1;
-        let prefix = local;
-        let Some(local) = self.parse_ncname() else {
-            self.ns_error(format!("Failed to parse QName '{prefix}:'\n"));
-            let rest = self.take_while(is_name_char).unwrap_or_default();
-            return Some((None, format!("{prefix}:{rest}")));
-        };
-        if self.at(self.cur) == b':' {
-            self.ns_error(format!("Failed to parse QName '{prefix}:{local}:'\n"));
-            self.cur += 1;
-            let rest = self.parse_name().unwrap_or_default();
-            return Some((None, format!("{prefix}:{local}:{rest}")));
-        }
-        Some((Some(prefix.clone()), format!("{prefix}:{local}")))
-    }
-
-    fn bound(&self, prefix: &str) -> bool {
-        prefix == "xml" || self.ns_tab.iter().any(|bound| bound == prefix)
-    }
-
-    /// `xmlParseStartTag2`: the element name and how many prefixes it
-    /// bound, or None when it has no name.
-    fn parse_start_tag(&mut self) -> Option<(String, usize)> {
-        self.cur += 1;
-        let Some((prefix, name)) = self.parse_qname() else {
-            self.fatal("StartTag: invalid element name\n");
-            return None;
-        };
-        self.skip_blanks();
-        let mut attributes: Vec<(Option<String>, String)> = Vec::new();
-        let mut bound = 0;
-        loop {
-            let byte = self.at(self.cur);
-            if byte == b'>'
-                || (byte == b'/' && self.at(self.cur + 1) == b'>')
-                || !(byte >= 0x20 || matches!(byte, b'\t' | b'\n' | b'\r'))
-                || self.inst == Inst::Eof
-            {
-                break;
-            }
-            if let Some((attribute_prefix, attribute)) = self.parse_attribute() {
-                match attribute_prefix.as_deref() {
-                    None if attribute == "xmlns" => {
-                        self.ns_tab.push(String::new());
-                        bound += 1;
-                    }
-                    Some("xmlns") => {
-                        self.ns_tab.push(attribute["xmlns:".len()..].to_owned());
-                        bound += 1;
-                    }
-                    _ => attributes.push((attribute_prefix, attribute)),
-                }
-            }
-            let byte = self.at(self.cur);
-            if byte == b'>' || (byte == b'/' && self.at(self.cur + 1) == b'>') {
-                break;
-            }
-            if self.skip_blanks() == 0 {
-                self.fatal("attributes construct error\n");
-                break;
-            }
-        }
-        let local = |name: &str| name.rsplit(':').next().unwrap_or(name).to_owned();
-        for index in 0..attributes.len() {
-            let (attribute_prefix, attribute) = attributes[index].clone();
-            if let Some(attribute_prefix) = attribute_prefix.filter(|bound| !self.bound(bound)) {
-                let message = format!(
-                    "Namespace prefix {attribute_prefix} for {} on {} is not defined\n",
-                    local(&attribute),
-                    local(&name)
-                );
-                self.ns_error(message);
-            }
-            if attributes[..index]
-                .iter()
-                .any(|(_, earlier)| *earlier == attribute)
-            {
-                self.attribute_redefined(&attribute);
-            }
-        }
-        if let Some(prefix) = prefix.filter(|bound| !self.bound(bound)) {
-            let message = format!(
-                "Namespace prefix {prefix} on {} is not defined\n",
-                local(&name)
+        self.pos = end;
+        if self.phase != Phase::Prolog {
+            self.fatal(
+                start,
+                Some(end),
+                "internal error: detected an error in element content\n",
+                start,
             );
-            self.ns_error(message);
+            return;
         }
-        if !self.disable_sax {
-            self.start_element(name.clone());
+        if let Some((from, to)) = subset {
+            let names = entity_names(&self.bytes()[from..to]);
+            self.declared.extend(names);
         }
-        Some((name, bound))
+        self.node(start, Some(end), Event::Doctype);
     }
 
-    /// `xmlErrAttributeDup`.
-    fn attribute_redefined(&mut self, attribute: &str) {
-        self.fatal(format!("Attribute {attribute} redefined\n"));
-    }
-
-    /// `xmlParseAttribute2`: the attribute's prefix and name, or None when
-    /// it has no name or no value. The value is checked and dropped.
-    fn parse_attribute(&mut self) -> Option<(Option<String>, String)> {
-        let Some((prefix, name)) = self.parse_qname() else {
-            self.fatal("error parsing attribute name\n");
-            return None;
+    fn start_tag(&mut self) {
+        let start = self.pos;
+        let len = self.bytes().len();
+        let first = self.char_at(start + 1);
+        if !first.is_some_and(is_name_start) {
+            self.fatal(
+                start,
+                Some(start + 2),
+                "StartTag: invalid element name",
+                start + 1,
+            );
+            return;
+        }
+        let name_end = self.scan_name(start + 1);
+        let name = self.text[start + 1..name_end].to_owned();
+        let next_gt = find(self.bytes(), b">", name_end).map(|at| at + 1);
+        let mut at = name_end;
+        let mut attributes = std::collections::HashSet::new();
+        let outcome = loop {
+            while at < len && is_blank(self.bytes()[at]) {
+                at += 1;
+            }
+            if at >= len {
+                break Err(None);
+            }
+            let rest = &self.bytes()[at..];
+            if rest.starts_with(b"/>") {
+                break Ok((at + 2, true));
+            }
+            if rest[0] == b'>' {
+                break Ok((at + 1, false));
+            }
+            if rest[0] == b'/' && rest.len() == 1 {
+                break Err(None);
+            }
+            if at == name_end || !self.char_at(at).is_some_and(is_name_start) {
+                break Err(Some((
+                    format!("Couldn't find end of Start Tag {name}"),
+                    at,
+                    false,
+                )));
+            }
+            let attr_end = self.scan_name(at);
+            let attr = self.text[at..attr_end].to_owned();
+            at = attr_end;
+            while at < len && is_blank(self.bytes()[at]) {
+                at += 1;
+            }
+            if at >= len {
+                break Err(None);
+            }
+            if self.bytes()[at] != b'=' {
+                break Err(Some((
+                    format!("Specification mandates value for attribute {attr}"),
+                    at,
+                    true,
+                )));
+            }
+            at += 1;
+            while at < len && is_blank(self.bytes()[at]) {
+                at += 1;
+            }
+            if at >= len {
+                break Err(None);
+            }
+            let quote = self.bytes()[at];
+            if quote != b'"' && quote != b'\'' {
+                break Err(Some(("AttValue: \" or ' expected".to_owned(), at, true)));
+            }
+            let Some(close) = self.bytes()[at + 1..]
+                .iter()
+                .position(|byte| *byte == quote)
+            else {
+                break Err(None);
+            };
+            at += close + 2;
+            if !attributes.insert(attr.clone()) {
+                break Err(Some((format!("Attribute {attr} redefined"), at, false)));
+            }
         };
-        self.skip_blanks();
-        if self.at(self.cur) != b'=' {
-            self.fatal(format!(
-                "Specification mandates value for attribute {}\n",
-                name.rsplit(':').next().unwrap_or(&name)
-            ));
-            return None;
+        match outcome {
+            Ok((end, empty)) => {
+                self.pos = end;
+                if self.phase == Phase::Epilog {
+                    self.fatal(start, Some(start + 2), EXTRA_CONTENT, start);
+                    return;
+                }
+                if !empty && self.open.len() >= MAX_DEPTH {
+                    self.fatal(
+                        start,
+                        Some(end),
+                        format!("Excessive depth in document: {MAX_DEPTH}"),
+                        start,
+                    );
+                    return;
+                }
+                let line = self.line_at(start);
+                self.node(
+                    start,
+                    Some(end),
+                    Event::Start {
+                        name: name.clone(),
+                        empty,
+                    },
+                );
+                if empty {
+                    if self.open.is_empty() {
+                        self.phase = Phase::Epilog;
+                    }
+                } else {
+                    self.open.push((name, line));
+                    self.phase = Phase::Content;
+                }
+            }
+            Err(Some((message, caret, bad_attribute))) => {
+                let ready = next_gt;
+                self.pos = ready.unwrap_or(len);
+                if self.phase == Phase::Epilog {
+                    self.fatal(start, Some(start + 2), EXTRA_CONTENT, start);
+                } else if ready.is_none() && self.stop_error.is_some() {
+                    self.at_end(start);
+                } else if bad_attribute {
+                    // A malformed attribute is reported three times over,
+                    // ending with the start tag itself.
+                    self.note(start, ready, message, caret);
+                    self.note(start, ready, "attributes construct error", caret);
+                    self.fatal(
+                        start,
+                        ready,
+                        format!("Couldn't find end of Start Tag {name}"),
+                        caret,
+                    );
+                } else {
+                    self.fatal(start, ready, message, caret);
+                }
+            }
+            Err(None) => {
+                // The start tag runs into the end of the input. The
+                // reference still creates the element under the name read
+                // so far (`parse_tag_rrd: Unknown tag: na`).
+                self.pos = len;
+                if self.stop_error.is_some() {
+                    self.at_end(start);
+                    return;
+                }
+                if self.phase == Phase::Epilog {
+                    self.fatal(start, None, EXTRA_CONTENT, start);
+                    return;
+                }
+                self.node(
+                    start,
+                    None,
+                    Event::Start {
+                        name: name.clone(),
+                        empty: false,
+                    },
+                );
+                self.fatal(
+                    start,
+                    None,
+                    format!("Couldn't find end of Start Tag {name}"),
+                    len,
+                );
+            }
         }
-        self.advance(1);
-        self.skip_blanks();
-        let quote = self.at(self.cur);
-        if !matches!(quote, b'"' | b'\'') {
-            self.fatal("AttValue: \" or ' expected\n");
-            return None;
+    }
+
+    /// Reports a DOCTYPE cut off by the end of the input, with the
+    /// diagnostics the parser prints for the part that is missing.
+    fn truncated_doctype(&mut self, start: usize) {
+        let len = self.bytes().len();
+        let mut at = start + "<!DOCTYPE".len();
+        while at < len && is_blank(self.bytes()[at]) {
+            at += 1;
         }
-        self.advance(1);
+        let name_end = self.scan_name(at);
+        if name_end == at {
+            self.note(start, None, "xmlParseDocTypeDecl : no DOCTYPE name !", len);
+        } else {
+            at = name_end;
+            while at < len && is_blank(self.bytes()[at]) {
+                at += 1;
+            }
+            let rest = &self.bytes()[at..];
+            if rest.starts_with(b"SYSTEM") || rest.starts_with(b"PUBLIC") {
+                let mut literal = at + 6;
+                while literal < len && is_blank(self.bytes()[literal]) {
+                    literal += 1;
+                }
+                if literal >= len {
+                    self.note(start, None, "SystemLiteral \" or ' expected", len);
+                    self.note(start, None, "SYSTEM or PUBLIC, the URI is missing", len);
+                } else {
+                    self.note(
+                        start,
+                        None,
+                        "Unfinished System or Public ID \" or ' expected",
+                        len,
+                    );
+                }
+            }
+        }
+        self.fatal(start, None, "DOCTYPE improperly terminated", len);
+    }
+
+    fn scan_name(&self, from: usize) -> usize {
+        let mut at = from;
+        while let Some(ch) = self.char_at(at).filter(|ch| is_name_char(*ch)) {
+            at += ch.len_utf8();
+        }
+        at
+    }
+
+    fn end_tag(&mut self) {
+        let start = self.pos;
+        let len = self.bytes().len();
+        let name_end = if self.char_at(start + 2).is_some_and(is_name_start) {
+            self.scan_name(start + 2)
+        } else {
+            start + 2
+        };
+        let name = self.text[start + 2..name_end].to_owned();
+        let mut at = name_end;
+        while at < len && is_blank(self.bytes()[at]) {
+            at += 1;
+        }
+        let complete = at < len && self.bytes()[at] == b'>';
+        let ready = if complete {
+            Some(at + 1)
+        } else {
+            find(self.bytes(), b">", at).map(|gt| gt + 1)
+        };
+        if ready.is_none() && self.stop_error.is_some() {
+            self.pos = len;
+            self.at_end(start);
+            return;
+        }
+        self.pos = ready.unwrap_or(len);
+        let Some((open, line)) = self.open.last().cloned() else {
+            self.fatal(start, ready.or(Some(start + 2)), EXTRA_CONTENT, start);
+            return;
+        };
+        if complete && name == open {
+            self.open.pop();
+            if self.open.is_empty() {
+                self.phase = Phase::Epilog;
+            }
+            self.emit(start, ready, Item::Close(name));
+            return;
+        }
+        let message = if name.is_empty() {
+            format!("Opening and ending tag mismatch: {open} line {line} and unparsable")
+        } else if name != open {
+            format!("Opening and ending tag mismatch: {open} line {line} and {name}")
+        } else {
+            "expected '>'".to_owned()
+        };
+        self.emit(start, ready, Item::BrokenClose);
+        let caret = if complete { at + 1 } else { at };
+        // An end tag cut off by the end of the input is first reported as
+        // missing its `>`.
+        if ready.is_none() && !name.is_empty() && name != open {
+            self.note(start, ready, "expected '>'", caret);
+        }
+        self.fatal(start, ready, message, caret);
+    }
+
+    /// Character data up to the next `<`, with references expanded.
+    fn text_run(&mut self) {
+        let start = self.pos;
+        let len = self.bytes().len();
+        let end = self.bytes()[start..]
+            .iter()
+            .position(|byte| *byte == b'<')
+            .map_or(len, |at| start + at);
+        self.pos = end;
+        let reaches_end = end == len;
+        if reaches_end && self.stop_error.is_some() {
+            self.at_end(start);
+            return;
+        }
+        let ready = (!reaches_end).then_some(end + 1);
+        // Compatibility: a single trailing byte of character data is never
+        // handed to the document, even at the end of the input.
+        // Provenance: black-box compatibility test (truncations ending in
+        // one byte of white space or `<`).
+        if reaches_end && end - start < 2 {
+            self.at_end(start);
+            return;
+        }
+        let raw = self.text[start..end].to_owned();
+        if raw.contains("]]>") {
+            self.fatal(start, ready, "Sequence ']]>' not allowed in content", start);
+            return;
+        }
+        let mut text = String::with_capacity(raw.len());
+        let mut chars = raw.char_indices().peekable();
+        while let Some((offset, ch)) = chars.next() {
+            match ch {
+                '\r' => {
+                    if chars.peek().is_some_and(|(_, next)| *next == '\n') {
+                        chars.next();
+                    }
+                    text.push('\n');
+                }
+                '&' => {
+                    let tail = &raw[offset + 1..];
+                    let Some(semi) = tail.find(';') else {
+                        self.fatal(start, ready, "EntityRef: expecting ';'", start + offset + 1);
+                        return;
+                    };
+                    let reference = &tail[..semi];
+                    for _ in 0..reference.chars().count() + 1 {
+                        chars.next();
+                    }
+                    match self.reference(reference) {
+                        Ok(Some(expanded)) => text.push(expanded),
+                        Ok(None) => {}
+                        Err(Expansion::Undefined(name)) => {
+                            let at = self.raw(start + offset + semi + 2);
+                            self.emit(
+                                start,
+                                ready,
+                                Item::Note {
+                                    message: format!("Entity '{name}' not defined"),
+                                    at,
+                                    warning: false,
+                                },
+                            );
+                        }
+                        Err(Expansion::Fatal(message)) => {
+                            self.fatal(start, ready, message, start + offset + 2 + semi);
+                            return;
+                        }
+                    }
+                }
+                ch if is_bad_char(ch) => {
+                    self.fatal(start, ready, bad_char_message(ch), start + offset);
+                    return;
+                }
+                ch => text.push(ch),
+            }
+        }
+        let blank = text.bytes().all(is_blank);
+        self.node(start, ready, Event::Text { text, blank });
+        if reaches_end {
+            self.at_end(end);
+        }
+    }
+
+    fn reference(&self, reference: &str) -> Result<Option<char>, Expansion> {
+        if let Some(number) = reference.strip_prefix('#') {
+            let value = match number.strip_prefix('x') {
+                Some(hex) if !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit()) => {
+                    u32::from_str_radix(hex, 16).ok()
+                }
+                None if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) => {
+                    number.parse::<u32>().ok()
+                }
+                _ => {
+                    return Err(Expansion::Fatal(
+                        "xmlParseCharRef: invalid decimal value".into(),
+                    ));
+                }
+            };
+            let value = value.unwrap_or(u32::MAX);
+            return match char::from_u32(value).filter(|ch| !is_bad_char(*ch)) {
+                Some(ch) => Ok(Some(ch)),
+                None => Err(Expansion::Fatal(format!(
+                    "xmlParseCharRef: invalid xmlChar value {value}"
+                ))),
+            };
+        }
+        match reference {
+            "lt" => Ok(Some('<')),
+            "gt" => Ok(Some('>')),
+            "amp" => Ok(Some('&')),
+            "apos" => Ok(Some('\'')),
+            "quot" => Ok(Some('"')),
+            "" => Err(Expansion::Fatal("xmlParseEntityRef: no name".into())),
+            name if !name.chars().next().is_some_and(is_name_start)
+                || !name.chars().all(is_name_char) =>
+            {
+                Err(Expansion::Fatal("EntityRef: expecting ';'".into()))
+            }
+            // Compatibility: an entity declared in an internal subset is
+            // dropped rather than substituted (RS-11).
+            // Provenance: black-box compatibility test
+            // (`value-internal-entity`).
+            name if self.declared.contains(name) => Ok(None),
+            name => Err(Expansion::Undefined(name.to_owned())),
+        }
+    }
+
+    fn node(&mut self, start: usize, ready: Option<usize>, event: Event) {
+        self.emit(start, ready, Item::Node(event));
+    }
+}
+
+enum Expansion {
+    Undefined(String),
+    Fatal(String),
+}
+
+/// The offset of the `]` that closes an internal subset starting at `from`.
+fn subset_end(bytes: &[u8], from: usize) -> Option<usize> {
+    let mut quote = None;
+    let mut at = from;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        match quote {
+            Some(open) if byte == open => quote = None,
+            Some(_) => {}
+            None if bytes[at..].starts_with(b"<!--") => {
+                at = find(bytes, b"-->", at + 4)? + 2;
+            }
+            None if byte == b'"' || byte == b'\'' => quote = Some(byte),
+            None if byte == b']' => return Some(at),
+            None => {}
+        }
+        at += 1;
+    }
+    None
+}
+
+fn entity_names(subset: &[u8]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut from = 0;
+    while let Some(at) = find(subset, b"<!ENTITY", from) {
+        let rest = trim_start(&subset[at + 8..]);
+        let rest = rest.strip_prefix(b"%").map_or(rest, trim_start);
+        let len = rest
+            .iter()
+            .position(|byte| is_blank(*byte) || *byte == b'>')
+            .unwrap_or(rest.len());
+        names.push(String::from_utf8_lossy(&rest[..len]).into_owned());
+        from = at + 8;
+    }
+    names
+}
+
+// ---------------------------------------------------------------------------
+// Reader.
+
+#[derive(Debug)]
+struct Slot {
+    event: Event,
+    /// Number of enclosing elements.
+    depth: usize,
+    /// Absolute index of the enclosing element's start event.
+    parent: Option<usize>,
+    /// For start and end events, the absolute index of the start event.
+    element: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum State {
+    /// More input may still arrive.
+    Live,
+    /// All input arrived without a fatal error.
+    Finished,
+    /// The input ended with a fatal error. Nodes already built are still
+    /// handed out; `stop_at_end` makes the first end event fail instead.
+    Failed { stop_at_end: bool },
+    /// Every further read fails.
+    Dead,
+}
+
+struct OpenElement {
+    index: usize,
+    has_children: bool,
+    name: String,
+}
+
+/// What the reader knows about the event it delivered last.
+#[derive(Clone, Debug)]
+struct Position {
+    event: Event,
+    parent: Option<usize>,
+    element: Option<usize>,
+}
+
+/// Where the reader writes the XML library's own diagnostics.
+pub(crate) struct Diagnostics<'w> {
+    pub(crate) out: &'w mut dyn Write,
+    /// The file name the diagnostics carry; `None` silences them.
+    pub(crate) name: Option<String>,
+}
+
+pub(crate) struct Reader<'a, 'w> {
+    stream: &'a [u8],
+    tokens: Tokenizer<'a>,
+    pending: Option<Construct>,
+    feed: Feed,
+    delivered: usize,
+    terminated: bool,
+    events: VecDeque<Slot>,
+    /// Absolute index of `events[0]`.
+    base: usize,
+    cursor: usize,
+    /// Absolute index of the last node event.
+    last_node: Option<usize>,
+    /// Elements the parser has opened and not closed.
+    open: Vec<OpenElement>,
+    state: State,
+    failure: Option<String>,
+    last: Option<Position>,
+    /// Stream offset the parser has consumed up to.
+    position: usize,
+    line_pos: usize,
+    line_no: u64,
+    /// Where diagnostics last counted lines up to, and the line there.
+    diagnostic_line: (usize, usize),
+    diagnostics: Diagnostics<'w>,
+}
+
+impl<'a, 'w> Reader<'a, 'w> {
+    pub(crate) fn new(input: &'a Prepared<'_>, diagnostics: Diagnostics<'w>) -> Self {
+        let stream: &[u8] = &input.stream;
+        let decoded = decode(stream, input.delivery);
+        let feed = match input.delivery {
+            Delivery::File => Feed::File {
+                len: stream.len(),
+                buffered: stream.len().min(PROBE),
+                handed: stream.len().min(PROBE),
+                eof: false,
+                done: false,
+            },
+            Delivery::Stdin => Feed::Lines {
+                ends: input.line_ends.clone(),
+                next: 0,
+                len: stream.len(),
+                done: false,
+            },
+        };
+        Self {
+            stream,
+            tokens: Tokenizer::new(decoded),
+            pending: None,
+            feed,
+            delivered: 0,
+            terminated: false,
+            events: VecDeque::new(),
+            base: 0,
+            cursor: 0,
+            last_node: None,
+            open: Vec::new(),
+            state: State::Live,
+            failure: None,
+            last: None,
+            position: 0,
+            line_pos: 0,
+            line_no: 1,
+            diagnostic_line: (0, 1),
+            diagnostics,
+        }
+    }
+
+    /// The library message of the fatal error, once one was reported.
+    pub(crate) fn failure(&self) -> Option<&str> {
+        self.failure.as_deref()
+    }
+
+    /// The event the reader is positioned on.
+    pub(crate) fn last(&self) -> Option<&Event> {
+        self.last.as_ref().map(|position| &position.event)
+    }
+
+    /// Whether every further read fails (the reference would retry forever).
+    pub(crate) fn is_dead(&self) -> bool {
+        self.state == State::Dead
+    }
+
+    /// The parser's current line: one more than the line feeds it consumed.
+    pub(crate) fn line(&mut self) -> u64 {
+        let end = self.position.min(self.stream.len());
+        if end > self.line_pos {
+            self.line_no += self.stream[self.line_pos..end]
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count() as u64;
+            self.line_pos = end;
+        }
+        self.line_no
+    }
+
+    pub(crate) fn read(&mut self) -> Read {
+        match self.state {
+            State::Dead => Read::Failed,
+            State::Live => self.read_live(),
+            State::Finished => match self.slot(self.cursor) {
+                Some(_) => self.deliver(),
+                None => Read::Eof,
+            },
+            State::Failed { stop_at_end } => match self.slot(self.cursor) {
+                // Compatibility: after a syntax error in a construct the
+                // reference still hands out the nodes it built, but cannot
+                // leave an element; after a document that merely ended
+                // early it also ends the open elements. Provenance:
+                // black-box compatibility test (truncations of `seed-mini`
+                // ending in `\n<`, `\n</d`, `\n</ds`, `<!--`, `<na` and
+                // `<xff>5.0000000000e-01</`).
+                Some(slot) if stop_at_end && !slot.event.is_node() => {
+                    self.state = State::Dead;
+                    Read::Failed
+                }
+                // Text that may still grow needs input the parser can no
+                // longer supply.
+                Some(slot)
+                    if stop_at_end
+                        && self.text_may_grow(self.cursor)
+                        && self.last_node.is_none_or(|last| last <= self.cursor)
+                        && self.open.len() >= slot.depth =>
+                {
+                    let _ = self.deliver();
+                    Read::Failed
+                }
+                Some(_) => self.deliver(),
+                None if stop_at_end => {
+                    self.state = State::Dead;
+                    Read::Failed
+                }
+                None => Read::Eof,
+            },
+        }
+    }
+
+    fn read_live(&mut self) -> Read {
+        let depth_at_start = self.open.len();
+        // Compatibility: the reader asks for more input only while the
+        // parser could still add a sibling after its position or a child
+        // to it. Provenance: black-box compatibility test (truncations of
+        // `seed-mini`, `wide-mismatch-late@stdin`, `two-roots@stdin`).
+        while self.needs_input(depth_at_start) {
+            if self.push().is_err() {
+                return Read::Failed;
+            }
+        }
         loop {
-            match self.at(self.cur) {
-                0 => {
-                    self.fatal("AttValue: ' expected\n");
-                    return None;
-                }
-                b'<' => {
-                    self.fatal("Unescaped '<' not allowed in attributes values\n");
-                    return None;
-                }
-                byte if byte == quote => {
-                    self.advance(1);
-                    return Some((prefix, name));
-                }
-                _ => self.advance(1),
+            match self.state {
+                State::Live => {}
+                _ => return self.read(),
+            }
+            if self.slot(self.cursor).is_some() {
+                break;
+            }
+            if self.push().is_err() {
+                return Read::Failed;
             }
         }
+        if self.text_may_grow(self.cursor) {
+            // Text is handed out only once something follows it, the
+            // parser has left its parent, or the input ended.
+            let depth = self.slot(self.cursor).map_or(0, |slot| slot.depth);
+            while self.state == State::Live
+                && self.last_node.is_none_or(|last| last <= self.cursor)
+                && self.open.len() >= depth
+            {
+                if self.push().is_err() {
+                    let _ = self.deliver();
+                    return Read::Failed;
+                }
+            }
+        }
+        self.deliver()
     }
 
-    /// `xmlParseEndTag2`.
-    fn parse_end_tag(&mut self) {
-        self.cur += 2;
-        let (expected, line, _) = self.name_tab.last().cloned().unwrap_or_default();
-        let length = expected.len();
-        let matched = if self.buf[self.cur..self.pend].starts_with(expected.as_bytes())
-            && (self.at(self.cur + length) == b'>' || is_blank(self.at(self.cur + length)))
-        {
-            self.cur += length;
-            None
-        } else {
-            match self.parse_name() {
-                Some(name) if name == expected => None,
-                Some(name) => Some(name),
-                None => Some("unparsable".to_owned()),
-            }
+    /// Whether the reader must see more input before it can move on from
+    /// its current position.
+    fn needs_input(&self, depth_at_start: usize) -> bool {
+        if self.state != State::Live || self.open.len() != depth_at_start {
+            return false;
+        }
+        let Some(last) = &self.last else {
+            return self.slot(self.cursor).is_none();
         };
-        self.skip_blanks();
-        if self.at(self.cur) == b'>' {
-            self.advance(1);
-        } else {
-            self.fatal("expected '>'\n");
-        }
-        if let Some(name) = matched {
-            self.fatal(format!(
-                "Opening and ending tag mismatch: {expected} line {line} and {name}\n"
-            ));
-        }
-        if !self.disable_sax {
-            self.node_tab.pop();
-        }
-    }
-
-    /// `xmlParseCharData`: text up to the next markup or the buffer end.
-    /// A `]]>` is reported from the start of the run, after the lines up
-    /// to it have been counted.
-    fn parse_char_data(&mut self) {
-        let start = self.cur;
-        let mut end = start;
-        while end < self.pend && !matches!(self.buf[end], b'<' | b'&') {
-            let byte = self.buf[end];
-            if byte == b']' && self.buf[end..self.pend].starts_with(b"]]>") {
-                let newlines = self.buf[start..end]
-                    .iter()
-                    .filter(|byte| **byte == b'\n')
-                    .count();
-                self.line += newlines;
-                self.fatal("Sequence ']]>' not allowed in content\n");
-                self.cur = end + 1;
-                return;
-            }
-            if byte < 0x20 && !matches!(byte, b'\t' | b'\n' | b'\r') {
-                self.emit_text(start, end);
-                self.advance(end - start);
-                self.fatal(format!("PCDATA invalid Char value {byte}\n"));
-                self.advance(1);
-                return;
-            }
-            end += 1;
-        }
-        self.emit_text(start, end);
-        self.advance(end - start);
-    }
-
-    fn emit_text(&mut self, start: usize, end: usize) {
-        if end > start && !self.disable_sax {
-            let text = self.buf[start..end].to_vec();
-            self.characters(&text);
-        }
-    }
-
-    /// `xmlParseReference`: character references and the predefined
-    /// entities become text; anything else is undeclared.
-    fn parse_reference(&mut self) {
-        if self.at(self.cur + 1) == b'#' {
-            let value = self.parse_char_ref();
-            if let Some(character) = value.and_then(char::from_u32).filter(|_| !self.disable_sax) {
-                let mut encoded = [0; 4];
-                let text = character.encode_utf8(&mut encoded).as_bytes().to_vec();
-                self.characters(&text);
-            }
-            return;
-        }
-        self.advance(1);
-        let Some(name) = self.parse_name() else {
-            self.fatal("xmlParseEntityRef: no name\n");
-            return;
-        };
-        if self.at(self.cur) != b';' {
-            self.fatal("EntityRef: expecting ';'\n");
-            return;
-        }
-        self.advance(1);
-        let predefined = match name.as_str() {
-            "lt" => Some(b"<"),
-            "gt" => Some(b">"),
-            "amp" => Some(b"&"),
-            "apos" => Some(b"'"),
-            "quot" => Some(b"\""),
+        let at = self.cursor;
+        let open_element = match &last.event {
+            Event::Start { empty: false, .. } => last.element,
             _ => None,
         };
-        match predefined {
-            Some(text) => {
-                if !self.disable_sax {
-                    self.characters(text);
-                }
-            }
-            None if self.external_subset => {
-                self.error(format!("Entity '{name}' not defined\n"));
-                if !self.disable_sax && !self.node_tab.is_empty() {
-                    self.add_leaf(Kind::EntityRef, name);
-                }
-            }
-            None => self.fatal(format!("Entity '{name}' not defined\n")),
-        }
-    }
-
-    /// `xmlParseCharRef`: the referenced character, or None after an error.
-    fn parse_char_ref(&mut self) -> Option<u32> {
-        let hex = self.at(self.cur + 2) == b'x';
-        self.cur += if hex { 3 } else { 2 };
-        let radix = if hex { 16 } else { 10 };
-        let mut value: u32 = 0;
-        while self.at(self.cur) != b';' {
-            match char::from(self.at(self.cur)).to_digit(radix) {
-                Some(digit) => value = (value * radix + digit).min(0x11_0000),
-                None => {
-                    self.fatal(if hex {
-                        "CharRef: invalid hexadecimal value\n"
-                    } else {
-                        "CharRef: invalid decimal value\n"
-                    });
-                    value = 0;
-                    break;
-                }
-            }
-            self.advance(1);
-        }
-        if self.at(self.cur) == b';' {
-            self.cur += 1;
-        }
-        if value >= 0x11_0000 {
-            self.fatal("xmlParseCharRef: character reference out of bounds\n");
-            None
-        } else if is_xml_char(value) {
-            Some(value)
-        } else {
-            self.fatal(format!("xmlParseCharRef: invalid xmlChar value {value}\n"));
-            None
-        }
-    }
-
-    /// `xmlParseComment`, scanning the way its fast path does: a `--`
-    /// inside is reported where it stands and the scan goes on, a control
-    /// character ends it, and a comment cut off by the end of the input is
-    /// reported at that end.
-    fn parse_comment(&mut self) {
-        let body = self.cur + 4;
-        self.cur = body;
-        loop {
-            if self.cur >= self.pend {
-                self.fatal("Comment not terminated\n");
-                return;
-            }
-            let byte = self.buf[self.cur];
-            if byte == b'-' && self.at(self.cur + 1) == b'-' {
-                if self.at(self.cur + 2) == b'>' {
-                    self.advance(3);
-                    if !self.disable_sax {
-                        self.add_leaf(Kind::Comment, String::new());
-                    }
-                    return;
-                }
-                let so_far =
-                    String::from_utf8_lossy(&self.buf[body..self.cur.min(body + 50)]).into_owned();
-                self.fatal(if so_far.is_empty() {
-                    "Double hyphen within comment\n".to_owned()
-                } else {
-                    format!("Double hyphen within comment: <!--{so_far}\n")
-                });
-                if self.inst == Inst::Eof {
-                    return;
-                }
-                self.advance(1);
-            } else if byte < 0x20 && !matches!(byte, b'\t' | b'\n' | b'\r') {
-                self.fatal(format!("xmlParseComment: invalid xmlChar value {byte}\n"));
-                return;
-            }
-            self.advance(1);
-        }
-    }
-
-    /// `xmlParsePI`.
-    fn parse_pi(&mut self) {
-        self.cur += 2;
-        let Some(target) = self.parse_name() else {
-            self.fatal("xmlParsePI : no target name\n");
-            return;
+        let next_sibling_at = match open_element {
+            None => Some(at),
+            Some(element) => match self.slot(at).map(|slot| &slot.event) {
+                None => None,
+                Some(Event::End { .. }) => Some(at + 1),
+                Some(Event::Text { .. }) => match self.slot(at + 1) {
+                    None => None,
+                    Some(slot) if slot.element == Some(element) => Some(at + 2),
+                    Some(_) => return false,
+                },
+                Some(_) => return false,
+            },
         };
-        if target == "xml" {
-            self.fatal("XML declaration allowed only at the start of the document\n");
-        } else if target.eq_ignore_ascii_case("xml") {
-            self.fatal("Invalid PI name\n");
-        }
-        if !(self.at(self.cur) == b'?' && self.at(self.cur + 1) == b'>') && self.skip_blanks() == 0
+        if next_sibling_at
+            .and_then(|index| self.slot(index))
+            .is_some_and(|slot| slot.event.is_node())
         {
-            self.fatal(format!("ParsePI: PI {target} space expected\n"));
+            return false;
         }
-        loop {
-            let byte = self.at(self.cur);
-            if byte == b'?' && self.at(self.cur + 1) == b'>' {
-                self.advance(2);
-                if !self.disable_sax {
-                    self.add_leaf(Kind::Pi, target);
-                }
-                return;
+        match self.open.last() {
+            None => true,
+            Some(current) => {
+                Some(current.index) == last.element || Some(current.index) == last.parent
             }
-            if self.cur >= self.pend || (byte < 0x20 && !matches!(byte, b'\t' | b'\n' | b'\r')) {
-                self.fatal(format!("ParsePI: PI {target} never end ...\n"));
-                return;
-            }
-            self.advance(1);
         }
     }
 
-    /// `xmlParseXMLDecl`. The encoding is checked but not applied: the
-    /// input is always read as UTF-8.
-    fn parse_xml_decl(&mut self) {
-        self.cur += 5;
-        self.skip_blanks();
-        match self.parse_version_info() {
-            None => self.fatal("Malformed declaration expecting version\n"),
-            Some(version) if version != "1.0" => {
-                let message = format!("Unsupported version '{version}'\n");
-                if version.starts_with("1.") {
-                    self.warning(message);
-                } else {
-                    self.fatal(message);
-                }
-            }
-            Some(_) => {}
-        }
-        if !is_blank(self.at(self.cur)) {
-            if self.at(self.cur) == b'?' && self.at(self.cur + 1) == b'>' {
-                self.cur += 2;
-                return;
-            }
-            self.fatal("Blank needed here\n");
-        }
-        let encoding = self.parse_encoding_decl();
-        if self.unsupported_encoding || self.inst == Inst::Eof {
-            return;
-        }
-        if encoding.is_some() && !is_blank(self.at(self.cur)) {
-            if self.at(self.cur) == b'?' && self.at(self.cur + 1) == b'>' {
-                self.cur += 2;
-                return;
-            }
-            self.fatal("Blank needed here\n");
-        }
-        self.skip_blanks();
-        self.parse_standalone_decl();
-        self.skip_blanks();
-        if self.at(self.cur) == b'?' && self.at(self.cur + 1) == b'>' {
-            self.cur += 2;
-        } else if self.at(self.cur) == b'>' {
-            self.fatal("parsing XML declaration: '?>' expected\n");
-            self.advance(1);
-        } else {
-            self.fatal("parsing XML declaration: '?>' expected\n");
-            // MOVETO_ENDTAG moves the cursor without counting lines.
-            while !matches!(self.at(self.cur), 0 | b'>') {
-                self.cur += 1;
-            }
-            self.advance(1);
-        }
+    /// Whether the event at `index` is text with nothing known after it.
+    fn text_may_grow(&self, index: usize) -> bool {
+        let is_text = self
+            .slot(index)
+            .is_some_and(|slot| matches!(slot.event, Event::Text { .. } | Event::CData));
+        is_text
+            && self
+                .slot(index + 1)
+                .is_none_or(|slot| !slot.event.is_node())
     }
 
-    /// `name S? = S?` of a declaration attribute; false after an error.
-    fn decl_attribute(&mut self, name: &[u8]) -> Option<bool> {
-        self.skip_blanks();
-        if !self.buf[self.cur..self.pend].starts_with(name) {
-            return None;
-        }
-        self.cur += name.len();
-        self.skip_blanks();
-        if self.at(self.cur) != b'=' {
-            self.fatal("expected '='\n");
-            return Some(false);
-        }
-        self.advance(1);
-        self.skip_blanks();
-        Some(true)
+    fn slot(&self, index: usize) -> Option<&Slot> {
+        self.events.get(index.checked_sub(self.base)?)
     }
 
-    /// A quoted declaration value read by `value`, with libxml2's quote
-    /// errors. The version survives a missing closing quote; the encoding
-    /// does not.
-    fn decl_value(
-        &mut self,
-        keep_unclosed: bool,
-        value: impl FnOnce(&mut Self) -> Option<String>,
-    ) -> Option<String> {
-        let quote = self.at(self.cur);
-        if !matches!(quote, b'"' | b'\'') {
-            self.fatal("String not started expecting ' or \"\n");
-            return None;
+    fn deliver(&mut self) -> Read {
+        let Some(slot) = self.slot(self.cursor) else {
+            return Read::Eof;
+        };
+        let event = slot.event.clone();
+        self.last = Some(Position {
+            event: event.clone(),
+            parent: slot.parent,
+            element: slot.element,
+        });
+        self.cursor += 1;
+        // The reader never looks behind its position again.
+        while self.base < self.cursor && !self.events.is_empty() {
+            self.events.pop_front();
+            self.base += 1;
         }
-        self.advance(1);
-        let parsed = value(self);
-        if self.at(self.cur) != quote {
-            self.fatal("String not closed expecting \" or '\n");
-            return parsed.filter(|_| keep_unclosed);
-        }
-        self.advance(1);
-        parsed
+        Read::Event(event)
     }
 
-    /// `xmlParseVersionInfo`.
-    fn parse_version_info(&mut self) -> Option<String> {
-        if self.decl_attribute(b"version") != Some(true) {
-            return None;
+    fn push_event(&mut self, event: Event, element: Option<usize>) {
+        let index = self.base + self.events.len();
+        if event.is_node() {
+            self.last_node = Some(index);
         }
-        self.decl_value(true, |reader| {
-            let start = reader.cur;
-            if !reader.at(reader.cur).is_ascii_digit() {
-                return None;
-            }
-            reader.advance(1);
-            if reader.at(reader.cur) != b'.' {
-                return None;
-            }
-            reader.advance(1);
-            while reader.at(reader.cur).is_ascii_digit() {
-                reader.advance(1);
-            }
-            Some(String::from_utf8_lossy(&reader.buf[start..reader.cur]).into_owned())
-        })
-    }
-
-    /// `xmlParseEncodingDecl`, failing on a name iconv would not know.
-    fn parse_encoding_decl(&mut self) -> Option<String> {
-        if self.decl_attribute(b"encoding") != Some(true) {
-            return None;
-        }
-        let encoding = self.decl_value(false, |reader| {
-            if !reader.at(reader.cur).is_ascii_alphabetic() {
-                reader.fatal("Invalid XML encoding name\n");
-                return None;
-            }
-            reader.take_while(|byte| {
-                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
-            })
-        })?;
-        let upper = encoding.to_ascii_uppercase();
-        // UTF-8 is native and UTF-16 would already have been switched to, so
-        // neither is kept as `input->encoding`.
-        if matches!(upper.as_str(), "UTF-16" | "UTF16") {
-            self.fatal("Document labelled UTF-16 but has UTF-8 content\n");
-            return None;
-        }
-        if matches!(upper.as_str(), "UTF-8" | "UTF8") {
-            return None;
-        }
-        let known = matches!(
-            upper.as_str(),
-            "UTF-8"
-                | "UTF8"
-                | "UTF-16"
-                | "UTF16"
-                | "US-ASCII"
-                | "ASCII"
-                | "LATIN1"
-                | "ISO-LATIN-1"
-                | "UCS-2"
-                | "UCS2"
-                | "UCS-4"
-                | "UCS4"
-        ) || upper.starts_with("ISO-8859-")
-            || upper.starts_with("WINDOWS-")
-            || upper.starts_with("CP");
-        if !known {
-            self.fatal(format!("Unsupported encoding {encoding}\n"));
-            self.unsupported_encoding = true;
-            return None;
-        }
-        Some(encoding)
-    }
-
-    /// `xmlParseSDDecl`.
-    fn parse_standalone_decl(&mut self) {
-        if self.decl_attribute(b"standalone") != Some(true) {
-            return;
-        }
-        let _ = self.decl_value(false, |reader| {
-            let rest = &reader.buf[reader.cur..reader.pend];
-            if rest.starts_with(b"no") {
-                reader.cur += 2;
-            } else if rest.starts_with(b"yes") {
-                reader.cur += 3;
-            } else {
-                reader.fatal("standalone accepts only 'yes' or 'no'\n");
-            }
-            Some(String::new())
+        // Callers pop a closed element before adding its end event, so the
+        // end event sits outside it, at its depth.
+        let depth = self.open.len();
+        let parent = self.open.last().map(|open| open.index);
+        self.events.push_back(Slot {
+            event,
+            depth,
+            parent,
+            element,
         });
     }
 
-    /// `xmlParseDocTypeDecl` up to an internal subset.
-    fn parse_doctype(&mut self) {
-        self.cur += 9;
-        self.skip_blanks();
-        let name = self.parse_name();
-        if name.is_none() {
-            self.fatal("xmlParseDocTypeDecl : no DOCTYPE name !\n");
-        }
-        self.skip_blanks();
-        let rest = &self.buf[self.cur..self.pend];
-        if rest.starts_with(b"SYSTEM") {
-            self.cur += 6;
-            if self.skip_blanks() == 0 {
-                self.fatal("Space required after 'SYSTEM'\n");
+    /// Delivers the next piece of input and lets the parser handle every
+    /// construct it completes.
+    fn push(&mut self) -> Result<(), ()> {
+        let Some((delivered, terminate)) = self.feed.next() else {
+            self.state = State::Finished;
+            return Ok(());
+        };
+        self.delivered = delivered;
+        self.terminated |= terminate;
+        loop {
+            let construct = match self.pending.take() {
+                Some(construct) => construct,
+                None => match self.tokens.next() {
+                    Some(construct) => construct,
+                    None => break,
+                },
+            };
+            let ready =
+                self.terminated || construct.ready.is_some_and(|ready| ready <= self.delivered);
+            if !ready {
+                self.position = construct.start.min(self.delivered);
+                self.pending = Some(construct);
+                break;
             }
-            if self.parse_literal() {
-                self.external_subset = true;
-            } else {
-                self.fatal("SYSTEM or PUBLIC, the URI is missing\n");
-            }
-        } else if rest.starts_with(b"PUBLIC") {
-            self.cur += 6;
-            if self.skip_blanks() == 0 {
-                self.fatal("Space required after 'PUBLIC'\n");
-            }
-            if self.parse_literal() {
-                self.external_subset = true;
-                if self.skip_blanks() == 0 {
-                    self.fatal("Space required after the Public Identifier\n");
-                }
-                if !self.parse_literal() {
-                    self.fatal("SYSTEM or PUBLIC, the URI is missing\n");
-                }
-            } else {
-                self.fatal("PUBLIC, the Public Identifier is missing\n");
+            // A syntax error stops the parser where it found it; a leftover
+            // it never parses leaves it where the leftover begins.
+            self.position = match (&construct.item, construct.ready) {
+                (
+                    Item::Fatal {
+                        document_end: true, ..
+                    },
+                    _,
+                ) => construct.start,
+                (Item::Fatal { at, .. }, _) => *at,
+                (_, Some(ready)) => ready,
+                (_, None) => self.stream.len(),
+            };
+            if let Err((message, document_end)) = self.apply(construct) {
+                self.fail(message, terminate, document_end);
+                return Err(());
             }
         }
-        self.skip_blanks();
-        if !self.disable_sax {
-            let node = self.new_node(Kind::Dtd, name.unwrap_or_default(), Vec::new());
-            self.add_child(DOC, node);
+        if self.pending.is_none() {
+            self.position = self.delivered;
         }
-        if self.at(self.cur) == b'[' {
-            return;
+        if self.terminated {
+            self.position = self.stream.len();
+            self.state = State::Finished;
         }
-        if self.at(self.cur) != b'>' {
-            self.fatal("DOCTYPE improperly terminated\n");
-        }
-        self.advance(1);
+        Ok(())
     }
 
-    /// `xmlParseSystemLiteral`: false when no literal starts here; an
-    /// unterminated one runs to the end of the buffer.
-    fn parse_literal(&mut self) -> bool {
-        let quote = self.at(self.cur);
-        if !matches!(quote, b'"' | b'\'') {
-            self.fatal("SystemLiteral \" or ' expected\n");
-            return false;
-        }
-        self.advance(1);
-        match self.lookup(self.cur, &[quote]) {
-            Some(end) => self.advance(end + 1 - self.cur),
-            None => {
-                self.advance(self.pend.saturating_sub(self.cur));
-                self.fatal("Unfinished System or Public ID \" or ' expected\n");
+    fn apply(&mut self, construct: Construct) -> Result<(), (String, bool)> {
+        match construct.item {
+            Item::Node(event) => {
+                if let Some(parent) = self.open.last_mut() {
+                    parent.has_children = true;
+                }
+                let index = self.base + self.events.len();
+                let element = matches!(event, Event::Start { .. }).then_some(index);
+                let opens = match &event {
+                    Event::Start { name, empty: false } => Some(name.clone()),
+                    _ => None,
+                };
+                self.push_event(event, element);
+                if let Some(name) = opens {
+                    self.open.push(OpenElement {
+                        index,
+                        has_children: false,
+                        name,
+                    });
+                }
+            }
+            Item::Close(name) => {
+                let element = self.open.pop().map(|open| open.index);
+                self.push_event(Event::End { name }, element);
+            }
+            Item::BrokenClose => {
+                let element = self.open.last().map(|open| open.index);
+                self.push_event(
+                    Event::End {
+                        name: String::new(),
+                    },
+                    element,
+                );
+            }
+            Item::Note {
+                message,
+                at,
+                warning,
+            } => self.diagnose(&message, at, warning),
+            Item::Fatal {
+                message,
+                at,
+                document_end,
+            } => {
+                self.diagnose(&message, at, false);
+                return Err((message, document_end));
             }
         }
-        true
+        Ok(())
+    }
+
+    fn fail(&mut self, message: String, terminate: bool, document_end: bool) {
+        self.failure = Some(message);
+        // Compatibility: only the end of the input inside the document lets
+        // the reader end the open elements; after any other syntax error it
+        // fails at the first end event, so a read that would leave an
+        // element retries forever (RS-15a). Provenance: black-box
+        // compatibility test (`walk-spin-after-comment@stdin`,
+        // `wide-mismatch-late`).
+        let document_end = document_end && terminate;
+        if document_end {
+            // End events for the elements the parser left open, innermost
+            // first; an element that never got a child has none.
+            while let Some(element) = self.open.pop() {
+                if element.has_children {
+                    let index = element.index;
+                    self.push_event(Event::End { name: element.name }, Some(index));
+                }
+            }
+        }
+        self.state = State::Failed {
+            stop_at_end: !document_end,
+        };
+    }
+
+    /// Prints a diagnostic the way the XML library does for a named file:
+    /// location, message, the offending line and a caret.
+    fn diagnose(&mut self, message: &str, at: usize, warning: bool) {
+        let Some(name) = self.diagnostics.name.clone() else {
+            return;
+        };
+        let at = at.min(self.stream.len());
+        if at < self.diagnostic_line.0 {
+            self.diagnostic_line = (0, 1);
+        }
+        let (counted, line) = self.diagnostic_line;
+        let line = line
+            + self.stream[counted..at]
+                .iter()
+                .filter(|byte| **byte == b'\n')
+                .count();
+        self.diagnostic_line = (at, line);
+        // The context window: back to the start of the line or 80 bytes,
+        // forward to the end of the line, 80 bytes or a NUL, with the
+        // caret under the error column but never past 79 columns or the
+        // printed text. A position on a line break belongs to the line it
+        // ends.
+        let byte = |index: usize| self.stream.get(index).copied().unwrap_or(0);
+        let is_break = |value: u8| value == b'\n' || value == b'\r';
+        let mut from = at;
+        if from > 0 && is_break(byte(from)) {
+            from -= 1;
+        }
+        let mut steps = 0;
+        while steps < 80 && from > 0 && !is_break(byte(from)) {
+            from -= 1;
+            steps += 1;
+        }
+        if is_break(byte(from)) {
+            from += 1;
+        }
+        let context: Vec<u8> = self.stream[from.min(self.stream.len())..]
+            .iter()
+            .copied()
+            .take_while(|value| *value != 0 && !is_break(*value))
+            .take(80)
+            .collect();
+        let column = at.saturating_sub(from).min(79).min(context.len());
+        let caret: Vec<u8> = context[..column]
+            .iter()
+            .map(|value| if *value == b'\t' { b'\t' } else { b' ' })
+            .collect();
+        let kind = if warning { "warning" } else { "error" };
+        let mut text = format!("{name}:{line}: parser {kind} : {message}\n").into_bytes();
+        text.extend_from_slice(&context);
+        text.push(b'\n');
+        text.extend_from_slice(&caret);
+        text.extend_from_slice(b"^\n");
+        // Nothing useful can be done when stderr cannot be written.
+        let _ = self.diagnostics.out.write_all(&text);
+    }
+}
+
+/// The dump after the input source's own preparation.
+pub(crate) struct Prepared<'a> {
+    delivery: Delivery,
+    stream: Cow<'a, [u8]>,
+    line_ends: Vec<usize>,
+}
+
+/// Prepares raw input for reading: standard input is cut into lines.
+pub(crate) fn prepare(input: &[u8], delivery: Delivery) -> Prepared<'_> {
+    match delivery {
+        Delivery::File => Prepared {
+            delivery,
+            stream: Cow::Borrowed(input),
+            line_ends: Vec::new(),
+        },
+        Delivery::Stdin => {
+            let (stream, line_ends) = stdin_lines(input);
+            Prepared {
+                delivery,
+                stream: Cow::Owned(stream),
+                line_ends,
+            }
+        }
     }
 }
 
@@ -1866,93 +1909,169 @@ impl<'a> XmlReader<'a> {
 mod tests {
     use super::*;
 
-    fn nodes(reader: &mut XmlReader) -> Vec<(NodeType, String, usize)> {
-        let mut out = Vec::new();
-        while reader.read() == 1 {
-            let kind = reader.node_type();
-            let label = match kind {
-                NodeType::Text => reader.value(),
-                NodeType::Element | NodeType::EndElement => reader.name().to_owned(),
-                _ => continue,
-            };
-            out.push((kind, label, reader.line()));
-        }
-        out
-    }
-
-    #[test]
-    fn walks_elements_and_text_like_the_reader() {
-        let xml = b"<?xml version=\"1.0\"?>\n<!DOCTYPE rrd SYSTEM \"x.dtd\">\n<rrd>\n <a>1</a>\n <b/>\n</rrd>\n";
-        let mut reader = XmlReader::new(xml, Source::Stdin, "-");
-        let seen: Vec<_> = nodes(&mut reader)
-            .into_iter()
-            .map(|(kind, label, _)| (kind, label))
-            .collect();
-        assert_eq!(
-            seen,
-            [
-                (NodeType::Element, "rrd".into()),
-                (NodeType::Element, "a".into()),
-                (NodeType::Text, "1".into()),
-                (NodeType::EndElement, "a".into()),
-                (NodeType::Element, "b".into()),
-                (NodeType::EndElement, "rrd".into()),
-            ]
+    fn events(xml: &[u8], delivery: Delivery) -> (Vec<Read>, Option<String>) {
+        let prepared = prepare(xml, delivery);
+        let mut sink = std::io::sink();
+        let mut reader = Reader::new(
+            &prepared,
+            Diagnostics {
+                out: &mut sink,
+                name: None,
+            },
         );
-        assert_eq!(reader.read(), 0);
-    }
-
-    #[test]
-    fn stdin_lines_reach_the_parser_one_at_a_time() {
-        let xml = b"<rrd>\n<a>x</a>\n<b>y</b>\n</rrd>\n";
-        let mut reader = XmlReader::new(xml, Source::Stdin, "-");
-        let lines: Vec<_> = nodes(&mut reader)
-            .into_iter()
-            .filter(|(kind, _, _)| *kind == NodeType::Text)
-            .map(|(_, _, line)| line)
-            .collect();
-        assert_eq!(lines, [3, 5]);
-    }
-
-    #[test]
-    fn content_after_the_root_fails_the_read_that_reaches_it() {
-        let xml = b"<rrd>\n<a>x</a>\n</rrd>\n<x/>\n";
-        let mut reader = XmlReader::new(xml, Source::Stdin, "-");
-        let mut results = Vec::new();
-        loop {
-            let rc = reader.read();
-            results.push(rc);
-            if rc != 1 {
+        let mut seen = Vec::new();
+        for _ in 0..64 {
+            let read = reader.read();
+            let stop = read == Read::Eof || reader.is_dead();
+            seen.push(read);
+            if stop {
                 break;
             }
         }
-        assert_eq!(results.last(), Some(&-1));
-        assert_eq!(
-            reader.last_error_text(),
-            "Extra content at the end of the document "
-        );
-        assert!(reader.diagnostics.is_empty());
+        (seen, reader.failure().map(str::to_owned))
+    }
+
+    fn start(name: &str) -> Read {
+        Read::Event(Event::Start {
+            name: name.into(),
+            empty: false,
+        })
+    }
+
+    fn end(name: &str) -> Read {
+        Read::Event(Event::End { name: name.into() })
     }
 
     #[test]
-    fn file_errors_print_libxml2_context() {
-        let mut reader = XmlReader::new(b"hello world\n", Source::File, "in.xml");
-        assert_eq!(reader.read(), -1);
+    fn well_formed_document_streams_every_node() {
+        let (seen, failure) = events(b"<a><b>1 &amp; 2</b><!-- c --></a>\n", Delivery::File);
         assert_eq!(
-            String::from_utf8(reader.diagnostics).unwrap(),
-            "in.xml:1: parser error : Document is empty\nhello world\n^\n"
+            seen,
+            vec![
+                start("a"),
+                start("b"),
+                Read::Event(Event::Text {
+                    text: "1 & 2".into(),
+                    blank: false
+                }),
+                end("b"),
+                Read::Event(Event::Comment),
+                end("a"),
+                Read::Eof
+            ]
+        );
+        assert_eq!(failure, None);
+    }
+
+    #[test]
+    fn self_closing_tags_have_no_end_event() {
+        let (seen, _) = events(b"<a><b/></a>", Delivery::Stdin);
+        assert_eq!(
+            seen,
+            vec![
+                start("a"),
+                Read::Event(Event::Start {
+                    name: "b".into(),
+                    empty: true
+                }),
+                end("a"),
+                Read::Eof
+            ]
         );
     }
 
     #[test]
-    fn freed_nodes_are_reused() {
-        let mut xml = b"<rrd>".to_vec();
-        for _ in 0..1000 {
-            xml.extend_from_slice(b"<row><v>1</v></row>\n");
-        }
-        xml.extend_from_slice(b"</rrd>");
-        let mut reader = XmlReader::new(&xml, Source::File, "in.xml");
-        while reader.read() == 1 {}
-        assert!(reader.nodes.len() < 400, "{}", reader.nodes.len());
+    fn mismatched_end_tag_is_reported_with_its_line() {
+        let (seen, failure) = events(b"<a><b>\n</c></a>", Delivery::File);
+        assert_eq!(seen[0], Read::Failed);
+        assert_eq!(
+            failure.as_deref(),
+            Some("Opening and ending tag mismatch: b line 1 and c")
+        );
+    }
+
+    #[test]
+    fn truncated_start_tag_still_creates_the_element_at_the_end() {
+        let (seen, failure) = events(b"<a>\n<b>x</b>\n<na", Delivery::Stdin);
+        assert!(seen.contains(&start("na")), "{seen:?}");
+        assert_eq!(
+            failure.as_deref(),
+            Some("Couldn't find end of Start Tag na")
+        );
+    }
+
+    #[test]
+    fn stdin_lines_stop_at_nul_and_ctrl_z() {
+        let (stream, ends) = stdin_lines(b"ab\0cd\nef\ngh\x1aij\nkl\n");
+        assert_eq!(stream, b"abef\ngh");
+        assert_eq!(ends, vec![2, 5, 7]);
+    }
+
+    #[test]
+    fn file_blocks_follow_the_probe_and_read_sizes() {
+        let mut feed = Feed::File {
+            len: 700,
+            buffered: 4,
+            handed: 4,
+            eof: false,
+            done: false,
+        };
+        assert_eq!(feed.next(), Some((516, false)));
+        assert_eq!(feed.next(), Some((700, true)));
+        assert_eq!(feed.next(), None);
+        let mut small = Feed::File {
+            len: 179,
+            buffered: 4,
+            handed: 4,
+            eof: false,
+            done: false,
+        };
+        assert_eq!(small.next(), Some((179, false)));
+        assert_eq!(small.next(), Some((179, true)));
+    }
+
+    #[test]
+    fn latin1_names_are_converted_to_utf8() {
+        let (seen, _) = events(
+            b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><a>\xe9t\xe9</a>",
+            Delivery::File,
+        );
+        assert!(seen.contains(&Read::Event(Event::Text {
+            text: "\u{e9}t\u{e9}".into(),
+            blank: false
+        })));
+    }
+
+    #[test]
+    fn unknown_encoding_and_bad_utf8_fail() {
+        let (_, failure) = events(
+            b"<?xml version=\"1.0\" encoding=\"no-such-charset\"?><a/>",
+            Delivery::File,
+        );
+        assert_eq!(
+            failure.as_deref(),
+            Some("Unsupported encoding no-such-charset")
+        );
+        let (_, failure) = events(b"<a>\xff</a>", Delivery::File);
+        assert!(failure.unwrap().starts_with("Input is not proper UTF-8"));
+    }
+
+    #[test]
+    fn undefined_entities_are_dropped_without_failing() {
+        let (seen, failure) = events(b"<a>&nope;60</a>", Delivery::File);
+        assert_eq!(failure, None);
+        assert!(seen.contains(&Read::Event(Event::Text {
+            text: "60".into(),
+            blank: false
+        })));
+    }
+
+    #[test]
+    fn content_after_the_root_fails() {
+        let (_, failure) = events(b"<a></a>\n<b/>", Delivery::Stdin);
+        assert_eq!(failure.as_deref(), Some(EXTRA_CONTENT));
+        let (seen, failure) = events(b"<a></a>\n<!-- c -->\n", Delivery::Stdin);
+        assert_eq!(failure, None);
+        assert_eq!(seen.last(), Some(&Read::Eof));
     }
 }
