@@ -4,7 +4,7 @@
 [![Security](https://github.com/kadupulhq/rondi/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/kadupulhq/rondi/actions/workflows/security.yml)
 [![CodeQL](https://github.com/kadupulhq/rondi/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/kadupulhq/rondi/actions/workflows/codeql.yml)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=kadupulhq_rondi&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=kadupulhq_rondi)
-[![License: GPL-2.0-or-later WITH RRDtool FLOSS exception](https://img.shields.io/badge/license-GPL--2.0--or--later%20WITH%20RRDtool%20FLOSS%20exception-blue.svg)](COPYRIGHT)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
 Rondi is a Rust reimplementation of RRDtool 1.11.0, `rrdcached` and the `.rrd` file format, differentially tested against the real C programs, built for Kadupul.
 
