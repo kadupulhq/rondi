@@ -22,7 +22,7 @@ About 12,400 lines of Rust (38 percent of non-test source) are rated High: modul
 | `crates/rondi/src/graph_layout.rs` | High | 1,011 | Declared port of image layout functions |
 | `crates/rondi-cli/src/graph_options.rs` | High | 880 | Option tables keyed to C line numbers |
 | `crates/rondi-cli/src/optparse.rs` | High (FLAG) | 445 | Port of the bundled option parser; models C struct and enum |
-| `crates/rondi/src/rrd_snprintf.rs` | High (FLAG) | 702 | Declared port of the portable snprintf; identifier sequence matches |
+| `crates/rondi/src/rrd_snprintf.rs` | Replaced | 702 | Declared port of the portable snprintf; replaced by the clean-room `format_value/` from `docs/compatibility/format-strings.md` and black-box runs |
 | `crates/rondi-server/src/rrdcached_listen.rs` | High | 926 | Declared port of listener setup and daemonize (GPL-2.0-only file) |
 | `crates/rondi-cli/src/main.rs` (front end, print/time helpers, list) | High | ~1,020 of 7,295 | Ports of the command dispatcher, batch-mode tokenizer, print_calc and helpers, directory listing |
 | `crates/rondi-cli/src/help/*.txt` | High (FLAG) | 354 text | Verbatim RRDtool help output |
@@ -151,6 +151,7 @@ Risk tiers:
 - Compatibility requirement: `dump` and `xport` print `%e`/`%f` values that are not correctly rounded, so the C library cannot be used.
 - Likely source: black-box observation of dump output reveals the rounding; the algorithm (scale by powers of ten, round the scaled fraction) can be stated without the C, but the current code was taken from reference-source inspection.
 - Remediation: replace by spec and fresh implementation. Write the conversion as a short arithmetic spec and verify with a large differential corpus. Tests: `number_format_differential.rs` (2), `csrc_dump.rs` (1), in-module tests; add more vectors first. FLAG: the C file credits Patrick Powell and Holger Weiss under a permissive grant layered with RRDtool's header; legal should confirm which terms apply.
+- Status: replaced. `crates/rondi/src/format_value/scaled.rs` implements a behavioral model fitted to black-box runs of the pinned RRDtool (thousands of xport PRINT values and formats on macOS arm64 and Linux x86_64), without reading this module or the C source. `number_format_differential.rs` now also replays random formats through xport and graph PRINT.
 
 **`crates/rondi-server/src/rrdcached_listen.rs`: Unix and network listener setup, `-m`/`-s`/`-P` handling, daemonize and privilege drop**
 
@@ -166,6 +167,7 @@ Risk tiers:
 - Likely source: man pages (`rrdtool`, `rrdgraph_graph` for GPRINT and duration formats) and black-box observation.
 - Remediation: replace by spec and fresh implementation; the stdin tokenizer and `list` are small. Tests: `alias_modes.rs` (90), `cli_list_and_aliases.rs`, `graph_data_differential.rs`.
 - Status: the dispatcher, usage, alias programs and pipe mode (`rrdtool_usage` through `rrdtool_batch`) are replaced by `crates/rondi-cli/src/frontend/`, written from `docs/compatibility/cli.md`, `docs/compatibility/pipe-mode.md`, their vectors and black-box runs without reading the removed functions or the C source. `print_calc`, `strfduration`, `time_clean` and the `list` helpers are not part of that change.
+- Status of the print helpers: `print_calc`, `strfduration`, `time_clean` and their formatting helpers (with `format_graph_numeric` and `parse_graph_numeric_format`) are replaced by `crates/rondi-cli/src/print_format.rs` and `crates/rondi/src/format_value/`, written from `docs/compatibility/format-strings.md`, the vectors and black-box runs without reading the removed code or the C source.
 
 **`crates/rondi-cli/src/help/*.txt` and the `RRDCACHED_HELP` string in `main.rs`**
 
@@ -181,7 +183,7 @@ Risk tiers:
 - Format reader (`read_info`, `inspect_parts`, offset helpers): category 2. The `.rrd` header, DS, RRA, live head, PDP and CDP prep layout is an external file format. Keep as is; replace C line citations with references to a written format spec.
 - Update path (`apply_update`, `update_text_arguments`, `update_pdp_new`, `process_pdp_steps`, `update_cdp_preps`, `update_cdp`, `write_rra_rows`): written as idiomatic Rust, but each function's doc comment names the C helper it corresponds to, with about 20 C line citations, and `update_cdp` keeps the C name. The arithmetic is the documented RRD consolidation model (category 3) and its exact results are observable (category 1). Remediation: write a consolidation spec (PDP integration, heartbeat, xff, carry-over, split PDP) from `rrdcreate`/`rrdupdate` documentation and observation, then reword comments to cite the spec. A rewrite is optional once the spec exists. Tests: `csrc_update.rs` (17), `rrdtool_differential.rs` (7), `rrd_binary_probe.rs` (30), `fuzz/fuzz_targets/update_args.rs`.
 - Fetch (`prepare_fetch`, `choose_archive`): archive selection is documented in `rrdfetch` and observable. Keep, reword citations.
-- Dump (`dump_rrd_open_file_bytes`): XML output is category 2 plus 1. Keep; it depends on `rrd_snprintf.rs`.
+- Dump (`dump_rrd_open_file_bytes`): XML output is category 2 plus 1. Keep; its numbers now come from `format_value::data_value`.
 - Locking (`parse_rrd_lock_mode`, `with_rrd_locking`): category 1 interoperability with the C writer. Keep.
 
 **`crates/rondi-server/src/lib.rs`**
@@ -258,8 +260,8 @@ Effort is the non-test line count to rewrite. "Pinned by" lists tests that alrea
 | 6 | `rrd_create.rs` and `rrd_resize.rs` | ~970 | `csrc_create.rs` (8), `csrc_mutate.rs` | `.rrd` format spec, create argument grammar, resize row mapping |
 | 7 | `optparse.rs` and `main.rs` front end (dispatch, stdin mode, list) | ~300 + ~600 | `rrdtool_optparse.rs` (25), `rrdtool_command_options.rs` (14), `alias_modes.rs` (90), `cli_list_and_aliases.rs` | Option-permutation spec, stdin tokenizer spec, list ordering |
 | 8 | `time.rs` | ~850 | `parsetime_compat.rs` (15), fuzz `time_spec` | At-style grammar from `rrdfetch`, message table, DST cases |
-| 9 | `main.rs` `print_calc`, `strfduration`, `time_clean` | ~410 | `graph_data_differential.rs`, `number_format_differential.rs` | GPRINT and duration format spec from `rrdgraph_graph` |
-| 10 | `rrd_snprintf.rs` | ~600 | `number_format_differential.rs` (2), `csrc_dump.rs` (1), in-module tests | Conversion recipe plus a larger differential corpus |
+| 9 | `main.rs` `print_calc`, `strfduration`, `time_clean` (done) | ~410 | `graph_data_differential.rs`, `number_format_differential.rs` | GPRINT and duration format spec from `rrdgraph_graph` |
+| 10 | `rrd_snprintf.rs` (done) | ~600 | `number_format_differential.rs` (2), `csrc_dump.rs` (1), in-module tests | Conversion recipe plus a larger differential corpus |
 | 11 | `rrd_binary.rs` update path comments and spec | ~1,000 (spec first; rewrite optional) | `csrc_update.rs` (17), `rrdtool_differential.rs` (7), `rrd_binary_probe.rs` (30) | Consolidation spec |
 | 12 | Test comments and `docs/rrd-source-notes.md` | comments only | n/a | Reword to observed behaviour |
 

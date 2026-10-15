@@ -344,6 +344,89 @@ vectors do not go beyond that.
 bounded at 199 bytes (`%0400D` prints 199 zeros and digits,
 `format-bounds-050`).
 
+## 8. Rules settled during the clean-room implementation
+
+These rules were established by black-box runs of RRDtool 1.11.0 on
+macOS arm64, Linux aarch64 and Linux x86_64 while writing the
+replacement; no reference source was read for them.
+
+**FS-24** (bb; must). A numeric `GPRINT` keeps the first 197 bytes of its
+text. When the C library cannot produce the text at all (more than
+2^31 - 1 bytes, as with width 2147483648) the legend is empty and the
+command goes on. A `GPRINT` `:valstrftime` value printed as digits
+(FS-32) keeps its first 199 bytes; `PRINT` text is not cut (FS-10).
+
+**FS-25** (bb; must). Scaling (FS-16) starts whenever the format, after
+FS-8, contains the two bytes `%s`, even inside `%%s`, which then prints
+`%s`: `%lf %%S` of 2500 prints `2.500000 %s` and `%%s%lf` prints
+`%s2.500000`. A real `%S` conversion left after the rewrite (`%lf %%S
+%S`) crashes or prints memory contents in the reference; Rondi prints the
+prefix character there.
+
+**FS-26** (bb; should). The power of an infinite value is the C `int`
+conversion of an infinite quotient: `INT_MIN` on x86_64, saturated on
+ARM (FS-20). That power is remembered for later `%S` items, so after
+`INF %s` a later `2500 %S` prints `inf ?` on x86_64 and `0.000000 ?`
+elsewhere. A NaN value chooses power 0 and remembers it.
+
+**FS-37** (bb; must). A `:strftime` item whose VDEF has no time (an
+AVERAGE or TOTAL VDEF, or a series with no known value) prints the format
+with every conversion replaced: `%%` by `%`; `% `, `%.` and `%@` kept;
+`%n` by CR LF; `%t` by a tab; `%d %g %m %y %C %H %I %M %S %U %V %W` by
+`--`; `%j` by `---`; `%G %Y` by `----`; `%D` by `--/--/--`; `%F` by
+`----------`; `%R` by `--:--`; `%T` by `--:--:--`; `%E` or `%O` together
+with the next byte by `-`; any other byte, or a final `%`, by `-`. The
+replacement works on bytes and does not depend on the platform or locale.
+
+**FS-38** (bb; must). The time a `:strftime` item shows is that of the
+most recent earlier or current `PRINT`/`GPRINT` item whose variable is a
+VDEF (time 0 if that VDEF has none), and the current time before any
+such item. With `--utc` the time is broken down in UTC.
+
+**FS-39** (bb; should). A `:strftime` result that does not fit is what
+the C library left in a 200-byte buffer: the first 200 bytes on macOS,
+the complete conversions that fit in 199 bytes on glibc (FS-34). On
+glibc, `format-bounds-033` and `-034` print bytes that follow the
+written text in the reference's buffer; they are not reproduced.
+
+**FS-46** (bb; must). Duration values derive each unit from the next
+smaller one in floating point: seconds = ms / 1000, minutes = seconds /
+60, hours = minutes / 60, days = hours / 24, weeks = days / 7, from the
+absolute value without truncation. A modulo letter is its unit minus the
+range times the floor of the next larger unit (`s` = seconds - 60 x
+floor(minutes), `f` = ms - 1000 x floor(seconds)); this
+multiply-subtract is fused on aarch64 and rounded twice on x86_64, which
+is what makes `format-duration-048` differ. The printed number is
+floor(x x 10^p) / 10^p printed by `printf("%0*.*f")` with the locale's
+decimal point (`%.3S` is `90061,001` under `de_DE`); a precision whose
+power of ten overflows prints `inf` or `nan` (`%.308H`, `%.309H`).
+
+**FS-47** (bb; must). Duration width and precision digits are read as a
+saturating C `long` and then narrowed to an `int`. A negative width
+left-justifies (`%3000000000H`), a negative precision fails with `Wrong
+duration format` (`%.2147483648H`), and a wrapped value is used as is
+(`%4294967297H` prints `25`, `%.4294967297H` prints `25.0`). An empty
+precision (`%.H`) means none. A NaN or infinite value prints before the
+format is checked, so `%Q` of NaN prints `nan`.
+
+**FS-48** (bb; must). When the untruncated duration text would reach
+2^31 - 1 bytes, or a width is 2^31, the C library fails and RRDtool ends
+the command with no output at all and exit status 0 (`PRINT:v:|%2147483646H`
+and `PRINT:v:%2147483647H:valstrfduration`, with `PRINT` or `GPRINT`).
+
+**FS-52** (bb; must). `dump`, xport data values and xport `PRINT`
+entries use RRDtool's own printf, not the C library. Its observable rules:
+powers of ten are built by repeated multiplication (or division) by ten
+from one; the `%e` exponent is the largest such power not above the
+value, kept within -308..=308, and the mantissa is the value divided by
+that power; the digits after the point are the fraction times a power of
+ten, rounded half up, with a carry into the integer part, and at most 19
+are printed (20 significant digits for `%g`); a `%f` integer part of
+2^64 or more makes the conversion print nothing and ends the entry
+there; `-0` prints without a sign; NaN never shows `-` but takes `+` and
+space; the locale is ignored. `%g` chooses its layout from the exponent
+after rounding, as C does.
+
 ## Known divergences
 
 Vectors that fail against Rondi at the time of writing are listed in
@@ -352,6 +435,4 @@ expectation stays RRDtool's:
 
 | Vectors | Rule | Rondi today |
 |---|---|---|
-| `format-badprint-041`, `-042`, `format-badgprint-041`, `-042`, `format-bounds-020` | FS-10 | rejects widths and precisions above its own limit as an invalid format |
-| `format-bounds-003`, `-006`, `-009`, `-012`, `-015`, `-018`, `-021`, `-032` to `-035` | FS-34 | prints an empty line when the `strftime` result is long |
-| `format-duration-048` (macOS, Linux aarch64) | FS-45 | modulo seconds of 10^20 ms differ; Rondi matches Linux x86_64 |
+| `format-bounds-033`, `-034` (Linux) | FS-34, FS-39 | prints the complete conversions that fit; the reference also prints bytes left in its buffer |
