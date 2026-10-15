@@ -1,5 +1,5 @@
 use super::cparse::{atoi, atol, buffer_text, c_string, rrd_strtodbl};
-use super::optparse::{ArgType, DONE, ERROR, LongOpt, OptParse, opt};
+use super::frontend::{OptionScanner, OptionSpec};
 use rondi::time::{TimeSpec, parse_time_spec, resolve_start_end};
 
 const LONGOPT_UNITS_SI: i32 = 255;
@@ -10,83 +10,83 @@ const fn short(c: u8) -> i32 {
 }
 
 /// rrd_graph.c:5063.
-const GRAPH_LONGOPTS: &[LongOpt] = &[
-    opt("alt-autoscale", short(b'A'), ArgType::None),
-    opt("imgformat", short(b'a'), ArgType::Required),
-    opt("font-smoothing-threshold", short(b'B'), ArgType::Required),
-    opt("base", short(b'b'), ArgType::Required),
-    opt("color", short(b'c'), ArgType::Required),
-    opt("full-size-mode", short(b'D'), ArgType::None),
-    opt("daemon", short(b'd'), ArgType::Required),
-    opt("slope-mode", short(b'E'), ArgType::None),
-    opt("end", short(b'e'), ArgType::Required),
-    opt("force-rules-legend", short(b'F'), ArgType::None),
-    opt("imginfo", short(b'f'), ArgType::Required),
-    opt("graph-render-mode", short(b'G'), ArgType::Required),
-    opt("no-legend", short(b'g'), ArgType::None),
-    opt("height", short(b'h'), ArgType::Required),
-    opt("no-minor", short(b'I'), ArgType::None),
-    opt("interlaced", short(b'i'), ArgType::None),
-    opt("alt-autoscale-min", short(b'J'), ArgType::None),
-    opt("only-graph", short(b'j'), ArgType::None),
-    opt("units-length", short(b'L'), ArgType::Required),
-    opt("lower-limit", short(b'l'), ArgType::Required),
-    opt("alt-autoscale-max", short(b'M'), ArgType::None),
-    opt("zoom", short(b'm'), ArgType::Required),
-    opt("no-gridfit", short(b'N'), ArgType::None),
-    opt("font", short(b'n'), ArgType::Required),
-    opt("logarithmic", short(b'o'), ArgType::None),
-    opt("pango-markup", short(b'P'), ArgType::None),
-    opt("font-render-mode", short(b'R'), ArgType::Required),
-    opt("rigid", short(b'r'), ArgType::None),
-    opt("step", short(b'S'), ArgType::Required),
-    opt("start", short(b's'), ArgType::Required),
-    opt("tabwidth", short(b'T'), ArgType::Required),
-    opt("title", short(b't'), ArgType::Required),
-    opt("upper-limit", short(b'u'), ArgType::Required),
-    opt("vertical-label", short(b'v'), ArgType::Required),
-    opt("watermark", short(b'W'), ArgType::Required),
-    opt("width", short(b'w'), ArgType::Required),
-    opt("units-exponent", short(b'X'), ArgType::Required),
-    opt("x-grid", short(b'x'), ArgType::Required),
-    opt("alt-y-grid", short(b'Y'), ArgType::None),
-    opt("y-grid", short(b'y'), ArgType::Required),
-    opt("lazy", short(b'z'), ArgType::None),
-    opt("use-nan-for-all-missing-data", short(b'Z'), ArgType::None),
-    opt("units", LONGOPT_UNITS_SI, ArgType::Required),
-    opt("add-jsontime", LONGOPT_ADD_JSONTIME, ArgType::None),
-    opt("alt-y-mrtg", 1000, ArgType::None),
-    opt("disable-rrdtool-tag", 1001, ArgType::None),
-    opt("right-axis", 1002, ArgType::Required),
-    opt("right-axis-label", 1003, ArgType::Required),
-    opt("right-axis-format", 1004, ArgType::Required),
-    opt("legend-position", 1005, ArgType::Required),
-    opt("legend-direction", 1006, ArgType::Required),
-    opt("border", 1007, ArgType::Required),
-    opt("grid-dash", 1008, ArgType::Required),
-    opt("dynamic-labels", 1009, ArgType::None),
-    opt("week-fmt", 1010, ArgType::Required),
-    opt("graph-type", 1011, ArgType::Required),
-    opt("left-axis-format", 1012, ArgType::Required),
-    opt("left-axis-formatter", 1013, ArgType::Required),
-    opt("right-axis-formatter", 1014, ArgType::Required),
-    opt("allow-shrink", 1015, ArgType::None),
-    opt("utc", 1016, ArgType::None),
-    opt("vertical-label-angle", 1017, ArgType::Required),
-    opt("right-axis-label-angle", 1018, ArgType::Required),
-    opt("right-axis-range", 1019, ArgType::Required),
+const GRAPH_LONGOPTS: &[OptionSpec<i32>] = &[
+    OptionSpec::flag("alt-autoscale", Some('A'), short(b'A')),
+    OptionSpec::value("imgformat", Some('a'), short(b'a')),
+    OptionSpec::value("font-smoothing-threshold", Some('B'), short(b'B')),
+    OptionSpec::value("base", Some('b'), short(b'b')),
+    OptionSpec::value("color", Some('c'), short(b'c')),
+    OptionSpec::flag("full-size-mode", Some('D'), short(b'D')),
+    OptionSpec::value("daemon", Some('d'), short(b'd')),
+    OptionSpec::flag("slope-mode", Some('E'), short(b'E')),
+    OptionSpec::value("end", Some('e'), short(b'e')),
+    OptionSpec::flag("force-rules-legend", Some('F'), short(b'F')),
+    OptionSpec::value("imginfo", Some('f'), short(b'f')),
+    OptionSpec::value("graph-render-mode", Some('G'), short(b'G')),
+    OptionSpec::flag("no-legend", Some('g'), short(b'g')),
+    OptionSpec::value("height", Some('h'), short(b'h')),
+    OptionSpec::flag("no-minor", Some('I'), short(b'I')),
+    OptionSpec::flag("interlaced", Some('i'), short(b'i')),
+    OptionSpec::flag("alt-autoscale-min", Some('J'), short(b'J')),
+    OptionSpec::flag("only-graph", Some('j'), short(b'j')),
+    OptionSpec::value("units-length", Some('L'), short(b'L')),
+    OptionSpec::value("lower-limit", Some('l'), short(b'l')),
+    OptionSpec::flag("alt-autoscale-max", Some('M'), short(b'M')),
+    OptionSpec::value("zoom", Some('m'), short(b'm')),
+    OptionSpec::flag("no-gridfit", Some('N'), short(b'N')),
+    OptionSpec::value("font", Some('n'), short(b'n')),
+    OptionSpec::flag("logarithmic", Some('o'), short(b'o')),
+    OptionSpec::flag("pango-markup", Some('P'), short(b'P')),
+    OptionSpec::value("font-render-mode", Some('R'), short(b'R')),
+    OptionSpec::flag("rigid", Some('r'), short(b'r')),
+    OptionSpec::value("step", Some('S'), short(b'S')),
+    OptionSpec::value("start", Some('s'), short(b's')),
+    OptionSpec::value("tabwidth", Some('T'), short(b'T')),
+    OptionSpec::value("title", Some('t'), short(b't')),
+    OptionSpec::value("upper-limit", Some('u'), short(b'u')),
+    OptionSpec::value("vertical-label", Some('v'), short(b'v')),
+    OptionSpec::value("watermark", Some('W'), short(b'W')),
+    OptionSpec::value("width", Some('w'), short(b'w')),
+    OptionSpec::value("units-exponent", Some('X'), short(b'X')),
+    OptionSpec::value("x-grid", Some('x'), short(b'x')),
+    OptionSpec::flag("alt-y-grid", Some('Y'), short(b'Y')),
+    OptionSpec::value("y-grid", Some('y'), short(b'y')),
+    OptionSpec::flag("lazy", Some('z'), short(b'z')),
+    OptionSpec::flag("use-nan-for-all-missing-data", Some('Z'), short(b'Z')),
+    OptionSpec::value("units", None, LONGOPT_UNITS_SI),
+    OptionSpec::flag("add-jsontime", None, LONGOPT_ADD_JSONTIME),
+    OptionSpec::flag("alt-y-mrtg", None, 1000),
+    OptionSpec::flag("disable-rrdtool-tag", None, 1001),
+    OptionSpec::value("right-axis", None, 1002),
+    OptionSpec::value("right-axis-label", None, 1003),
+    OptionSpec::value("right-axis-format", None, 1004),
+    OptionSpec::value("legend-position", None, 1005),
+    OptionSpec::value("legend-direction", None, 1006),
+    OptionSpec::value("border", None, 1007),
+    OptionSpec::value("grid-dash", None, 1008),
+    OptionSpec::flag("dynamic-labels", None, 1009),
+    OptionSpec::value("week-fmt", None, 1010),
+    OptionSpec::value("graph-type", None, 1011),
+    OptionSpec::value("left-axis-format", None, 1012),
+    OptionSpec::value("left-axis-formatter", None, 1013),
+    OptionSpec::value("right-axis-formatter", None, 1014),
+    OptionSpec::flag("allow-shrink", None, 1015),
+    OptionSpec::flag("utc", None, 1016),
+    OptionSpec::value("vertical-label-angle", None, 1017),
+    OptionSpec::value("right-axis-label-angle", None, 1018),
+    OptionSpec::value("right-axis-range", None, 1019),
 ];
 
 /// rrd_xport.c:98.
-const XPORT_LONGOPTS: &[LongOpt] = &[
-    opt("start", short(b's'), ArgType::Required),
-    opt("end", short(b'e'), ArgType::Required),
-    opt("maxrows", short(b'm'), ArgType::Required),
-    opt("step", short(b'S'), ArgType::Required),
-    opt("enumds", 262, ArgType::None),
-    opt("json", 263, ArgType::None),
-    opt("showtime", short(b't'), ArgType::None),
-    opt("daemon", short(b'd'), ArgType::Required),
+const XPORT_LONGOPTS: &[OptionSpec<i32>] = &[
+    OptionSpec::value("start", Some('s'), short(b's')),
+    OptionSpec::value("end", Some('e'), short(b'e')),
+    OptionSpec::value("maxrows", Some('m'), short(b'm')),
+    OptionSpec::value("step", Some('S'), short(b'S')),
+    OptionSpec::flag("enumds", None, 262),
+    OptionSpec::flag("json", None, 263),
+    OptionSpec::flag("showtime", Some('t'), short(b't')),
+    OptionSpec::value("daemon", Some('d'), short(b'd')),
 ];
 
 /// The settings `rrd_graph_options` leaves in `image_desc_t` that Rondi's
@@ -244,13 +244,13 @@ pub(crate) fn rrd_graph_options(args: &[String], now: i64) -> Result<GraphOption
     let mut second_axis_formatter = AxisFormatter::Numeric;
     let mut start_tv = parse_time_spec("end-24h", now)?;
     let mut end_tv = parse_time_spec("now", now)?;
-    let mut options = OptParse::new(args.to_vec());
-    loop {
-        let option = options.long(GRAPH_LONGOPTS);
-        if option == DONE {
-            break;
-        }
-        let value = options.value().to_owned();
+    let mut options = OptionScanner::new(args.get(1..).unwrap_or_default(), GRAPH_LONGOPTS);
+    for found in options.by_ref() {
+        // Option texts are ASCII except for a rejected word, which this
+        // String error carries lossily.
+        let found = found.map_err(|error| error.to_string())?;
+        let option = found.key;
+        let value = found.text().to_owned();
         match option {
             1005 => {
                 use rondi::graph_layout::LegendPosition;
@@ -486,7 +486,6 @@ pub(crate) fn rrd_graph_options(args: &[String], now: i64) -> Result<GraphOption
             _ if option == short(b'Z') => graph.layout.allow_missing_ds = true,
             1001 => graph.layout.no_rrdtool_tag = true,
             1003 => graph.layout.second_axis_legend = Some(value),
-            ERROR => return Err(options.errmsg),
             // -I -Y -N -P -E -z -i -B, 1009, 1010 and --alt-y-mrtg
             // only change Cairo/Pango rendering.
             _ => {}
@@ -508,7 +507,7 @@ pub(crate) fn rrd_graph_options(args: &[String], now: i64) -> Result<GraphOption
         ));
     }
     (graph.start, graph.end) = proc_start_end(&start_tv, &end_tv)?;
-    graph.positionals = options.positionals().to_vec();
+    graph.positionals = options.into_operands();
     Ok(graph)
 }
 
@@ -539,17 +538,16 @@ pub(crate) fn rrd_xport_options(args: &[String], now: i64) -> Result<XportOption
     };
     let mut start_tv = parse_time_spec("end-24h", now)?;
     let mut end_tv = parse_time_spec("now", now)?;
-    let mut options = OptParse::new(args.to_vec());
-    loop {
-        let option = options.long(XPORT_LONGOPTS);
-        if option == DONE {
-            break;
-        }
-        let value = options.value().to_owned();
+    let mut options = OptionScanner::new(args.get(1..).unwrap_or_default(), XPORT_LONGOPTS);
+    for found in options.by_ref() {
+        // Option texts are ASCII except for a rejected word, which this
+        // String error carries lossily.
+        let found = found.map_err(|error| error.to_string())?;
+        let option = found.key;
+        let value = found.text().to_owned();
         match option {
             262 => xport.enumds = true,
             263 => xport.json = true,
-            ERROR => return Err(options.errmsg),
             _ if option == short(b'S') => xport.step = atoi(&value),
             _ if option == short(b't') => xport.showtime = true,
             _ if option == short(b's') => {
@@ -576,7 +574,7 @@ pub(crate) fn rrd_xport_options(args: &[String], now: i64) -> Result<XportOption
         }
     }
     (xport.start, xport.end) = proc_start_end(&start_tv, &end_tv)?;
-    xport.positionals = options.positionals().to_vec();
+    xport.positionals = options.into_operands();
     Ok(xport)
 }
 

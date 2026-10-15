@@ -590,10 +590,9 @@ expectation stays RRDtool's.
 | `cli-env-012` | CLI-41 | `create` honours `RRDCACHED_ADDRESS` and fails |
 | `cli-env-013` | CLI-42 | `tune` reports the connection error text instead of `Cannot connect to daemon` |
 | `cli-optparse-204`, `-205` | (create semantics) | `create --source` requires the start time to match the source |
-| `cli-truncate-014` to `-017` | CLI-35 | error messages are not cut to 4095 bytes |
 | `cli-commands-160` | CLI-39 | `graph /dev/null` with no elements prints `0x0` |
 | `cli-locale-002`, `-006`, `-010` | CLI-49 | `info` ignores the numeric locale |
-| `pipe-session-143`, `-144`, `-146` (Linux aarch64 only) | PM-10 | trims bytes 128 to 255 at line ends and prints U+FFFD for them |
+| `pipe-session-144` (Linux aarch64 only) | PM-10, PM-27 | keeps the trailing byte but passes it to the command as U+FFFD |
 
 Pipe-mode and format divergences are listed in
 [pipe-mode.md](pipe-mode.md) and [format-strings.md](format-strings.md).
