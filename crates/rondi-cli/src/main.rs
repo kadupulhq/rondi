@@ -5295,20 +5295,46 @@ fn rrdtool_restore(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     let range_check = RANGE_CHECK.load(std::sync::atomic::Ordering::Relaxed);
     let force_overwrite = FORCE_OVERWRITE.load(std::sync::atomic::Ordering::Relaxed);
-    // rrd_restore.c:1270-1290: stdin ends at the first ctrl-Z.
+    // rrd_restore.c:1242-1263: stdin ends at the first ctrl-Z and silences
+    // libxml2's error printing for the rest of the process, as
+    // xmlSetGenericErrorFunc does upstream.
+    static XML_ERRORS_SILENCED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
     let xml = if positional[0] == "-" {
+        XML_ERRORS_SILENCED.store(true, std::sync::atomic::Ordering::Relaxed);
         let mut xml = Vec::new();
         std::io::stdin().read_to_end(&mut xml)?;
         if let Some(end) = xml.iter().position(|byte| *byte == 0x1a) {
             xml.truncate(end);
         }
-        String::from_utf8_lossy(&xml).into_owned()
+        xml
     } else {
         std::fs::read(&positional[0])
-            .map(|xml| String::from_utf8_lossy(&xml).into_owned())
             .map_err(|_| format!("Could not create xml reader for: {}", positional[0]))?
     };
-    restore_rrd_file(&xml, &positional[1], force_overwrite, range_check)?;
+    let input = if positional[0] == "-" {
+        rondi::RestoreInput::Stdin(&xml)
+    } else {
+        rondi::RestoreInput::File {
+            name: &positional[0],
+            xml: &xml,
+        }
+    };
+    let mut stderr = std::io::stderr();
+    let mut sink = std::io::sink();
+    let diagnostics: &mut dyn std::io::Write =
+        if XML_ERRORS_SILENCED.load(std::sync::atomic::Ordering::Relaxed) {
+            &mut sink
+        } else {
+            &mut stderr
+        };
+    rondi::restore_rrd_input(
+        input,
+        &positional[1],
+        force_overwrite,
+        range_check,
+        diagnostics,
+    )?;
     Ok(())
 }
 
