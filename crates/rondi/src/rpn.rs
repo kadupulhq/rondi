@@ -6,7 +6,11 @@
 //! data pointers, so mixed-resolution expressions see the same rows upstream
 //! sees.
 
-use crate::{StoreError, rrd_binary::rrd_nan, rrd_number::parse_rrd_number};
+use crate::{
+    StoreError,
+    rrd_binary::{rrd_mul_add, rrd_nan},
+    rrd_number::parse_rrd_number,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Op {
@@ -789,7 +793,7 @@ pub(crate) fn rpn_calc<'a>(
                             let value = read(data, source.data - offset as isize);
                             if !value.is_nan() {
                                 sum += value;
-                                sum2 += value * value;
+                                sum2 = rrd_mul_add(value, value, sum2);
                                 if op == Op::PredictPerc {
                                     extra.push(value);
                                 }
@@ -808,7 +812,8 @@ pub(crate) fn rpn_calc<'a>(
                     }
                     Op::PredictSigma => {
                         if count > 1 {
-                            value = f64::from(count) * sum2 - sum * sum;
+                            // Clang rounds sum * sum and fuses the other product.
+                            value = rrd_mul_add(f64::from(count), sum2, -(sum * sum));
                             value = if value < 0.0 {
                                 rrd_nan()
                             } else {
@@ -829,7 +834,7 @@ pub(crate) fn rpn_calc<'a>(
                                 value = extra[idx as usize];
                                 if deltax != 0.0 {
                                     let deltay = extra[idx as usize + 1] - extra[idx as usize];
-                                    value += deltay * deltax;
+                                    value = rrd_mul_add(deltay, deltax, value);
                                 }
                             }
                         }
@@ -962,7 +967,7 @@ pub(crate) fn rpn_calc<'a>(
                     n += 1;
                     let delta = datum - mean;
                     mean += delta / f64::from(n);
-                    mean2 += delta * (datum - mean);
+                    mean2 = rrd_mul_add(delta, datum - mean, mean2);
                 }
                 stptr += 1;
                 stack.set(

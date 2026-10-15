@@ -35,7 +35,10 @@ pub(crate) fn rrd_nan() -> f64 {
 
 /// Evaluate `a * b + c` the way the pinned RRDtool builds do. GCC and Clang
 /// contract this pattern into a fused multiply-add on aarch64, which always
-/// has the instruction, while baseline x86_64 builds round the product first.
+/// has the instruction, while baseline x86_64 builds round the product first
+/// because the compiler may not assume FMA hardware there. Callers pass the
+/// exact operand split the pinned build's disassembly shows, since only one
+/// product of an `a * b - c * d` expression is fused.
 #[inline]
 pub(crate) fn rrd_mul_add(a: f64, b: f64, c: f64) -> f64 {
     #[cfg(target_arch = "aarch64")]
@@ -381,7 +384,9 @@ fn prepare_fetch(
     requested_step: u64,
     row_limit: Option<usize>,
 ) -> Result<RrdFetchRows, StoreError> {
-    if requested_step == 0 || requested_end < requested_start {
+    // rrd_fetch_fn itself accepts an end before the start; only the aligned
+    // range below can fail. rrdtool fetch checks the order before calling it.
+    if requested_step == 0 {
         return Err(StoreError::RrdUnsupported(
             "RRD fetch requires a positive resolution and end >= start".into(),
         ));
@@ -417,6 +422,10 @@ fn prepare_fetch(
                     .ok_or_else(divides_by_zero)?,
         )
         .ok_or_else(|| rrd_error("RRD fetch end overflows"))?;
+    if end < start {
+        // The unsigned row count wraps to a size malloc cannot satisfy.
+        return Err(StoreError::Rrd("malloc fetch data area".into()));
+    }
     let range_rows = end
         .checked_sub(start)
         .and_then(|span| usize::try_from(span / step_i64 + 1).ok())

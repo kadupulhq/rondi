@@ -1,26 +1,30 @@
 //! Field encoding of the rrdcached line protocol, shared by the daemon (its
 //! requests and journal) and the client so both split a line the same way.
 
-/// Port of rrd_daemon.c `buffer_get_field`: a field ends at a single space or
-/// at the end of the buffer, and a backslash takes the next character
+/// Port of rrd_daemon.c `buffer_get_field`: a field ends at a single space,
+/// a NUL, or the end of the buffer, and a backslash takes the next character
 /// literally. `None` is an exhausted buffer and `Some("")` one holding only
 /// its terminating NUL, which still yields an empty field. A trailing lone
-/// backslash fails and leaves the buffer unchanged.
+/// backslash fails and leaves the buffer unchanged. An escaped NUL ends the
+/// field as the C string its callers read.
 pub fn next_field(buffer: &mut Option<&str>) -> Option<String> {
     let text = (*buffer)?;
     let mut field = String::new();
     let mut characters = text.char_indices();
-    while let Some((index, character)) = characters.next() {
+    let rest = loop {
+        let Some((index, character)) = characters.next() else {
+            break None;
+        };
         match character {
-            ' ' => {
-                *buffer = Some(&text[index + 1..]);
-                return Some(field);
-            }
+            ' ' | '\0' => break Some(&text[index + 1..]),
             '\\' => field.push(characters.next()?.1),
             _ => field.push(character),
         }
+    };
+    *buffer = rest;
+    if let Some(end) = field.find('\0') {
+        field.truncate(end);
     }
-    *buffer = None;
     Some(field)
 }
 
@@ -63,6 +67,17 @@ mod tests {
         let mut trailing = Some(r"a\");
         assert_eq!(next_field(&mut trailing), None);
         assert_eq!(trailing, Some(r"a\"));
+    }
+
+    #[test]
+    fn nul_ends_a_field_like_a_space() {
+        let mut buffer = Some("ping\0\0x\\\0y z\0");
+        assert_eq!(next_field(&mut buffer).as_deref(), Some("ping"));
+        assert_eq!(next_field(&mut buffer).as_deref(), Some(""));
+        assert_eq!(next_field(&mut buffer).as_deref(), Some("x"));
+        assert_eq!(next_field(&mut buffer).as_deref(), Some("z"));
+        assert_eq!(next_field(&mut buffer).as_deref(), Some(""));
+        assert_eq!(next_field(&mut buffer), None);
     }
 
     #[test]
