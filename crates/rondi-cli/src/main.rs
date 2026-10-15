@@ -701,9 +701,9 @@ fn rrdcached_base_directory(value: &str) -> PathBuf {
 }
 
 /// rrd_mkdir_p: an existing directory is accepted and an existing
-/// non-directory is ENOTDIR. Missing components are created 0755 rather than
-/// upstream's 0777 less the umask, as for a missing socket directory, so a
-/// permissive umask cannot leave the base directory writable by others.
+/// non-directory is ENOTDIR. Missing components are created 0750 rather than
+/// upstream's 0777 less the umask, so a permissive umask cannot open the base
+/// directory to other accounts; an existing directory keeps its mode.
 fn rrd_mkdir_p(path: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     if path.as_os_str().is_empty() {
@@ -714,7 +714,7 @@ fn rrd_mkdir_p(path: &Path) -> std::io::Result<()> {
         Ok(_) => Err(std::io::Error::from_raw_os_error(libc::ENOTDIR)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => std::fs::DirBuilder::new()
             .recursive(true)
-            .mode(0o755)
+            .mode(0o750)
             .create(path),
         Err(error) => Err(error),
     }

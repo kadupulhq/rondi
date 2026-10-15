@@ -443,3 +443,18 @@ fn rrdcached_foreground_writes_nothing_to_stdout_like_upstream() {
     assert_eq!(outputs[1], outputs[0]);
     assert_eq!(outputs[0], "");
 }
+
+#[test]
+fn rrdcached_creates_missing_base_directories_without_access_for_others() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let base = work.join("new/base");
+    // -b is created as it is parsed; the invalid -t then stops startup.
+    let observed = startup_outcome(&work, true, &["-b", base.to_str().unwrap(), "-t", "0"]);
+    assert_eq!(observed.status, Some(1), "{observed:?}");
+    for created in [work.join("new"), base] {
+        let mode = std::fs::metadata(&created).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode & 0o007, 0, "{} is {mode:o}", created.display());
+    }
+}
