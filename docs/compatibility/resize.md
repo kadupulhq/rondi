@@ -228,9 +228,9 @@ Current Rondi against RRDtool 1.11.0, as of this specification:
   symbolic link or directory) it fails with
   `Can't create '<absolute path>': File exists` and changes nothing, where
   RRDtool rewrites the file in place, follows the link, or reports
-  `Can't create 'resize.rrd': Is a directory`. A new file gets 0666 minus
-  the umask, as RZ-12 asks. The refusal is intentional (safer); the
-  absolute path in the message is not pinned by vectors.
+  `Can't create 'resize.rrd': Is a directory`. A new file gets 0600 instead
+  of 0666 minus the umask. Both are intentional (safer); the mode and the
+  absolute path in the message are not pinned by vectors.
 
 No other difference was found: Rondi matches the other 87 vectors on macOS
 arm64.

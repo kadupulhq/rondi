@@ -376,15 +376,16 @@ pub fn resize_rrd_file(
         return Err(cannot_create(&io::Error::from_raw_os_error(enospc())));
     }
     // Compatibility: RRDtool truncates and rewrites an existing output, and
-    // follows a symbolic link there; Rondi creates it exclusively and never
-    // replaces anything, its input included (RZ-div-existing-output, RZ-13).
+    // follows a symbolic link there; Rondi creates it exclusively, private
+    // to the user, and never replaces anything, its input included
+    // (RZ-div-existing-output, RZ-13).
     // Provenance: black-box compatibility test.
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o666);
+        options.mode(0o600);
     }
     let mut target = options
         .open(output)
