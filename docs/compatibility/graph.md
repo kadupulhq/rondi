@@ -86,6 +86,11 @@ and the process exits with status 1, unless the rule says otherwise.
   `--check PATH` compares another binary with the table, and
   `--record-platform KEY` / `--merge-platform KEY FILE` record and merge
   Linux results (run inside an image built like `docker/Dockerfile.test`).
+  `--add GROUPS` captures the named groups and keeps the rest of the
+  table. A case that runs `--lazy` on `/dev/null` is tagged `host`: its
+  result depends on whether the host keeps the device's modification
+  time current (GR-84), so the replay compares it with the live oracle
+  only.
 
 ### Fixture
 

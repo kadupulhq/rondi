@@ -1468,6 +1468,14 @@ def add_tags(entry: dict, result: list[dict]) -> None:
     if any('(process:' in step.get('stderr', '') for step in result):
         if 'unstable' not in tags:
             tags.append('unstable')
+    # `--lazy` on /dev/null reads the device only when the host keeps its
+    # modification time current, so only a live run on the same host is a
+    # valid expectation.
+    lazy_null = any('/dev/null' in step['args']
+                    and ('-z' in step['args'] or '--lazy' in step['args'])
+                    for step in entry['steps'])
+    if lazy_null and 'host' not in tags:
+        tags.append('host')
 
 
 def merge_platform(out: str, key: str, source: str) -> int:

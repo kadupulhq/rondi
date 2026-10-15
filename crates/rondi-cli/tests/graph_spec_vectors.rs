@@ -440,7 +440,10 @@ impl Vector {
 
     /// The frozen expectation for this build target, if one applies.
     fn frozen(&self) -> Option<&Value> {
-        if self.tagged("unstable") {
+        // A `host` result depends on the machine (for `--lazy /dev/null`,
+        // whether the host keeps updating the device's time), so only the
+        // live oracle on the same host is a valid expectation.
+        if self.tagged("unstable") || self.tagged("host") {
             return None;
         }
         let zone_missing = self

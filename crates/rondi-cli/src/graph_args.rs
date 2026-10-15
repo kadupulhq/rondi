@@ -476,42 +476,43 @@ impl OnceOnly {
 
 /// The `--start`/`--end` pair while options are read.
 struct Window {
-    start: Option<TimeSpec>,
-    end: Option<TimeSpec>,
+    start: TimeSpec,
+    end: TimeSpec,
     now: i64,
 }
 
 impl Window {
-    fn new(now: i64) -> Self {
-        Self {
-            start: None,
-            end: None,
+    /// TS-4 defaults: `end-24h` and `now`.
+    fn new(now: i64) -> Result<Self, Failure> {
+        // Compatibility: the defaults are evaluated before any option is
+        // read. Evaluating `now` converts the current local time, and the C
+        // library on Linux reuses the daylight-saving offset of the last
+        // conversion when it settles a wall-clock time that occurs twice,
+        // so this order decides how `--start 'Oct 26 2025 01:30'` resolves
+        // in Europe/London while daylight saving time is in force.
+        // Provenance: black-box compatibility test (time_spec_vectors,
+        // dst-078 and calendar-143 on Linux x86_64).
+        Ok(Self {
+            start: parse_time_spec("end-24h", now)?,
+            end: parse_time_spec("now", now)?,
             now,
-        }
+        })
     }
 
     fn set(&mut self, is_start: bool, text: &str) -> Result<(), Failure> {
         let label = if is_start { "start time" } else { "end time" };
         let spec = parse_time_spec(text, self.now).map_err(|error| format!("{label}: {error}"))?;
         if is_start {
-            self.start = Some(spec);
+            self.start = spec;
         } else {
-            self.end = Some(spec);
+            self.end = spec;
         }
         Ok(())
     }
 
-    /// TS-4 defaults, TS-56 to TS-61.
+    /// TS-56 to TS-61.
     fn resolve(&self) -> Result<(i64, i64), Failure> {
-        let start = match self.start {
-            Some(spec) => spec,
-            None => parse_time_spec("end-24h", self.now)?,
-        };
-        let end = match self.end {
-            Some(spec) => spec,
-            None => TimeSpec::at(self.now),
-        };
-        let (start, end) = resolve_start_end(&start, &end)?;
+        let (start, end) = resolve_start_end(&self.start, &self.end)?;
         if start < EARLIEST_START {
             return Err(format!("the first entry to fetch should be after 1980 ({start})").into());
         }
@@ -537,7 +538,7 @@ fn keyword<T: Copy>(text: &str, table: &[(&str, T)]) -> Option<T> {
 /// Reads a `graph` or `graphv` command line; `args[0]` is the command.
 pub(crate) fn parse_graph(args: &[String], now: i64) -> Result<GraphArgs, Failure> {
     let mut parsed = GraphArgs::default();
-    let mut window = Window::new(now);
+    let mut window = Window::new(now)?;
     let words = args.get(1..).unwrap_or_default();
     let mut scanner = OptionScanner::new(words, GRAPH_TABLE);
     let mut once = OnceOnly::default();
@@ -734,7 +735,7 @@ pub(crate) fn parse_xport(args: &[String], now: i64) -> Result<XportArgs, Failur
         show_time: false,
         enum_ds: false,
     };
-    let mut window = Window::new(now);
+    let mut window = Window::new(now)?;
     let words = args.get(1..).unwrap_or_default();
     let mut scanner = OptionScanner::new(words, XPORT_TABLE);
     let mut once = OnceOnly::default();
