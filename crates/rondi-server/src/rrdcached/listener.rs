@@ -395,35 +395,67 @@ impl Stage {
     }
 
     /// Sets the socket's mode after checking it is still the bound socket.
+    // Linux cannot change a mode through a name without following a link,
+    // so it opens the entry itself (O_PATH, no follow), checks that this is
+    // the bound socket, and changes the mode of that inode through its
+    // /proc descriptor link. There is no fallback that follows a link.
+    #[cfg(target_os = "linux")]
+    fn set_mode(&self, mode: u32, bound: (u64, u64)) -> std::io::Result<()> {
+        // SAFETY: the descriptor is open and the name NUL terminated.
+        let fd = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                SOCKET_NAME.as_ptr(),
+                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: fd is a new descriptor owned by nothing else.
+        let entry = unsafe { OwnedFd::from_raw_fd(fd) };
+        // SAFETY: an all-zero stat is a valid out-parameter.
+        let mut found: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: the descriptor is open and `found` is valid for writing.
+        if unsafe { libc::fstat(entry.as_raw_fd(), &mut found) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if found.st_mode & libc::S_IFMT != libc::S_IFSOCK || identity_of(&found) != bound {
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+        }
+        let link = CString::new(format!("/proc/self/fd/{}", entry.as_raw_fd()))
+            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
+        // SAFETY: the name is NUL terminated; the /proc link names the
+        // inode the descriptor holds, not the directory entry.
+        if unsafe { libc::chmod(link.as_ptr(), mode as libc::mode_t) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// Sets the socket's mode after checking it is still the bound socket.
+    #[cfg(not(target_os = "linux"))]
     fn set_mode(&self, mode: u32, bound: (u64, u64)) -> std::io::Result<()> {
         if self.socket_identity()? != bound {
             return Err(std::io::Error::from_raw_os_error(libc::EPERM));
         }
-        let call = |flags| {
-            // SAFETY: the descriptor is open and the name NUL terminated.
-            unsafe {
-                libc::fchmodat(
-                    self.directory.as_raw_fd(),
-                    SOCKET_NAME.as_ptr(),
-                    mode as libc::mode_t,
-                    flags,
-                )
-            }
+        // SAFETY: the descriptor is open and the name NUL terminated;
+        // AT_SYMLINK_NOFOLLOW changes a link itself, never its target.
+        let changed = unsafe {
+            libc::fchmodat(
+                self.directory.as_raw_fd(),
+                SOCKET_NAME.as_ptr(),
+                mode as libc::mode_t,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
         };
-        if call(libc::AT_SYMLINK_NOFOLLOW) == 0 {
-            return Ok(());
-        }
-        let error = std::io::Error::last_os_error();
-        // Some C libraries cannot change a mode without following links;
-        // the entry was just checked to be the bound socket in a directory
-        // only this user can write, so the plain call is used then.
-        // ENOTSUP and EOPNOTSUPP are one value on Linux and two on macOS.
-        let code = error.raw_os_error();
-        if code != Some(libc::EOPNOTSUPP) && code != Some(libc::ENOTSUP) {
-            return Err(error);
-        }
-        if call(0) != 0 {
+        if changed != 0 {
             return Err(std::io::Error::last_os_error());
+        }
+        // A link swapped in after the check took the mode instead; refuse
+        // to publish then.
+        if self.socket_identity()? != bound {
+            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
         }
         Ok(())
     }

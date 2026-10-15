@@ -19,6 +19,9 @@ pub(crate) struct PidFile {
     directory: File,
     name: CString,
     identity: (u64, u64),
+    // Held open so the inode cannot be freed and its number reused by a
+    // file that replaces this one.
+    _file: File,
 }
 
 /// A pid file that stops startup, with the `FATAL` line to print last.
@@ -97,6 +100,7 @@ impl PidFile {
             directory,
             name,
             identity: (metadata.dev(), metadata.ino()),
+            _file: file,
         })
     }
 }
