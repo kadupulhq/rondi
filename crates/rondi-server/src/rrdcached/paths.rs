@@ -107,6 +107,7 @@ pub fn open_log_file(value: &str) -> Result<LogFile, OptionFailure> {
         return Err(failure(errno_text(libc::EMLINK)));
     }
     clear_nonblocking(&file).map_err(|error| failure(error_text(&error)))?;
+    super::drop_shared_write(&file).map_err(|error| failure(error_text(&error)))?;
     Ok(LogFile {
         path: PathBuf::from(value),
         file,

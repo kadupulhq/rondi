@@ -37,7 +37,7 @@ impl PidFile {
     pub(crate) fn create(path: &Path, notes: &mut dyn Write) -> Result<Self, PidFileError> {
         if let Some(directory) = path.parent().filter(|dir| !dir.as_os_str().is_empty())
             && !directory.exists()
-            && let Err(error) = std::fs::DirBuilder::new().recursive(true).create(directory)
+            && let Err(error) = super::create_directories(directory)
         {
             // Compatibility: the reference reports this twice.
             // Provenance: black-box compatibility test.
@@ -114,6 +114,7 @@ impl Drop for PidFile {
 }
 
 fn write_pid(file: &mut File, pid: u32) -> std::io::Result<()> {
+    super::drop_shared_write(file)?;
     file.write_all(format!("{pid}\n").as_bytes())?;
     file.flush()
 }

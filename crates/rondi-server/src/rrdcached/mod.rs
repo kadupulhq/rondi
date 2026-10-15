@@ -68,6 +68,51 @@ pub(crate) fn error_text(error: &std::io::Error) -> String {
     }
 }
 
+/// Write permission for the group and others: never left on a pid file,
+/// log file or directory the daemon creates.
+// Rondi policy (RCD-13): the reference creates these with the mode the
+// umask leaves, so a umask looser than 022 makes them group or world
+// writable; Rondi removes those bits, which changes nothing under the
+// usual umask 022.
+const SHARED_WRITE: u32 = 0o022;
+
+/// Removes group and other write permission from an open file.
+pub(crate) fn drop_shared_write(file: &std::fs::File) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+    let mode = file.metadata()?.mode() & 0o7777;
+    if mode & SHARED_WRITE == 0 {
+        return Ok(());
+    }
+    // SAFETY: fchmod on a descriptor this process holds.
+    if unsafe { libc::fchmod(file.as_raw_fd(), (mode & !SHARED_WRITE) as libc::mode_t) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Creates `path` and its missing parents with the mode the umask leaves,
+/// less group and other write permission.
+pub(crate) fn create_directories(path: &std::path::Path) -> std::io::Result<()> {
+    let missing = path
+        .ancestors()
+        .take_while(|ancestor| {
+            !ancestor.as_os_str().is_empty() && std::fs::symlink_metadata(ancestor).is_err()
+        })
+        .collect::<Vec<_>>();
+    for directory in missing.into_iter().rev() {
+        match std::fs::create_dir(directory) {
+            Ok(()) => drop_shared_write(&listener::open_directory(directory)?)?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if !path.is_dir() {
+        return Err(std::io::Error::from_raw_os_error(libc::ENOTDIR));
+    }
+    Ok(())
+}
+
 const DAEMONIZE_FAILED: &str = "rrdcached: daemonize failed, exiting.";
 
 /// Runs the daemon until a signal stops it and returns the exit status.

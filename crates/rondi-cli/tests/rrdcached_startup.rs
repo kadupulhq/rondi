@@ -458,3 +458,78 @@ fn rrdcached_creates_missing_base_directories_without_access_for_others() {
         assert_eq!(mode & 0o007, 0, "{} is {mode:o}", created.display());
     }
 }
+
+#[test]
+fn rrdcached_files_are_never_group_or_world_writable_under_umask_zero() {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    use std::os::unix::process::CommandExt;
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    let mode = |path: &Path| {
+        std::fs::symlink_metadata(path)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777
+    };
+    let pid_file = work.join("run/pid/rrdcached.pid");
+    let log_file = work.join("log");
+    let base = work.join("new/base");
+    let socket = work.join("sockets/s.sock");
+    let mut command = Command::new(rrdcached_program(&work, true));
+    command
+        .arg("-g")
+        .arg("-p")
+        .arg(&pid_file)
+        .arg("-o")
+        .arg(&log_file)
+        .arg("-b")
+        .arg(&base)
+        .arg("-l")
+        .arg(format!("unix:{}", socket.display()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: umask is async-signal-safe and touches only the child.
+    unsafe {
+        command.pre_exec(|| {
+            libc::umask(0);
+            Ok(())
+        });
+    }
+    run_unprivileged(&mut command, &work);
+    let mut child = command.spawn().unwrap();
+    wait_for_socket(&mut child, &socket);
+    // Rondi policy (RCD-13): the umask can only tighten these.
+    for path in [
+        pid_file.as_path(),
+        pid_file.parent().unwrap(),
+        work.join("run").as_path(),
+        log_file.as_path(),
+        socket.parent().unwrap(),
+    ] {
+        assert_eq!(
+            mode(path) & 0o022,
+            0,
+            "{} is {:o}",
+            path.display(),
+            mode(path)
+        );
+    }
+    assert!(
+        std::fs::symlink_metadata(&socket)
+            .unwrap()
+            .file_type()
+            .is_socket()
+    );
+    assert_eq!(mode(&socket), 0o600);
+    assert_eq!(mode(&base), 0o750);
+    assert_eq!(mode(base.parent().unwrap()), 0o750);
+    // SAFETY: the child is a daemon started by this test.
+    assert_eq!(
+        unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) },
+        0
+    );
+    assert!(wait_for_exit(&mut child).success());
+    assert!(!pid_file.exists() && !socket.exists());
+}

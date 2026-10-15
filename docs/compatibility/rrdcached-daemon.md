@@ -184,6 +184,16 @@ syslog. Rondi never forks and stays in the foreground, so startup errors
 always reach standard error with their exit status. The vectors always pass
 `-g`.
 
+**RCD-13** (black-box; rondi-policy). The reference creates the pid file,
+the `-o` file and missing pid or socket directories with the mode the umask
+leaves (0644 and 0755 under umask 022, 0666 and 0777 under umask 0).
+*Rondi policy*: it removes group and other write permission from each of
+them, so the umask can only tighten the result. The only difference from
+the reference is under a umask looser than 022. New `-b` directories stay
+0750 and Unix sockets 0600 without `-m`/`-s` whatever the umask (RCD-3,
+RCD-5). Pinned by `rrdcached_startup.rs`
+(`rrdcached_files_are_never_group_or_world_writable_under_umask_zero`).
+
 ## 5. Signals and shutdown
 
 **RCD-20** (documentation, black-box; must). The effect of each signal on

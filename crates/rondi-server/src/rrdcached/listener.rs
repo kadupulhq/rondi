@@ -166,13 +166,10 @@ fn open_unix(
     };
     let name =
         CString::new(name.as_encoded_bytes()).map_err(|_| bind_failed(errno_text(libc::EINVAL)))?;
-    // Compatibility: a missing socket directory is created with the mode
-    // the umask leaves, 0755 under umask 022 (opt-050).
+    // Compatibility: a missing socket directory is created, 0755 under
+    // umask 022 (opt-050); never group or world writable (RCD-13).
     // Provenance: black-box compatibility test.
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .create(directory)
-        .map_err(io_failed)?;
+    super::create_directories(directory).map_err(io_failed)?;
     let parent = check_directory_chain(directory)?;
     match stat_at(&parent, &name) {
         Ok(found) if found.st_mode & libc::S_IFMT == libc::S_IFSOCK => {
