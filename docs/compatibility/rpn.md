@@ -122,12 +122,31 @@ An expression is a sequence of tokens separated by single commas. [doc]
   40 characters long, and must be followed by a comma. A number in the last
   position is therefore never a number: `a,POP,5` and `a,1,2` fail with
   `don't understand '5'` / `'2'`. [bb]
-- The token must convert completely and in range as a decimal floating
-  point literal: `1.5`, `.5`, `5.`, `1e3`, `1e+3`, `1e-3`, `+1`, `-1`,
-  `00012`, 40-digit integers. `1e` is accepted and means `1`. Rejected (as
+- The token must convert completely as a decimal floating point literal:
+  `1.5`, `.5`, `5.`, `1e3`, `1e+3`, `1e-3`, `+1`, `-1`, `00012`, 40-digit
+  integers. `1e`, `1e+` and `1e-` are accepted and mean `1`. Rejected (as
   `don't understand`): `1E3` (upper-case exponent), `1e1100`, `-1e1100` and
-  `1e-1100` (overflow and underflow), `1..2`, `1-2`, `--1`, `1.5e2.5`,
-  `0x10`, `inf`, `nan`, `.`, and 41-character numbers. [bb]
+  `1e-1100`, `1..2`, `1-2`, `--1`, `1.5e2.5`, `0x10`, `inf`, `nan`, `.`,
+  and 41-character numbers. [bb]
+- The range check is on the decimal exponent after moving the decimal
+  point behind the last mantissa digit (the written exponent minus the
+  number of digits after the point), not on the value: it must lie in
+  -1021 to 1024. So `1e1024`, `10e1024` and `0.1e1025` are accepted and
+  read as `inf`, `1e-1021` and `1000e-1021` are accepted and read as 0,
+  while `1e1025`, `1.e1025`, `0e2000`, `1e-1022`, `0.1e-1021` and
+  `100000e-1025` are rejected. [bb]
+- The value read is not always the correctly rounded one. It is what this
+  procedure gives: accumulate the mantissa digits, ignoring the point, as
+  `m = m * 10 + digit` in binary64 (fused multiply-add on aarch64), then
+  scale by binary powering: with a factor starting at 10 and squared after
+  every bit, multiply by the factor for each set bit of the exponent's
+  magnitude (lowest bit first), or divide by it when the exponent is
+  negative. This reproduces RRDtool 1.11.0 on macOS arm64 to the bit for
+  403 random literals and for every power of ten from `1e-330` to `1e308`
+  (read back through `PRINT:%.17le`). Examples that differ from correct
+  rounding: `1.7976931348623157e308` reads as `inf`, `1e308,SIN` gives
+  `7.8524343674e-01` (`unaryedge-09`), `1e300,1e-300,%` (`mod-13`), and
+  `1000000010.9999999` reads as `1000000011`. [bb]
 - A lone `-` or `+` is the subtraction or addition operator. [bb]
 
 ### Operators
@@ -160,6 +179,13 @@ An expression is a sequence of tokens separated by single commas. [doc]
   comma or the end (`PREV(a)x`), or missing its closing parenthesis
   (`PREV(a,+`), fails with `garbage in RPN: '<rest>'`. `PREV()` and
   `PREV( a)` fail with `don't understand`. [bb]
+- The byte after the name closes the token whatever it is: `PREV(a,`,
+  `PREV(a,,+` and `PREV(a],+` read as `PREV(a)` (followed by `+`), while
+  `PREV(a,+`, `PREV(a,b,+,+` and `PREV(a)),+` are garbage. Garbage is
+  reported before the name is looked up (`PREV(nope,+` is garbage,
+  `PREV(nope,,+` is `variable 'nope' not found`). When the name runs to the
+  end of the expression the lookup comes first: `PREV(nope` is not found,
+  `PREV(a` is garbage. [bb]
 
 ### Variables are required
 
@@ -179,7 +205,14 @@ number fails earlier with `don't understand`. [bb]
 - The stack has no observable fixed limit (3000 duplicated values evaluate
   normally). [bb]
 - Count and index operands are truncated toward zero to an integer
-  (`2.9` behaves as `2`). [bb]
+  (`2.9` behaves as `2`). An unknown count behaves as 0 on aarch64
+  (`a,UNKN,COPY,POP` ends with `RPN final stack size != 1`, and
+  `1,2,UNKN,AVG` pushes unknown). Out-of-range and unknown values convert
+  like a C cast on the platform: aarch64 saturates and maps unknown to 0,
+  x86_64 yields the type's minimum (see
+  [platform notes](../compatibility.md#platform-notes)). ROLL converts its
+  operands as a 32-bit `int`; the other counts, shifts and windows as a
+  64-bit `long`. [bb]
 - All errors print `ERROR: <message>` on stderr, exit with status 1 and
   print nothing on stdout. [bb]
 
@@ -266,6 +299,16 @@ quarter-hour zones and DST transitions (`ltime-03` to `ltime-06`,
   UTC, the 01:00 local row). [doc] [bb]
 - `NEWWEEK` pushes 1 when the row's local weekday is the first day of the
   week and differs from the weekday of `row time - STEPWIDTH`. [bb]
+- On glibc the first weekday comes from the locale the environment selects
+  as for `setlocale(LC_ALL, "")`: `LC_ALL` wins over `LC_TIME`, which wins
+  over `LANG`, and if any category names a locale that is not installed the
+  whole selection falls back to C. The first weekday is the weekday of the
+  locale's `week` start date (`19971130`, a Sunday, in every probed locale)
+  plus `first_weekday - 1`. Probed in the CI image (glibc, Debian): C,
+  POSIX, `en_US` and `he_IL` start on Sunday, `de_DE`, `en_GB` and `fr_FR`
+  on Monday, `ar_EG` on Saturday; `LANG=de_DE.UTF-8 LC_TIME=C` and
+  `LC_ALL=C LC_TIME=de_DE.UTF-8` start on Sunday; an uninstalled locale in
+  any variable gives Sunday. [bb]
 - The first day of the week is platform dependent: on macOS it is always
   Sunday, independent of locale (`newweek-05` uses `LC_ALL=en_GB.UTF-8`
   and still starts on Sunday). On glibc it is derived from the locale's
@@ -290,8 +333,21 @@ step. [bb]
 - The position at the first rows depends on where the variable's fetched
   series begins, which can precede the CDEF start; RRDtool reads outside
   its data in that region. The `mixedstep` vectors mask the first six rows
-  with `COUNT,6,GT,...,UNKN,IF`. The replacement must not crash there; the
-  values are not a contract.
+  with `COUNT,6,GT,...,UNKN,IF`. The replacement must not crash there.
+- TREND and the PREDICT family count back from a different sample than a
+  plain reference reads: in a row whose time is a multiple of the
+  variable's step they end at the variable's current sample, otherwise at
+  the sample before it. At equal steps every row is a multiple, so this is
+  the current sample; a 30 s variable in a 10 s CDEF switches its window one
+  row before its plain value changes (`mixedstep-05` to `mixedstep-07`).
+  [bb]
+- Such windows reach before the variable's first sample in early rows of a
+  mixed-resolution CDEF, even after the six masked rows. RRDtool reads 0
+  there on macOS, and the same vectors passed the frozen comparison on
+  Linux x86_64: `z,60,TREND` in a 10 s
+  CDEF over a 30 s DEF gives `0` in its second row and
+  `(first sample + 0) / 2` in its third, and `mixedstep-06` row 7 is
+  `(2.583 + 0.417 + 0) / 3`. [bb]
 - When a DEF is given an earlier `:start=`, the CDEF is evaluated from that
   earlier time and `xport` prints only the rows inside the export range.
   Row indexes used by `COUNT`, `TREND` and the PREDICT family count from
@@ -308,9 +364,12 @@ step. [bb]
   reference (`copy-06`, tagged `undefined`); the replacement may reject it.
   [doc] [bb]
 - `n,INDEX` replaces `n` with a copy of the `n`th value below it, counting
-  from 1 (`1,2,3,4,3,INDEX` -> `1,2,3,4,2`). `0,INDEX` leaves the 0 in
-  place. Too large an `n` is `RPN stack underflow`. A negative `n` reads
-  above the stack top and is not a contract. [doc] [bb]
+  from 1 (`1,2,3,4,3,INDEX` -> `1,2,3,4,2`). `0,INDEX` leaves its operand
+  in place (an unknown operand stays unknown). Too large an `n` is
+  `RPN stack underflow`. A negative `n` pushes a value read from above the
+  stack top; the value is not a contract, but the push is, so `x,-1,INDEX`
+  ends with `RPN final stack size != 1` (pinned in
+  `graph_data_differential.rs`). [doc] [bb]
 
 ### ROLL
 
@@ -318,7 +377,11 @@ step. [bb]
 a,d,b,c`). Its observable behavior is: [rsi] [bb]
 
 1. Pop `m`, then `n`, both truncated to integers. If the remaining depth is
-   less than `n`, fail with `RPN stack underflow`.
+   less than `n`, fail with `RPN stack underflow`. The comparison is
+   `depth - n < 0` in wrapping 32-bit arithmetic, so `n` below about
+   `-2^31 + depth` is also an underflow: `-3e9`, `-2147483649` and `NEGINF`
+   on macOS, and `INF` on x86_64, where it converts to `INT_MIN`
+   (`graph_data_differential.rs`). [bb]
 2. If `n` is negative, fail with `RPN out of memory (allocating <n>
    objects)`. If `n` is 0 or 1 the stack is unchanged.
 3. Form a window `W[0..n-1]` from the current top value followed by the
@@ -335,8 +398,16 @@ With `1,2,3,4,5,6,3,1,ROLL` the window is `6, 3, 1` and the stack becomes
 slot holds a known value. For `n > 3` the window reaches slots whose
 contents depend on earlier evaluation history, and RRDtool shows
 uninitialised data there; the replacement must not crash but the values are
-not specified. A very large `m` wraps in 32-bit arithmetic (see
-`rpn_differential.rs`).
+not specified. When those slots were written earlier in the same row (for
+example `...,7,8,9,10,POP,POP,POP,POP,5,m,ROLL`), RRDtool reads the values
+last written there. [bb]
+
+Near the 32-bit limit, step 4 is computed as `((n - 1 + m) - j) mod n`,
+where `n - 1 + m` wraps in 32-bit two's-complement arithmetic and the
+subtraction of `j` and the modulus do not. For `n = 3` and `n = 5` this
+reproduces every probed `m` from `INT_MAX - 5` to `INT_MAX` and from
+`INT_MIN` to `INT_MIN + 4`; `m = 3e9` behaves as `INT_MAX` and `m = -3e9`
+as `INT_MIN` on aarch64. [bb]
 
 ## Set operators
 
@@ -354,7 +425,11 @@ is `RPN stack underflow`. [doc] [bb]
   count pops nothing and pushes unknown. The sum starts at +0, so the mean
   of negative zeros is +0 (pinned in `rpn_differential.rs`). [doc] [bb]
 - `n,SMIN` / `n,SMAX`: minimum / maximum, ignoring unknown values; unknown
-  when all are unknown or `n` is 0. [doc] [bb]
+  when all are unknown or `n` is 0. The values are scanned from the top and
+  only a strictly smaller (larger) value replaces the candidate, so
+  `0,-0,2,SMAX` is `-0` and `-0,0,2,SMIN` is `+0`
+  (`graph_data_differential.rs`). A negative count crashes the reference;
+  the replacement rejects it with `RPN stack underflow`. [doc] [bb]
 - `n,MEDIAN`: median of the non-unknown values (mean of the two middle
   values when their number is even); unknown when none. [doc] [bb] With
   infinities present the sorted order follows the platform sort; before
@@ -376,7 +451,9 @@ is `RPN stack underflow`. [doc] [bb]
   `r = round_half_away(p * n / 100)` counting from 1 at the smallest. When
   `r` is 0 the result is a copy of the value immediately below the `n`
   values, which itself stays on the stack (`7,1,2,3,0,3,PERCENT` ->
-  `7,7`). With nothing below, the result is not specified. [bb]
+  `7,7`). With nothing below it is `RPN stack underflow`
+  (`50,0,PERCENT,x,+` in `rpn_differential.rs`). The percentile range is
+  checked before the count. [bb]
 
 ### Ordering used by SORT, MEDIAN, PERCENT and PREDICTPERC
 
@@ -413,11 +490,18 @@ infinities are present (`vdef-22`: `-inf` on macOS, `inf` on Linux).
   `30,a,TREND`). The window operand `w` is itself popped from the stack
   and must be present (`a,TREND` is `RPN stack underflow`).
 - Let `S` be the variable's step and `N = ceil(w / S)` (at least 1;
-  `w <= 0` gives 1). An unknown `w` is undefined: the aarch64 builds
+  `w <= 0` gives 1), with `w` truncated to an integer first (`10.5` acts as
+  `10`). An unknown `w` is undefined: the aarch64 builds
   behave as `N = 1` and the x86_64 build crashes (`trend-10`,
   `trendnan-10`, tagged `undefined`); the replacement may reject it. In rows whose zero-based index is less
   than `N - 1` the result is unknown. Otherwise the result is the mean of
   the `N` most recent samples of the variable ending at the current one.
+- The warm-up count in the previous rule is computed with `w` and `S`
+  rounded to single precision: `ceil(float(w) / float(S))`. It equals `N`
+  unless `S` exceeds 2^24 seconds. With `S = 1000000010`, a window of
+  `S + 32` averages two samples from the first row, while `S + 33` leaves
+  the first row unknown (`alias_modes.rs`,
+  `rrdtool_xport_trend_duration_rounding_matches_rrd_strtod`). [bb]
 - `TREND` includes unknown samples, so one unknown makes the result
   unknown. `TRENDNAN` skips them and gives unknown only when all are
   unknown.
@@ -463,12 +547,20 @@ Rules: [bb] unless marked
 - `PREDICTSIGMA`: with `n` samples, sum `s` and sum of squares `q`,
   `sqrt((n*q - s*s) / (n*(n-1)))`; unknown when `n < 2` or the radicand is
   negative. On aarch64 the sum of squares is accumulated with fused
-  multiply-add. [rsi]
+  multiply-add. [rsi] The numerator is fused too, as `fma(n, q, -(s*s))`,
+  and samples are summed shift by shift, deepest shift first, offsets
+  ascending (`graph_engine_parity.rs`). [bb]
 - `PREDICTPERC`: sort the set with the [ordering](#ordering-used-by-sort-median-percent-and-predictperc).
   With `f = (p / 100) * (n - 1)`: for a negative `p`, take the element at
   index `round_half_away(|f|)`; for a non-negative `p`, take the element at
   `floor(f)` and, when `f` has a fractional part, add
-  `frac(f) * (next - this)`. Unknown when the set is empty. [rsi]
+  `frac(f) * (next - this)`. Unknown when the set is empty. [rsi] On
+  aarch64 the addition is fused (`graph_engine_parity.rs`). [bb]
+- The percentile check comes before the shift checks
+  (`-60,1,30,101,a,PREDICTPERC` reports `unsupported percentile:
+  101.000000`). Shifts, the multiplier and the window are truncated to
+  integers (`20.5,-2` uses shifts 0 and 20); an unknown window counts as 0
+  on aarch64. [bb]
 
 ## VDEF
 
@@ -505,6 +597,7 @@ printed as `ERROR: <text>` with exit status 1. [bb]
 | `RPN stack underflow` | too few operands |
 | `RPN final stack size != 1` | depth other than one at the end of a row |
 | `RPN out of memory (allocating <n> objects)` | negative `ROLL` count |
+| `malformed predict arguments` | Rondi only: PREDICT family without a variable operand |
 | `malformed trend arguments` | TREND window not preceded by a variable |
 | `percentile argument must be between 0 and 100` | `PERCENT` operand |
 | `unsupported percentile: <p>` | `PREDICTPERC` operand |
@@ -525,10 +618,10 @@ printed as `ERROR: <text>` with exit status 1. [bb]
   platform, but VDEF `PRINT` with `%le` shows the sign of the platform's
   unknown value: `nan` on aarch64 and `-nan` on x86_64 (`vdef-21`). [bb]
 - `0.49999999999999994,ROUND` gives 0 on aarch64 and 1 on x86_64
-  (`rounding-06`). Whether the difference lies in reading the literal or
-  in rounding is not settled; numeric literals with more than 15
-  significant digits should be treated as platform dependent in the last
-  bit. [bb]
+  (`rounding-06`). The difference lies in reading the literal: its 17
+  digits exceed 2^53, so the fused and unfused digit accumulation described
+  under [Numbers](#numbers) round differently. Any literal with more than
+  15 significant digits can differ in the last bit between platforms. [bb]
 - Vectors with a named `TZ` are compared against the frozen table only when
   the host has that zone in `/usr/share/zoneinfo`.
 - Results that accumulate products (`STDEV`, `PREDICTSIGMA`, VDEF `STDEV`
@@ -546,16 +639,25 @@ The reference crashes or reads memory it does not own in these cases. The
 replacement need not reproduce them and must not crash; returning an error
 such as `RPN stack underflow` is acceptable.
 
-- `COPY` with a negative count (crash).
+- `COPY` with a negative count (crash). Rondi: `RPN stack underflow`.
 - `SORT` with a negative count (crash on glibc; no effect on macOS).
-- `TREND` and `TRENDNAN` with an unknown window (crash on x86_64).
-- `MEDIAN` with a negative count (crash), `INDEX` with a negative index.
+  Rondi: no effect.
+- `TREND` and `TRENDNAN` with an unknown window (crash on x86_64). Rondi:
+  the window converts like a C cast, so aarch64 averages one sample.
+- `MEDIAN`, `SMIN`, `SMAX` and `STDEV` with a negative count (crash), and
+  `PERCENT` with a negative count. Rondi: `RPN stack underflow`.
+- The value pushed by `INDEX` with a negative index.
 - `ROLL` windows that reach stack slots never written in the current
   evaluation.
 - `PERCENT` with rank 0 and no value below the counted values.
 - The first rows of mixed-resolution CDEFs (see
   [Variable cursors](#variable-cursors)).
 - PREDICT family operators whose `x` operand is not a variable reference.
+  Rondi fails with its own message, `malformed predict arguments`.
+- A negative PREDICT shift count of enormous magnitude with a zero
+  multiplier. Rondi visits at most 2^22 sample offsets per row and then
+  fails with `RPN out of memory (allocating <k> objects)`, `<k>` being the
+  shift count.
 
 ## Rules by provenance
 
@@ -570,4 +672,9 @@ such as `RPN stack underflow` is acceptable.
 - From the manual: the operator set and the documented meaning of each
   operator, with the two contradictions noted above (comparisons and
   `LIMIT` with infinities, NEWWEEK and `LC_TIME` on macOS).
-- Everything else is black-box.
+- Everything else is black-box, including the rules added while writing
+  the clean-room implementation: number range and value, the `PREV(name)`
+  closing byte, ROLL wrapping, window ends and zero reads for coarser
+  variables, the single-precision TREND warm-up, PERCENT rank 0 with
+  nothing below, SMIN and SMAX scan order, negative INDEX, and the fused
+  PREDICTSIGMA numerator and PREDICTPERC interpolation.

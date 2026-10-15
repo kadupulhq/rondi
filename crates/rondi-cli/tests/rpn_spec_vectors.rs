@@ -20,10 +20,7 @@ const VECTORS: &str = include_str!("data/rpn_vectors.json");
 /// expectation stays RRDtool's; these ids are reported instead of failing.
 /// A listed vector that starts matching fails the test so the entry is
 /// removed.
-const KNOWN_DIVERGENCES: &[(&str, &str)] = &[(
-    "predictperc-19",
-    "an unknown PREDICTPERC percentile yields unknown rows in RRDtool; Rondi panics",
-)];
+const KNOWN_DIVERGENCES: &[(&str, &str)] = &[];
 
 struct Vector {
     id: String,

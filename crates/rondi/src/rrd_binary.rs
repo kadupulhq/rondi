@@ -1098,8 +1098,9 @@ fn update_text_arguments(
                 // conversion is out of range: aarch64 saturates, so the
                 // excess becomes a huge (long) microsecond count, while
                 // x86_64 stores LONG_MIN and the time check rejects it.
-                let seconds = crate::rpn::c_long(time.floor());
-                let microseconds = crate::rpn::c_long((time - seconds as f64) * f64::from(1e6_f32));
+                let seconds = crate::numeric_cast::c_long(time.floor());
+                let microseconds =
+                    crate::numeric_cast::c_long((time - seconds as f64) * f64::from(1e6_f32));
                 (seconds, microseconds as u64)
             }
         };
