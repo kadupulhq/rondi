@@ -658,7 +658,10 @@ keep these entry points consistent with this specification:
   `crates/rondi-server/src/lib.rs`) build files with sections 4 to 10 and
   CR-61 to CR-64. The daemon passes its own start and step after its own
   argument handling (CR-72), applies the 128-definition cap, and does not
-  support templates or sources.
+  support templates or sources. As a Rondi hardening limit with no RRDtool
+  counterpart, the daemon refuses a file larger than 64 MiB
+  (`file would exceed the 64 MiB CREATE limit`) before allocating or
+  creating anything; local `create` has no such limit (CR-71).
 - The CLI (`crates/rondi-cli/src/main.rs`) implements sections 1 to 3 and
   dispatches templates, sources and the daemon.
 

@@ -41,9 +41,9 @@ pub use rrd_binary::{
     update_rrd_raw_values_verbose, update_rrd_text, update_rrd_values, update_rrd_values_verbose,
     with_rrd_locking,
 };
-#[cfg(unix)]
-pub use rrd_create::create_rrd_at;
 pub use rrd_create::{CreateOptions, create_rrd};
+#[cfg(unix)]
+pub use rrd_create::{DAEMON_CREATE_MAX_BYTES, create_rrd_at};
 pub use rrd_number::{c_strtol, c_strtoll_errno, parse_rrd_number};
 pub use rrd_resize::resize_rrd_file;
 pub use rrd_restore::{

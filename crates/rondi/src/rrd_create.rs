@@ -29,6 +29,10 @@ const DEFAULT_STEP: u64 = 300;
 const DEFAULT_START_OFFSET: i64 = 10;
 /// Values written per `write` call when filling archive rows.
 const FILL_VALUES: usize = 8192;
+/// Largest file the cache daemon's `CREATE` writes. A Rondi hardening
+/// limit with no RRDtool counterpart: a network client must not be able to
+/// make the daemon fill its disk. Local `create` has no such limit (CR-71).
+pub const DAEMON_CREATE_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The options of `create` other than its definition words.
 #[derive(Debug, Clone, Copy, Default)]
@@ -486,6 +490,17 @@ pub fn create_rrd_at(
         return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
     }
     let rrd = NewRrd::build(step, start, None, definitions)?;
+    // The length is computed with checked arithmetic and compared before
+    // anything is allocated or created.
+    if rrd
+        .total_len()
+        .is_none_or(|length| length > DAEMON_CREATE_MAX_BYTES)
+    {
+        return Err(StoreError::Rrd(format!(
+            "file would exceed the {} MiB CREATE limit",
+            DAEMON_CREATE_MAX_BYTES >> 20
+        )));
+    }
     let head = rrd.head_bytes()?;
     let mode = existing
         .filter(|status| status.st_mode & libc::S_IFMT == libc::S_IFREG)
@@ -697,6 +712,72 @@ mod tests {
             rows.chunks(8)
                 .all(|value| value == rrd_nan().to_le_bytes().as_slice())
         );
+    }
+
+    fn options() -> CreateOptions<'static> {
+        CreateOptions {
+            step: Some(10),
+            start: Some(1_000_000_000),
+            no_overwrite: false,
+            template: None,
+        }
+    }
+
+    /// A row count far beyond any disk fails at once, before a temporary
+    /// file is created, instead of streaming terabytes.
+    #[test]
+    fn local_create_of_a_huge_file_fails_fast() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("huge.rrd");
+        let started = std::time::Instant::now();
+        let defs = words(&["DS:x:GAUGE:20:U:U", "RRA:AVERAGE:0.5:1:1099511627776"]);
+        let error = create_rrd(path.to_str().unwrap(), &options(), &defs).unwrap_err();
+        assert_eq!(error.to_string(), "cannot allocate memory");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+    }
+
+    /// The daemon limit does not apply to local `create`.
+    #[test]
+    fn local_create_is_not_bound_by_the_daemon_size_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("big.rrd");
+        let rows = DAEMON_CREATE_MAX_BYTES / 8 + 1;
+        let defs = words(&["DS:x:GAUGE:20:U:U", &format!("RRA:AVERAGE:0.5:1:{rows}")]);
+        create_rrd(path.to_str().unwrap(), &options(), &defs).unwrap();
+        assert!(std::fs::metadata(&path).unwrap().len() > DAEMON_CREATE_MAX_BYTES);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn daemon_create_is_capped_before_writing() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = File::open(temp.path()).unwrap();
+        let create = |rows: u64| {
+            create_rrd_at(
+                &directory,
+                std::ffi::OsStr::new("d.rrd"),
+                1_000_000_000,
+                10,
+                &words(&["DS:x:GAUGE:20:U:U", &format!("RRA:AVERAGE:0.5:1:{rows}")]),
+                true,
+            )
+        };
+        for rows in [DAEMON_CREATE_MAX_BYTES / 8, 1 << 40] {
+            assert_eq!(
+                create(rows).unwrap_err().to_string(),
+                "file would exceed the 64 MiB CREATE limit",
+                "{rows}"
+            );
+        }
+        // A size that overflows 64 bits fails while it is computed.
+        assert_eq!(
+            create(u64::MAX).unwrap_err().to_string(),
+            "cannot allocate memory"
+        );
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
+        create(1000).unwrap();
+        assert!(temp.path().join("d.rrd").is_file());
     }
 
     #[test]
