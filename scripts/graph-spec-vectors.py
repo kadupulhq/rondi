@@ -1257,9 +1257,30 @@ def duration_cases() -> None:
     run('duration', 'graph', 'nodir/x.png', *RANGE, DEFX, LINE, *bad)
 
 
+def repeat_cases() -> None:
+    """Options that may be given once, --graph-type and -I (GR-18)."""
+    for opts in [['--units', 'si', '--units', 'si'],
+                 ['--units', 'si', '--units', 'si', '-w', '5'],
+                 ['--units', 'xx', '--units', 'si'],
+                 ['--add-jsontime', '--add-jsontime'],
+                 ['-d', 'a', '-d', 'b'], ['-d', '', '--daemon', 'b'],
+                 ['--lazy', '--lazy'],
+                 ['--graph-type', 'TIME'], ['--graph-type', 'time'],
+                 ['--graph-type', ''], ['--graph-type', 'XY'],
+                 ['--graph-type', 'XY', '--graph-type', 'TIME'],
+                 ['--graph-type', 'XY', '-a', 'CSV'], ['-I']]:
+        run('repeat', *G, LINE, *opts)
+    run('repeat', 'graph', 'x', '--graph-type', 'XY')
+    run('repeat', 'graph', 'x', '--graph-type', 'XY', '-w', '5')
+    run('repeat', *G, 'VDEF:v=x,MAXIMUM', 'PRINT:v:%lf', '--graph-type',
+        'XY')
+    run('repeat', 'xport', '-d', 'a', '-d', 'b', '-m', '5')
+
+
 # Groups added after the first capture; --add appends them to the table
 # without regenerating the others.
-LATER_GROUPS = ['order', 'scan', 'lazy', 'jsontime', 'xgridtime', 'duration']
+LATER_GROUPS = ['order', 'scan', 'lazy', 'jsontime', 'xgridtime', 'duration',
+                'repeat']
 
 
 def all_cases() -> list[dict]:
@@ -1293,6 +1314,7 @@ def all_cases() -> list[dict]:
     jsontime_cases()
     xgridtime_cases()
     duration_cases()
+    repeat_cases()
     counters: dict[str, int] = {}
     for entry in CASES:
         n = counters.get(entry['group'], 0) + 1

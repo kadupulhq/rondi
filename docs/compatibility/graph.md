@@ -145,6 +145,7 @@ directory as `<dir>`.
 | `jsontime` | `--add-jsontime` with an output file (GR-87) |
 | `xgridtime` | the `--x-grid` label format in data exports (GR-86) |
 | `duration` | a value format under the `duration` axis formatter (GR-25) |
+| `repeat` | options that may be given once, `--graph-type` and `-I` (GR-18, GR-19) |
 
 ## 1. Command line
 
@@ -250,6 +251,14 @@ A start or end that cannot be parsed fails when its option is read
 same order holds for `xport` (`order-001` to `-019`; `order-017` is the
 `xport` case).
 
+**GR-18** (bb; compat). Three options may be given only once: a second
+`--units` fails with `ERROR: --units can only be used once!`, a second
+`--add-jsontime` with `ERROR: --add-jsontime can only be used once!` and
+a second `--daemon` (also `graph --daemon ''` followed by another, and
+in `xport`) with `ERROR: You cannot specify --daemon more than once.`,
+each when the repeated option is read (`repeat-001` to `-006`, `-018`).
+Other options may repeat (GR-15).
+
 ### Option table
 
 **GR-16** (doc, bb; compat). The options of `graph` and `graphv`, with
@@ -321,6 +330,18 @@ cover every row in every accepted form.
 | `--disable-rrdtool-tag` | | flag | GR-61 |
 | `--alt-y-mrtg` | | flag | accepted; range unchanged |
 | `--no-minor` | | flag | rendering only |
+| `--graph-type` | | `TIME` or `XY` | GR-19 |
+| | `-I` | flag | accepted, no observable effect (`repeat-014`); no long form |
+
+**GR-19** (bb; compat). `--graph-type` accepts `TIME` (the default) and
+`XY`, case sensitively; any other value fails when read with
+`ERROR: unsupported graphics type '<v>'` (`repeat-008` to `-010`). `XY`
+is accepted while reading options but fails once a graph is laid out,
+before anything is printed, with `ERROR: XY diagram not implemented`
+(`repeat-011`). It does not fail without graph elements or for a data
+format, and a later `--graph-type TIME` cancels it (`repeat-012`,
+`-013`, `-015` to `-017`).
+
 
 *Rendering only* means the option is validated as stated and changes no
 observable output other than the image pixels.
@@ -1224,6 +1245,7 @@ their class; the expectation stays RRDtool's. They are summarized here.
 | `order-009`, `-010` | GR-17 | defect | axis format checked against the formatter in force when it is read |
 | `scan-001`, `-002`, `-009`, `-010`, `-012` to `-014`, `-016`, `-029`, `-031`, `-035`, `-038`, `-039`, `-048`, `-049`, `-057` to `-060`, `-062`, `-072`, `-073`, `-080`, `-087`, `-091` | GR-22 to GR-24 | defect | value scanners accept or reject other inputs |
 | `xgridtime-001` to `-003`, `-005` to `-008`, `-010` | GR-86 | defect | `--x-grid` time format ignored in data exports |
+| `repeat-007`, `-011`, `-015` | GR-19, GR-84, GR-3 | defect | `XY` not refused, `--lazy` on `/dev/null`, `0x0` without elements |
 
 `def-073` is listed as a defect, but the reference value comes from a
 data source the DEF did not name; whether that is a reference defect to

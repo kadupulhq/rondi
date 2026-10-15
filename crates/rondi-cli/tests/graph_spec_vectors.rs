@@ -636,6 +636,24 @@ const KNOWN_DIVERGENCES: &[Divergence] = &[
         DEFECT,
         "GR-86: --x-grid time format ignored",
     ),
+    div(
+        "graph-repeat-007",
+        LIBPNG_READ,
+        DEFECT,
+        "GR-84: no libpng read error for --lazy /dev/null",
+    ),
+    div(
+        "graph-repeat-011",
+        ALL,
+        DEFECT,
+        "GR-19: XY graph type not refused",
+    ),
+    div(
+        "graph-repeat-015",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
 ];
 
 struct Vector {
