@@ -20,7 +20,7 @@ About 12,400 lines of Rust (38 percent of non-test source) are rated High: modul
 | `crates/rondi/src/rrd_resize.rs` | Removed | 288 | Declared port; replaced by a clean-room `rrd_resize.rs` |
 | `crates/rondi/src/graph.rs` | High | 2,357 | Declared port of graph script parsing and data preparation; 18 shared function names |
 | `crates/rondi/src/graph_layout.rs` | High | 1,011 | Declared port of image layout functions |
-| `crates/rondi-cli/src/graph_options.rs` | High | 880 | Option tables keyed to C line numbers |
+| `crates/rondi-cli/src/graph_options.rs` | Replaced | 880 | Option tables keyed to C line numbers; replaced by the clean-room `graph_args.rs` from `docs/compatibility/graph.md` |
 | `crates/rondi-cli/src/optparse.rs` | High (FLAG) | 445 | Port of the bundled option parser; models C struct and enum |
 | `crates/rondi/src/rrd_snprintf.rs` | Replaced | 702 | Declared port of the portable snprintf; replaced by the clean-room `format_value/` from `docs/compatibility/format-strings.md` and black-box runs |
 | `crates/rondi-server/src/rrdcached_listen.rs` | Removed | 926 | Declared port of listener setup and daemonize (GPL-2.0-only file); replaced by the clean-room `rrdcached/` daemon modules |
@@ -136,6 +136,7 @@ Risk tiers:
 - Compatibility requirement: accept and validate every documented `graph`, `graphv` and `xport` option with matching error text.
 - Likely source: `rrdgraph` and `rrdxport` man pages; error text black-box observable.
 - Remediation: replace by spec and fresh implementation (an option table built from the man pages plus an observed error table). Tests: `graph_option_differential.rs`, `xport_option_differential.rs`, `rrdtool_command_options.rs` (14).
+- Status: replaced. `crates/rondi-cli/src/graph_args.rs` was written from `docs/compatibility/graph.md`, its vectors and black-box runs of RRDtool 1.11.0, from the removed module's signatures only, without reading its bodies or the C source. One exposure: a grep for module paths printed seven body lines (the legend direction and position assignments and the line that sets the no-RRDtool-tag flag); none of them shaped the new code beyond what the option table already states.
 
 **`crates/rondi-cli/src/optparse.rs`: `OptParse::{short, long, long_at, finish}`, `ArgType`, `LongOpt`, `DONE`, `ERROR`, `ERRMSG_SIZE`**
 

@@ -342,7 +342,6 @@ before anything is printed, with `ERROR: XY diagram not implemented`
 format, and a later `--graph-type TIME` cancels it (`repeat-012`,
 `-013`, `-015` to `-017`).
 
-
 *Rendering only* means the option is validated as stated and changes no
 observable output other than the image pixels.
 
@@ -1224,12 +1223,8 @@ their class; the expectation stays RRDtool's. They are summarized here.
 | `imgformat-004` to `-006`, `out-013`, `-016` to `-019` | GR-93 | policy | refuses SVG, PDF, EPS |
 | `limit-004`, `-006`, `-009`, `-012`, `-015`, `-016`, `-019` | GR-91 | policy | refuses large PNG graphs |
 | `limit-020` to `-025` | GR-92 | policy | refuses fetches over 10 million rows |
-| `grammar-055`, `-056`, `-061`, `out-008` | GR-3 | defect | prints `0x0` for a graph with no elements |
-| `opt-145`, `-146` (macOS, Linux aarch64) | GR-84 | defect | no `libpng error: Read Error` |
-| `out-027`, `-031` | GR-84 | defect | `--lazy` replaces a newer output file |
-| `out-029` | GR-84 | defect | `graphv --lazy` prints every key |
+| `grammar-055`, `-056`, `-061`, `out-008`, `order-009`, `-010`, `scan-001`, `-002`, `-009`, `-010`, `-012` to `-014`, `-016`, `-029`, `-031`, `-035`, `-038`, `-039`, `-048`, `-049`, `-057` to `-060`, `-062`, `-072`, `-073`, `-080`, `-087`, `-091`, `repeat-015` | GR-3 | defect | prints `0x0` for a graph with no elements |
 | `vertical-label-002` | GR-61 | defect | a 300-character vertical label panics (subtract overflow) |
-| `formatter-007`, `-008` | GR-25 | defect | a value format under the duration formatter is not rejected |
 | `def-073` | GR-43 | defect | `-Z` with a missing DS gives `nan`; the reference prints another value (`-5.438596`) |
 | `cdef-019` | GR-45 | defect | a CDEF that names itself is refused instead of giving `nan` |
 | `grid-dash-011`, `line-044`, `-045`, `hrule-027`, `-028`, `vrule-027`, `-028` | GR-24, GR-50, GR-54 | defect | no Cairo warning for zero or negative dashes |
@@ -1237,15 +1232,6 @@ their class; the expectation stays RRDtool's. They are summarized here.
 | `legend-030` | GR-60 | defect | CJK fallback metrics |
 | `legend-079` | GR-64 | defect | Pango markup measured as text |
 | `layout-026` to `-028` (Linux) | GR-81 | defect | legend `coords` under `--zoom` |
-| `data-005`, `-012`, `-019`, `-026`, `-033`, `-040`, `-047` | GR-86 | defect | `--x-grid` time format ignored in data exports |
-| `data-062`, `-063` | GR-87 | defect | `--add-jsontime` ignored |
-| `jsontime-001` to `-007`, `-009`, `-010` | GR-87 | defect | `--add-jsontime` ignored |
-| `lazy-001`, `-002`, `-004`, `-005` | GR-84 | defect | `--lazy` freshness and PNG check |
-| `duration-001`, `-006`, `-008`, `-013` to `-015` | GR-25 | defect | a value format under the duration formatter is not rejected |
-| `order-009`, `-010` | GR-17 | defect | axis format checked against the formatter in force when it is read |
-| `scan-001`, `-002`, `-009`, `-010`, `-012` to `-014`, `-016`, `-029`, `-031`, `-035`, `-038`, `-039`, `-048`, `-049`, `-057` to `-060`, `-062`, `-072`, `-073`, `-080`, `-087`, `-091` | GR-22 to GR-24 | defect | value scanners accept or reject other inputs |
-| `xgridtime-001` to `-003`, `-005` to `-008`, `-010` | GR-86 | defect | `--x-grid` time format ignored in data exports |
-| `repeat-007`, `-011`, `-015` | GR-19, GR-84, GR-3 | defect | `XY` not refused, `--lazy` on `/dev/null`, `0x0` without elements |
 
 `def-073` is listed as a defect, but the reference value comes from a
 data source the DEF did not name; whether that is a reference defect to
