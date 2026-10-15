@@ -5,7 +5,7 @@
 
 use thiserror::Error;
 
-use crate::rrd_binary::rrd_mul_add;
+use crate::rrd_binary::{rrd_mul_add, rrd_nan};
 
 /// The pinned Linux aarch64 oracle is built with GCC, which contracts across
 /// statements (`-ffp-contract=fast`) and after expanding `pow(x, 2.0)`, while
@@ -111,7 +111,7 @@ pub fn evaluate_vdef(
                 sorted.retain(|value| !value.is_nan());
             }
             if sorted.is_empty() {
-                no_time(f64::NAN)
+                no_time(rrd_nan())
             } else {
                 rrd_qsort_compatible(&mut sorted);
                 let index =
@@ -125,14 +125,14 @@ pub fn evaluate_vdef(
                 value: values[index],
                 timestamp: Some(interval_start(start, index, step)?),
             },
-            None => no_time(f64::NAN),
+            None => no_time(rrd_nan()),
         },
         VdefFunction::Last => match values.iter().rposition(|value| !value.is_nan()) {
             Some(index) => VdefResult {
                 value: values[index],
                 timestamp: Some(interval_timestamp(start, index, step)?),
             },
-            None => no_time(f64::NAN),
+            None => no_time(rrd_nan()),
         },
         VdefFunction::Average | VdefFunction::Stdev | VdefFunction::Total => {
             let finite: Vec<_> = values
@@ -141,7 +141,7 @@ pub fn evaluate_vdef(
                 .filter(|value| value.is_finite())
                 .collect();
             if finite.is_empty() {
-                no_time(f64::NAN)
+                no_time(rrd_nan())
             } else {
                 // vdef_calc starts at +0.0; Rust's f64 sum starts at -0.0.
                 let sum = finite.iter().fold(0.0, |sum, value| sum + value);
@@ -182,7 +182,7 @@ pub fn evaluate_vdef(
                 }
             }
             if count == 0.0 {
-                no_time(f64::NAN)
+                no_time(rrd_nan())
             } else {
                 // Clang rounds the count products and fuses the others; GCC
                 // does the reverse. The correlation below stays unfused in
@@ -217,7 +217,7 @@ fn extrema(
 ) -> Result<VdefResult, VdefError> {
     let Some(mut index) = values.iter().position(|value| !value.is_nan()) else {
         return Ok(VdefResult {
-            value: f64::NAN,
+            value: rrd_nan(),
             timestamp: None,
         });
     };
@@ -324,6 +324,41 @@ fn rrd_qsort_compatible(values: &mut [f64]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_unknown_aggregates_use_rrdtool_dnan_bits() {
+        // vdef_calc stores DNAN, the runtime 0.0/0.0 from rrd_nan_inf.c. That
+        // is the target's default NaN: sign set on x86-64 SSE, clear on AArch64.
+        #[cfg(target_arch = "x86_64")]
+        assert_eq!(rrd_nan().to_bits(), 0xfff8_0000_0000_0000);
+        #[cfg(target_arch = "aarch64")]
+        assert_eq!(rrd_nan().to_bits(), 0x7ff8_0000_0000_0000);
+        let expected = rrd_nan().to_bits();
+        // Unknown inputs carry the other sign and a payload, so passing an
+        // input NaN through instead of generating DNAN fails on every target.
+        let foreign = f64::from_bits((expected ^ (1 << 63)) | 1);
+        assert!(foreign.is_nan());
+        for function in [
+            VdefFunction::Maximum,
+            VdefFunction::Minimum,
+            VdefFunction::Average,
+            VdefFunction::Stdev,
+            VdefFunction::Total,
+            VdefFunction::First,
+            VdefFunction::Last,
+            VdefFunction::PercentNan,
+            VdefFunction::LslSlope,
+            VdefFunction::LslIntercept,
+            VdefFunction::LslCorrelation,
+        ] {
+            let percentile = (function == VdefFunction::PercentNan).then_some(50.0);
+            for values in [&[][..], &[foreign, foreign][..]] {
+                let result = evaluate_vdef(function, percentile, values, 100, 10).unwrap();
+                assert_eq!(result.value.to_bits(), expected, "{function:?}");
+                assert_eq!(result.timestamp, None);
+            }
+        }
+    }
 
     #[test]
     fn vdef_function_names_match_rrdtool_vocabulary() {

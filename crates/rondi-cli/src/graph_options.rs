@@ -96,6 +96,8 @@ pub(crate) struct GraphOptions {
     pub(crate) colors: super::GraphColors,
     pub(crate) imginfo: Option<String>,
     pub(crate) base: u32,
+    /// `FORCE_UTC_TIME`: print_calc breaks VDEF times down with gmtime_r.
+    pub(crate) utc: bool,
     pub(crate) daemon: Option<String>,
     pub(crate) start: i64,
     pub(crate) end: i64,
@@ -204,6 +206,7 @@ pub(crate) fn rrd_graph_options(args: &[String], now: i64) -> Result<GraphOption
         colors: super::GraphColors::default(),
         imginfo: None,
         base: 1000,
+        utc: false,
         daemon: None,
         start: 0,
         end: 0,
@@ -476,6 +479,7 @@ pub(crate) fn rrd_graph_options(args: &[String], now: i64) -> Result<GraphOption
             _ if option == short(b'J') => graph.alt_autoscale_min = true,
             _ if option == short(b'M') => graph.alt_autoscale_max = true,
             1015 => graph.allow_shrink = true,
+            1016 => graph.utc = true,
             _ if option == short(b'X') => graph.layout.units_exponent = Some(atoi(&value)),
             _ if option == short(b'L') => graph.layout.units_length = Some(atoi(&value)),
             _ if option == short(b'W') => graph.layout.watermark = Some(value),
@@ -483,7 +487,7 @@ pub(crate) fn rrd_graph_options(args: &[String], now: i64) -> Result<GraphOption
             1001 => graph.layout.no_rrdtool_tag = true,
             1003 => graph.layout.second_axis_legend = Some(value),
             ERROR => return Err(options.errmsg),
-            // -I -Y -N -P -E -z -i -B, 1009, 1010, 1016 and --alt-y-mrtg
+            // -I -Y -N -P -E -z -i -B, 1009, 1010 and --alt-y-mrtg
             // only change Cairo/Pango rendering.
             _ => {}
         }

@@ -8,7 +8,7 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ### Added
 
-- Nothing yet.
+- Add Criterion fetch and graph calculation benchmarks for 120-row and 7,200-row archives.
 
 ### Changed
 
@@ -17,6 +17,10 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ### Fixed
 
+- Fill all-unknown VDEF aggregates with RRDtool's target-specific DNAN bits.
+- Scale PRINT/GPRINT values when `%%S` or `%%s` appears literally, and rewrite `%S` in place so graphv metadata rescales and graph format errors quote the rewritten text like RRDtool.
+- Format PRINT/GPRINT VDEF times in UTC under `--utc`.
+- Paint HRULE and VRULE after the data elements regardless of their script position.
 - Reject Unix socket paths with ancestors another account can replace, and traverse daemon RRD parents through directory descriptors without following symlinks.
 - Bound rrdcached CREATE allocations to 64 MiB, including headers, and check archive size arithmetic before allocating. Local `rrdtool create` keeps upstream's unbounded size.
 - Validate native journal ownership, file type, link count, and group or other write permission before recovery, append, or compaction can modify it.
