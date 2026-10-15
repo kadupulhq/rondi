@@ -1,0 +1,18 @@
+@@ 021-single-del-v-rra-average-0-5-2-4 status 1
+1
+@@ 021-single-del-v-rra-average-0-5-2-4 stdout 0
+
+@@ 021-single-del-v-rra-average-0-5-2-4 stderr 21
+ERROR: out of memory
+
+@@ 021-single-del-v-rra-average-0-5-2-4 unchanged 0
+
+@@ 022-single-del-v-delrra-0-rra-average-0-5-1-4 status 1
+1
+@@ 022-single-del-v-delrra-0-rra-average-0-5-1-4 stdout 0
+
+@@ 022-single-del-v-delrra-0-rra-average-0-5-1-4 stderr 21
+ERROR: out of memory
+
+@@ 022-single-del-v-delrra-0-rra-average-0-5-1-4 unchanged 0
+

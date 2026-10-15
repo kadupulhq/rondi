@@ -1,0 +1,9 @@
+@@ 024-fresh-del-x status 1
+1
+@@ 024-fresh-del-x stdout 0
+
+@@ 024-fresh-del-x stderr 30
+ERROR: Cannot allocate memory
+
+@@ 024-fresh-del-x unchanged 0
+
