@@ -5555,7 +5555,10 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     "rrdtool tune output for COMPUTE data sources is not implemented".into(),
                 );
             }
-            let bound = |value: Option<f64>| c_printf_double("%1.4f", value.unwrap_or(f64::NAN));
+            // An unknown bound is DNAN, whose sign bit is set on x86_64,
+            // where glibc prints it as -nan.
+            let bound =
+                |value: Option<f64>| c_printf_double("%1.4f", value.unwrap_or_else(rrd_nan));
             println!(
                 "DS[{}] typ: {}\thbt: {}\tmin: {}\tmax: {}",
                 source.name,
