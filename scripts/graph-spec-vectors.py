@@ -51,6 +51,7 @@ from pathlib import Path
 
 PNG_MAGIC = b'\x89PNG\r\n\x1a\n'
 BLOB = re.compile(r'BLOB_SIZE:\d+')
+MMAP = re.compile(r"(mmaping file '[^\n]*?': )[^\n]*")
 
 # ------------------------------------------------------------ fixture
 
@@ -384,8 +385,12 @@ def value_cases() -> None:
                          '%lu', '%lu %s']),
             ('daemon', ['', 'unix:/nonexistent/sock', 'bad host name x'])]:
         for value in values:
+            # A label format this long overruns the reference's label
+            # buffer; on some hosts Pango then reports invalid UTF-8.
+            overrun = ['undefined'] if name == 'x-grid' and len(value) > 100 \
+                else None
             run(name, 'graph', '/dev/null', *RANGE, f'--{name}', value,
-                DEFX, LINE)
+                DEFX, LINE, tags=overrun)
     # The size line is left out when an argument word is an imginfo option.
     for args in [['-t', '-f'], ['-t', '--imginfo'],
                  ['-t', '-f', '-f', '%s %lu %lu'],
@@ -1158,6 +1163,9 @@ def normalize_bytes(data: bytes, cwd: Path) -> str:
         # The image ends the output of `graph -`; keep any text after it.
     text = out.decode('latin-1')
     text = BLOB.sub('BLOB_SIZE:*', text)
+    # Mapping a directory fails with EINVAL or ENODEV depending on the file
+    # system.
+    text = MMAP.sub(r'\1{ERRNO}', text)
     paths = sorted({str(cwd), os.path.realpath(cwd)}, key=len, reverse=True)
     lines = []
     for line in text.split('\n'):

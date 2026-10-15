@@ -117,6 +117,7 @@ Image bytes are never compared (see GR-90). Before comparison:
 | The number after `image = BLOB_SIZE:` becomes `*` | the image size in bytes |
 | The work directory becomes `{CWD}` | absolute paths in errors |
 | Text after `Compiled ` is dropped | the build stamp in the help banner |
+| The text after `mmaping file '<path>': ` becomes `{ERRNO}` | mapping a directory fails with EINVAL or ENODEV depending on the file system (GR-43) |
 
 An inspected path that does not exist is recorded as `<missing>`, a
 directory as `<dir>`.
@@ -387,8 +388,10 @@ is read like `strtod` and a negative size is accepted. Text after a second
   `ERROR: invalid x-grid format`. A grid step of 0 or less is
   **undefined**: the reference crashes for 0, and for a negative step it
   renders on macOS and crashes on Linux (`x-grid-009`, `-010`). Rondi
-  finishes. An LFM of 120 characters is accepted (`x-grid-001` to
-  `-020`).
+  finishes (`x-grid-001` to `-019`). An LFM of 120 characters is
+  **undefined**: it is accepted, but the formatted label overruns the
+  reference's label buffer, and on the CI runner host Pango then prints
+  `Invalid UTF-8 string` warnings with a process id (`x-grid-020`).
 - `--y-grid none` turns the y grid off (GR-61). Otherwise `step:factor`
   read as a float and an integer; trailing text after them is ignored
   (`1:2:3`). Fewer fields, `NONE` or garbage fail with
@@ -521,8 +524,13 @@ is missing fails with `ERROR: No positional VNAME`, or for `PRINT`,
 - The file is opened when the graph is computed, after all elements are
   parsed: `ERROR: opening '<file>': <strerror>`,
   `ERROR: reached EOF while loading header rrd->stat_head` for a short
-  file, `ERROR: mmaping file '<file>': <strerror>` for a directory
-  (platform-specific text), `ERROR: No DS called '<ds>' in '<file>'`.
+  file, `ERROR: mmaping file '<file>': <strerror>` for a directory,
+  `ERROR: No DS called '<ds>' in '<file>'`. The directory error is
+  platform-specific: `Invalid argument` (EINVAL) on macOS and on the Linux
+  file system of the local oracle container, `No such device` (ENODEV) on
+  the CI runners' Linux file system, so it follows the file system rather
+  than the OS; a replacement reports the error the host's `mmap` returns,
+  and the vectors mask that text (`def-019`).
 - `step=` must be a positive integer (`atoi`-style digits only, no
   suffix): otherwise `ERROR: Bad step value: <v>`. `start=` and `end=`
   are at-style times with the GR-30 errors. `reduce=` takes a CF;

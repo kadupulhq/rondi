@@ -22,6 +22,7 @@ use serde_json::{Map, Value, json};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 const VECTORS: &str = include_str!("data/graph_spec_vectors.json");
@@ -521,7 +522,7 @@ fn normalize_text(text: &str, work: &Path) -> String {
     paths.dedup();
     text.split('\n')
         .map(|raw| {
-            let mut line = blob_size(raw);
+            let mut line = mask_mmap_error(&blob_size(raw));
             if let Some(position) = line.find("Compiled ") {
                 line.truncate(position + "Compiled ".len());
             }
@@ -532,6 +533,19 @@ fn normalize_text(text: &str, work: &Path) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Mapping a directory fails with EINVAL or ENODEV depending on the file
+/// system, so the text after `mmaping file '<path>': ` becomes `{ERRNO}`.
+fn mask_mmap_error(line: &str) -> String {
+    const MARK: &str = "mmaping file '";
+    let Some(at) = line.find(MARK) else {
+        return line.to_owned();
+    };
+    let Some(end) = line[at..].find("': ") else {
+        return line.to_owned();
+    };
+    format!("{}{{ERRNO}}", &line[..at + end + 3])
 }
 
 /// `BLOB_SIZE:<digits>` becomes `BLOB_SIZE:*`.
@@ -862,17 +876,22 @@ fn graph_spec_vectors_match_rrdtool() {
         setup(program, &up, &table);
     }
 
-    let threads = std::thread::available_parallelism().map_or(2, |n| n.get().min(6));
-    let chunk = vectors.len().div_ceil(threads);
+    // The slow cases (large images, long fetches) sit together at the end of
+    // the table, so workers take the next vector from a shared counter
+    // rather than a fixed slice.
+    let threads = std::thread::available_parallelism().map_or(2, |n| n.get().min(8));
+    let next = AtomicUsize::new(0);
     let outcomes: Vec<Outcome> = std::thread::scope(|scope| {
-        let handles: Vec<_> = vectors
-            .chunks(chunk)
-            .map(|part| {
-                let (rondi, ro, up, oracle) = (&rondi, &ro, &up, &oracle);
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                let (rondi, ro, up, oracle, next) = (&rondi, &ro, &up, &oracle, &next);
+                let vectors = &vectors;
                 scope.spawn(move || {
-                    part.iter()
-                        .map(|vector| check(vector, rondi, ro, up, oracle.as_deref()))
-                        .collect::<Vec<_>>()
+                    let mut done = Vec::new();
+                    while let Some(vector) = vectors.get(next.fetch_add(1, Ordering::Relaxed)) {
+                        done.push(check(vector, rondi, ro, up, oracle.as_deref()));
+                    }
+                    done
                 })
             })
             .collect();
