@@ -35,7 +35,10 @@ pub(crate) fn rrd_nan() -> f64 {
 
 /// Evaluate `a * b + c` the way the pinned RRDtool builds do. GCC and Clang
 /// contract this pattern into a fused multiply-add on aarch64, which always
-/// has the instruction, while baseline x86_64 builds round the product first.
+/// has the instruction, while baseline x86_64 builds round the product first
+/// because the compiler may not assume FMA hardware there. Callers pass the
+/// exact operand split the pinned build's disassembly shows, since only one
+/// product of an `a * b - c * d` expression is fused.
 #[inline]
 pub(crate) fn rrd_mul_add(a: f64, b: f64, c: f64) -> f64 {
     #[cfg(target_arch = "aarch64")]
