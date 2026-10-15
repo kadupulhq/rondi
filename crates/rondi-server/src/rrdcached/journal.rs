@@ -112,19 +112,22 @@ impl Journal {
             .collect())
     }
 
-    /// Reads a journal file for replay. Returns `None` for a file that is
-    /// not a single-link regular file owned by the daemon user.
-    pub(crate) fn read(&self, name: &CString) -> io::Result<Option<Vec<u8>>> {
-        let mut file = open_at(&self.directory, name, libc::O_RDONLY, 0)?;
+    /// Opens a journal file for replay. Returns `None` for a name that is
+    /// not a single-link regular file owned by the daemon user, including a
+    /// symbolic link, which is skipped rather than followed.
+    pub(crate) fn open_for_replay(&self, name: &CString) -> io::Result<Option<File>> {
+        let file = match open_at(&self.directory, name, libc::O_RDONLY, 0) {
+            Ok(file) => file,
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
+            Err(error) => return Err(error),
+        };
         let metadata = file.metadata()?;
         // SAFETY: geteuid has no preconditions.
         let owned = metadata.uid() == unsafe { libc::geteuid() };
         if !metadata.is_file() || metadata.nlink() != 1 || !owned {
             return Ok(None);
         }
-        let mut text = Vec::new();
-        file.read_to_end(&mut text)?;
-        Ok(Some(text))
+        Ok(Some(file))
     }
 
     /// Starts the first journal file.
@@ -251,16 +254,44 @@ impl Journal {
     }
 }
 
-/// The LF-terminated lines of a journal file; a last line without LF was
-/// never completely written and is not replayed (RCD-32).
-pub(crate) fn lines(text: &[u8]) -> impl Iterator<Item = &[u8]> {
-    let complete = text
-        .iter()
-        .rposition(|&byte| byte == b'\n')
-        .map_or(&text[..0], |end| &text[..end]);
-    complete
-        .split(|&byte| byte == b'\n')
-        .filter(|line| !complete.is_empty() && line.len() <= REPLAY_LINE_MAX)
+/// Calls `each` with every LF-terminated line of a journal file, reading
+/// it in pieces so a large file is never held whole. A line longer than
+/// [`REPLAY_LINE_MAX`] is skipped; a last line without LF was never
+/// completely written and is not replayed (RCD-32).
+pub(crate) fn each_line(
+    reader: impl Read,
+    mut each: impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut reader = std::io::BufReader::new(reader);
+    let mut line = Vec::new();
+    let mut overlong = false;
+    loop {
+        let available =
+            std::io::BufRead::fill_buf(&mut reader).map_err(|error| error.to_string())?;
+        if available.is_empty() {
+            return Ok(());
+        }
+        let (taken, complete) = match available.iter().position(|&byte| byte == b'\n') {
+            Some(at) => (at, true),
+            None => (available.len(), false),
+        };
+        if !overlong {
+            if line.len() + taken > REPLAY_LINE_MAX {
+                overlong = true;
+                line.clear();
+            } else {
+                line.extend_from_slice(&available[..taken]);
+            }
+        }
+        std::io::BufRead::consume(&mut reader, taken + usize::from(complete));
+        if complete {
+            if !overlong {
+                each(&line)?;
+            }
+            line.clear();
+            overlong = false;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -268,17 +299,29 @@ mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
+    fn lines(text: &[u8]) -> Vec<Vec<u8>> {
+        let mut found = Vec::new();
+        each_line(text, |line| {
+            found.push(line.to_vec());
+            Ok(())
+        })
+        .unwrap();
+        found
+    }
+
     #[test]
     fn only_complete_lines_replay() {
-        assert_eq!(lines(b"a\nb\nc").collect::<Vec<_>>(), [&b"a"[..], b"b"]);
+        assert_eq!(lines(b"a\nb\nc"), [b"a".to_vec(), b"b".to_vec()]);
         assert_eq!(
-            lines(b"a\n\nb\n").collect::<Vec<_>>(),
-            [&b"a"[..], b"", b"b"]
+            lines(b"a\n\nb\n"),
+            [b"a".to_vec(), Vec::new(), b"b".to_vec()]
         );
-        assert_eq!(lines(b"partial").count(), 0);
-        assert_eq!(lines(b"").count(), 0);
+        assert!(lines(b"partial").is_empty());
+        assert!(lines(b"").is_empty());
         let long = [vec![b'x'; REPLAY_LINE_MAX + 1], b"\nok\n".to_vec()].concat();
-        assert_eq!(lines(&long).collect::<Vec<_>>(), [&b"ok"[..]]);
+        assert_eq!(lines(&long), [b"ok".to_vec()]);
+        let exact = [vec![b'x'; REPLAY_LINE_MAX], b"\n".to_vec()].concat();
+        assert_eq!(lines(&exact)[0].len(), REPLAY_LINE_MAX);
     }
 
     #[test]
@@ -312,10 +355,14 @@ mod tests {
         std::fs::write(temp.path().join("other.file"), b"x").unwrap();
         let (mut journal, replay) = Journal::open(temp.path()).unwrap();
         assert_eq!(replay, [CString::new("rrd.journal.0001").unwrap()]);
-        assert_eq!(
-            journal.read(&replay[0]).unwrap().unwrap(),
-            b"update a.rrd 1:1\n"
-        );
+        let mut text = Vec::new();
+        journal
+            .open_for_replay(&replay[0])
+            .unwrap()
+            .unwrap()
+            .read_to_end(&mut text)
+            .unwrap();
+        assert_eq!(text, b"update a.rrd 1:1\n");
         journal.start().unwrap();
         let count = || {
             std::fs::read_dir(temp.path())
@@ -360,8 +407,15 @@ mod tests {
             temp.path().join("rrd.journal.2.000000"),
         )
         .unwrap();
+        std::os::unix::fs::symlink(
+            "rrd.journal.1.000000",
+            temp.path().join("rrd.journal.3.000000"),
+        )
+        .unwrap();
         let (journal, replay) = Journal::open(temp.path()).unwrap();
-        assert_eq!(replay.len(), 2);
-        assert_eq!(journal.read(&replay[0]).unwrap(), None);
+        assert_eq!(replay.len(), 3);
+        for name in &replay {
+            assert!(journal.open_for_replay(name).unwrap().is_none());
+        }
     }
 }

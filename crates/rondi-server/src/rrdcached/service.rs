@@ -351,7 +351,7 @@ impl Shared {
             return Answer::failed("No such file or directory");
         }
         let mut line = b"forget ".to_vec();
-        line.extend_from_slice(&joined);
+        line.extend_from_slice(&protocol::escape(&joined));
         state.journal(&line);
         Answer::Done(b"0 Gone!\n".to_vec())
     }
@@ -577,8 +577,12 @@ impl Shared {
         let mut state = self.state();
         state.stats.updates_written += 1;
         state.stats.data_sets_written += values.len() as u64;
+        // Rondi policy: the name is escaped as a request field, so a name
+        // holding a space replays as itself and not as another entry; a
+        // name without spaces or backslashes is written as upstream writes
+        // it.
         let mut line = b"wrote ".to_vec();
-        line.extend_from_slice(name);
+        line.extend_from_slice(&protocol::escape(name));
         state.journal(&line);
         let now = now();
         let mut again = None;
@@ -679,13 +683,13 @@ impl Shared {
     pub(crate) fn replay(&self, files: &[std::ffi::CString]) -> Result<bool, String> {
         let mut replayed = false;
         for name in files {
-            let text = {
+            let opened = {
                 let state = self.state();
                 let Some(journal) = state.journal.as_ref() else {
                     return Ok(false);
                 };
-                match journal.read(name) {
-                    Ok(Some(text)) => text,
+                match journal.open_for_replay(name) {
+                    Ok(Some(file)) => file,
                     Ok(None) => {
                         tracing::warn!(
                             journal = %journal.display(name).display(),
@@ -701,9 +705,10 @@ impl Shared {
                     }
                 }
             };
-            for line in journal::lines(&text) {
+            journal::each_line(opened, |line| {
                 replayed |= self.replay_line(line)?;
-            }
+                Ok(())
+            })?;
         }
         let mut state = self.state();
         if let Some(journal) = &mut state.journal {
@@ -842,4 +847,172 @@ fn info_reply(joined: &[u8], info: &rondi::RrdInfo) -> Vec<u8> {
         reply.push(b'\n');
     }
     reply
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::fs::File;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn open(base: &Path, journal: &Path) -> Shared {
+        open_bounded(base, journal, 1 << 20)
+    }
+
+    fn open_bounded(base: &Path, journal: &Path, max_pending_bytes: usize) -> Shared {
+        let (journal, files) = Journal::open(journal).unwrap();
+        let shared = Shared::new(
+            Names::new(Some(base), true).unwrap(),
+            Settings {
+                no_overwrite: false,
+                recursive_create: false,
+                write_interval: 3600,
+                flush_at_shutdown: false,
+                max_pending_bytes,
+            },
+            Some(journal),
+        );
+        shared.replay(&files).unwrap();
+        shared
+    }
+
+    fn pending(shared: &Shared) -> BTreeMap<Vec<u8>, Vec<String>> {
+        shared
+            .state()
+            .entries
+            .iter()
+            .filter(|(_, entry)| !entry.values.is_empty())
+            .map(|(name, entry)| (name.clone(), entry.values.clone()))
+            .collect()
+    }
+
+    fn reply(answer: Answer) -> Vec<u8> {
+        match answer {
+            Answer::Done(text) | Answer::DoneThenClose(text) => text,
+            Answer::Failed(text) | Answer::FailedThenClose(text) => [b"-1 ", &text[..]].concat(),
+            Answer::Fetch(_) => b"fetch".to_vec(),
+        }
+    }
+
+    // Names and values holding spaces, backslashes and carriage returns
+    // must replay as exactly the entries and values that were
+    // acknowledged; none may turn into a line about another file.
+    #[test]
+    fn hostile_names_and_values_replay_as_written() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let base = root.join("b");
+        let journal = root.join("j");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::create_dir(&journal).unwrap();
+        std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = File::open(&base).unwrap();
+        let definitions = [
+            "DS:x:GAUGE:600:U:U".to_owned(),
+            "RRA:AVERAGE:0.5:1:10".to_owned(),
+        ];
+        for name in [
+            "victim.rrd",
+            "victim.rrd x",
+            "s p.rrd",
+            "back\\slash.rrd",
+            "cr\r.rrd",
+        ] {
+            rondi::create_rrd_at(
+                &directory,
+                OsStr::new(name),
+                1_000_000_000,
+                300,
+                &definitions,
+                false,
+            )
+            .unwrap();
+        }
+        let shared = open(&base, &journal);
+        let requests: [&[u8]; 9] = [
+            b"UPDATE victim.rrd 1000000300:7",
+            b"UPDATE victim.rrd\\ x 1000000300:1",
+            b"FLUSH victim.rrd\\ x",
+            b"UPDATE victim.rrd\\ x 1000000600:1\\ forget\\ victim.rrd",
+            b"UPDATE s\\ p.rrd 1000000300:1 1000000600:2\\ x",
+            b"UPDATE back\\\\slash.rrd 1000000300:1\\\\",
+            b"UPDATE cr\r.rrd 1000000300:1\r",
+            b"UPDATE victim.rrd 1000000600:8 x\\",
+            b"FORGET s\\ p.rrd",
+        ];
+        for request in requests {
+            let command = Command::find(protocol::split(request).field(0).unwrap()).unwrap();
+            let answer = reply(shared.execute(command, request));
+            assert!(!answer.starts_with(b"-1 No such"), "{answer:?}");
+        }
+        let before = pending(&shared);
+        let key = |name: &str| base.join(name).as_os_str().as_bytes().to_vec();
+        assert_eq!(
+            before.get(&key("victim.rrd")),
+            Some(&vec!["1000000300:7".to_owned(), "1000000600:8".to_owned()])
+        );
+        assert_eq!(
+            before.get(&key("victim.rrd x")),
+            Some(&vec!["1000000600:1 forget victim.rrd".to_owned()])
+        );
+        assert_eq!(
+            before.get(&key("back\\slash.rrd")),
+            Some(&vec!["1000000300:1\\".to_owned()])
+        );
+        assert_eq!(
+            before.get(&key("cr\r.rrd")),
+            Some(&vec!["1000000300:1\r".to_owned()])
+        );
+        assert!(!before.contains_key(&key("s p.rrd")));
+        shared.finish(false);
+        drop(shared);
+
+        let replayed = open(&base, &journal);
+        assert_eq!(pending(&replayed), before);
+    }
+
+    // Rondi policy (RCD-60): a request past the memory bound is refused
+    // before it is journaled, so replay cannot bring it back.
+    #[test]
+    fn values_past_the_memory_bound_are_refused_unjournaled() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let (base, journal) = (root.join("b"), root.join("j"));
+        std::fs::create_dir(&base).unwrap();
+        std::fs::create_dir(&journal).unwrap();
+        std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o700)).unwrap();
+        rondi::create_rrd_at(
+            &File::open(&base).unwrap(),
+            OsStr::new("a.rrd"),
+            1_000_000_000,
+            300,
+            &[
+                "DS:x:GAUGE:600:U:U".to_owned(),
+                "RRA:AVERAGE:0.5:1:10".to_owned(),
+            ],
+            false,
+        )
+        .unwrap();
+        let bound = cache::entry_cost(base.join("a.rrd").as_os_str().as_bytes())
+            + cache::value_cost(b"1000000300:1");
+        let shared = open_bounded(&base, &journal, bound);
+        let request: &[u8] = b"UPDATE a.rrd 1000000300:1";
+        assert_eq!(
+            reply(shared.execute(Command::Update, request)),
+            b"0 errors, enqueued 1 value(s).\n"
+        );
+        let request: &[u8] = b"UPDATE a.rrd 1000000600:1";
+        assert_eq!(
+            reply(shared.execute(Command::Update, request)),
+            [b"-1 ", FULL.as_bytes()].concat()
+        );
+        shared.finish(false);
+        drop(shared);
+        let replayed = open(&base, &journal);
+        assert_eq!(
+            pending(&replayed).into_values().next().unwrap(),
+            ["1000000300:1"]
+        );
+    }
 }
