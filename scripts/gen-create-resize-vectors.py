@@ -700,9 +700,25 @@ def parse_vectors(b):
     return out
 
 
+def without_build_time(b):
+    """Drops the build timestamp from the usage banner's `Compiled` line."""
+    mark = b"\n               Compiled "
+    if mark not in b:
+        return b
+    start = b.index(mark) + len(mark)
+    end = b.find(b"\n", start)
+    return b[:start] + (b[end:] if end >= 0 else b"")
+
+
 def folded(sections):
-    return [(n, fold_nan(b) if n.startswith("file:") or n == "stdout" else b)
-            for n, b in sections]
+    out = []
+    for name, body in sections:
+        if name == "stdout" and body.startswith(b"RRDtool "):
+            body = without_build_time(body)
+        elif name.startswith("file:") or name == "stdout":
+            body = fold_nan(body)
+        out.append((name, body))
+    return out
 
 
 def case_id(n, args):

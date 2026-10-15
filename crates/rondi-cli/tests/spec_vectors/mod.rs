@@ -259,13 +259,30 @@ pub fn masked(bytes: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Drops the build timestamp from the usage banner's `Compiled` line, which
+/// says when each RRDtool binary was built.
+fn without_build_time(body: &[u8]) -> Vec<u8> {
+    const MARK: &[u8] = b"\n               Compiled ";
+    let Some(start) = body.windows(MARK.len()).position(|window| window == MARK) else {
+        return body.to_vec();
+    };
+    let from = start + MARK.len();
+    let end = body[from..]
+        .iter()
+        .position(|byte| *byte == b'\n')
+        .map_or(body.len(), |offset| from + offset);
+    [&body[..from], &body[end..]].concat()
+}
+
 /// Folds the x86_64 negative quiet NaN into the positive one in file
-/// bodies and standard output.
+/// bodies and standard output, and drops the usage banner's build time.
 pub fn folded(sections: &Sections) -> Sections {
     sections
         .iter()
         .map(|(name, body)| {
-            if name.starts_with("file:") || name == "stdout" {
+            if name == "stdout" && body.starts_with(b"RRDtool ") {
+                (name.clone(), without_build_time(body))
+            } else if name.starts_with("file:") || name == "stdout" {
                 let mut body = body.clone();
                 for chunk in body.as_chunks_mut::<8>().0 {
                     if *chunk == 0xfff8_0000_0000_0000_u64.to_le_bytes() {

@@ -53,8 +53,10 @@ reference behavior for now).
 
 **CR-2** (black-box; must). `rrdtool create` with no further argument
 prints the create usage text on standard output and exits 0. The text
-starts with the RRDtool banner line, whose second line names the build; the
-Linux overrides carry that line (vector `000-noargs`).
+starts with the RRDtool banner, whose second line is `Compiled` followed by
+the build's date and time (empty in the macOS build). That build time is
+not part of the contract; the tests drop it before comparing (vector
+`000-noargs`).
 
 **CR-3** (black-box; must). On success nothing is written to standard output
 or standard error (unless the file name is `-`, CR-63) and the exit status
@@ -601,9 +603,9 @@ as `U`, PDP and CDP values, rows) use the platform's default quiet NaN:
 `0x7ff8000000000000` on arm64 and aarch64, `0xfff8000000000000` on x86_64.
 The tests fold the x86_64 pattern into the arm64 one before comparing.
 
-**CR-75** (black-box; must, platform specific). The usage text's build line
-(CR-2) and the prefill arithmetic (CR-58) differ between the recording
-platform and Linux; `expected/create.linux-<arch>.vectors` hold those cases.
+**CR-75** (black-box; must, platform specific). The prefill AVERAGE
+arithmetic (CR-58) differs between arm64 and x86_64;
+`expected/create.linux-x86_64.vectors` holds those cases.
 Huge allocations differ as CR-70 states. No other platform difference was
 observed in the 466 cases on macOS arm64, Linux aarch64 and Linux x86_64
 (under emulation; CI confirms native x86_64).
@@ -713,9 +715,10 @@ Current Rondi against RRDtool 1.11.0, as of this specification:
   an untouched input, `file:` with the masked bytes of a new or changed
   file, `link:` and `dir:`. Sections are framed as
   `@@ <id> <section> <length>`, the bytes and a newline.
-  `expected/create.linux-aarch64.vectors` and
-  `expected/create.linux-x86_64.vectors` replace the cases that differ on
-  Linux.
+  `expected/create.linux-<arch>.vectors`, when present, replaces the cases
+  that differ on that Linux architecture (only x86_64 has any). The usage
+  banner's build time is dropped before comparing (CR-2), and x86_64 NaNs
+  are folded (CR-74).
 - `scripts/gen-create-resize-vectors.py write` rebuilds the vectors from a
   local RRDtool 1.11.0, running each case twice and marking cases whose
   output varies as `undefined`; with `--rondi` it also checks every

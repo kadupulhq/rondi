@@ -28,8 +28,9 @@ pinned 1.11.0 build on Linux aarch64 and x86_64, pinned by the vectors), and
 
 **RZ-1** (documentation; must). The synopsis is
 `rrdtool resize filename rra-num GROW|SHRINK rows`. `rrdtool resize` with no
-further argument prints the usage text on standard output and exits 0 (its
-build line differs per platform; Linux overrides).
+further argument prints the usage text on standard output and exits 0. The
+build time in the banner's `Compiled` line is not part of the contract and
+is dropped before comparing, as in `create.md` CR-2.
 
 **RZ-2** (black-box; must). Errors are one `ERROR: <message>` line on
 standard error with exit status 1 and nothing on standard output. Success
@@ -233,5 +234,7 @@ arm64.
   range, and a text file.
 - The case table and the vector format are those of `create.md`; resize
   outputs are compared byte for byte, not masked.
-  `expected/resize.linux-<arch>.vectors` hold the Linux overrides.
+  No Linux overrides are needed: every case gives the same result on
+  Linux aarch64 and x86_64 once x86_64 NaNs are folded
+  (`expected/resize.linux-<arch>.vectors` would hold any).
 - `scripts/gen-create-resize-vectors.py` rebuilds both suites.
