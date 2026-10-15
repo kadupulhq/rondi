@@ -14,7 +14,7 @@ About 12,400 lines of Rust (38 percent of non-test source) are rated High: modul
 |---|---|---:|---|
 | `crates/rondi/src/time.rs` | High (FLAG) | 1,001 | Declares it keeps the C control flow of the at-style time parser; scanner state names match |
 | `crates/rondi/src/rpn.rs` | High | 1,084 | Declared port of the RPN parser and evaluator |
-| `crates/rondi/src/rrd_modify.rs` | High | 981 | Declared port; 9 internal function names shared; allocator quirk emulated |
+| `crates/rondi/src/rrd_modify.rs` | Removed | 981 | Declared port; replaced by the clean-room `tune_modify.rs` |
 | `crates/rondi/src/rrd_restore.rs` | High | 912 | Declared port; 16 internal function names shared |
 | `crates/rondi/src/rrd_create.rs` | High | 790 | Declared port; C error-slot model and temp-file naming reproduced |
 | `crates/rondi/src/rrd_resize.rs` | High | 288 | Declared port, including file-position rules |
@@ -90,6 +90,7 @@ Risk tiers:
 - Compatibility requirement: the result of `tune` DS and RRA edits (which rows are kept or resampled into new archives, CDP state after edit) and error text.
 - Likely source: `rrdtune` man page documents the operations; resampled values are black-box observable; candidate selection order and the allocator quirk came from reference-source inspection.
 - Remediation: replace by spec and fresh implementation. The resampling rule can be stated as a mathematical spec (which source rows cover a destination row, and how they combine per CF). Specify the zero-DS case as an observed error rather than emulating the allocator. Existing coverage is thin: `crates/rondi-cli/tests/tune_modify_differential.rs` has 5 tests, so add differential vectors before rewriting.
+- Status: removed. `crates/rondi/src/tune_modify.rs` replaces it, written from `docs/compatibility/tune-modify.md` and its vectors without reading this module or the C source.
 
 **`crates/rondi/src/rrd_restore.rs`: `Restore::{get_xml_element, expect_element, expect_element_end, get_xml_text, get_xml_string, get_xml_time_t, get_xml_ulong, get_xml_double, parse_tag_*}`, `layout`**
 

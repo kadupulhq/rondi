@@ -14,6 +14,7 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ### Changed
 
+- `tune` structure changes are reimplemented in `tune_modify.rs` from `docs/compatibility/tune-modify.md`, replacing the ported `rrd_modify.rs`. `modify_rrd_file` now takes a list of `RrdStructureOp` values (breaking API change).
 - Rondi is licensed `MIT OR Apache-2.0`. `COPYRIGHT` carries RRDtool's unmodified notice as third-party attribution, and the license text that notice refers to is in `LICENSE-GPL-2.0` (#100).
 - Replace the library entry point `run(config)` with `prepare_server(config)`, called before threads start, and `run(prepared)`. Library callers must update (breaking API change) (#80).
 

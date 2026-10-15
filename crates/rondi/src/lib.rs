@@ -11,7 +11,6 @@ mod queries;
 mod rpn;
 mod rrd_binary;
 mod rrd_create;
-mod rrd_modify;
 mod rrd_number;
 mod rrd_resize;
 mod rrd_restore;
@@ -21,6 +20,7 @@ pub mod rrdc_proto;
 pub mod safe_fs;
 pub(crate) mod storage;
 pub mod time;
+mod tune_modify;
 pub mod vdef;
 mod xml_reader;
 
@@ -43,9 +43,9 @@ pub use rrd_binary::{
 #[cfg(unix)]
 pub use rrd_create::create_rrd_at;
 pub use rrd_create::rrd_create_r2;
-pub use rrd_modify::{RrdRraOp, modify_rrd_file};
 pub use rrd_number::{c_strtol, c_strtoll_errno, parse_rrd_number};
 pub use rrd_resize::resize_rrd_file;
 pub use rrd_restore::{RestoreInput, restore_rrd_file, restore_rrd_input};
 pub use storage::{DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, Store, StoreError, StoreOptions};
+pub use tune_modify::{RrdRowChange, RrdStructureOp, modify_rrd_file};
 pub use vdef::{VdefError, VdefFunction, VdefResult, evaluate_vdef};

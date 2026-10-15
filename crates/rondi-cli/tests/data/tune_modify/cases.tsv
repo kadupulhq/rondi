@@ -1,0 +1,283 @@
+# id	input	expect	args... (tab separated)
+000-base-ds-ngau-gauge-600-u-u	base	same	DS:ngau:GAUGE:600:U:U
+001-base-ds-ncou-counter-600-0-u	base	same	DS:ncou:COUNTER:600:0:U
+002-base-ds-nder-derive-900-5-7	base	same	DS:nder:DERIVE:900:-5:7
+003-base-ds-nabs-absolute-300-u-100	base	same	DS:nabs:ABSOLUTE:300:U:100
+004-base-ds-ndco-dcounter-600-u-u	base	same	DS:ndco:DCOUNTER:600:U:U
+005-base-ds-ndde-dderive-600-u-u	base	same	DS:ndde:DDERIVE:600:U:U
+006-base-ds-n1-gauge-600-u-u-ds-n2-counter-600-u-u	base	same	DS:n1:GAUGE:600:U:U	DS:n2:COUNTER:600:U:U
+007-base-del-g	base	same	DEL:g
+008-base-del-c	base	same	DEL:c
+009-base-del-g-del-c	base	same	DEL:g	DEL:c
+010-base-del-c-del-g-ds-z-gauge-600-u-u	base	same	DEL:c	DEL:g	DS:z:GAUGE:600:U:U
+011-base-del-g-ds-g-gauge-900-0-10	base	same	DEL:g	DS:g:GAUGE:900:0:10
+012-base-del-g-del-g	base	same	DEL:g	DEL:g
+013-base-del-nonexistent	base	same	DEL:nonexistent
+014-base-del-g	base	same	DEL:G
+015-types-del-a-del-b-del-c	types	same	DEL:a	DEL:b	DEL:c
+016-types-del-b-ds-q-derive-120-u-u	types	same	DEL:b	DS:q:DERIVE:120:U:U
+017-types-ds-h-gauge-120-u-u-ds-k-absolute-60-u-u	types	same	DS:h:GAUGE:120:U:U	DS:k:ABSOLUTE:60:U:U
+018-single-del-v	single	same	DEL:v
+019-single-del-v-ds-w-gauge-120-u-u	single	same	DEL:v	DS:w:GAUGE:120:U:U
+020-single-del-v-delrra-0	single	same	DEL:v	DELRRA:0
+021-single-del-v-rra-average-0-5-2-4	single	same	DEL:v	RRA:AVERAGE:0.5:2:4
+022-single-del-v-delrra-0-rra-average-0-5-1-4	single	same	DEL:v	DELRRA:0	RRA:AVERAGE:0.5:1:4
+023-fresh-ds-new-dcounter-600-u-u	fresh	same	DS:new:DCOUNTER:600:U:U
+024-fresh-del-x	fresh	same	DEL:x
+025-v5-del-d	v5	same	DEL:d
+026-v5-del-d-del-e	v5	same	DEL:d	DEL:e
+027-v5-ds-x-gauge-120-u-u	v5	same	DS:x:GAUGE:120:U:U
+028-unkn-ds-x-counter-1200-u-u	unkn	same	DS:x:COUNTER:1200:U:U
+029-usec-ds-x-gauge-120-u-u	usec	same	DS:x:GAUGE:120:U:U
+030-wrap0-del-v	wrap0	same	DEL:v
+031-base-delrra-0	base	same	DELRRA:0
+032-base-delrra-1	base	same	DELRRA:1
+033-base-delrra-2	base	same	DELRRA:2
+034-base-delrra-3	base	same	DELRRA:3
+035-base-delrra-9	base	same	DELRRA:9
+036-base-delrra-0-delrra-0	base	same	DELRRA:0	DELRRA:0
+037-base-delrra-1-delrra-0	base	same	DELRRA:1	DELRRA:0
+038-base-delrra-0-delrra-1-delrra-2-delrra-3	base	same	DELRRA:0	DELRRA:1	DELRRA:2	DELRRA:3
+039-base-delrra-x	base	same	DELRRA:x
+040-base-delrra-2junk	base	same	DELRRA:2junk
+041-single-delrra-0	single	same	DELRRA:0
+042-fresh-delrra-0-delrra-1	fresh	same	DELRRA:0	DELRRA:1
+043-base-rra-0-4	base	same	RRA#0:+4
+044-base-rra-0-2	base	same	RRA#0:-2
+045-base-rra-0-17	base	same	RRA#0:=17
+046-base-rra-1-4	base	same	RRA#1:+4
+047-base-rra-1-2	base	same	RRA#1:-2
+048-base-rra-1-15	base	same	RRA#1:=15
+049-base-rra-2-4	base	same	RRA#2:+4
+050-base-rra-2-2	base	same	RRA#2:-2
+051-base-rra-2-12	base	same	RRA#2:=12
+052-base-rra-3-4	base	same	RRA#3:+4
+053-base-rra-3-2	base	same	RRA#3:-2
+054-base-rra-3-13	base	same	RRA#3:=13
+055-base-rra-0-10	base	same	RRA#0:=10
+056-base-rra-0-0	base	same	RRA#0:+0
+057-base-rra-0-10	base	same	RRA#0:-10
+058-base-rra-0-11	base	same	RRA#0:-11
+059-base-rra-0-0	base	same	RRA#0:=0
+060-base-rra-0-1	base	same	RRA#0:=1
+061-base-rra-9-3	base	same	RRA#9:+3
+062-base-rra-0-5-rra-0-7	base	same	RRA#0:+5	RRA#0:+7
+063-base-rra-0-5-delrra-0	base	same	RRA#0:+5	DELRRA:0
+064-base-delrra-0-rra-0-5	base	same	DELRRA:0	RRA#0:+5
+065-base-rra-00-1	base	same	RRA#00:+1
+066-base-rra-1-1	base	same	RRA# 1:+1
+067-base-rra-1-2junk	base	same	RRA#1:+2junk
+068-base-rra-1-1	base	same	RRA#1:-+1
+069-base-rra-0-4294967291	base	clean-error	RRA#0:+4294967291
+070-base-rra-0-4294967295	base	same	RRA#0:=4294967295
+071-base-rra-0-1	base	same	RRA#0:=-1
+072-base-rra-4294967296-1	base	same	RRA#4294967296:+1
+073-base-rra-1-1	base	same	RRA#-1:+1
+074-base-delrra-4294967296	base	same	DELRRA:4294967296
+075-base-delrra-99999999999	base	same	DELRRA:99999999999
+076-base-delrra-1	base	same	DELRRA: 1
+077-base-delrra-1	base	same	DELRRA:+1
+078-base-delrra-0	base	same	DELRRA:-0
+079-types-rra-0-6	types	same	RRA#0:+6
+080-types-rra-1-6	types	same	RRA#1:+6
+081-types-rra-2-6	types	same	RRA#2:+6
+082-types-rra-3-6	types	same	RRA#3:+6
+083-types-rra-4-6	types	same	RRA#4:+6
+084-types-rra-5-6	types	same	RRA#5:+6
+085-types-rra-6-6	types	same	RRA#6:+6
+086-types-rra-7-6	types	same	RRA#7:+6
+087-types-rra-8-6	types	same	RRA#8:+6
+088-types-rra-2-11	types	same	RRA#2:-11
+089-types-rra-6-2	types	same	RRA#6:=2
+090-types-rra-7-20	types	same	RRA#7:=20
+091-ties-rra-1-10	ties	same	RRA#1:+10
+092-ties-rra-5-10	ties	same	RRA#5:+10
+093-ties-rra-9-3	ties	same	RRA#9:+3
+094-sparse-rra-0-10	sparse	same	RRA#0:+10
+095-sparse-rra-1-5	sparse	same	RRA#1:+5
+096-sparse-rra-2-1	sparse	same	RRA#2:=1
+097-single-rra-0-5	single	same	RRA#0:+5
+098-single-rra-0-7	single	same	RRA#0:-7
+099-fresh-rra-0-5	fresh	same	RRA#0:+5
+100-coarse-rra-0-30	coarse	same	RRA#0:+30
+101-coarse-rra-2-3	coarse	same	RRA#2:+3
+102-coarse-rra-3-4	coarse	same	RRA#3:+4
+103-coarse-rra-4-40	coarse	same	RRA#4:=40
+104-neg-rra-1-5	neg	same	RRA#1:+5
+105-neg-rra-2-5	neg	same	RRA#2:+5
+106-maxonly-rra-0-5	maxonly	same	RRA#0:+5
+107-maxonly-rra-1-5	maxonly	same	RRA#1:+5
+108-wrap0-rra-0-3	wrap0	same	RRA#0:+3
+109-wrap0-rra-1-3	wrap0	same	RRA#1:+3
+110-wrap0-rra-2-3	wrap0	same	RRA#2:+3
+111-unkn-rra-1-4	unkn	same	RRA#1:+4
+112-wrap3-rra-0-2	wrap3	same	RRA#0:+2
+113-wrap3-rra-average-0-5-2-6	wrap3	same	RRA:AVERAGE:0.5:2:6
+114-wrap3-rra-max-0-5-2-6	wrap3	same	RRA:MAX:0.5:2:6
+115-wrap3-rra-last-0-5-1-12	wrap3	same	RRA:LAST:0.5:1:12
+116-wrap3b-rra-average-0-5-2-6	wrap3b	same	RRA:AVERAGE:0.5:2:6
+117-wrap3b-rra-min-0-5-2-6	wrap3b	same	RRA:MIN:0.5:2:6
+118-wrap3b-delrra-0-rra-average-0-5-2-6	wrap3b	same	DELRRA:0	RRA:AVERAGE:0.5:2:6
+119-aligned-rra-2-3	aligned	same	RRA#2:+3
+120-base-delrra-0-rra-1-4	base	same	DELRRA:0	RRA#1:+4
+121-base-delrra-0-rra-2-3	base	same	DELRRA:0	RRA#2:+3
+122-types-delrra-1-rra-4-5	types	same	DELRRA:1	RRA#4:+5
+123-types-delrra-0-delrra-1-rra-3-4	types	same	DELRRA:0	DELRRA:1	RRA#3:+4
+124-base-rra-average-0-5-1-30	base	same	RRA:AVERAGE:0.5:1:30
+125-base-rra-average-0-5-2-15	base	same	RRA:AVERAGE:0.5:2:15
+126-base-rra-average-0-5-3-9	base	same	RRA:AVERAGE:0.5:3:9
+127-base-rra-average-0-5-5-8	base	same	RRA:AVERAGE:0.5:5:8
+128-base-rra-average-0-5-7-4	base	same	RRA:AVERAGE:0.5:7:4
+129-base-rra-min-0-5-1-30	base	same	RRA:MIN:0.5:1:30
+130-base-rra-min-0-5-2-15	base	same	RRA:MIN:0.5:2:15
+131-base-rra-min-0-5-3-9	base	same	RRA:MIN:0.5:3:9
+132-base-rra-min-0-5-5-8	base	same	RRA:MIN:0.5:5:8
+133-base-rra-min-0-5-7-4	base	same	RRA:MIN:0.5:7:4
+134-base-rra-max-0-5-1-30	base	same	RRA:MAX:0.5:1:30
+135-base-rra-max-0-5-2-15	base	same	RRA:MAX:0.5:2:15
+136-base-rra-max-0-5-3-9	base	same	RRA:MAX:0.5:3:9
+137-base-rra-max-0-5-5-8	base	same	RRA:MAX:0.5:5:8
+138-base-rra-max-0-5-7-4	base	same	RRA:MAX:0.5:7:4
+139-base-rra-last-0-5-1-30	base	same	RRA:LAST:0.5:1:30
+140-base-rra-last-0-5-2-15	base	same	RRA:LAST:0.5:2:15
+141-base-rra-last-0-5-3-9	base	same	RRA:LAST:0.5:3:9
+142-base-rra-last-0-5-5-8	base	same	RRA:LAST:0.5:5:8
+143-base-rra-last-0-5-7-4	base	same	RRA:LAST:0.5:7:4
+144-types-rra-average-0-5-1-20	types	same	RRA:AVERAGE:0.5:1:20
+145-types-rra-average-0-5-2-20	types	same	RRA:AVERAGE:0.5:2:20
+146-types-rra-average-0-5-5-6	types	same	RRA:AVERAGE:0.5:5:6
+147-types-rra-min-0-5-1-20	types	same	RRA:MIN:0.5:1:20
+148-types-rra-min-0-5-2-20	types	same	RRA:MIN:0.5:2:20
+149-types-rra-min-0-5-5-6	types	same	RRA:MIN:0.5:5:6
+150-types-rra-max-0-5-1-20	types	same	RRA:MAX:0.5:1:20
+151-types-rra-max-0-5-2-20	types	same	RRA:MAX:0.5:2:20
+152-types-rra-max-0-5-5-6	types	same	RRA:MAX:0.5:5:6
+153-types-rra-last-0-5-1-20	types	same	RRA:LAST:0.5:1:20
+154-types-rra-last-0-5-2-20	types	same	RRA:LAST:0.5:2:20
+155-types-rra-last-0-5-5-6	types	same	RRA:LAST:0.5:5:6
+156-types-rra-average-0-5-1h-1d	types	same	RRA:AVERAGE:0.5:1h:1d
+157-types-rra-average-0-5-1-1	types	same	RRA:AVERAGE:0.5:1:1
+158-coarse-rra-average-0-5-3-20	coarse	same	RRA:AVERAGE:0.5:3:20
+159-neg-rra-average-0-5-2-12	neg	same	RRA:AVERAGE:0.5:2:12
+160-maxonly-rra-average-0-5-1-12	maxonly	same	RRA:AVERAGE:0.5:1:12
+161-aligned-rra-average-0-5-5-8	aligned	same	RRA:AVERAGE:0.5:5:8
+162-unkn-rra-average-0-5-2-10	unkn	same	RRA:AVERAGE:0.5:2:10
+163-wrap0-rra-average-0-5-1-9	wrap0	same	RRA:AVERAGE:0.5:1:9
+164-coarse-rra-min-0-5-3-20	coarse	same	RRA:MIN:0.5:3:20
+165-neg-rra-min-0-5-2-12	neg	same	RRA:MIN:0.5:2:12
+166-maxonly-rra-min-0-5-1-12	maxonly	same	RRA:MIN:0.5:1:12
+167-aligned-rra-min-0-5-5-8	aligned	same	RRA:MIN:0.5:5:8
+168-unkn-rra-min-0-5-2-10	unkn	same	RRA:MIN:0.5:2:10
+169-wrap0-rra-min-0-5-1-9	wrap0	same	RRA:MIN:0.5:1:9
+170-coarse-rra-max-0-5-3-20	coarse	same	RRA:MAX:0.5:3:20
+171-neg-rra-max-0-5-2-12	neg	same	RRA:MAX:0.5:2:12
+172-maxonly-rra-max-0-5-1-12	maxonly	same	RRA:MAX:0.5:1:12
+173-aligned-rra-max-0-5-5-8	aligned	same	RRA:MAX:0.5:5:8
+174-unkn-rra-max-0-5-2-10	unkn	same	RRA:MAX:0.5:2:10
+175-wrap0-rra-max-0-5-1-9	wrap0	same	RRA:MAX:0.5:1:9
+176-coarse-rra-last-0-5-3-20	coarse	same	RRA:LAST:0.5:3:20
+177-neg-rra-last-0-5-2-12	neg	same	RRA:LAST:0.5:2:12
+178-maxonly-rra-last-0-5-1-12	maxonly	same	RRA:LAST:0.5:1:12
+179-aligned-rra-last-0-5-5-8	aligned	same	RRA:LAST:0.5:5:8
+180-unkn-rra-last-0-5-2-10	unkn	same	RRA:LAST:0.5:2:10
+181-wrap0-rra-last-0-5-1-9	wrap0	same	RRA:LAST:0.5:1:9
+182-aligned-rra-average-0-5-15-3	aligned	same	RRA:AVERAGE:0.5:15:3
+183-aligned-rra-average-0-5-60-2	aligned	same	RRA:AVERAGE:0.5:60:2
+184-coarse-rra-average-0-5-24-10	coarse	same	RRA:AVERAGE:0.5:24:10
+185-coarse-rra-max-0-5-48-4	coarse	same	RRA:MAX:0.5:48:4
+186-ties-rra-average-0-5-2-20	ties	same	RRA:AVERAGE:0.5:2:20
+187-ties-rra-max-0-5-3-10	ties	same	RRA:MAX:0.5:3:10
+188-sparse-rra-average-0-5-6-10	sparse	same	RRA:AVERAGE:0.5:6:10
+189-sparse-rra-last-0-5-3-12	sparse	same	RRA:LAST:0.5:3:12
+190-fresh-rra-last-0-5-1-40	fresh	same	RRA:LAST:0.5:1:40
+191-fresh-rra-min-0-5-3-5	fresh	same	RRA:MIN:0.5:3:5
+192-single-rra-max-0-5-2-6	single	same	RRA:MAX:0.5:2:6
+193-v5-rra-min-0-5-3-4	v5	same	RRA:MIN:0.5:3:4
+194-usec-rra-average-0-5-3-4	usec	same	RRA:AVERAGE:0.5:3:4
+195-base-delrra-0-delrra-1-delrra-2-delrra-3-rra-average-	base	same	DELRRA:0	DELRRA:1	DELRRA:2	DELRRA:3	RRA:AVERAGE:0.5:1:5
+196-base-rra-average-0-5-1-5-rra-max-0-5-2-5-rra-average-	base	same	RRA:AVERAGE:0.5:1:5	RRA:MAX:0.5:2:5	RRA:AVERAGE:0.5:1:5
+197-base-ds-g2-gauge-600-u-u-del-g-rra-3-5	base	same	DS:g2:GAUGE:600:U:U	DEL:g	RRA#3:+5
+198-base-del-c-rra-0-5-rra-min-0-5-2-12	base	same	DEL:c	RRA#0:+5	RRA:MIN:0.5:2:12
+199-base-ds-x-gauge-600-u-u-rra-average-0-5-2-12	base	same	DS:x:GAUGE:600:U:U	RRA:AVERAGE:0.5:2:12
+200-types-ds-q-dderive-300-u-u-del-g-rra-8-2-rra-last-0-5-	types	same	DS:q:DDERIVE:300:U:U	DEL:g	RRA#8:-2	RRA:LAST:0.5:1:5
+201-types-ds-n-dcounter-300-0-u-rra-1-5-rra-average-0-5-2-	types	same	DS:n:DCOUNTER:300:0:U	RRA#1:+5	RRA:AVERAGE:0.5:2:30
+202-types-del-a-delrra-0-rra-5-4-rra-max-0-5-3-10	types	same	DEL:a	DELRRA:0	RRA#5:+4	RRA:MAX:0.5:3:10
+203-ties-delrra-2-rra-5-3	ties	same	DELRRA:2	RRA#5:+3
+204-ties-ds-c-gauge-15-u-u-rra-average-0-5-2-20-rra-3-6	ties	same	DS:c:GAUGE:15:U:U	RRA:AVERAGE:0.5:2:20	RRA#3:+6
+205-sparse-del-in-rra-2-1	sparse	same	DEL:in	RRA#2:=1
+206-fresh-rra-0-5-rra-last-0-5-1-40	fresh	same	RRA#0:+5	RRA:LAST:0.5:1:40
+207-wrap0-del-w-rra-0-2-rra-average-0-5-2-8	wrap0	same	DEL:w	RRA#0:+2	RRA:AVERAGE:0.5:2:8
+208-base-del-g-del-c-delrra-1-delrra-2-delrra-3	base	same	DEL:g	DEL:c	DELRRA:1	DELRRA:2	DELRRA:3
+209-base-del-g-del-c-rra-average-0-5-1-5	base	same	DEL:g	DEL:c	RRA:AVERAGE:0.5:1:5
+210-base-heartbeat-g-900-del-c	base	same	--heartbeat	g:900	DEL:c
+211-base-r-g-gg-rra-0-2	base	same	-r	g:gg	RRA#0:+2
+212-base-i-g-0-a-g-50-ds-x-gauge-600-u-u	base	same	-i	g:0	-a	g:50	DS:x:GAUGE:600:U:U
+213-base-r-g-gg-del-gg	base	same	-r	g:gg	DEL:gg
+214-base-h-zz-5-foo	base	same	-h	zz:5	FOO
+215-coarse-step-1800-rra-0-2	coarse	same	--step	1800	RRA#0:+2
+216-coarse-step-1200-rra-0-2	coarse	same	--step	1200	RRA#0:+2
+217-coarse-step-900-rra-0-2	coarse	same	--step	900	RRA#0:+2
+218-coarse-step-600-rra-0-2	coarse	same	--step	600	RRA#0:+2
+219-coarse-step-400-rra-0-2	coarse	same	--step	400	RRA#0:+2
+220-coarse-step-360-rra-0-2	coarse	same	--step	360	RRA#0:+2
+221-coarse-step-300-rra-0-2	coarse	same	--step	300	RRA#0:+2
+222-coarse-step-120-rra-0-2	coarse	same	--step	120	RRA#0:+2
+223-coarse-step-60-rra-0-2	coarse	same	--step	60	RRA#0:+2
+224-coarse-step-1800-del-r	coarse	same	--step	1800	DEL:r
+225-coarse-t-900-rra-average-0-5-2-10-ds-k-gauge-7200-u-u	coarse	same	-t	900	RRA:AVERAGE:0.5:2:10	DS:k:GAUGE:7200:U:U
+226-coarse-step-1200-rra-min-0-5-3-10	coarse	same	--step	1200	RRA:MIN:0.5:3:10
+227-coarse-step-7-del-r	coarse	same	--step	7	DEL:r
+228-coarse-step-3600-del-r	coarse	same	--step	3600	DEL:r
+229-coarse-step-7200-del-r	coarse	same	--step	7200	DEL:r
+230-coarse-step-0-del-r	coarse	same	--step	0	DEL:r
+231-coarse-step-60-del-r	coarse	same	--step	-60	DEL:r
+232-coarse-step-abc-del-r	coarse	same	--step	abc	DEL:r
+233-coarse-step-1800	coarse	same	--step	1800
+234-coarse-del-r-step-900	coarse	same	DEL:r	--step	900
+235-types-step-30-rra-0-3	types	same	--step	30	RRA#0:+3
+236-types-step-20-del-a	types	same	--step	20	DEL:a
+237-types-step-30	types	same	--step	30
+238-ties-step-5-rra-average-0-5-2-20	ties	same	--step	5	RRA:AVERAGE:0.5:2:20
+239-unkn-step-300-del-g-ds-g-gauge-600-u-u	unkn	same	--step	300	DEL:g	DS:g:GAUGE:600:U:U
+240-unkn-step-200-rra-2-2	unkn	same	--step	200	RRA#2:+2
+241-aligned-step-30-rra-average-0-5-4-10	aligned	same	--step	30	RRA:AVERAGE:0.5:4:10
+242-usec-step-20-rra-1-2	usec	same	--step	20	RRA#1:+2
+243-single-step-30-del-v	single	same	--step	30	DEL:v
+244-base-ds-g-gauge-600-u-u	base	same	DS:g:GAUGE:600:U:U
+245-base-ds-new-gauge-600-u-u-ds-new-gauge-600-u-u	base	same	DS:new:GAUGE:600:U:U	DS:new:GAUGE:600:U:U
+246-base-ds-g-newg-gauge-600-u-u	base	same	DS:g=newg:GAUGE:600:U:U
+247-base-rra-0-3	base	same	RRA#0:*3
+248-base-rra-x	base	same	RRA#x
+249-base-rra	base	same	RRA#
+250-base-rra-0	base	same	RRA#0
+251-base-rra-0	base	same	RRA#0:+
+252-base-rra-0-1	base	same	RRA#0: +1
+253-base-foo	base	same	FOO
+254-base-ds	base	same	DS:
+255-base-del	base	same	DEL:
+256-base-delrra	base	same	DELRRA:
+257-base-rra	base	same	RRA:
+258-base-del-g	base	same	del:g
+259-base-rra-0-1	base	same	rra#0:+1
+260-base-delrra-1	base	same	DELRRA:-1
+261-base-rra-foo-0-5-1-3	base	same	RRA:FOO:0.5:1:3
+262-base-rra-average-1-5-1-5	base	same	RRA:AVERAGE:1.5:1:5
+263-base-rra-average-0-5-1	base	same	RRA:AVERAGE:0.5:1
+264-base-rra-average-0-5-0-5	base	same	RRA:AVERAGE:0.5:0:5
+265-base-rra-average-0-5-1-0	base	same	RRA:AVERAGE:0.5:1:0
+266-base-ds-m-foo-600-u-u-rra-average-0-5-1-3	base	same	DS:m:FOO:600:U:U	RRA:AVERAGE:0.5:1:3
+267-base-ds-m-foo-600-u-u-rra-bogus-0-5-1-3	base	same	DS:m:FOO:600:U:U	RRA:BOGUS:0.5:1:3
+268-base-del-g-foo	base	same	DEL:g	FOO
+269-base-rra-average-0-5-1-5-foo	base	same	RRA:AVERAGE:0.5:1:5	FOO
+270-base-ds-abcdefghijklmnopqrstu-gauge-600-u-u-rra-avera	base	same	DS:abcdefghijklmnopqrstu:GAUGE:600:U:U	RRA:AVERAGE:0.5:1:3
+271-base-ds-bad-rra-average-0-5-1-3	base	same	DS:bad	RRA:AVERAGE:0.5:1:3
+272-base-step-7-ds-c-gauge-600-u-u	base	same	--step	7	DS:c:GAUGE:600:U:U
+273-base-ds-c-gauge-600-u-u-rra-foo-0-5-1-1	base	same	DS:c:GAUGE:600:U:U	RRA:FOO:0.5:1:1
+274-base-rra-foo-0-5-1-1-ds-c-gauge-600-u-u	base	same	RRA:FOO:0.5:1:1	DS:c:GAUGE:600:U:U
+275-base-ds-bad	base	refuse	DS:bad
+276-base-ds-9bad-gauge-x-u-u	base	refuse	DS:9bad:GAUGE:x:U:U
+277-base-ds-z-gauge-600-5-1	base	refuse	DS:z:GAUGE:600:5:1
+278-base-ds-x-gauge-600-u-u-ds-bad	base	clean-error	DS:x:GAUGE:600:U:U	DS:bad
+279-base-rra-0-4294967295	base	clean-error	RRA#0:+4294967295
+280-base-ds-y-compute-g-2	base	unsupported	DS:y:COMPUTE:g,2,*
+281-base-rra-hwpredict-100-0-1-0-0035-10	base	unsupported	RRA:HWPREDICT:100:0.1:0.0035:10
