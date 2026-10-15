@@ -143,7 +143,7 @@ Set `KADUPUL_ROOT`, `RRDTOOL_BIN`, or `RONDI_BIN` to override the checkout or ex
 
 ## Releases
 
-Version tags (`vMAJOR.MINOR.PATCH`, with optional SemVer prerelease or build metadata) use GitHub-generated release notes, grouped by the pull request labels in [.github/release.yml](.github/release.yml). Label pull requests with `enhancement`, `bug`, or `documentation` so they appear under the matching section; unlabeled changes appear under “Other Changes.”
+Version tags (`vMAJOR.MINOR.PATCH`, with optional SemVer prerelease or build metadata) use GitHub-generated release notes, grouped by the pull request labels in [.github/release.yml](.github/release.yml). Label pull requests with `enhancement`, `bug`, or `documentation` so they appear under the matching section; unlabeled changes appear under “Other Changes.” The maintainer checklist, including publishing to crates.io, is in [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Contributing
 

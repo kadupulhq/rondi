@@ -6,6 +6,17 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
+readme = "README.md"
+keywords = ["rrdtool", "rrd", "time-series", "monitoring"]
+categories = ["database-implementations", "visualization"]
+include = [
+    "/src/**",
+    "/README.md",
+    "/COPYRIGHT",
+    "/LICENSE-APACHE",
+    "/LICENSE-GPL-2.0",
+    "/LICENSE-MIT",
+]
 
 [lints]
 workspace = true

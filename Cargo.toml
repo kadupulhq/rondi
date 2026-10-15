@@ -18,6 +18,10 @@ unused_must_use = "deny"
 all = { level = "warn", priority = -1 }
 
 [workspace.dependencies]
+# Keep these versions equal to workspace.package.version; crates.io needs
+# them because it drops the path when publishing.
+rondi = { path = "crates/rondi", version = "0.1.0" }
+rondi-server = { path = "crates/rondi-server", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
