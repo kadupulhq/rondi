@@ -226,3 +226,110 @@ fn locale_decimal_point_follows_the_printf_used() {
         .map(|((variable, locale), args)| f.compare_with(args, variable, locale)),
     );
 }
+
+// Edge cases of format-strings.md sections 8 (FS-24 to FS-52) against the
+// oracle: GPRINT cuts, %s found inside %%s, the text of an unknown time,
+// the time a strftime item shows, duration arithmetic and the silent end
+// of a duration printf failure.
+#[test]
+fn print_edge_cases_match_rrdtool() {
+    let Some(f) = fixture() else { return };
+    let base = |command: &str, items: &[&str]| -> Vec<String> {
+        [
+            command,
+            "/dev/null",
+            "--start",
+            "1000000000",
+            "--end",
+            "1000000300",
+            "DEF:x=a.rrd:x:AVERAGE",
+            "VDEF:v=x,MAXIMUM",
+            "VDEF:a=x,AVERAGE",
+            "CDEF:big=x,1e300,*",
+            "VDEF:b=big,MAXIMUM",
+            "CDEF:ms=x,0,*,1234567.89,+",
+            "VDEF:d=ms,MAXIMUM",
+        ]
+        .iter()
+        .chain(items)
+        .map(|arg| (*arg).to_owned())
+        .collect()
+    };
+    let long_format = format!("GPRINT:v:{}%10lf", "a".repeat(190));
+    let cases = [
+        base("graphv", &["GPRINT:v:%200lf", "GPRINT:v:%2147483648lf"]),
+        base("graphv", &[long_format.as_str(), "GPRINT:b:%s:valstrftime"]),
+        base(
+            "graph",
+            &["PRINT:v:%lf %%S", "PRINT:v:%%s%lf", "PRINT:v:%le %S"],
+        ),
+        base(
+            "graph",
+            &[
+                "PRINT:a:%Y-%m-%d %H %% %q %j %F %T %EY %5Y <%E>:strftime",
+                "PRINT:x:MAX:%Y:strftime",
+                "PRINT:v:%lf",
+                "PRINT:x:MAX:%Y:strftime",
+            ],
+        ),
+        base(
+            "graph",
+            &[
+                "PRINT:d:%8.3S %08.2f %.2147483647H:valstrfduration",
+                "PRINT:d:|%3000000000H|:valstrfduration",
+                "PRINT:d:%4294967297H %.4294967297H %.H:valstrfduration",
+            ],
+        ),
+        base("graph", &["PRINT:d:%.2147483648H:valstrfduration"]),
+        base(
+            "graph",
+            &["PRINT:v:%lf", "PRINT:d:|%2147483646H:valstrfduration"],
+        ),
+        base("graph", &["GPRINT:d:%2147483647H:valstrfduration"]),
+    ];
+    check_all(cases.iter().map(|args| f.compare(args, "C")));
+}
+
+// Random value formats against the oracle: xport PRINT entries use
+// RRDtool's own printf, graph PRINT lines the C library's.
+#[test]
+fn random_print_formats_match_both_printers() {
+    let Some(f) = fixture() else { return };
+    let mut seed = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = move |limit: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % limit
+    };
+    let window = ["--start", "1000000000", "--end", "1000000300"];
+    let mut results = Vec::new();
+    for _ in 0..6 {
+        let mut items = vec![String::from("DEF:x=a.rrd:x:AVERAGE")];
+        for i in 0..20 {
+            let mantissa = next(10_000_000_000_000_000);
+            let exponent = next(80) as i64 - 40;
+            let sign = if next(4) == 0 { "-" } else { "" };
+            let flag = ["", "", "-", "+", " ", "0", "#"][next(7) as usize];
+            let width = ["", "", "12", "30"][next(4) as usize];
+            let precision = next(23);
+            let conversion = ["le", "lf", "lg", "lE", "lG"][next(5) as usize];
+            items.push(format!("CDEF:c{i}=x,0,*,{sign}{mantissa}e{exponent},+"));
+            items.push(format!("VDEF:v{i}=c{i},MAXIMUM"));
+            items.push(format!(
+                "PRINT:v{i}:[%{flag}{width}.{precision}{conversion}]"
+            ));
+        }
+        let command = |head: &[&str], tail: &[&str]| -> Vec<String> {
+            head.iter()
+                .chain(window.iter())
+                .map(|arg| (*arg).to_owned())
+                .chain(items.iter().cloned())
+                .chain(tail.iter().map(|arg| (*arg).to_owned()))
+                .collect()
+        };
+        results.push(f.compare(&command(&["xport"], &["XPORT:x"]), "C"));
+        results.push(f.compare(&command(&["graph", "/dev/null"], &[]), "C"));
+    }
+    check_all(results);
+}
