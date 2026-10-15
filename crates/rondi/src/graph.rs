@@ -11,7 +11,8 @@
 use crate::{
     StoreError, fetch_rrd_file,
     graph_layout::{LegendDirection, LegendPosition, TEXT_PROP_SIZES},
-    rpn::{self, Node, Op, RpnStack},
+    numeric_cast::{c_int, c_long},
+    rpn::{Evaluator, Expression, Row, RpnError, Source},
     rrd_binary::rrd_nan,
     rrd_number::parse_rrd_number,
     vdef::{VdefFunction, evaluate_vdef},
@@ -165,7 +166,7 @@ pub struct GraphElement {
     pub xrule: i64,
     pub vf: Vdef,
     pub rpn: String,
-    rpnp: Vec<Node>,
+    rpnp: Expression,
     pub shidx: Option<usize>,
     pub shval: i64,
     pub shift: i64,
@@ -224,7 +225,7 @@ impl GraphElement {
                 never: false,
             },
             rpn: String::new(),
-            rpnp: Vec::new(),
+            rpnp: Expression::default(),
             shidx: None,
             shval: 0,
             shift: 0,
@@ -951,7 +952,7 @@ impl GraphImage {
                             return err(format!("{name} is not a vname nor a number"));
                         };
                         if gf == Gf::Vrule {
-                            let mut xrule = rpn::c_long(value);
+                            let mut xrule = c_long(value);
                             if xrule == 0 {
                                 xrule += 1;
                             }
@@ -1098,9 +1099,9 @@ impl GraphImage {
         let gdi = self.new_graph_description(gf, pa, Parse::vname_rpn(), times)?;
         if gf == Gf::Cdef {
             let rpn = self.gdes[gdi].rpn.clone();
-            let nodes = rpn::rpn_parse(&rpn, &|name| self.find_var(name))
+            let expression = Expression::parse(&rpn, |name| self.find_var(name))
                 .map_err(|error| ScriptError::Error(error.to_string()))?;
-            self.gdes[gdi].rpnp = nodes;
+            self.gdes[gdi].rpnp = expression;
         } else {
             let rpn = self.gdes[gdi].rpn.clone();
             let Some((name, function)) = rpn.split_once(',') else {
@@ -1767,7 +1768,7 @@ fn reduce_data(
     columns: &mut [Vec<f64>],
 ) -> Result<(), StoreError> {
     // `int reduce_factor = ceil(...)` keeps C's out-of-range conversion.
-    let reduce_factor = rpn::c_int((*step as f64 / cur_step as f64).ceil());
+    let reduce_factor = c_int((*step as f64 / cur_step as f64).ceil());
     // `int` converts to `unsigned long` by sign extension.
     let factor = i64::from(reduce_factor) as u64;
     *step = cur_step.wrapping_mul(factor);
@@ -2042,13 +2043,12 @@ impl GraphImage {
 
     /// Port of `data_calc`: SHIFT, VDEF and CDEF in definition order.
     pub fn data_calc(&mut self) -> Result<(), StoreError> {
-        let mut stack = RpnStack::default();
         for gdi in 0..self.gdes.len() {
             match self.gdes[gdi].gf {
                 Gf::Shift => {
                     let vidx = self.gdes[gdi].vidx.unwrap_or(0);
                     let shift = match self.gdes[gdi].shidx {
-                        Some(shidx) => rpn::c_long(self.gdes[shidx].vf.val),
+                        Some(shidx) => c_long(self.gdes[shidx].vf.val),
                         None => self.gdes[gdi].shval,
                     };
                     // time_t arithmetic wraps in the pinned build; a huge
@@ -2069,26 +2069,21 @@ impl GraphImage {
                     self.gdes[gdi].ds_cnt = 0;
                     self.vdef_calc(gdi);
                 }
-                Gf::Cdef => self.cdef_calc(gdi, &mut stack)?,
+                Gf::Cdef => self.cdef_calc(gdi)?,
                 _ => {}
             }
         }
         Ok(())
     }
 
-    fn cdef_calc(&mut self, gdi: usize, stack: &mut RpnStack) -> Result<(), StoreError> {
-        let mut rpnp = std::mem::take(&mut self.gdes[gdi].rpnp);
+    fn cdef_calc(&mut self, gdi: usize) -> Result<(), StoreError> {
+        let expression = std::mem::take(&mut self.gdes[gdi].rpnp);
         let (mut start, mut end) = (0_i64, 0_i64);
         let mut steps = Vec::new();
-        for node in &mut rpnp {
-            if !matches!(node.op, Op::Variable | Op::PrevOther) {
-                continue;
-            }
-            let source = &self.gdes[node.ptr];
-            if source.ds_cnt == 0 {
-                node.val = source.vf.val;
-                node.op = Op::Number;
-            } else {
+        // A VDEF reads as a constant; DEFs and CDEFs set the window and step.
+        for element in expression.variables() {
+            let source = &self.gdes[element];
+            if source.ds_cnt != 0 {
                 steps.push(source.step);
                 if start < source.start {
                     start = source.start;
@@ -2096,24 +2091,11 @@ impl GraphImage {
                 if end == 0 || end > source.end {
                     end = source.end;
                 }
-                node.data = 0;
-                node.step = source.step as i64;
-            }
-        }
-        for node in &mut rpnp {
-            if matches!(node.op, Op::Variable | Op::PrevOther) {
-                let source = &self.gdes[node.ptr];
-                let diff = start - source.start;
-                if diff > 0 {
-                    node.data += (diff / source.step as i64) as isize;
-                }
             }
         }
         if steps.is_empty() {
-            self.gdes[gdi].rpnp = rpnp;
-            return Err(StoreError::RrdExpression(
-                "rpn expressions without DEF or CDEF variables are not supported".into(),
-            ));
+            self.gdes[gdi].rpnp = expression;
+            return Err(StoreError::RrdExpression(RpnError::NoVariables.to_string()));
         }
         let step = steps.into_iter().reduce(gcd).unwrap_or(0);
         // C sizes the buffer as (end - start) / step doubles with the
@@ -2121,7 +2103,7 @@ impl GraphImage {
         // overlap ask malloc for a wrapped, enormous size.
         let bytes = ((end.wrapping_sub(start) as u64) / step).wrapping_mul(8);
         if bytes > MALLOC_MAX_BYTES {
-            self.gdes[gdi].rpnp = rpnp;
+            self.gdes[gdi].rpnp = expression;
             return Err(StoreError::RrdExpression(
                 "malloc im->gdes[gdi].data".into(),
             ));
@@ -2129,26 +2111,39 @@ impl GraphImage {
         let rows = usize::try_from((end - start) / step as i64).unwrap_or(0);
         let mut output = vec![0.0; rows];
         let gdes = &self.gdes;
-        let series = |index: usize| gdes[index].data.as_slice();
+        let mut evaluator = Evaluator::new(&expression, |element| {
+            let source = &gdes[element];
+            if source.ds_cnt == 0 {
+                return Source::Constant(source.vf.val);
+            }
+            // Each series starts at the sample that covers the CDEF start.
+            let skipped = (start - source.start)
+                .checked_div(source.step as i64)
+                .unwrap_or(0)
+                .max(0);
+            Source::Series {
+                values: &source.data,
+                step: source.step,
+                first: usize::try_from(skipped).unwrap_or(usize::MAX),
+            }
+        });
         let mut now = start + step as i64;
         let mut dataidx = 0;
         let result = loop {
-            if now > end {
+            if now > end || dataidx >= rows {
                 break Ok(());
             }
-            if dataidx >= rows {
-                break Ok(());
-            }
-            if let Err(error) = rpn::rpn_calc(
-                &mut rpnp,
-                stack,
-                now,
-                &mut output,
-                dataidx as i32,
-                step as i32,
-                &series,
-            ) {
-                break Err(error);
+            let row = Row {
+                time: now,
+                index: dataidx,
+                step,
+                previous: dataidx
+                    .checked_sub(1)
+                    .map_or_else(rrd_nan, |previous| output[previous]),
+            };
+            match evaluator.evaluate(&row) {
+                Ok(value) => output[dataidx] = value,
+                Err(error) => break Err(StoreError::RrdExpression(error.to_string())),
             }
             dataidx += 1;
             now += step as i64;
@@ -2159,7 +2154,7 @@ impl GraphImage {
         element.end = end;
         element.step = step;
         element.data = output;
-        element.rpnp = rpnp;
+        element.rpnp = expression;
         result
     }
 

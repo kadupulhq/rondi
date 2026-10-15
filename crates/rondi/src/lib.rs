@@ -6,6 +6,7 @@ mod format;
 pub mod graph;
 pub mod graph_layout;
 pub mod import_export;
+mod numeric_cast;
 mod queries;
 mod rpn;
 mod rrd_binary;
