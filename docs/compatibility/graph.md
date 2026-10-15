@@ -139,6 +139,12 @@ directory as `<dir>`.
 | `xport` | `xport` options, elements and output |
 | `out` | output files, `-`, `graphv -`, `--imginfo` output, `--lazy` |
 | `limit` | image size and fetch size limits (RD-016, RD-017) |
+| `order` | the order in which option values and times are checked (GR-17) |
+| `scan` | how `--font`, `--color`, `--x-grid`, `--y-grid`, `--right-axis`, `--grid-dash` and `--right-axis-range` read their values |
+| `lazy` | `--lazy` against files the previous step wrote (GR-84) |
+| `jsontime` | `--add-jsontime` with an output file (GR-87) |
+| `xgridtime` | the `--x-grid` label format in data exports (GR-86) |
+| `duration` | a value format under the `duration` axis formatter (GR-25) |
 
 ## 1. Command line
 
@@ -220,6 +226,29 @@ and fails as `ERROR: '-' is not a valid function name in -`
 **GR-15** (bb; compat). When an option is given more than once, the last
 value wins (`-w 300 -w 200` is 200 wide, `grammar-007`). Options are
 processed in order and the first invalid one ends the run with its error.
+
+**GR-17** (bb; compat). Each option value is checked when the option is
+read, with these exceptions, which are checked after the last option in
+this order:
+
+1. `--left-axis-format`, then `--right-axis-format` (GR-25), each against
+   the formatter given last for its axis, wherever it appears;
+2. `--logarithmic` with a `--lower-limit` of 0 or less (GR-72;
+   `order-018`, `-019`);
+3. the start and end: relating them (`the start and end times cannot be
+   specified relative to each other`), then
+   `ERROR: the first entry to fetch should be after 1980 (<start>)` for a
+   start below 315360000 (time-spec.md TS-61), then
+   `start (<start>) should be less than end (<end>)`;
+4. `missing filename` (GR-2);
+5. `--imginfo` (GR-83), which is checked only after the data was fetched
+   and the print elements were formatted, so an error in either wins
+   (`order-016`).
+
+A start or end that cannot be parsed fails when its option is read
+(`--start abc -w 5` reports the start, `-w 5 --start abc` the width). The
+same order holds for `xport` (`order-001` to `-019`; `order-017` is the
+`xport` case).
 
 ### Option table
 
@@ -351,7 +380,16 @@ for the long-only ones (`num-023` to `-039`, `-069` to `-083`, `-099` to
   `ERROR: the color format is #RRGGBB[AA]`. No digit at all (`#gg0000`,
   `#`) fails with `ERROR: invalid color def format`.
 
-(`color-001` to `-030`.)
+The tag is a run of 1 to 10 upper-case letters followed by `#`; 11 or
+more letters, or any other character before `#`, are
+`invalid color def format`. The value after `#` is read like a C `%x`
+conversion and its length is the number of characters that conversion
+consumed: leading white space, a sign and a `0x` or `0X` prefix count
+(`# 123` and `#0X1` have length 4 and 3 and are accepted, `#-1020` has
+length 5 and is refused). A value with no hexadecimal digit after the
+sign and prefix is `invalid color def format` (`#--1020`, `#-`). Text
+after the digits is ignored, including a second `#` (`color-001` to
+`-030`, `scan-029` to `-046`).
 
 **GR-23** (bb; compat). Keyword values are matched exactly and case
 sensitively:
@@ -372,9 +410,28 @@ sensitively:
 upper-case tag fails with `ERROR: invalid fonttag '<TAG>'`; a value
 without `:` after the tag, a lower-case tag, an empty tag or a size that
 is not a number fails with `ERROR: invalid text property format`. The size
-is read like `strtod` and a negative size is accepted. Text after a second
-`:` is the font name and may contain `:` and spaces (`font-001` to
-`-019`).
+is the longest run of the characters `0123456789.e+-` after the tag's
+`:`, and the whole run must convert as in GR-21; otherwise the error is
+`invalid text property format` (`1.2.3`, `1-`, `1ee`, and an empty run
+as in `nan`, ` 10` or `e5`). Upper-case `E` ends the run. What follows
+the run:
+
+- nothing, or at most two characters not starting with `:`: accepted,
+  without a font name (`10y`, `1;:`);
+- `:` and any text: the text is the font name, which may contain `:` and
+  spaces;
+- three or more characters not starting with `:`:
+  `ERROR: expected : after font size in '<value>'` (`0x10`, `10;Arial`,
+  `10x:Arial`, `1E5x`).
+
+The tag is 1 to 10 upper-case letters; with 11 the value is
+`invalid text property format`. The tag is checked after the size, so
+`BOGUS:abc` is `invalid text property format` and `BOGUS:10yyy` is
+`invalid fonttag 'BOGUS'`. A size of 0 or less is accepted and changes
+nothing. `DEFAULT` sets the size of every text, and the options apply in
+order, so `LEGEND:12 DEFAULT:10` makes everything 10 and
+`DEFAULT:10 LEGEND:12` keeps the legend at 12 (`font-001` to `-019`,
+`scan-001` to `-028`).
 
 **GR-24** (bb; compat). Structured values:
 
@@ -392,9 +449,22 @@ is read like `strtod` and a negative size is accepted. Text after a second
   **undefined**: it is accepted, but the formatted label overruns the
   reference's label buffer, and on the CI runner host Pango then prints
   `Invalid UTF-8 string` warnings with a process id (`x-grid-020`).
+  The value is read like the C `scanf` format
+  `%10[A-Z]:%d:%10[A-Z]:%d:%10[A-Z]:%d:%d:`: keywords are 1 to 10
+  upper-case letters, the numbers may have leading white space and a sign
+  but no fraction, exponent or hexadecimal prefix, and anything else is
+  `invalid x-grid format`. The three keywords are then looked up in order
+  and the first unknown one is reported (`scan-047` to `-055`).
 - `--y-grid none` turns the y grid off (GR-61). Otherwise `step:factor`
   read as a float and an integer; trailing text after them is ignored
-  (`1:2:3`). Fewer fields, `NONE` or garbage fail with
+  (`1:2:3`). The step is the longest run of `0123456789.e+-` at the start
+  of the value, which must be followed by `:`; the run is then converted
+  as in GR-21 with the option name `-y`
+  (`ERROR: option -y - Converted '1-' to 1.000000, but cannot convert '-'`).
+  The factor is read like C `%d` (leading white space and a sign allowed,
+  at least one digit) and kept modulo 2^32 as a signed 32-bit integer, so
+  `2147483648` is a factor below 1 and `4294967297` a factor of 1
+  (`scan-056` to `-073`). Fewer fields, `NONE` or garbage fail with
   `ERROR: invalid y-grid format`; a step of 0 or less fails with
   `ERROR: grid step must be > 0`; a factor of 0 or less with
   `ERROR: label factor must be > 0` (`y-grid-001` to `-012`).
@@ -403,17 +473,26 @@ is read like `strtod` and a negative size is accepted. Text after a second
   values are accepted and make the renderer print
   `OOPS: Cairo has issues it can't even die: invalid value for a dash setting`
   on standard error while the graph still succeeds (`grid-dash-001` to
-  `-012`).
+  `-012`). Each number is a run of `0123456789.e+-` as for `--y-grid`; a
+  value without that shape is `invalid grid-dash format`, and a run that
+  does not convert in full is
+  `ERROR: expected grid-dash format float:float` (`1-:2`, `1:2-`;
+  `scan-082` to `-088`).
 - `--right-axis scale:shift`, two floats with trailing text ignored. Fewer
   fields or garbage give
   `ERROR: invalid right-axis format expected scale:shift`; a scale of 0
   gives `ERROR: the second_axis_scale  must not be 0` (two spaces).
+  Both numbers are runs as for `--y-grid`; a run that does not convert in
+  full is also `invalid right-axis format expected scale:shift`
+  (`scan-074` to `-081`).
 - `--right-axis-range min:max`, either side may be empty. A value without
   `:` gives `ERROR: invalid right-axis-range format expected min:max`; a
   side that is not a number gives the GR-21 conversion error with
   `--right-axis-range`; min greater than max gives
   `ERROR: right-axis-range min must not be larger than max`. `nan` is
-  accepted (`right-axis-range-001` to `-010`).
+  accepted (`right-axis-range-001` to `-010`). The value is split at the
+  first `:` and each side is converted whole, so `1:2:3` reports `'2:3'`
+  and `1 :2` reports the trailing space (`scan-089` to `-092`).
 
 **GR-25** (bb; compat). Axis formatters and formats:
 
@@ -423,11 +502,20 @@ is read like `strtod` and a negative size is accepted. Text after a second
   accepted. Errors print
   `ERROR: invalid format string '<f>' (should match '^(?:[^%]+|%%)*%[-+ 0#]?[0-9]*(?:[.][0-9]+)?l[eEfFgG](?:[^%]+|%%)*$')`.
 - With `timestamp`, the format is a strftime text and is not checked.
-- With `duration`, the format must be a valid duration format; a value
-  format such as `%lf` fails after layout with `ERROR: Wrong duration
-  format`, the size line already printed (`formatter-007`, `-008`).
-- The vectors give the formatter before the format; whether the check
-  depends on their order was not tested.
+- With `duration`, the format must be a valid duration format
+  (format-strings.md FS-40 to FS-44; an empty format is valid). An
+  invalid one does not stop the graph: the image is drawn and written and
+  every line and key is printed as usual, including `legend[n]`,
+  `coords[n]` and `image_info`, and the run then fails with
+  `ERROR: Wrong duration format`, exit 1 (`formatter-007`, `-008`,
+  `duration-001`, `-006`, `-008`, `-013` to `-015`). A failed save is
+  reported instead (`duration-016`). The format is only used, and so only
+  fails, when the axis labels are drawn: not with `--y-grid none`,
+  `--only-graph` or `--logarithmic`, not for the right axis without
+  `--right-axis`, not for an abandoned graph (GR-21) and not for a data
+  format (`duration-002` to `-005`, `-010` to `-012`).
+- The check uses the formatter given last, wherever it appears relative
+  to the format (GR-17; `order-009`, `-010`).
 
 **GR-26** (bb; compat). `--daemon` accepts any text. An empty value means
 no daemon. Otherwise the graph is drawn from the local files, the size and
@@ -921,19 +1009,34 @@ prints nothing at all (`imginfo-011`, `-012`); `-W --imginfo=x` (a
 watermark) prints the size line (`imginfo-016`). An empty format prints
 no line at all, so `--imginfo ''` prints nothing (`imginfo-004`).
 
-**GR-84** (doc, bb; compat). `--lazy` computes everything and prints the
-size and print lines as usual, but leaves an existing output file in
-place when that file is newer than the data: the file keeps its old size
-and content even when the new graph would differ (`out-026` to `-031`).
-The size line reports the new graph. `graphv --lazy` stops its key list
-after `graph_end` (`out-029`). An existing file older than the data is
-replaced (`out-032`: the fixture's `notes.txt` is dated 1000000000,
-before the last update of `f.rrd`). A newer file that is not a PNG makes
-the reference print `libpng error: Not a PNG file` on standard error and
-replace it, exit 0 (observed outside the vectors); `/dev/null` gives
-`libpng error: Read Error` (`opt-145`, `-146`). Whether "newer than the
-data" means the RRD file times or their last update times was not
-settled.
+**GR-84** (doc, bb; compat). `--lazy` computes the prints and the image
+size and prints the size and print lines as usual, but leaves an existing
+output file in place when that file is fresh: the file keeps its old size
+and content even when the new graph would differ (`out-026` to `-031`,
+`lazy-001`, `-002`). The size line reports the new graph.
+
+- *Fresh* means that the file's modification time is at most
+  `(end - start) / width` seconds (the time one pixel of the new graph
+  covers) before the current time. The RRD files' times and their last
+  update times play no part. Black-box runs that set the file times
+  settled this: with a 4000 s range over 400 pixels a file 10 s old was
+  kept and one 11 s old replaced, with 4400 s, 11 s was kept and 12 s
+  replaced, and files dated after the last update but more than one pixel
+  ago were replaced. Whether the division rounds was not settled.
+  `out-032` replaces the fixture's `notes.txt`, dated 1000000000.
+- A fresh file must begin with a PNG image whose chunks up to the first
+  `IDAT` chunk can be read. Otherwise the reference prints
+  `libpng error: Not a PNG file` (8 or more bytes that are not the PNG
+  signature) or `libpng error: Read Error` (a shorter or truncated file)
+  on standard error and draws and writes the graph as usual, exit 0
+  (`lazy-004`, `-005`). `/dev/null` is fresh on hosts that update its
+  time, so it gives `Read Error` there (`opt-145`, `-146`).
+- When the file is kept, nothing after the layout is computed: `graphv`
+  prints the print keys and the keys up to `graph_end`, then
+  `image_info` (`out-029`, `lazy-001`), and an infinite limit no longer
+  abandons the graph (`lazy-002`).
+- `--lazy` does not apply to the data formats, which always write
+  (`lazy-003`).
 
 **GR-85** (bb; compat). Nothing is written on any error found before
 rendering (GR-5). A rendering error from the PNG backend (GR-91) prints
@@ -965,13 +1068,35 @@ exported), using the legend as column name:
   JSON (`data-051` to `-053`).
 - `--x-grid` with an LFM changes the time column and the `start`/`end`
   meta entries to that strftime format (`data-005`, `-033`); `--step`
-  changes the step (`data-006`).
+  changes the step (`data-006`). The times are formatted in the local
+  zone of `TZ` even with `--utc`; JSON quotes them; an empty LFM gives
+  empty text; the text is not escaped. `--x-grid none` alone keeps the
+  numbers, but it does not cancel the LFM of another `--x-grid`, before
+  or after it; and once `none` was given the x grid stays hidden whatever
+  follows (`xgridtime-001` to `-008`, `-010` to `-012`). `xport` has no
+  `--x-grid` and prints numbers (`xgridtime-009`).
 
-**GR-87** (doc, bb; compat). `--add-jsontime` makes `graphv` append,
-after its keys (and after the image bytes with `-`), the lines
-`graph_start = <n>`, `graph_end = <n>`, `graph_step = <n>` (the aligned
-data window), `datapoints = BLOB_SIZE:<n>` and the JSONTIME export
-(`data-062`, `-063`). `graph` ignores it (`data-064`).
+**GR-87** (doc, bb; compat). `--add-jsontime` makes `graph` and `graphv`
+export the data a second time, in the JSONTIME format of GR-86, once the
+graph or data export finished:
+
+- The export goes to the output of the image. With `-`, `graphv`
+  appends, after its keys and the image bytes, the lines
+  `graph_start = <n>`, `graph_end = <n>`, `graph_step = <n>` (the aligned
+  data window), `datapoints = BLOB_SIZE:<n>` and the export (`data-062`,
+  `jsontime-005`); `graph -` prints only the image (`data-064`).
+- With a file name the export replaces the file's content, so the image
+  (or the data of `--imgformat`) is lost, and `graphv` prints
+  `datapoints = BLOB_SIZE:0` (`data-063`, `jsontime-001` to `-004`,
+  `-006`). When the file cannot be opened the image save fails as in
+  GR-80 and the export goes to standard output (`jsontime-007`).
+- The three keys follow `image_info` (`jsontime-003`) and are printed
+  also when `--lazy` stopped the key list early (`jsontime-010`).
+- With no exportable element the file is truncated to zero bytes,
+  `graphv` prints `datapoints = BLOB_SIZE:0` without the three keys, and
+  the run fails with `ERROR: no XPORT found, nothing to do`
+  (`jsontime-009`, `lazy-005`). An abandoned graph exports nothing and
+  creates no file (`jsontime-008`).
 
 ## 12. xport
 
@@ -1093,6 +1218,12 @@ their class; the expectation stays RRDtool's. They are summarized here.
 | `layout-026` to `-028` (Linux) | GR-81 | defect | legend `coords` under `--zoom` |
 | `data-005`, `-012`, `-019`, `-026`, `-033`, `-040`, `-047` | GR-86 | defect | `--x-grid` time format ignored in data exports |
 | `data-062`, `-063` | GR-87 | defect | `--add-jsontime` ignored |
+| `jsontime-001` to `-007`, `-009`, `-010` | GR-87 | defect | `--add-jsontime` ignored |
+| `lazy-001`, `-002`, `-004`, `-005` | GR-84 | defect | `--lazy` freshness and PNG check |
+| `duration-001`, `-006`, `-008`, `-013` to `-015` | GR-25 | defect | a value format under the duration formatter is not rejected |
+| `order-009`, `-010` | GR-17 | defect | axis format checked against the formatter in force when it is read |
+| `scan-001`, `-002`, `-009`, `-010`, `-012` to `-014`, `-016`, `-029`, `-031`, `-035`, `-038`, `-039`, `-048`, `-049`, `-057` to `-060`, `-062`, `-072`, `-073`, `-080`, `-087`, `-091` | GR-22 to GR-24 | defect | value scanners accept or reject other inputs |
+| `xgridtime-001` to `-003`, `-005` to `-008`, `-010` | GR-86 | defect | `--x-grid` time format ignored in data exports |
 
 `def-073` is listed as a defect, but the reference value comes from a
 data source the DEF did not name; whether that is a reference defect to
@@ -1129,8 +1260,9 @@ provenance.
 7. **`--rigid --allow-shrink`** and **`--y-grid`** change the value range
    in ways pinned by `scale-170`, `-171` and `scale-189` to `-191` but not
    reduced to a rule.
-8. **`--lazy` freshness**: whether the output file is compared with the
-   RRD files' modification times or with their last update times.
+8. **`--lazy` freshness** is settled by GR-84: the output file is
+   compared with the current time minus one pixel's duration. Whether
+   that duration is rounded was not settled.
 9. **`-Z` with a missing data source** (`def-073`) prints a value from
    another data source of the same file; it may be a reference defect.
 10. **Message length**: option errors are cut to 47 bytes after `ERROR: `

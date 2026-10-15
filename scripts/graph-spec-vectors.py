@@ -1081,6 +1081,187 @@ def limit_cases() -> None:
             'DEF:x=f.rrd:x:AVERAGE:step=60', 'XPORT:x')
 
 
+def order_cases() -> None:
+    """When each option is checked relative to the others (GR-17)."""
+    for opts in [['--start', 'abc', '-w', '5'], ['-w', '5', '--start', 'abc'],
+                 ['--start', 'end+1d', '--end', '19750101'],
+                 ['--start', '19750102', '--end', '19750101'],
+                 ['--start', '1000000000', '--end', '999999999', '-c', 'X#1'],
+                 ['--left-axis-format', '%d', '-w', '5'],
+                 ['--left-axis-format', '%d', '--start', 'end-1h',
+                  '--end', 'start+1h'],
+                 ['--right-axis-format', '%d', '--left-axis-format', '%e'],
+                 ['--left-axis-format', '%d', '--left-axis-formatter',
+                  'timestamp'],
+                 ['--left-axis-formatter', 'duration', '--left-axis-format',
+                  '%d'],
+                 ['--imginfo', '%d', '-w', '5'],
+                 ['--imginfo', '%d', '--start', 'end-1h', '--end',
+                  'start+1h']]:
+        run('order', 'graph', 'x', *opts)
+    run('order', 'graph', '--start', 'end-1h', '--end', 'start+1h')
+    run('order', 'graph', '--imginfo', '%d')
+    run('order', 'graph', '/dev/null', *RANGE, '--imginfo', '%d')
+    run('order', 'graph', '/dev/null', *RANGE, '--imginfo', '%d', DEFX,
+        'VDEF:v=x,AVERAGE', 'PRINT:v:%d', LINE)
+    run('order', 'xport', '--start', 'end+1d', '--end', '19750101',
+        DEFX, 'XPORT:x')
+    # The logarithmic lower limit is checked after the axis formats and
+    # before the times.
+    run('order', 'graph', 'x', '-l', '0', '-o', '--start', 'end-1h', '--end',
+        'start+1h')
+    run('order', 'graph', 'x', '-o', '-l', '0', '--left-axis-format', '%d')
+
+
+def scan_cases() -> None:
+    """Value scanners of --font, --color, --x-grid, --y-grid, --right-axis
+    and --grid-dash (GR-22 to GR-24)."""
+    for value in ['DEFAULT:.5', 'DEFAULT:+3', 'DEFAULT:nan', 'DEFAULT:inf',
+                  'DEFAULT:-', 'DEFAULT:.', 'DEFAULT:e5', 'DEFAULT: 10',
+                  'DEFAULT:1e', 'DEFAULT:1e+', 'DEFAULT:0x10', 'DEFAULT:0x1',
+                  'DEFAULT:10y', 'DEFAULT:10yy', 'DEFAULT:10yyy',
+                  'DEFAULT:1;:', 'DEFAULT:10;Arial', 'DEFAULT:10x:Arial',
+                  'DEFAULT:1.2.3', 'DEFAULT:1-', 'DEFAULT:1ee',
+                  'DEFAULT:1E5x', 'DEFAULT:1exyz', 'DEFAULTx:10',
+                  'ABCDEFGHIJ:10', 'ABCDEFGHIJK:10', 'BOGUS:abc',
+                  'BOGUS:10yyy']:
+        run('scan', 'graph', 'x', '--font', value)
+    for value in ['BACK#0x1020', 'BACK#0x10203', 'BACK#+10203', 'BACK#-1020',
+                  'BACK#--1020', 'BACK#-', 'BACK#0X1', 'BACK#12',
+                  'BACK#12345x', 'BACK#1234x', 'BACK# 123', 'BACK#  12345',
+                  'A#123', 'ABCDEFGHIJ#123', 'ABCDEFGHIJK#123', 'BACK#1#2',
+                  'BA_CK#123', 'BACKx#123']:
+        run('scan', 'graph', 'x', '--color', value)
+    for value in ['MINUTE:1.5:MINUTE:5:MINUTE:5:0:%H',
+                  'MINUTE: 1:MINUTE:5:MINUTE:5:0:%H',
+                  'MINUTE:+1:MINUTE:5:MINUTE:5:0:%H',
+                  'MINUTE:1:FOO:5:BAR:5:0:%H',
+                  'FOO:x:MINUTE:5:MINUTE:5:0:%H',
+                  'MINUTE:1:MINUTE:5:MINUTE:5:1e3:%H',
+                  'MINUTE:1:MINUTE:5:MINUTE:5:0x1:%H',
+                  'ABCDEFGHIJK:1:MINUTE:5:MINUTE:5:0:%H',
+                  'ABCDEFGHIJ:1:MINUTE:5:MINUTE:5:0:%H']:
+        run('scan', 'graph', 'x', '--x-grid', value)
+    for value in ['1E1:2', '1e1:2', '+1:2', '.5:2', '1e:2', ' 1:2', '1: 2',
+                  '1 :2', 'nan:1', '0x1:2', '1-:2', '1.2.3:2', '1:', '1:x',
+                  '1:0x2', '1:2147483648', '1:4294967297', '1:99999999999']:
+        run('scan', 'graph', 'x', '--y-grid', value)
+    for value in ['0x1:0', '1 :0', 'nan:0', '1:', '1-:0', '1:0-', '1:0x',
+                  '1E1:1']:
+        run('scan', 'graph', 'x', '--right-axis', value)
+    for value in ['0x1:2', '1 :2', 'nan:1', '1-:2', '1:2-', '1e:2e', '1E1:1']:
+        run('scan', 'graph', 'x', '--grid-dash', value)
+    for value in ['1 :2', '0x1:2', '1: 2', '1:2:3']:
+        run('scan', 'graph', 'x', '--right-axis-range', value)
+
+
+def lazy_cases() -> None:
+    """--lazy with fresh files the earlier step wrote (GR-84)."""
+    # Two days over 400 pixels: a file counts as fresh for 432 s, so slow
+    # runners do not age it out between the steps.
+    elements = ['DEF:a=d.rrd:x:AVERAGE', 'LINE1:a#ff0000:a',
+                'VDEF:v=a,MAXIMUM', 'PRINT:v:%lf']
+    first = {'args': ['graph', 'out.png', '-w', '200', *DRANGE, *elements]}
+    case('lazy', first,
+         {'args': ['graphv', 'out.png', '-z', '-f', '%s %lu %lu', *DRANGE,
+                   *elements], 'inspect': ['out.png']})
+    case('lazy', first,
+         {'args': ['graph', 'out.png', '-z', '-u', 'inf', *DRANGE,
+                   *elements], 'inspect': ['out.png']})
+    case('lazy', first,
+         {'args': ['graph', 'out.png', '-z', '-a', 'CSV', '-w', '10',
+                   *DRANGE, *elements], 'inspect': ['out.png']})
+    case('lazy', {'args': ['graph', 'out.png', '-a', 'CSV', '-w', '10',
+                           *DRANGE, *elements]},
+         {'args': ['graph', 'out.png', '-z', *DRANGE, *elements],
+          'inspect': ['out.png']})
+    case('lazy', {'args': ['graph', 'out.png', '--add-jsontime', *DRANGE,
+                           *elements[:1], *elements[2:]]},
+         {'args': ['graph', 'out.png', '-z', *DRANGE, *elements],
+          'inspect': ['out.png']})
+
+
+def jsontime_cases() -> None:
+    """--add-jsontime with an output file (GR-87)."""
+    line = LINE + ':xx'
+    written('jsontime', ['graph', 'out.png', '--add-jsontime', *RANGE,
+                         DEFX, line], 'out.png')
+    written('jsontime', ['graphv', 'out.png', '--add-jsontime', *RANGE,
+                         DEFX, line], 'out.png')
+    written('jsontime', ['graphv', 'out.png', '--add-jsontime', '-f',
+                         '%s %lu %lu', *RANGE, DEFX, line], 'out.png')
+    written('jsontime', ['graphv', 'out.png', '--add-jsontime', '-a', 'CSV',
+                         *RANGE, DEFX, line], 'out.png')
+    run('jsontime', 'graphv', '-', '--add-jsontime', '-a', 'CSV', *RANGE,
+        DEFX, line)
+    written('jsontime', ['graphv', 'out.png', '--add-jsontime', '-x',
+                         'MINUTE:1:MINUTE:5:MINUTE:5:0:%H:%M', *RANGE,
+                         DEFX, line], 'out.png')
+    written('jsontime', ['graphv', 'nodir/out.png', '--add-jsontime',
+                         *RANGE, DEFX, line], 'nodir/out.png')
+    written('jsontime', ['graphv', 'out.png', '--add-jsontime', '-u', 'inf',
+                         *RANGE, DEFX, line], 'out.png')
+    written('jsontime', ['graphv', 'out.png', '--add-jsontime', *RANGE, DEFX,
+                         'VDEF:v=x,MAXIMUM', 'PRINT:v:%lf'], 'out.png')
+    dline = ['DEF:a=d.rrd:x:AVERAGE', 'LINE1:a#ff0000:a']
+    case('jsontime', {'args': ['graph', 'out.png', *DRANGE, *dline]},
+         {'args': ['graphv', 'out.png', '-z', '--add-jsontime', '-w', '10',
+                   *DRANGE, *dline], 'inspect': ['out.png']})
+
+
+def xgridtime_cases() -> None:
+    """The --x-grid label format in data exports (GR-86)."""
+    short = ['--start', T0, '--end', '1000000180', DEFX, LINE + ':xx']
+    fmt = 'MINUTE:1:MINUTE:5:MINUTE:5:0:%H:%M %Z'
+    ny = {'TZ': 'America/New_York'}
+    run('xgridtime', 'graph', '-', '-a', 'CSV', '-x', fmt, *short, env=ny)
+    run('xgridtime', 'graph', '-', '-a', 'CSV', '-x', fmt, '--utc', *short,
+        env=ny)
+    run('xgridtime', 'graph', '-', '-a', 'CSV', '-x',
+        'MINUTE:1:MINUTE:5:MINUTE:5:0:', *short)
+    run('xgridtime', 'graph', '-', '-a', 'CSV', '-x', 'none', *short)
+    run('xgridtime', 'graph', '-', '-a', 'CSV', '-x', fmt, '-x', 'none',
+        *short)
+    run('xgridtime', 'graph', '-', '-a', 'XML', '-x',
+        'MINUTE:1:MINUTE:5:MINUTE:5:0:', *short)
+    run('xgridtime', 'graph', '-', '-a', 'JSON', '-x', fmt, *short)
+    run('xgridtime', 'graph', '-', '-a', 'TSV', '-x',
+        'MINUTE:1:MINUTE:5:MINUTE:5:0:%%a"b', *short)
+    run('xgridtime', 'xport', '--start', T0, '--end', '1000000180', DEFX,
+        'XPORT:x')
+    # `none` hides the grid even before a spec; the spec's format stays.
+    run('xgridtime', 'graph', '-', '-a', 'CSV', '-x', 'none', '-x', fmt,
+        *short)
+    run('xgridtime', 'graph', '/dev/null', '-x', 'none', '-x', fmt, *short)
+    run('xgridtime', 'graph', '/dev/null', '-x', fmt, '-x', 'none', *short)
+
+
+def duration_cases() -> None:
+    """A value format under the duration axis formatter (GR-25)."""
+    bad = ['--left-axis-formatter', 'duration', '--left-axis-format', '%lf']
+    rbad = ['--right-axis-formatter', 'duration', '--right-axis-format',
+            '%lf']
+    for opts in [bad, bad + ['-y', 'none'], bad + ['-j'], bad + ['-o'],
+                 bad + ['-u', 'inf'], bad + ['-f', '%s %lu %lu'],
+                 ['--left-axis-formatter', 'duration', '--left-axis-format',
+                  ''],
+                 ['--left-axis-formatter', 'duration', '--left-axis-format',
+                  '%X'],
+                 ['--left-axis-formatter', 'duration'], rbad,
+                 rbad + ['--right-axis', '1:0', '-y', 'none'],
+                 bad + ['-a', 'CSV']]:
+        run('duration', *G, LINE, *opts)
+    run('duration', *GV, LINE + ':xx', *bad)
+    run('duration', *G, LINE, 'VDEF:v=x,MAXIMUM', 'PRINT:v:%lf', *bad)
+    run('duration', 'graph', '-', *RANGE, DEFX, LINE, *bad)
+    run('duration', 'graph', 'nodir/x.png', *RANGE, DEFX, LINE, *bad)
+
+
+# Groups added after the first capture; --add appends them to the table
+# without regenerating the others.
+LATER_GROUPS = ['order', 'scan', 'lazy', 'jsontime', 'xgridtime', 'duration']
+
+
 def all_cases() -> list[dict]:
     CASES.clear()
     option_cases()
@@ -1106,6 +1287,12 @@ def all_cases() -> list[dict]:
     xport_cases()
     output_cases()
     limit_cases()
+    order_cases()
+    scan_cases()
+    lazy_cases()
+    jsontime_cases()
+    xgridtime_cases()
+    duration_cases()
     counters: dict[str, int] = {}
     for entry in CASES:
         n = counters.get(entry['group'], 0) + 1
@@ -1284,7 +1471,7 @@ def compare(binary: str, fixture: Path, table: dict, check: bool,
     for entry in table['vectors']:
         if 'unstable' in entry['tags']:
             continue
-        if only and entry['group'] != only:
+        if only and entry['group'] not in only.split(','):
             continue
         got = run_case(binary, fixture, entry)
         if got != entry['expect']:
@@ -1301,6 +1488,31 @@ def compare(binary: str, fixture: Path, table: dict, check: bool,
     return 0
 
 
+def add_groups(binary: str, fixture: Path, out: str,
+               groups: list[str]) -> int:
+    """Captures `groups` against the table's own fixture files and puts
+    them in place of any earlier capture, leaving the other vectors and
+    their platform expectations untouched."""
+    table = read_table(out)
+    setup(binary, fixture, table['files'])
+    kept = [entry for entry in table['vectors']
+            if entry['group'] not in groups]
+    added = []
+    for entry in all_cases():
+        if entry['group'] not in groups:
+            continue
+        entry['expect'] = run_case(binary, fixture, entry)
+        again = run_case(binary, fixture, entry)
+        if again != entry['expect']:
+            entry['tags'].append('unstable')
+        add_tags(entry, entry['expect'])
+        added.append(ordered(entry))
+    table['vectors'] = kept + added
+    write_text(out, render(table))
+    print(f'{len(added)} vectors captured for {",".join(groups)}')
+    return 0
+
+
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
     parser = argparse.ArgumentParser()
@@ -1312,6 +1524,9 @@ def main() -> int:
     parser.add_argument('--platform-out')
     parser.add_argument('--merge-platform', nargs=2, metavar=('KEY', 'FILE'))
     parser.add_argument('--only', help='print results of one group only')
+    parser.add_argument('--add', metavar='GROUPS',
+                        help='capture these comma-separated groups and '
+                             'replace them in the table, keeping the rest')
     options = parser.parse_args()
 
     if options.merge_platform:
@@ -1335,6 +1550,9 @@ def main() -> int:
                                  capture_output=True, text=True).stdout
         if not version.startswith('RRDtool 1.11.0 '):
             sys.exit(f'expected RRDtool 1.11.0, found {version[:40]!r}')
+        if options.add:
+            return add_groups(binary, fixture, options.out,
+                              options.add.split(','))
         files = build_seed(binary)
         setup(binary, fixture, files)
         vectors = []
