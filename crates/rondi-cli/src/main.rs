@@ -22,7 +22,7 @@ use rondi::time::{
 use rondi::{
     DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, DatabaseConfig, RrdDataSourceTune, RrdDumpHeader,
     RrdResizeAction, RrdTuneBound, Store, StoreOptions, Update, dump_rrd_file_with_header,
-    fetch_rrd_file, first_rrd_time, parse_rrd_scaled_duration, resize_rrd_file, restore_rrd_file,
+    fetch_rrd_rows, first_rrd_time, parse_rrd_scaled_duration, resize_rrd_file, restore_rrd_file,
     tune_rrd_data_sources, update_rrd_text,
 };
 use std::fmt::Write as FmtWrite;
@@ -1812,31 +1812,42 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let daemon_address = daemon_address
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
         .filter(|address| !address.is_empty());
-    let mut name_error = None;
-    let result = if let Some(address) = daemon_address {
+    if let Some(address) = daemon_address {
         let escaped = escape_rrdcached_field(&filename.to_string_lossy());
         let command = format!("FETCH {escaped} {cf} {start} {end}");
-        parse_rrdcached_fetch(&send_rrdcached_multiline_command(&address, &command)?)?
-    } else {
-        let result = fetch_rrd_file(&filename, cf, start, end, resolution)?;
-        // rrd_fetch_fn runs rrd_cf_conv over every RRA while it looks for a
-        // match and keeps going past a name it rejects, so the data prints
-        // and rrdtool still exits with that error.
-        name_error = inspect_rrd(&filename.to_string_lossy())?
-            .archives
-            .iter()
-            .rev()
-            .find_map(|archive| rondi::cf_conv_error(&archive.raw_consolidation));
-        result
-    };
+        let result = parse_rrdcached_fetch(&send_rrdcached_multiline_command(&address, &command)?)?;
+        return write_fetch_rows(&result.data_sources, result.rows);
+    }
+    // rrd_fetch.c allocates the whole range; streaming keeps memory bounded
+    // by the archive while printing the same rows.
+    let fetch = fetch_rrd_rows(&filename, cf, start, end, resolution)?;
+    // rrd_fetch_fn runs rrd_cf_conv over every RRA while it looks for a
+    // match and keeps going past a name it rejects, so the data prints
+    // and rrdtool still exits with that error.
+    let name_error = inspect_rrd(&filename.to_string_lossy())?
+        .archives
+        .iter()
+        .rev()
+        .find_map(|archive| rondi::cf_conv_error(&archive.raw_consolidation));
+    write_fetch_rows(&fetch.data_sources, fetch.rows())?;
+    match name_error {
+        Some(message) => Err(RawRrdError(message).into()),
+        None => Ok(()),
+    }
+}
+
+fn write_fetch_rows(
+    data_sources: &[String],
+    rows: impl IntoIterator<Item = rondi::RrdFetchRow>,
+) -> Result<(), Box<dyn std::error::Error>> {
     // stdout is line buffered; one write per row dominates large fetches.
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
     write!(out, "           ")?;
-    for data_source in &result.data_sources {
+    for data_source in data_sources {
         write!(out, "{data_source:>20}")?;
     }
     writeln!(out, "\n")?;
-    for row in result.rows {
+    for row in rows {
         write!(out, "{:>10}:", row.timestamp)?;
         for value in row.values {
             match value {
@@ -1847,10 +1858,7 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         writeln!(out)?;
     }
     out.flush()?;
-    match name_error {
-        Some(message) => Err(RawRrdError(message).into()),
-        None => Ok(()),
-    }
+    Ok(())
 }
 
 #[inline]
@@ -5549,7 +5557,9 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             .position(|source| source == name)
             .ok_or_else(|| format!("unknown data source name '{name}'"))
     };
-    let mut options = OptParse::new(args.to_vec());
+    // rrd_tune_r re-parses the argv the first pass permuted, so a trailing
+    // option without a value takes the file name as its value there.
+    let mut options = OptParse::new(options.permuted_argv().to_vec());
     // rrd_tune.c:423: --step feeds handle_modify's stretch.
     let mut newstep: libc::c_int = -1;
     // rrd_tune_r edits the header through the file mapping, so settings
@@ -5689,12 +5699,35 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     applied?;
 
+    // rrd_tune.c:427. Only reached when an option consumed the file name.
+    if options.positionals().is_empty() {
+        for source in rondi::inspect_rrd_file(&filename)?.data_sources {
+            if source.kind == "COMPUTE" {
+                return Err(
+                    "rrdtool tune output for COMPUTE data sources is not implemented".into(),
+                );
+            }
+            // An unknown bound is DNAN, whose sign bit is set on x86_64,
+            // where glibc prints it as -nan.
+            let bound =
+                |value: Option<f64>| c_printf_double("%1.4f", value.unwrap_or_else(rrd_nan));
+            println!(
+                "DS[{}] typ: {}\thbt: {}\tmin: {}\tmax: {}",
+                source.name,
+                source.kind,
+                source.heartbeat,
+                bound(source.minimum),
+                bound(source.maximum)
+            );
+        }
+    }
+
     // handle_modify (rrd_modify.c:1299) takes the words after the file name
     // and parses all of them before changing anything.
     let mut remove = Vec::new();
     let mut add = Vec::new();
     let mut rra_ops = Vec::new();
-    for argument in &options.positionals()[1..] {
+    for argument in options.positionals().get(1..).unwrap_or_default() {
         if let Some(name) = argument
             .strip_prefix("DEL:")
             .filter(|name| !name.is_empty())
@@ -6164,31 +6197,151 @@ impl std::fmt::Display for RrdcachedConnectError {
 
 impl std::error::Error for RrdcachedConnectError {}
 
+/// Port of RRDtool 1.11.0 rrd_client.c `client_connect` (868-878). Only a
+/// `unix:` prefix or a leading slash names a socket path; everything else,
+/// including a bare host, is a network address.
 #[cfg(unix)]
 fn open_rrdcached_stream(
     address: &str,
 ) -> Result<Box<dyn RrdcachedStream>, Box<dyn std::error::Error>> {
-    use std::os::unix::net::UnixStream;
-
     if let Some(path) = address.strip_prefix("unix:") {
-        if path.is_empty() {
-            return Err("empty rrdcached Unix socket path".into());
-        }
-        return Ok(Box::new(UnixStream::connect(path)?));
+        return Ok(Box::new(connect_rrdcached_unix(path)?));
     }
     if address.starts_with('/') {
-        return Ok(Box::new(UnixStream::connect(address)?));
+        return Ok(Box::new(connect_rrdcached_unix(address)?));
     }
-    if let Some(endpoint) = address
-        .strip_prefix("tcp:")
-        .or_else(|| address.contains(':').then_some(address))
-    {
-        if endpoint.is_empty() {
-            return Err("empty rrdcached TCP endpoint".into());
+    let (host, port) = split_rrdcached_network_address(address)?;
+    Ok(Box::new(connect_rrdcached_network(&host, &port)?))
+}
+
+/// `connect_unix` (782-814). The path is truncated to `sun_path` and the
+/// whole structure goes to connect(2), so an empty or overlong path fails
+/// the way the kernel reports it rather than being rejected here.
+#[cfg(unix)]
+fn connect_rrdcached_unix(path: &str) -> std::io::Result<std::os::unix::net::UnixStream> {
+    use std::os::fd::FromRawFd;
+
+    // SAFETY: the descriptor is owned by `stream` as soon as it exists, so
+    // every return closes it, and `address` is a fully initialised
+    // sockaddr_un whose size is passed to connect.
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
         }
-        return Ok(Box::new(std::net::TcpStream::connect(endpoint)?));
+        let stream = std::os::unix::net::UnixStream::from_raw_fd(fd);
+        libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        let mut address = std::mem::zeroed::<libc::sockaddr_un>();
+        address.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        let capacity = address.sun_path.len() - 1;
+        for (slot, byte) in address.sun_path.iter_mut().zip(path.bytes().take(capacity)) {
+            *slot = byte as libc::c_char;
+        }
+        let status = libc::connect(
+            fd,
+            std::ptr::addr_of!(address).cast::<libc::sockaddr>(),
+            std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t,
+        );
+        if status != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(stream)
     }
-    Err(format!("unsupported rrdcached address: {address}").into())
+}
+
+/// The host and service `connect_network` (816-856) hands to getaddrinfo:
+/// `[v6]` or `[v6]:port`, otherwise a split at the last colon, with port
+/// 42217 when none is given.
+#[cfg(unix)]
+fn split_rrdcached_network_address(
+    address: &str,
+) -> Result<(Vec<u8>, Vec<u8>), Box<dyn std::error::Error>> {
+    // addr_copy is NI_MAXHOST bytes including its terminator.
+    const NI_MAXHOST: usize = 1025;
+    const RRDCACHED_DEFAULT_PORT: &[u8] = b"42217";
+
+    let bytes = address.as_bytes();
+    let bytes = &bytes[..bytes.len().min(NI_MAXHOST - 1)];
+    let (host, port) = if let Some(rest) = bytes.strip_prefix(b"[") {
+        let Some(close) = rest.iter().position(|byte| *byte == b']') else {
+            return Err(format!("malformed address: {address}").into());
+        };
+        let after = &rest[close + 1..];
+        let port = match after.first() {
+            None => None,
+            Some(b':') => Some(&after[1..]),
+            Some(_) => {
+                return Err(
+                    format!("garbage after address: {}", String::from_utf8_lossy(after)).into(),
+                );
+            }
+        };
+        (&rest[..close], port)
+    } else if let Some(colon) = bytes.iter().rposition(|byte| *byte == b':') {
+        (&bytes[..colon], Some(&bytes[colon + 1..]))
+    } else {
+        (bytes, None)
+    };
+    Ok((
+        host.to_vec(),
+        port.unwrap_or(RRDCACHED_DEFAULT_PORT).to_vec(),
+    ))
+}
+
+/// `connect_network` (857-896): try each resolved address in turn and
+/// report the errno of the last failed attempt.
+#[cfg(unix)]
+fn connect_rrdcached_network(
+    host: &[u8],
+    port: &[u8],
+) -> Result<std::net::TcpStream, Box<dyn std::error::Error>> {
+    use std::ffi::{CStr, CString};
+    use std::os::fd::FromRawFd;
+
+    let c_host = CString::new(host)?;
+    let c_port = CString::new(port)?;
+    // SAFETY: getaddrinfo receives NUL-terminated strings and zeroed hints,
+    // its list is only walked while alive and is freed after a successful
+    // call, and each descriptor is owned by a TcpStream as soon as it
+    // exists.
+    unsafe {
+        let mut hints = std::mem::zeroed::<libc::addrinfo>();
+        hints.ai_flags = libc::AI_ADDRCONFIG;
+        hints.ai_family = libc::AF_UNSPEC;
+        hints.ai_socktype = libc::SOCK_STREAM;
+        let mut list: *mut libc::addrinfo = std::ptr::null_mut();
+        let status = libc::getaddrinfo(c_host.as_ptr(), c_port.as_ptr(), &hints, &mut list);
+        if status != 0 {
+            let reason = CStr::from_ptr(libc::gai_strerror(status)).to_string_lossy();
+            return Err(format!(
+                "failed to resolve address '{}' (port {}): {reason} ({status})",
+                String::from_utf8_lossy(host),
+                String::from_utf8_lossy(port)
+            )
+            .into());
+        }
+        let mut last_error = std::io::Error::from_raw_os_error(0);
+        let mut entry = list;
+        let mut connected = None;
+        while let Some(info) = entry.as_ref() {
+            entry = info.ai_next;
+            let fd = libc::socket(info.ai_family, info.ai_socktype, info.ai_protocol);
+            if fd < 0 {
+                last_error = std::io::Error::last_os_error();
+                continue;
+            }
+            let stream = std::net::TcpStream::from_raw_fd(fd);
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            if libc::connect(fd, info.ai_addr, info.ai_addrlen) != 0 {
+                last_error = std::io::Error::last_os_error();
+                continue;
+            }
+            connected = Some(stream);
+            break;
+        }
+        libc::freeaddrinfo(list);
+        connected.ok_or_else(|| last_error.into())
+    }
 }
 
 #[cfg(not(unix))]
@@ -7056,6 +7209,31 @@ mod rrdcached_response_tests {
             message == "rrdcached response line exceeds 1 MiB",
             "{message:.80}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn network_daemon_addresses_split_like_connect_network() {
+        let split = |address: &str| {
+            super::split_rrdcached_network_address(address)
+                .map(|(host, port)| {
+                    (
+                        String::from_utf8(host).unwrap(),
+                        String::from_utf8(port).unwrap(),
+                    )
+                })
+                .map_err(|error| error.to_string())
+        };
+        let pair = |host: &str, port: &str| Ok((host.to_owned(), port.to_owned()));
+        assert_eq!(split("127.0.0.1"), pair("127.0.0.1", "42217"));
+        assert_eq!(split("localhost"), pair("localhost", "42217"));
+        assert_eq!(split("[::1]"), pair("::1", "42217"));
+        assert_eq!(split("[::1]:9"), pair("::1", "9"));
+        assert_eq!(split("host:"), pair("host", ""));
+        assert_eq!(split("tcp:host:9"), pair("tcp:host", "9"));
+        assert_eq!(split("::1"), pair(":", "1"));
+        assert_eq!(split("[::1"), Err("malformed address: [::1".to_owned()));
+        assert_eq!(split("[::1]x"), Err("garbage after address: x".to_owned()));
     }
 
     #[cfg(unix)]

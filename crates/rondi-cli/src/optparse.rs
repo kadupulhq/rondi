@@ -37,6 +37,8 @@ pub(crate) struct OptParse {
     subopt: usize,
     /// Indices of non-options passed over and not yet permuted.
     skipped: Vec<usize>,
+    /// Where upstream's permutation left a NULL inside argv; see `finish`.
+    terminator: Option<usize>,
 }
 
 const ERRMSG_SIZE: usize = 48;
@@ -111,12 +113,19 @@ impl OptParse {
             errmsg: String::new(),
             subopt: 0,
             skipped: Vec::new(),
+            terminator: None,
         }
     }
 
     /// The positionals left after option parsing.
     pub(crate) fn positionals(&self) -> &[String] {
         self.argv.get(self.optind..).unwrap_or_default()
+    }
+
+    /// The argv a second `optparse_init` over the permuted C array would
+    /// parse: everything before the NULL `finish` may have moved into it.
+    pub(crate) fn permuted_argv(&self) -> &[String] {
+        &self.argv[..self.terminator.unwrap_or(self.argv.len())]
     }
 
     fn set_error(&mut self, message: Vec<u8>) {
@@ -206,6 +215,12 @@ impl OptParse {
         if self.skipped.is_empty() {
             return;
         }
+        // A long option missing its value at the end leaves optind one past
+        // argc, so permute() shifts the NULL at argv[argc] in after the
+        // consumed options and parks the last skipped word in its slot, out
+        // of reach. Only a caller that keeps parsing after that error, as
+        // rrd_tune's first pass does, can observe it.
+        let overflow = self.optind > self.argv.len();
         let end = self.optind.min(self.argv.len());
         let mut words = std::mem::take(&mut self.argv)
             .into_iter()
@@ -221,6 +236,10 @@ impl OptParse {
         self.optind = argv.len();
         argv.extend(nonoptions);
         argv.extend(words[end..].iter_mut().filter_map(Option::take));
+        if overflow {
+            argv.pop();
+            self.terminator = Some(self.optind);
+        }
         self.argv = argv;
     }
 
@@ -368,6 +387,28 @@ mod tests {
             parse(&["cmd", "file", "-s"]).2,
             "option requires an argument -- 's'"
         );
+    }
+
+    /// Parses to the end, as rrd_tune's first pass does, ignoring errors.
+    fn parse_through_errors(args: &[&str]) -> OptParse {
+        let mut options = OptParse::new(args.iter().map(|arg| arg.to_string()).collect());
+        while options.long(TABLE) != DONE {}
+        options
+    }
+
+    #[test]
+    fn a_long_option_missing_its_value_strands_the_last_skipped_word() {
+        let options = parse_through_errors(&["cmd", "a", "--start"]);
+        assert!(options.positionals().is_empty());
+        assert_eq!(options.permuted_argv(), ["cmd", "--start"]);
+
+        let options = parse_through_errors(&["cmd", "a", "b", "c", "--start"]);
+        assert_eq!(options.positionals(), ["a", "b"]);
+        assert_eq!(options.permuted_argv(), ["cmd", "--start"]);
+
+        let options = parse_through_errors(&["cmd", "a", "-s"]);
+        assert_eq!(options.positionals(), ["a"]);
+        assert_eq!(options.permuted_argv(), ["cmd", "-s", "a"]);
     }
 
     #[test]
