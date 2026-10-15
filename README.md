@@ -1,24 +1,30 @@
 # Rondi
 
+[![Rust](https://github.com/kadupulhq/rondi/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/kadupulhq/rondi/actions/workflows/rust.yml)
 [![Security](https://github.com/kadupulhq/rondi/actions/workflows/security.yml/badge.svg?branch=main)](https://github.com/kadupulhq/rondi/actions/workflows/security.yml)
 [![CodeQL](https://github.com/kadupulhq/rondi/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/kadupulhq/rondi/actions/workflows/codeql.yml)
-[![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange.svg)](https://github.com/kadupulhq/rondi/pulls)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=kadupulhq_rondi&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=kadupulhq_rondi)
+[![License: GPL-2.0-or-later WITH RRDtool FLOSS exception](https://img.shields.io/badge/license-GPL--2.0--or--later%20WITH%20RRDtool%20FLOSS%20exception-blue.svg)](COPYRIGHT)
 
-Rondi is a Rust-native round-robin time-series storage and RRDtool compatibility project for Kadupul. One Cargo workspace and coordinated release contain the storage library, CLI, and daemon. On every surface it shares with RRDtool (the `.rrd` format, the `rrdtool` and `rrdcached` command lines and protocol) the target is the exact behavior of RRDtool 1.11.0; it reimplements that behavior in Rust rather than wrapping librrd.
+Rondi is a Rust reimplementation of RRDtool 1.11.0, `rrdcached` and the `.rrd` file format, differentially tested against the real C programs, built for Kadupul.
+
+Kadupul, like Cacti, drives RRDtool as a child process: its `lib/rrd.php` pipes commands to `rrdtool -`. Rondi exists to replace that dependency with a Rust implementation without changing what Kadupul sees: on every surface it shares with RRDtool (the `.rrd` format, the `rrdtool` and `rrdcached` command lines and protocol) the target is the exact behavior of RRDtool 1.11.0, including file bytes, output, error text and exit status. It reimplements that behavior in Rust rather than wrapping librrd. One Cargo workspace and coordinated release contain the storage library, CLI, and daemon.
 
 The native `.rondi` store implements GAUGE values, fixed sampling steps, AVERAGE consolidation, bounded retention, durable server update journaling, and a versioned local HTTP/JSON API over a Unix socket. Separately, the `rrdtool` compatibility alias can create, inspect, fetch, and update a tested subset of existing `.rrd` binary files in place. `.rondi` files are not binary-compatible `.rrd` files.
 
 ## Current support
 
-Rondi is pre-alpha. Compatibility is checked against pinned RRDtool 1.11.0 C behavior, including file bytes, command output, errors, and daemon replies on disposable fixtures. Passing those cases does not establish complete drop-in compatibility.
+Rondi is pre-alpha and not a drop-in replacement. No release has been published; everything below describes `main`. Compatibility is checked against pinned RRDtool 1.11.0 C behavior, including file bytes, command output, errors, and daemon replies on disposable fixtures. Passing those cases does not establish complete drop-in compatibility.
+
+On `main` at `26d8acf`, `RONDI_REQUIRE_ORACLE=1 cargo test --workspace` passes 548 tests on macOS arm64 against Homebrew RRDtool 1.11.0, and CI passes 553 on Linux x86_64 and 554 on Linux aarch64 against RRDtool 1.11.0 built from the release tarball, with none failed or ignored. Most of those tests run the same input through both implementations and compare the results. The [compatibility matrix](docs/compatibility.md#test-evidence) records the runs and the per-platform differences Rondi reproduces.
 
 | Surface | Implemented scope | Remaining limits |
 | --- | --- | --- |
 | Native `.rondi` storage | GAUGE, fixed steps, heartbeat, AVERAGE, bounded retention, journal recovery, local JSON API | Separate format from `.rrd`; no general RRDtool interchange |
-| `.rrd` storage and CLI | Tested v3-v5 basic DS/CF layouts; create, update/updatev, fetch, info, first/last, dump/restore, basic tune, v3/v4 resize, stdin command mode | Specialized layouts and complete option/error parity remain incomplete |
-| Graph calculations and exports | DEF/CDEF/VDEF/SHIFT, mixed-step data preparation, tested RPN operators, XML/JSON xport, numeric PRINT/GPRINT and SI scaling | Complete graph grammar and edge behavior remain unverified |
-| Graph rendering | Native PNG with LINE/AREA/STACK/TICK and rules, tested dimensions, layout keys, colors, and options | Pixels, typography, sampling, vector output, and complete Cacti graph coverage remain incomplete |
-| `rrdcached` | Unix/TCP and multiple listeners, privilege drop, daemonization, socket activation, journals, tested update/read/flush/list/stats/suspend commands | Full configuration and lifecycle parity remain incomplete; TCP has no authentication |
+| `.rrd` storage and CLI | Tested v3-v5 layouts with GAUGE, COUNTER, DERIVE, ABSOLUTE, DCOUNTER and DDERIVE sources and AVERAGE/MIN/MAX/LAST archives; create, update/updatev, fetch, info, first/last/lastupdate, dump/restore, list, tune (including `rrd_modify` DS and RRA changes), v3/v4 resize, flushcached, stdin command mode | COMPUTE sources and Holt-Winters archives are refused; no local fallback after a failed `--daemon` connection; `tune --daemon` drops DS/RRA changes; complete option and error parity remain incomplete |
+| Graph calculations and exports | DEF/CDEF/VDEF/SHIFT, `data_fetch` and mixed-step data preparation, RPN through a port of `rpn_parse`/`rpn_calc`, XML/JSON xport, CSV/TSV/SSV/XML/JSON graph export, numeric PRINT/GPRINT and SI scaling | Collected fetches stop at 10 million rows; the last row of a PREDICT-family CDEF with shift 0 differs |
+| Graph rendering | Native PNG with LINE/AREA/STACK/TICK and rules; image size, layout keys, legends, colors, `--zoom` and options match for the default font | PNG bytes and fonts differ from RRDtool; SVG, PDF and EPS are refused; complete Cacti graph coverage is unverified |
+| `rrdcached` | Unix and TCP listeners, `-U`/`-G` privilege drop, upstream-format journals, upstream signal handling, tested request handlers including CREATE, UPDATE, FETCH/FETCHBIN, FLUSH, LIST, STATS, TUNE and SUSPEND/RESUME | Rondi never forks and does not apply `-z` or `-V`; `-o` log format differs; TCP has no authentication; full configuration and lifecycle parity remain incomplete |
 | RRDProxy | Direct and PHP launcher aliases with tested help/version/error behavior | Proxy daemon and wire protocol are unimplemented; no librrd C ABI is provided |
 
 The [compatibility matrix](docs/compatibility.md) and [defect register](docs/COMPATIBILITY_DEFECTS.md) record the detailed boundaries. The [roadmap](docs/ROADMAP.md) tracks the work needed for a drop-in replacement.
@@ -61,7 +67,7 @@ For systemd deployments, `packaging/systemd/rondi-rrdcached.service` is the pack
 
 The unauthenticated `rrdcached` adapter refuses to serve as root unless `-B` with `-b` confines its paths. A Unix socket defaults to `0600`; use `-m` or `-s` to explicitly configure broader access.
 
-Graph, export, dump, restore, and resize outputs reject final symlinks, multiple hard links, special files, and files owned by another user. New outputs are mode `0600` less the umask. A failed forced restore preserves a pre-existing destination, although an I/O failure can leave partially written contents. XML restore is limited to 4096 data sources, 4096 archives, and one million rows and values; oversized dumps fail before destination creation. These are deliberate safety differences from RRDtool.
+Graph, export, dump, restore, and resize outputs reject final symlinks, multiple hard links, special files other than character devices such as `/dev/null`, and regular files owned by another user. New outputs are mode `0600` less the umask. A failed forced restore preserves a pre-existing destination, although an I/O failure can leave partially written contents. XML restore is limited to 4096 data sources, 4096 archives, and one million rows and values; oversized dumps fail before destination creation. These are deliberate safety differences from RRDtool.
 
 The current `rrdtool` alias supports tested fetch and update paths against version 0003-0005 `.rrd` layouts on 64-bit little-endian targets. Time parsing includes tested RRDtool absolute, relative, and calendar forms. It also accepts RRDtool's stdin command mode (`rrdtool -`), used by Kadupul's poller, with tested `update --template` handling. For example:
 
@@ -76,7 +82,11 @@ rrdtool tune /tmp/sample.rrd --heartbeat traffic_in:600 --minimum traffic_in:0
 printf 'update /tmp/sample.rrd --template traffic_in:traffic_out 1700003640:100:200\nquit\n' | rrdtool -
 ```
 
-For supported basic data sources, `tune` also accepts `--maximum`, `--data-source-type`, and `--data-source-rename`.
+For supported basic data sources, `tune` also accepts `--maximum`, `--data-source-type`, and `--data-source-rename`, and the `rrd_modify` operations that add, delete or resize data sources and archives:
+
+```sh
+rrdtool tune /tmp/sample.rrd DS:errors:COUNTER:600:0:U RRA#0:+100
+```
 
 `resize` supports tested v3/v4 archives and follows RRDtool's fixed output filename. Run it from the directory where `resize.rrd` should be created; the destination must not already exist:
 
@@ -113,7 +123,7 @@ mise exec -- cargo bench -p rondi --bench rrd_workload
 
 ## Continuous integration and Docker validation
 
-GitHub Actions runs the Rust checks on Linux x86_64 and ARM64. It builds the pinned RRDtool 1.11.0 oracle from its upstream release tarball, verifies the tarball SHA-256, and runs formatting, Clippy, the full workspace test suite, documentation generation, and release builds in the same container. This ensures the RRDtool differential tests execute instead of being skipped because the oracle is missing. A separate fuzz job builds every target and replays committed seeds; its RPN differential target needs a local RRDtool oracle and is not replayed in that job. The security workflow runs Semgrep and RustSec `cargo-audit` against `Cargo.lock` and `cargo-deny` against dependency advisories, licenses, duplicate versions, and registry sources. CodeQL is configured for Rust and GitHub Actions; GitHub only runs its code scanning upload where repository visibility and plan settings enable it.
+GitHub Actions runs the Rust checks on Linux x86_64 and ARM64. It builds the pinned RRDtool 1.11.0 oracle from its upstream release tarball, verifies the tarball SHA-256, and runs formatting, Clippy, the full workspace test suite, documentation generation, and release builds in the same container. This ensures the RRDtool differential tests execute instead of being skipped because the oracle is missing. A separate fuzz job builds every target and replays committed seeds; its RPN differential target needs a local RRDtool oracle and is not replayed in that job. The security workflow runs Semgrep and RustSec `cargo-audit` against `Cargo.lock` and `cargo-deny` against dependency advisories, licenses, duplicate versions, and registry sources. CodeQL is configured for Rust and GitHub Actions; GitHub only runs its code scanning upload where repository visibility and plan settings enable it. The SonarQube Cloud workflow builds the same pinned oracle, collects coverage with `cargo llvm-cov` and a Clippy report, and uploads both for the quality gate shown above.
 
 Run the same checks locally in a disposable Linux container with:
 
