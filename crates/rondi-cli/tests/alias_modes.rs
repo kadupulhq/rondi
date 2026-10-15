@@ -9009,3 +9009,105 @@ fn graph_base_utc_and_shared_si_units_match_rrdtool() {
         );
     }
 }
+
+/// print_calc checks the format after rewriting its first "%S" to "%s", so
+/// graph errors quote the rewritten text; rrd_xport.c checks first and
+/// quotes the format as given.
+#[test]
+fn invalid_percent_s_print_formats_report_upstream_error_text() {
+    let pinned = Command::new("rrdtool")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).starts_with("RRDtool 1.11.0 ")
+        });
+    if !pinned {
+        oracle_skip!("skipping %S error differential: pinned RRDtool 1.11.0 is not installed");
+        return;
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("percent.rrd");
+    assert!(
+        Command::new("rrdtool")
+            .args([
+                "create",
+                file.to_str().unwrap(),
+                "--start",
+                "1000000000",
+                "--step",
+                "10",
+                "DS:x:GAUGE:30:U:U",
+                "RRA:AVERAGE:0.5:1:8",
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    assert!(
+        Command::new("rrdtool")
+            .args([
+                "update",
+                file.to_str().unwrap(),
+                "1000000010:1",
+                "1000000020:3",
+                "1000000030:5",
+                "1000000040:7",
+            ])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let alias = temp.path().join("rrdtool");
+    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    let def = format!("DEF:x={}:x:AVERAGE", file.display());
+    let run = |program: &std::path::Path, mode: &str, element: &str| {
+        let mut command = Command::new(program);
+        match mode {
+            "graph" => command.args(["graph", temp.path().join("out.png").to_str().unwrap()]),
+            "graphv-xml" => command.args([
+                "graphv",
+                temp.path().join("out.xml").to_str().unwrap(),
+                "--imgformat",
+                "XML",
+            ]),
+            _ => command.arg("xport"),
+        };
+        let output = command
+            .args(["--start", "1000000000", "--end", "1000000040"])
+            .arg(&def)
+            .args(["VDEF:v=x,AVERAGE", element, "XPORT:x"])
+            .output()
+            .unwrap();
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    for format in [
+        "%S %lf",
+        "%lf %S %S",
+        "%S",
+        "%%S %S",
+        "%lf%S%d",
+        "%5S %lf",
+        "x %S",
+        "%lf %s %S",
+        "%le%Sx%",
+        "%S%lf",
+        "%lf %Ss %S",
+    ] {
+        for kind in ["PRINT", "GPRINT"] {
+            let element = format!("{kind}:v:{format}");
+            for mode in ["graph", "graphv-xml", "xport"] {
+                let expected = run(std::path::Path::new("rrdtool"), mode, &element);
+                let actual = run(&alias, mode, &element);
+                assert_eq!(expected.0, Some(1), "{mode} {element}");
+                assert_eq!(actual, expected, "{mode} {element}");
+            }
+        }
+    }
+}

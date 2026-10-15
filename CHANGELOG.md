@@ -18,7 +18,7 @@ follows [Semantic Versioning](VERSIONING.md).
 ### Fixed
 
 - Fill all-unknown VDEF aggregates with RRDtool's target-specific DNAN bits.
-- Scale PRINT/GPRINT values when `%%S` or `%%s` appears literally, and rewrite `%S` in place so graphv metadata rescales like RRDtool.
+- Scale PRINT/GPRINT values when `%%S` or `%%s` appears literally, and rewrite `%S` in place so graphv metadata rescales and graph format errors quote the rewritten text like RRDtool.
 - Format PRINT/GPRINT VDEF times in UTC under `--utc`.
 - Paint HRULE and VRULE after the data elements regardless of their script position.
 - Reject Unix socket paths with ancestors another account can replace, and traverse daemon RRD parents through directory descriptors without following symlinks.
