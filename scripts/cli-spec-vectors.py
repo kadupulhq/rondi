@@ -27,8 +27,8 @@ the build stamp after `Compiled ` is dropped, the pipe-mode timing line
 `OK u:<f> s:<f> r:<f>` becomes `OK u:* s:* r:*`, the work directory path
 becomes `{CWD}`, the program directory becomes `{BIN}`, archive `cur_row`
 values become `*`, and runs of pipe-mode `ls` lines are sorted. Vectors
-tagged `dir-order` list a directory with several entries of one kind; their
-standard output is compared as a sorted set of lines.
+tagged `dir-order` run `list`, which prints entries in directory order;
+their standard output is compared as a sorted set of lines.
 
 The table is captured on macOS arm64 (/opt/homebrew/bin/rrdtool 1.11.0).
 Results that differ on Linux are recorded per vector under
@@ -936,12 +936,13 @@ def all_cases() -> list[dict]:
     pipe_cases()
     format_cases()
     for entry in CASES:
-        # Directory enumeration order is not portable; see DIR_ORDER.
+        # `list` prints entries in directory enumeration order, which is
+        # not portable; compare such output as a set of lines.
         for step in entry['steps']:
-            text = step.get('stdin', '')
-            if (step['args'][:1] == ['list'] and '.' in step['args']) \
-                    or 'list -r .' in text:
+            if step['args'][:1] == ['list'] \
+                    or 'list ' in step.get('stdin', ''):
                 entry['tags'].append('dir-order')
+                break
     counters: dict[str, int] = {}
     for entry in CASES:
         key = f'{entry["area"]}-{entry["group"]}'

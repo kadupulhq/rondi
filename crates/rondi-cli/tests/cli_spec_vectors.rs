@@ -236,8 +236,23 @@ const KNOWN_DIVERGENCES: &[(&str, &[&str], &str)] = &[
     ),
     (
         "format-duration-048",
-        ALL,
+        &["macos", "linux-aarch64"],
         "duration fields of 1e20 ms differ in the last digits",
+    ),
+    (
+        "pipe-session-143",
+        &["linux-aarch64"],
+        "bytes 128 to 255 at line ends are trimmed and printed as U+FFFD",
+    ),
+    (
+        "pipe-session-144",
+        &["linux-aarch64"],
+        "bytes 128 to 255 at line ends are trimmed and printed as U+FFFD",
+    ),
+    (
+        "pipe-session-146",
+        &["linux-aarch64"],
+        "bytes 128 to 255 at line ends are trimmed and printed as U+FFFD",
     ),
     (
         "format-bounds-003",
