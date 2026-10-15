@@ -294,9 +294,37 @@ pub(crate) enum Access {
     Write,
 }
 
+/// Refuses to write through anything but a regular file with one link,
+/// owned by root when the daemon runs as root.
+// Rondi policy (RD-007): a hard link planted below the base directory, or
+// a special file, cannot redirect the daemon's writes to another file.
+fn writable(file: File) -> io::Result<File> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+    }
+    if metadata.nlink() != 1 {
+        return Err(io::Error::from_raw_os_error(libc::EMLINK));
+    }
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 && metadata.uid() != 0 {
+        return Err(io::Error::from_raw_os_error(libc::EPERM));
+    }
+    Ok(file)
+}
+
 impl Target {
     /// Opens the file. A FIFO or device never blocks the open.
     pub(crate) fn open(&self, access: Access) -> io::Result<File> {
+        let opened = self.open_any(access)?;
+        match access {
+            Access::Read => Ok(opened),
+            Access::Write => writable(opened),
+        }
+    }
+
+    fn open_any(&self, access: Access) -> io::Result<File> {
         let flags = match access {
             Access::Read => libc::O_RDONLY,
             Access::Write => libc::O_RDWR,
@@ -458,6 +486,41 @@ mod tests {
             empty.open(Access::Write).unwrap_err().raw_os_error(),
             Some(libc::EISDIR)
         );
+    }
+
+    #[test]
+    fn writes_need_a_single_link_regular_file() {
+        let (_temp, base) = tree();
+        std::fs::hard_link(base.join("sub/d.rrd"), base.join("sub/hard.rrd")).unwrap();
+        let fifo = CString::new(base.join("fifo.rrd").as_os_str().as_bytes()).unwrap();
+        // SAFETY: the path is NUL terminated and the mode valid.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        for confine in [false, true] {
+            let names = Names::new(Some(&base), confine).unwrap();
+            let open = |name: &str| {
+                names
+                    .locate(&names.join(name.as_bytes()))
+                    .unwrap()
+                    .open(Access::Write)
+            };
+            assert!(open("a.rrd").is_ok());
+            assert_eq!(
+                open("sub/hard.rrd").unwrap_err().raw_os_error(),
+                Some(libc::EMLINK)
+            );
+            assert_eq!(
+                open("fifo.rrd").unwrap_err().raw_os_error(),
+                Some(libc::EINVAL)
+            );
+            assert_eq!(open("sub").unwrap_err().raw_os_error(), Some(libc::EISDIR));
+            assert!(
+                names
+                    .locate(&names.join(b"sub/hard.rrd"))
+                    .unwrap()
+                    .open(Access::Read)
+                    .is_ok()
+            );
+        }
     }
 
     #[test]
