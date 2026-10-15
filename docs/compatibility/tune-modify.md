@@ -357,9 +357,8 @@ If every value in the range is unknown, the next candidate is tried. The
 **TM-43** (black-box; should, platform specific). The AVERAGE accumulation
 of TM-42 is computed with a fused multiply-add (`value·Tc + accumulator`
 rounded once) by the macOS arm64 build and with a separate multiply and add
-by the Linux aarch64 build. Baseline x86_64 builds have no fused
-instruction, so they are expected to round like Linux aarch64; the x86_64
-CI run checks this. The two results differ in the last bit for some inputs
+by the Linux aarch64 and x86_64 builds. The x86_64 result was confirmed by
+the CI oracle run against the Linux overrides. The two results differ in the last bit for some inputs
 (vectors `base-rra-average-0-5-3-9`, `types-rra-average-0-5-2-20`,
 `types-rra-average-0-5-5-6` and others carry Linux overrides for this). A
 replacement matches the platform it runs on.
@@ -530,8 +529,9 @@ Current Rondi against RRDtool 1.11.0, as of this specification:
 - TM-60: COMPUTE and Holt-Winters additions are refused (expectation
   `unsupported`).
 
-No other difference was found on macOS arm64: Rondi matches all 282
-vectors there. Linux results are taken from CI on x86_64 and aarch64.
+No other difference was found: Rondi matches all 282 vectors on macOS arm64
+and, with the Linux overrides, on Linux x86_64 and aarch64, where CI also
+runs every case live against the pinned RRDtool build.
 
 ## Tests
 
