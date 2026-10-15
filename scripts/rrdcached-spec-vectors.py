@@ -925,14 +925,9 @@ DIVERGENCE_RULES: list[tuple[object, str, str]] = [
     (lambda c: _has(c, 'LIST /../'), 'defect',
      'Rondi answers "Cannot read" for a LIST path that escapes the base '
      'directory without -B (RC-100).'),
-    (lambda c: '{ROOT}/b/a.rrd' in _argv(c) and '-j' in _argv(c), 'defect',
-     'Rondi reports EEXIST instead of ENOTDIR for a -j path that is a file '
-     '(RCD-1).'),
     (lambda c: '{ROOT}/new/base' in _argv(c), 'policy',
      'Rondi creates missing -b components with mode 0750 and Unix sockets '
      'with mode 0600 (RCD-3, RCD-5).'),
-    (lambda c: 'LOG_DEBUG' in _argv(c), 'defect',
-     'Rondi validates -V but does not log at the requested level (RCD-1).'),
     (lambda c: any('daemon2' in s for s in c['steps']) and 'pid2' in str(c['steps']),
      'policy', 'Rondi refuses a live socket instead of unlinking it (RCD-11).'),
     (lambda c: c['kind'] == 'daemon' and c['id'].startswith('opt'), 'policy',
