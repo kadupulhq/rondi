@@ -69,7 +69,7 @@ pub fn c_strtol(text: &str, base: u32) -> (i64, usize) {
 
 /// `errno = 0; strtoll(text, NULL, base)`: the value and whether errno
 /// became ERANGE.
-pub(crate) fn c_strtoll_errno(text: &str, base: u32) -> (i64, bool) {
+pub fn c_strtoll_errno(text: &str, base: u32) -> (i64, bool) {
     let (negative, magnitude, overflow, _) = strtol_parts(text, base);
     let limit = if negative {
         i64::MIN.unsigned_abs()
