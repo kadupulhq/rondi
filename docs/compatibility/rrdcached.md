@@ -764,7 +764,7 @@ removed).
 `scripts/rrdcached-spec-vectors.py --record-rondi` assigns each case to the
 first matching entry of `DIVERGENCE_RULES` and fails on a divergence no
 entry explains; the note of each entry is stored with the case. At the time
-of writing (129 cases):
+of writing (128 cases):
 
 | Class | Cases | Rule | Difference |
 |---|---|---|---|
@@ -779,7 +779,7 @@ of writing (129 cases):
 | policy | `tune-036` | RC-91 | `TUNE` with too large an argument count answered (reference hangs) |
 | policy | `fetch-009` | RC-71a | `FETCH` with start a step after end answered with the reader error (reference undefined) |
 | policy | `list-003` | RC-100 | no symbolic links followed by `LIST RECURSIVE` under `-B` |
-| policy | 16 `opt-*` cases, `opt-037` | RCD-3, RCD-5 | Unix sockets 0600 without `-m`/`-s`; new `-b` directories 0750 |
+| policy | 17 `opt-*` cases, `opt-037` | RCD-3, RCD-5 | Unix sockets 0600 without `-m`/`-s`; new `-b` directories 0750 |
 | policy | `pid-005` | RCD-11 | a live socket is refused, not replaced |
 | policy | 29 `signal-*` and `journal-*` cases | RCD-30 | journal files 0600 |
 | defect | 18 cases naming `a.rrd/` | RC-30 | trailing slash after a file name ignored |
@@ -788,8 +788,6 @@ of writing (129 cases):
 | defect | `create-043` to `create-046` | RC-80 | `CREATE -r`, `-t`, COMPUTE and Holt-Winters refused |
 | defect | `list-030` | RC-100 | `LIST RECURSIVE` does not follow directory links |
 | defect | `list-048` | RC-100 | wrong error text for `/../` without `-B` |
-| defect | `opt-032` | RCD-1 | errno text for a `-j` path that is a file |
-| defect | `opt-040` | RCD-1 | `-V` not applied |
 | defect | `update-015`, `fetch-002`, `fetch-005`, `fetch-006`, `fetch-008` (x86_64 only) | RC-70 | stored NaN sign not kept |
 
 Some entries also carry per-platform variants of Rondi's result

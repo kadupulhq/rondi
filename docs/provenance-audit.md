@@ -23,7 +23,7 @@ About 12,400 lines of Rust (38 percent of non-test source) are rated High: modul
 | `crates/rondi-cli/src/graph_options.rs` | High | 880 | Option tables keyed to C line numbers |
 | `crates/rondi-cli/src/optparse.rs` | High (FLAG) | 445 | Port of the bundled option parser; models C struct and enum |
 | `crates/rondi/src/rrd_snprintf.rs` | Replaced | 702 | Declared port of the portable snprintf; replaced by the clean-room `format_value/` from `docs/compatibility/format-strings.md` and black-box runs |
-| `crates/rondi-server/src/rrdcached_listen.rs` | High | 926 | Declared port of listener setup and daemonize (GPL-2.0-only file) |
+| `crates/rondi-server/src/rrdcached_listen.rs` | Removed | 926 | Declared port of listener setup and daemonize (GPL-2.0-only file); replaced by the clean-room `rrdcached/` daemon modules |
 | `crates/rondi-cli/src/main.rs` (front end, print/time helpers, list) | High | ~1,020 of 7,295 | Ports of the command dispatcher, batch-mode tokenizer, print_calc and helpers, directory listing |
 | `crates/rondi-cli/src/help/*.txt` | High (FLAG) | 354 text | Verbatim RRDtool help output |
 | `crates/rondi/src/rrd_binary.rs` | Review | 3,046 | Update path follows C helper boundaries with line citations; format reader is format-dictated |
@@ -159,6 +159,7 @@ Risk tiers:
 - Compatibility requirement: `-l`, `-L`, `-m`, `-s`, `-P`, `-U`, `-G` behaviour, socket permissions, and startup messages.
 - Likely source: `rrdcached` man page documents the options; messages black-box observable.
 - Remediation: replace by spec and fresh implementation. Tests: `rrdcached_listeners.rs` (13), `rrdcached_privileges.rs` (6), `rrdcached_startup.rs` (7).
+- Status: removed. The daemon layer (options, base directory, listeners, pid file, privileges, signals, timers, logging, shutdown) is now `crates/rondi-server/src/rrdcached/` and `crates/rondi-cli/src/rrdcached.rs`, written from `docs/compatibility/rrdcached-daemon.md`, its vectors, the existing daemon tests and black-box runs of rrdcached 1.11.0, without reading this module, the replaced daemon code in `lib.rs` and `main.rs`, or the C source.
 
 **`crates/rondi-cli/src/main.rs`, front end and helpers (about 1,020 lines): `rrdtool_usage`, `print_usage`, `rrdtool_main`, `rrdupdate_main`, `rrdtool_dispatch`, `handle_input_line`, `remote_ls`, `fgetslong`, `count_args`, `create_args`, `rrdtool_batch`, `print_calc`, `strfduration`, `time_clean`, `rrd_list_r`, `rrd_list_rec`, `rrd_mkdir_p`**
 
@@ -190,6 +191,7 @@ Risk tiers:
 
 - Architecture is independent: tokio tasks, Rust queues, bounded reads, and an HTTP API with no RRDtool counterpart.
 - Ported fragments: `flush_owned_rrdcached_path` documented as "Port of queue_thread_main", the UPDATE handler documented as "Port of handle_request_update", `journal_init`/`journal_write`/`journal_replay`/`journal_done` sharing C names, and `cache_tree_*`, an AVL tree added so the `STATS` `TreeDepth` value matches the C daemon's balanced tree. Comments quote C struct fields (around line 629).
+- The daemon startup, signal, pid-file and listener code that lived here (`run_rrdcached` and its helpers, `PidFile`, `RrdcachedConfig`) was removed with the daemon-layer rewrite above; the request handlers, queue and journal remain for a second phase and are reached only through `rrdcached/engine.rs`.
 - `RRDCACHED_COMMAND_TABLE` copies the command usage strings. These are observable through `HELP` (category 1) but are text expression; treat with the help files above.
 - The C daemon is GPL-2.0 only.
 - Remediation: specify the line protocol, journal format and queue semantics from the `rrdcached` man page (which documents the protocol) and observation; rewrite the named handler ports; decide whether exact `TreeDepth` parity is worth an AVL implementation or whether the value should be specified as "height of a balanced tree over pending keys". Tests: `rrdcached_protocol_parity.rs` (11), `server_roundtrip.rs` (35), `rrdcached_client_paths.rs` (5), fuzz targets `rrdcached_protocol` and `rrdcached_journal`.
@@ -202,7 +204,7 @@ Risk tiers:
 
 **`crates/rondi-cli/src/main.rs`, remaining handlers (about 4,735 lines)**
 
-- `rrdcached_mode` option parsing: option letters are public (category 2); messages category 1. Several citations to the C read-options routine.
+- `rrdcached_mode` option parsing: option letters are public (category 2); messages category 1. Several citations to the C read-options routine. Status: removed with the daemon-layer rewrite; the `rrdcached` personality is now `crates/rondi-cli/src/rrdcached.rs`. Its usage text is the recorded `rrdcached -h` output (opt-001) and stays under the help-text FLAG below.
 - Command handlers (`rrdtool_create`, `rrdtool_fetch`, `rrdtool_graph`, `rrdtool_xport`, `rrdtool_update_impl`, `rrdtool_tune`, `rrdtool_restore`, `rrdtool_dump`, `rrdtool_info`, `rrdtool_first`, `rrdtool_last`, `rrdtool_resize`, `rrdtool_list`): each cites the C option table line. Mostly category 1. Reword citations; no rewrite needed beyond the optparse change.
 - rrdcached client (`rrdcached_client_path`, `translate_rrdcached_file_command`, `connect_rrdcached`, `split_rrdcached_network_address`): documented as ports of the client C file, which is MIT licensed. Category 1 for path and address rules. Remediation: confirm attribution needs; specify address and path rules from the `rrdcached` and `rrdtool` man pages.
 - Xport and graph number formatting (`format_graph_numeric`, `parse_graph_numeric_format`, `format_xport_*`): mostly category 1 and 2 (XML and JSON shapes). Keep.
