@@ -7,7 +7,7 @@
 use crate::rrd_binary::{
     CDP_PREP_LEN, DS_DEF_LEN, LIVE_HEAD_LEN, PDP_PREP_LEN, RRA_DEF_LEN, RRA_PTR_LEN, RrdFileLock,
     RrdResizeAction, STAT_HEAD_LEN, VALUE_LEN, open_output_file, open_rrd_write, read_info,
-    rrd_nan, rrd_strerror,
+    require_rows_in_file, rrd_nan, rrd_strerror,
 };
 use crate::storage::StoreError;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -137,6 +137,11 @@ pub fn resize_rrd_file(
     let mut old = Vec::new();
     input_file.seek(SeekFrom::Start(0))?;
     input_file.read_to_end(&mut old)?;
+    // The copy loops below run once per stored value, so a damaged row_cnt
+    // would size them, and the new file, from the unwrapped count.
+    for archive in &info.archives {
+        require_rows_in_file(&info, archive, old.len() as u64)?;
+    }
     let ds_cnt = info.data_sources.len();
     let rra_cnt = info.archives.len();
     let rra_start = STAT_HEAD_LEN + ds_cnt * DS_DEF_LEN;
