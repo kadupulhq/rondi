@@ -1627,10 +1627,9 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(name) = definition
             .strip_prefix("DS:")
             .and_then(|value| value.split([':', '=']).next())
+            && !seen_data_source_names.insert(name)
         {
-            if !seen_data_source_names.insert(name) {
-                return Err(format!("Duplicate DS name: {name}").into());
-            }
+            return Err(format!("Duplicate DS name: {name}").into());
         }
     }
     if archives.is_empty() {
@@ -2225,10 +2224,10 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                         "OOPS: Cairo has issues it can't even die: invalid matrix (not invertible)"
                     );
                 }
-                if !to_memory {
-                    if let Err(OutputError::Refused(message)) = write_output_file(filename, &[]) {
-                        return Err(message.into());
-                    }
+                if !to_memory
+                    && let Err(OutputError::Refused(message)) = write_output_file(filename, &[])
+                {
+                    return Err(message.into());
                 }
                 save_error = Some(save_failed);
             } else {
@@ -3180,7 +3179,7 @@ fn render_graph_png(
         })
         .ok_or("PNG graph dimensions overflow")?;
     let mut pixels = vec![255_u8; pixel_count.checked_mul(3).ok_or("PNG size overflows")?];
-    for pixel in pixels.chunks_exact_mut(3) {
+    for pixel in pixels.as_chunks_mut::<3>().0 {
         pixel.copy_from_slice(&composite_rgb(colors.back, [255, 255, 255]));
     }
     let canvas_rgb = composite_rgb(colors.canvas, composite_rgb(colors.back, [255, 255, 255]));
@@ -4884,17 +4883,17 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
             .join(":");
         daemon_samples.push(format!("{}:{encoded_values}", update_time.format_rrd()));
     }
-    if let Some(address) = daemon_address {
-        if !daemon_samples.is_empty() {
-            #[cfg(unix)]
-            {
-                let stream = connect_rrdcached(&address)?;
-                let path = rrdcached_client_path(&address, &filename.to_string_lossy())?;
-                send_rrdcached_update_on_stream(stream, Path::new(&path), &daemon_samples)?;
-            }
-            #[cfg(not(unix))]
-            return Err("rrdcached updates are unavailable on this platform".into());
+    if let Some(address) = daemon_address
+        && !daemon_samples.is_empty()
+    {
+        #[cfg(unix)]
+        {
+            let stream = connect_rrdcached(&address)?;
+            let path = rrdcached_client_path(&address, &filename.to_string_lossy())?;
+            send_rrdcached_update_on_stream(stream, Path::new(&path), &daemon_samples)?;
         }
+        #[cfg(not(unix))]
+        return Err("rrdcached updates are unavailable on this platform".into());
     }
     Ok(())
 }
@@ -5250,13 +5249,12 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .into());
     };
     let filename = filename.clone();
-    if !noflush {
-        if let Some(address) = daemon_address
+    if !noflush
+        && let Some(address) = daemon_address
             .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
             .filter(|address| !address.is_empty())
-        {
-            send_rrdcached_flush(&address, &filename)?;
-        }
+    {
+        send_rrdcached_flush(&address, &filename)?;
     }
     ensure_rrd_file_exists(std::path::Path::new(&filename))?;
     let info = inspect_rrd(&filename)?;
@@ -6863,8 +6861,10 @@ mod graph_stroke_tests {
         draw_line_with_width(&mut thick, 20, 20, (3, 10), (16, 10), [255, 0, 0, 255], 3.0);
         let colored_pixels = |pixels: &[u8]| {
             pixels
-                .chunks_exact(3)
-                .filter(|pixel| *pixel == [255, 0, 0])
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .filter(|pixel| *pixel == &[255, 0, 0])
                 .count()
         };
         assert!(colored_pixels(&thick) > colored_pixels(&thin));
@@ -6949,9 +6949,11 @@ mod graph_stroke_tests {
             },
         );
         let black: Vec<_> = pixels
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .enumerate()
-            .filter_map(|(x, p)| (p == [0, 0, 0]).then_some(x))
+            .filter_map(|(x, p)| (p == &[0, 0, 0]).then_some(x))
             .collect();
         assert_eq!(black, (0..30).filter(|x| x % 6 < 3).collect::<Vec<_>>());
         let mut offset = vec![255; 30 * 3];
@@ -7110,7 +7112,13 @@ mod graph_stroke_tests {
             bytes.truncate(info.buffer_size());
             bytes
         };
-        let contains_red = |pixels: &[u8]| pixels.chunks_exact(3).any(|pixel| pixel == [255, 0, 0]);
+        let contains_red = |pixels: &[u8]| {
+            pixels
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .any(|pixel| pixel == &[255, 0, 0])
+        };
         assert!(!contains_red(&render(zero)));
         assert!(contains_red(&render(visible)));
     }
@@ -7125,7 +7133,13 @@ mod graph_stroke_tests {
         draw_vertical_text(&mut diagonal, 48, 40, 2, 2, "RRD", [0, 0, 0, 255], 45.0);
         assert_ne!(normal, reverse);
         assert_ne!(normal, diagonal);
-        assert!(diagonal.chunks_exact(3).any(|pixel| pixel == [0, 0, 0]));
+        assert!(
+            diagonal
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .any(|pixel| pixel == &[0, 0, 0])
+        );
     }
 
     #[test]

@@ -342,9 +342,11 @@ impl RrdFetchRows {
             } else {
                 let at = (index - self.first_stored) as usize * row_bytes;
                 self.stored[at..at + row_bytes]
-                    .chunks_exact(VALUE_LEN)
+                    .as_chunks::<VALUE_LEN>()
+                    .0
+                    .iter()
                     .map(|chunk| {
-                        let value = f64::from_le_bytes(chunk.try_into().expect("eight byte value"));
+                        let value = f64::from_le_bytes(*chunk);
                         // rrd_fetch.c:552 copies stored rows as they are; only
                         // NaN means unknown, so infinities reach the caller.
                         (!value.is_nan()).then_some(value)
@@ -646,14 +648,13 @@ fn apply_update(
     // update_pdp_prep does; numeric callers keep an up-front check.
     if raw_values.is_none() {
         for (source, value) in info.data_sources.iter().zip(values) {
-            if let Some(value) = value {
-                if matches!(source.kind.as_str(), "COUNTER" | "DERIVE")
-                    && !(value.fract() == 0.0
-                        && (source.kind != "COUNTER" || *value >= 0.0)
-                        && value.abs() <= 9_007_199_254_740_992.0)
-                {
-                    return Err(StoreError::InvalidValue);
-                }
+            if let Some(value) = value
+                && matches!(source.kind.as_str(), "COUNTER" | "DERIVE")
+                && !(value.fract() == 0.0
+                    && (source.kind != "COUNTER" || *value >= 0.0)
+                    && value.abs() <= 9_007_199_254_740_992.0)
+            {
+                return Err(StoreError::InvalidValue);
             }
         }
     }
@@ -1780,27 +1781,26 @@ pub fn tune_rrd_data_sources_file(
                 ));
             }
         }
-        if let Some(kind) = &change.kind {
-            if !matches!(
+        if let Some(kind) = &change.kind
+            && !matches!(
                 kind.as_str(),
                 "GAUGE" | "COUNTER" | "DERIVE" | "ABSOLUTE" | "DCOUNTER" | "DDERIVE"
-            ) {
-                return Err(StoreError::RrdUnsupported(format!(
-                    "unsupported data source type: {kind}"
-                )));
-            }
+            )
+        {
+            return Err(StoreError::RrdUnsupported(format!(
+                "unsupported data source type: {kind}"
+            )));
         }
-        if let Some(name) = &change.new_name {
-            if name.is_empty()
+        if let Some(name) = &change.new_name
+            && (name.is_empty()
                 || name.len() > 19
                 || !name
                     .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-            {
-                return Err(StoreError::RrdUnsupported(format!(
-                    "invalid data source name: {name}"
-                )));
-            }
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'))
+        {
+            return Err(StoreError::RrdUnsupported(format!(
+                "invalid data source name: {name}"
+            )));
         }
         resolved.push((index, change));
     }
@@ -1811,33 +1811,33 @@ pub fn tune_rrd_data_sources_file(
             file.seek(SeekFrom::Start((offset + 40) as u64))?;
             file.write_all(&heartbeat.to_le_bytes())?;
         }
-        if let Some(kind) = &change.kind {
-            if kind != &info.data_sources[index].kind {
-                if kind.len() >= 20 {
-                    return Err(StoreError::RrdUnsupported(
-                        "data source type name is too long".into(),
-                    ));
-                }
-                let mut type_bytes = [0_u8; 20];
-                type_bytes[..kind.len()].copy_from_slice(kind.as_bytes());
-                file.seek(SeekFrom::Start((offset + 20) as u64))?;
-                file.write_all(&type_bytes)?;
-                let pdp_start = STAT_HEAD_LEN
-                    + info.data_sources.len() * DS_DEF_LEN
-                    + info.archives.len() * RRA_DEF_LEN
-                    + info.live_head_len;
-                let pdp_offset = pdp_start + index * PDP_PREP_LEN;
-                file.seek(SeekFrom::Start(pdp_offset as u64))?;
-                file.write_all(b"UNKN\0")?;
+        if let Some(kind) = &change.kind
+            && kind != &info.data_sources[index].kind
+        {
+            if kind.len() >= 20 {
+                return Err(StoreError::RrdUnsupported(
+                    "data source type name is too long".into(),
+                ));
             }
+            let mut type_bytes = [0_u8; 20];
+            type_bytes[..kind.len()].copy_from_slice(kind.as_bytes());
+            file.seek(SeekFrom::Start((offset + 20) as u64))?;
+            file.write_all(&type_bytes)?;
+            let pdp_start = STAT_HEAD_LEN
+                + info.data_sources.len() * DS_DEF_LEN
+                + info.archives.len() * RRA_DEF_LEN
+                + info.live_head_len;
+            let pdp_offset = pdp_start + index * PDP_PREP_LEN;
+            file.seek(SeekFrom::Start(pdp_offset as u64))?;
+            file.write_all(b"UNKN\0")?;
         }
-        if let Some(name) = &change.new_name {
-            if name != &info.data_sources[index].name {
-                let mut name_bytes = [0_u8; 20];
-                name_bytes[..name.len()].copy_from_slice(name.as_bytes());
-                file.seek(SeekFrom::Start(offset as u64))?;
-                file.write_all(&name_bytes)?;
-            }
+        if let Some(name) = &change.new_name
+            && name != &info.data_sources[index].name
+        {
+            let mut name_bytes = [0_u8; 20];
+            name_bytes[..name.len()].copy_from_slice(name.as_bytes());
+            file.seek(SeekFrom::Start(offset as u64))?;
+            file.write_all(&name_bytes)?;
         }
         for (bound, relative_offset) in [(change.minimum, 48_u64), (change.maximum, 56_u64)] {
             if let Some(bound) = bound {

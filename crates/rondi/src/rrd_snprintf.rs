@@ -304,7 +304,7 @@ fn emit_digits(out: &mut Vec<u8>, digits: &[u8], separators: bool) {
     while pos > 0 {
         pos -= 1;
         out.push(digits[pos]);
-        if separators && pos > 0 && pos % 3 == 0 {
+        if separators && pos > 0 && pos.is_multiple_of(3) {
             out.push(b',');
         }
     }

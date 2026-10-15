@@ -259,18 +259,18 @@ impl RrdcachedBase {
     fn fs_path(&self, requested: &str) -> PathBuf {
         let requested = Path::new(requested);
         if requested.is_absolute() {
-            if self.confined() {
-                if let Some(given) = &self.given {
-                    let given = if given.is_absolute() {
-                        given.clone()
-                    } else {
-                        std::env::current_dir().unwrap_or_default().join(given)
-                    };
-                    // Normalize only the configured base alias (e.g. /var on
-                    // macOS), never request-controlled descendant symlinks.
-                    if let Ok(relative) = requested.strip_prefix(given) {
-                        return self.root.join(relative);
-                    }
+            if self.confined()
+                && let Some(given) = &self.given
+            {
+                let given = if given.is_absolute() {
+                    given.clone()
+                } else {
+                    std::env::current_dir().unwrap_or_default().join(given)
+                };
+                // Normalize only the configured base alias (e.g. /var on
+                // macOS), never request-controlled descendant symlinks.
+                if let Ok(relative) = requested.strip_prefix(given) {
+                    return self.root.join(relative);
                 }
             }
             requested.to_path_buf()
@@ -327,10 +327,10 @@ impl RrdcachedBase {
         }
         // Preserve access-check diagnostics. Every actual open repeats this
         // descriptor traversal, so changing a parent afterwards cannot bypass it.
-        if let Err(error) = rondi::safe_fs::open_directory(parent, false) {
-            if error.kind() != std::io::ErrorKind::NotFound {
-                return Err(denied());
-            }
+        if let Err(error) = rondi::safe_fs::open_directory(parent, false)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(denied());
         }
         Ok(path)
     }
