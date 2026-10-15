@@ -15,7 +15,7 @@ About 12,400 lines of Rust (38 percent of non-test source) are rated High: modul
 | `crates/rondi/src/time.rs` | High (FLAG) | 1,001 | Declares it keeps the C control flow of the at-style time parser; scanner state names match |
 | `crates/rondi/src/rpn.rs` | High | 1,084 | Declared port of the RPN parser and evaluator |
 | `crates/rondi/src/rrd_modify.rs` | Removed | 981 | Declared port; replaced by the clean-room `tune_modify.rs` |
-| `crates/rondi/src/rrd_restore.rs` | High | 912 | Declared port; 16 internal function names shared |
+| `crates/rondi/src/rrd_restore.rs` | Replaced | 912 | Declared port; replaced by a clean-room rewrite from `docs/compatibility/restore.md` |
 | `crates/rondi/src/rrd_create.rs` | High | 790 | Declared port; C error-slot model and temp-file naming reproduced |
 | `crates/rondi/src/rrd_resize.rs` | High | 288 | Declared port, including file-position rules |
 | `crates/rondi/src/graph.rs` | High | 2,357 | Declared port of graph script parsing and data preparation; 18 shared function names |
@@ -28,7 +28,7 @@ About 12,400 lines of Rust (38 percent of non-test source) are rated High: modul
 | `crates/rondi-cli/src/help/*.txt` | High (FLAG) | 354 text | Verbatim RRDtool help output |
 | `crates/rondi/src/rrd_binary.rs` | Review | 3,046 | Update path follows C helper boundaries with line citations; format reader is format-dictated |
 | `crates/rondi-server/src/lib.rs` | Review | 5,203 | Independent async design with ported handler fragments, command table and help strings |
-| `crates/rondi/src/xml_reader.rs` | Review (FLAG) | 1,958 | Models libxml2 reader and push-parser internals to match error line numbers |
+| `crates/rondi/src/xml_reader.rs` | Replaced | 1,958 | Modelled libxml2 internals; replaced by a clean-room rewrite from `docs/compatibility/restore.md` and black-box runs |
 | `crates/rondi-cli/src/main.rs` (rest except renderer) | Review | ~4,735 | Command handlers with C line citations; rrdcached client ported from an MIT-licensed C file |
 | `crates/rondi/src/rrd_number.rs` | Review | 451 | Number parsing algorithm from a BSD-licensed C file |
 | `crates/rondi-cli/src/cparse.rs` | Review | 217 | Same as above |
@@ -98,6 +98,7 @@ Risk tiers:
 - Compatibility requirement: accept the XML dump schema that `rrdtool dump` produces, reject malformed input with RRDtool's messages, and produce an equivalent `.rrd`.
 - Likely source: the XML schema is a published external format (category 2) and observable from `dump`; error wording is black-box observable; the walk order and per-tag helper split came from reference-source inspection.
 - Remediation: replace by spec and fresh implementation using a schema-driven parser. Tests: `crates/rondi-cli/tests/csrc_mutate.rs` (16), `fuzz/fuzz_targets/restore_xml.rs`, in-module limit tests. Decide separately whether libxml2-exact line numbers in error text (see `xml_reader.rs`) are a requirement.
+- Status: replaced. A new `rrd_restore.rs` was written from `docs/compatibility/restore.md`, its vectors and black-box runs of RRDtool 1.11.0, without reading this module or the C source.
 
 **`crates/rondi/src/rrd_create.rs`: `rrd_create_r2`, `create_bytes`, `parse_ds`, `parse_generic_ds`, `parse_rra`, `rrd_init_data`, `write_rrd`, `ErrorSlot`, `mkstemp`, `chmod_like_write_rrd`, `match_ds_re`, `scan_min_max`**
 
@@ -191,6 +192,7 @@ Risk tiers:
 
 - Models libxml2's `xmlTextReader` and push-parser chunking so that restore error messages report the same line numbers as RRDtool. The modelled code is libxml2 (MIT licensed), not RRDtool, and the module reproduces its internal chunk sizes and state names. Category 4 relative to libxml2; category 1 for the resulting messages.
 - Remediation: FLAG. Decide whether libxml2-exact error line numbers are a product requirement. If not, replace with an ordinary XML parser and specify error categories rather than byte-exact libxml2 text. If yes, confirm libxml2 attribution obligations.
+- Status: replaced. The new `xml_reader.rs` is a hand-written tokenizer and reader whose delivery and availability rules were derived from the specification and from black-box runs of the pinned RRDtool (every truncation of two seed dumps, plus targeted inputs), without reading this module, RRDtool's C source or libxml2's source. The libxml2 diagnostic texts it prints are observable output.
 
 **`crates/rondi-cli/src/main.rs`, remaining handlers (about 4,735 lines)**
 

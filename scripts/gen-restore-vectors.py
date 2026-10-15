@@ -981,14 +981,11 @@ EXPECT = {
     "walk-cdef-ok": "unsupported",
     "walk-cdef-bad": "unsupported",
     "walk-cdef-unknown-ds": "unsupported",
-    # RS-82 to RS-87: documented divergences.
-    "doc-utf16le-bom": "diverge",
-    "doc-utf16be-bom": "diverge",
-    "doc-latin1-name": "diverge",
-    "doc-bad-utf8": "diverge",
-    "value-internal-entity": "diverge",
+    # RS-86 and RS-87: documented divergences.
     "dup-database": "diverge",
     "opt-force-longer-file": "truncates",
+    # Rondi now matches this text too, but the case keeps the
+    # text-differs class covered.
     "target-is-dir-force": "text-differs",
 }
 
