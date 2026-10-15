@@ -5745,19 +5745,17 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // handle_modify (rrd_modify.c:1299) takes the words after the file name
-    // and parses all of them before changing anything.
-    let mut remove = Vec::new();
-    let mut add = Vec::new();
-    let mut rra_ops = Vec::new();
+    // The words after the file name are all classified and parsed before
+    // anything changes (docs/compatibility/tune-modify.md, TM-8 to TM-13).
+    let mut structure_ops = Vec::new();
     for argument in options.positionals().get(1..).unwrap_or_default() {
         if let Some(name) = argument
             .strip_prefix("DEL:")
             .filter(|name| !name.is_empty())
         {
-            remove.push(name.to_owned());
-        } else if argument.starts_with("DS:") && argument.len() > 3 {
-            add.push(argument.clone());
+            structure_ops.push(rondi::RrdStructureOp::DeleteSource(name.to_owned()));
+        } else if let Some(spec) = argument.strip_prefix("DS:").filter(|spec| !spec.is_empty()) {
+            structure_ops.push(rondi::RrdStructureOp::AddSource(spec.to_owned()));
         } else if let Some(spec) = argument
             .strip_prefix("RRA#")
             .filter(|spec| !spec.is_empty())
@@ -5771,19 +5769,17 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     format!("Failed to parse RRA# command: invalid operation: {sign}").into(),
                 );
             }
-            rra_ops.push(rondi::RrdRraOp {
-                index: index as i32,
-                op: sign,
-                row_count,
-                def: None,
-            });
-        } else if argument.starts_with("RRA:") && argument.len() > 4 {
-            rra_ops.push(rondi::RrdRraOp {
-                index: -1,
-                op: b'a',
-                row_count: 0,
-                def: Some(argument.clone()),
-            });
+            let change = match sign {
+                b'=' => rondi::RrdRowChange::Set(row_count),
+                b'+' => rondi::RrdRowChange::Grow(row_count),
+                _ => rondi::RrdRowChange::Shrink(row_count),
+            };
+            structure_ops.push(rondi::RrdStructureOp::ResizeArchive { index, change });
+        } else if let Some(spec) = argument
+            .strip_prefix("RRA:")
+            .filter(|spec| !spec.is_empty())
+        {
+            structure_ops.push(rondi::RrdStructureOp::AddArchive(spec.to_owned()));
         } else if let Some(index) = argument
             .strip_prefix("DELRRA:")
             .filter(|index| !index.is_empty())
@@ -5792,18 +5788,13 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             if index < 0 {
                 return Err("DELRRA requires a non-negative, integer argument".into());
             }
-            rra_ops.push(rondi::RrdRraOp {
-                index,
-                op: b'=',
-                row_count: 0,
-                def: None,
-            });
+            structure_ops.push(rondi::RrdStructureOp::DeleteArchive(index as u32));
         } else {
             return Err(format!("unparsable argument: {argument}").into());
         }
     }
-    if !remove.is_empty() || !add.is_empty() || !rra_ops.is_empty() {
-        rondi::modify_rrd_file(&filename, &remove, &add, &rra_ops, i64::from(newstep))?;
+    if !structure_ops.is_empty() {
+        rondi::modify_rrd_file(&filename, &structure_ops, newstep)?;
     }
     Ok(())
 }
