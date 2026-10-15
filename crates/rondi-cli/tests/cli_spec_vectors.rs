@@ -371,6 +371,11 @@ impl Vector {
         if self.tagged("unstable") || (self.tagged("locale") && !locale) {
             return None;
         }
+        // The zone name of an empty TZ comes from the host's time zone
+        // database on glibc, so it is frozen on macOS only.
+        if self.tagged("host-tz") && !cfg!(target_os = "macos") {
+            return None;
+        }
         let zone_missing = self
             .env
             .iter()
@@ -745,7 +750,7 @@ fn cli_spec_vectors_match_rrdtool() {
 
     let threads = std::thread::available_parallelism().map_or(2, |n| n.get().min(6));
     let chunk = vectors.len().div_ceil(threads);
-    let outcomes: Vec<(String, bool, String)> = std::thread::scope(|scope| {
+    let outcomes: Vec<Outcome> = std::thread::scope(|scope| {
         let handles: Vec<_> = vectors
             .chunks(chunk)
             .map(|part| {
@@ -765,7 +770,12 @@ fn cli_spec_vectors_match_rrdtool() {
 
     let mut failures = Vec::new();
     let mut divergent = Vec::new();
-    for (id, ok, detail) in outcomes {
+    for outcome in outcomes {
+        let (id, ok, detail) = match outcome {
+            Outcome::Matches(id) => (id, true, String::new()),
+            Outcome::Differs(id, detail) => (id, false, detail),
+            Outcome::NotCompared => continue,
+        };
         let here = platform_key().unwrap_or("macos");
         let known = KNOWN_DIVERGENCES.iter().any(|(known, platforms, _)| {
             *known == id && (platforms.is_empty() || platforms.contains(&here))
@@ -798,37 +808,46 @@ fn check(
     up: &Path,
     oracle: Option<&Path>,
     locale: bool,
-) -> (String, bool, String) {
+) -> Outcome {
+    let id = vector.id.clone();
     let got = run_vector(bindir, ro, vector);
     if failed_to_finish(&got) {
         // Whatever the reference does, Rondi must exit on its own.
-        return (vector.id.clone(), false, format!("rondi  {got}"));
+        return Outcome::Differs(id, format!("rondi  {got}"));
     }
     if vector.tagged("undefined") {
-        return (vector.id.clone(), true, String::new());
+        return Outcome::Matches(id);
     }
-    if let Some(frozen) = vector.frozen(locale)
-        && comparable(vector, frozen) != comparable(vector, &got)
-    {
-        return (
-            vector.id.clone(),
-            false,
-            format!("frozen {frozen}\n  rondi  {got}"),
-        );
+    let mut compared = false;
+    if let Some(frozen) = vector.frozen(locale) {
+        compared = true;
+        if comparable(vector, frozen) != comparable(vector, &got) {
+            return Outcome::Differs(id, format!("frozen {frozen}\n  rondi  {got}"));
+        }
     }
     if let Some(dir) = oracle
         && (locale || !vector.tagged("locale"))
     {
         let reference = run_vector(dir, up, vector);
-        if !failed_to_finish(&reference)
-            && comparable(vector, &reference) != comparable(vector, &got)
-        {
-            return (
-                vector.id.clone(),
-                false,
-                format!("live   {reference}\n  rondi  {got}"),
-            );
+        if !failed_to_finish(&reference) {
+            compared = true;
+            if comparable(vector, &reference) != comparable(vector, &got) {
+                return Outcome::Differs(id, format!("live   {reference}\n  rondi  {got}"));
+            }
         }
     }
-    (vector.id.clone(), true, String::new())
+    if compared {
+        Outcome::Matches(id)
+    } else {
+        Outcome::NotCompared
+    }
+}
+
+/// The result of checking one vector. A vector whose expectation does not
+/// apply here and that has no live oracle is not compared, so it neither
+/// passes nor fails, and a known divergence is not reported as fixed.
+enum Outcome {
+    Matches(String),
+    Differs(String, String),
+    NotCompared,
 }

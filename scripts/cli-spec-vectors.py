@@ -616,8 +616,11 @@ def env_cases() -> None:
         cli('env', 'last', A, env={'RRD_LOCKING': value})
     for zone in ['UTC', 'America/New_York', 'Asia/Kolkata', '', 'Not/AZone',
                  'EST5EDT', '<+0530>-5:30']:
+        # glibc names the zone of an empty TZ after the host's time zone
+        # database (`Universal` on Debian, `UTC` on Ubuntu).
         fmt('env', *GRAPH, 'VDEF:v=x,MAXIMUM',
-            'PRINT:v:%Y-%m-%d %H\\:%M\\:%S %Z:strftime', env={'TZ': zone})
+            'PRINT:v:%Y-%m-%d %H\\:%M\\:%S %Z:strftime', env={'TZ': zone},
+            tags=['host-tz'] if zone == '' else None)
         cli('env', 'fetch', A, 'AVERAGE', '-s', '1700000000', '-e',
             '1700001200', env={'TZ': zone})
         cli('env', 'info', 'e.rrd', env={'TZ': zone})
@@ -675,19 +678,21 @@ def pipe_cases() -> None:
         'updatev f.rrd 1000000300:5\n',
         'update f.rrd 1000000000:5\nlast f.rrd\n',
         'create n.rrd --start 1000000000 DS:x:GAUGE:120:U:U '
-        'RRA:AVERAGE:0.5:1:5\nlast n.rrd\n',
-        'create n.rrd\n', 'graph /dev/null -s 1000000000 -e 1000000300 '
-        'DEF:x=f.rrd:x:AVERAGE VDEF:v=x,AVERAGE PRINT:v:%lf\n',
+        + 'RRA:AVERAGE:0.5:1:5\nlast n.rrd\n',
+        'create n.rrd\n',
+        'graph /dev/null -s 1000000000 -e 1000000300 '
+        + 'DEF:x=f.rrd:x:AVERAGE VDEF:v=x,AVERAGE PRINT:v:%lf\n',
         'graphv /dev/null -s 1000000000 -e 1000000300 '
-        'DEF:x=f.rrd:x:AVERAGE VDEF:v=x,AVERAGE PRINT:v:%lf\n',
+        + 'DEF:x=f.rrd:x:AVERAGE VDEF:v=x,AVERAGE PRINT:v:%lf\n',
         'graph /dev/null -s 1000000000 -e 1000000300 '
-        'DEF:x=f.rrd:x:AVERAGE VDEF:v=x,AVERAGE "PRINT:v:avg %lf"\n',
+        + 'DEF:x=f.rrd:x:AVERAGE VDEF:v=x,AVERAGE "PRINT:v:avg %lf"\n',
         'graph /dev/null -s 1000000000 -e 1000000300 '
-        'DEF:x=f.rrd:x:AVERAGE VDEF:v=x,AVERAGE PRINT:v:%d\n',
+        + 'DEF:x=f.rrd:x:AVERAGE VDEF:v=x,AVERAGE PRINT:v:%d\n',
         'xport -s 1000000000 -e 1000000300 DEF:x=f.rrd:x:AVERAGE XPORT:x\n',
-        'xport\n', 'dump e.rrd\n', 'dump e.rrd out.xml\nrestore out.xml '
-        'r.rrd\nlast r.rrd\n', 'restore a.xml\n', 'tune a.rrd -h x:900\n'
-        'info a.rrd\n', 'tune a.rrd --bogus\n', 'resize a.rrd 0 GROW 1\n',
+        'xport\n', 'dump e.rrd\n',
+        'dump e.rrd out.xml\nrestore out.xml r.rrd\nlast r.rrd\n',
+        'restore a.xml\n', 'tune a.rrd -h x:900\ninfo a.rrd\n',
+        'tune a.rrd --bogus\n', 'resize a.rrd 0 GROW 1\n',
         'resize\n', 'flushcached a.rrd\n', 'list sub\n', 'list -r .\n',
         'list missing\n', 'first a.rrd --rraindex 9\n',
         'last a.rrd\n' * 3, 'last\xff.rrd\nlast a.rrd\n',
