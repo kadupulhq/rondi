@@ -3463,15 +3463,7 @@ fn rrdcached_fetch_data(
         rondi::fetch_rrd_open_file(file, &path, fields[1], start, end, 1).map_err(|error| {
             match error {
                 StoreError::Rrd(message) => format!("rrd_fetch_r failed: {message}"),
-                error => {
-                    let error = error.to_string();
-                    if error.contains("no archive matching consolidation function") {
-                        "rrd_fetch_r failed: the RRD does not contain an RRA matching the chosen CF"
-                            .to_owned()
-                    } else {
-                        error
-                    }
-                }
+                error => error.to_string(),
             }
         })?;
     // The field index loop of handle_request_fetch_parse: the bound is checked

@@ -166,6 +166,37 @@ impl Sides {
         assert_eq!(ro, up, "args: {args:?}");
     }
 
+    /// Like [`Self::assert_same`] but compares stdout and stderr as bytes,
+    /// for output that is not UTF-8.
+    pub fn assert_same_bytes(&self, args: &[&str]) {
+        let run = |program: &std::path::Path, dir: &std::path::Path| {
+            let output = Command::new(program)
+                .args(args)
+                .current_dir(dir)
+                .env("TZ", "UTC")
+                .env("LC_ALL", "C")
+                .env_remove("RRDCACHED_ADDRESS")
+                .output()
+                .unwrap();
+            (output.status.code(), output.stdout, output.stderr)
+        };
+        let up = run(std::path::Path::new("rrdtool"), &self.up);
+        let ro = run(&self.rondi, &self.ro);
+        let show = |(status, stdout, stderr): &(Option<i32>, Vec<u8>, Vec<u8>)| {
+            format!(
+                "status={status:?}\n stdout: {}\n stderr: {}",
+                stdout.escape_ascii(),
+                stderr.escape_ascii()
+            )
+        };
+        assert!(
+            ro == up,
+            "args: {args:?}\nrondi {}\nupstream {}",
+            show(&ro),
+            show(&up)
+        );
+    }
+
     /// Asserts that `name` has the same bytes, or is missing, on both sides.
     pub fn assert_same_file(&self, name: &str) {
         let up = std::fs::read(self.up.join(name)).ok();
