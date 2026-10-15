@@ -87,6 +87,7 @@ absolute paths, and their length must not depend on the host.
 | `b/lnk` | symbolic link to `sub` |
 | `b/escape.rrd` | symbolic link to `../outside.rrd` |
 | `outside.rrd` | copy of `a.rrd` outside the base directory |
+| `outside.txt` | 3200 bytes of text outside the base directory (an absolute name that is not an RRD file) |
 | `j/` | empty directory, mode 0700, for `-j` |
 
 A protocol session starts the daemon as
@@ -106,8 +107,10 @@ comparison the root path is replaced by `{ROOT}`, a TCP port by `{PORT}`
 it is a whole word, and the time stamps in journal file names by `{T}`
 (`rrd.journal.{T}`). A reply of a case tagged `unordered`, which holds a
 `LIST` result, is compared with its lines sorted, because `LIST` prints
-entries in directory read order, which differs between file systems. A
-read that times out (10 s) records `<timeout>`. A connection reset ends the
+entries in directory read order, which differs between file systems. The
+error text after `mmaping file '<path>': ` is compared as `{ERRNO}`:
+mapping a directory fails with EINVAL or ENODEV depending on the file
+system (the vectors store the recorded text). A read that times out (10 s) records `<timeout>`. A connection reset ends the
 reply like a normal close: a daemon that closes a connection with unread
 input resets it on Linux and closes it normally on macOS.
 
@@ -321,7 +324,7 @@ form (`{ROOT}/b/missing.rrd`). The man page states that `-b` defaults to
 refused unless it starts with the base directory followed by `/`, and any
 name containing `../` is refused. The refusal is `-1 <name>: Permission
 denied`, where `<name>` is the joined path (`{ROOT}/b/../outside.rrd`) or,
-for an absolute name, the name as sent (`/etc/hosts`). The check is on the
+for an absolute name, the name as sent (`{ROOT}/outside.txt`). The check is on the
 string only; symbolic links inside the base directory that point elsewhere
 (`escape.rrd`, `lnk/`) are followed. `PENDING` and `DUMP` do not apply the
 check in the reference (RC-95). `./a.rrd` passes; `sub/../a.rrd` is
@@ -746,7 +749,7 @@ itself is denied, the lines after it are processed as ordinary requests.
 - `strerror` texts differ between macOS and glibc (`Device not configured`
   for ENXIO on macOS is `No such device or address` on glibc; errno 0 is
   `Undefined error: 0` on macOS and `Success` on glibc), and mapping a
-  directory fails with EINVAL on macOS and ENODEV on Linux; vectors that
+  directory fails with EINVAL or ENODEV depending on the file system (masked, see Normalization); vectors that
   show them are recorded per platform.
 
 ## Rondi divergences

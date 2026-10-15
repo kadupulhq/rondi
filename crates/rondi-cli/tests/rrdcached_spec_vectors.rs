@@ -744,10 +744,16 @@ fn rrdcached_spec_vectors_match() {
     }
     let oracle = live_oracle();
     let only = std::env::var("RONDI_RRDCACHED_ONLY").unwrap_or_default();
-    let cases: Vec<Value> = table()
+    let mut cases: Vec<Value> = table()
         .into_iter()
         .filter(|c| only.is_empty() || only.split(',').any(|id| c["id"] == id))
         .collect();
+    // Cases that wait (timers, sleeps, several daemons) start first so they
+    // do not finish last.
+    cases.sort_by_key(|case| {
+        let waits = tagged(case, "timing") || case["kind"] == "daemon";
+        std::cmp::Reverse(waits)
+    });
     let failures = Mutex::new(Vec::<String>::new());
     let next = Mutex::new(0usize);
     // A case spends most of its time waiting: the reference daemon takes
