@@ -11,6 +11,7 @@ mod queries;
 mod rpn;
 mod rrd_binary;
 mod rrd_create;
+mod rrd_definitions;
 mod rrd_number;
 mod rrd_resize;
 mod rrd_restore;
@@ -42,7 +43,7 @@ pub use rrd_binary::{
 };
 #[cfg(unix)]
 pub use rrd_create::create_rrd_at;
-pub use rrd_create::rrd_create_r2;
+pub use rrd_create::{CreateOptions, create_rrd};
 pub use rrd_number::{c_strtol, c_strtoll_errno, parse_rrd_number};
 pub use rrd_resize::resize_rrd_file;
 pub use rrd_restore::{

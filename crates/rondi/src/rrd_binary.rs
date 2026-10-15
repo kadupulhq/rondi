@@ -50,8 +50,8 @@ pub(crate) fn rrd_mul_add(a: f64, b: f64, c: f64) -> f64 {
     }
 }
 
-/// Create an RRDtool file from `DS:` and `RRA:` definitions with
-/// `rrd_create_r2`; the data sources are parsed before the archives.
+/// Create an RRDtool file from `DS:` and `RRA:` definitions; the data
+/// sources are parsed before the archives. A step of 0 means the default.
 pub fn create_rrd_file(
     path: impl AsRef<Path>,
     start: i64,
@@ -74,11 +74,17 @@ pub fn create_rrd_file(
         .chain(archives)
         .cloned()
         .collect::<Vec<_>>();
-    crate::rrd_create::rrd_create_r2(filename, step, start, no_overwrite, None, &argv)
+    let options = crate::rrd_create::CreateOptions {
+        step: (step != 0).then_some(step),
+        start: Some(start),
+        no_overwrite,
+        template: None,
+    };
+    crate::rrd_create::create_rrd(filename, &options, &argv)
 }
 
-/// The parts of an existing file that `rrd_create_r2` copies from a
-/// `--template`: its step, last update and the raw DS and RRA definitions.
+/// The parts of an existing file that `create` copies from a `--template`:
+/// its step, last update and the raw DS and RRA definitions.
 pub(crate) struct TemplateDefinitions {
     pub(crate) pdp_step: u64,
     pub(crate) last_up: i64,
