@@ -6,6 +6,13 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
+include = [
+    "/src/**",
+    "/COPYRIGHT",
+    "/LICENSE-APACHE",
+    "/LICENSE-GPL-2.0",
+    "/LICENSE-MIT",
+]
 
 [lints]
 workspace = true
