@@ -1,18 +1,16 @@
 /// C library conversions RRDtool's command parsers call, either through
 /// libc itself or as ports of RRDtool's own helpers in rrd_strtod.c.
 mod cparse;
+/// The `rrdtool` front end: command selection, option scanning, error
+/// reporting, pipe mode and the single-command programs.
+mod frontend;
 /// Option parsing for `graph`, `graphv` and `xport`, ported from
 /// `rrd_graph_options` (rrd_graph.c:5042) and `rrd_xport` (rrd_xport.c:76).
 /// Options that only affect Cairo/Pango rendering are validated exactly as
 /// upstream validates them and then left unused.
 mod graph_options;
-/// Port of RRDtool 1.11.0 `src/optparse.c`, the option parser every
-/// `rrdtool` command uses. Non-option words are permuted to the end of
-/// `argv`, so after the loop `argv[optind..]` holds the positionals in their
-/// original order.
-mod optparse;
 
-use optparse::{ArgType, LongOpt, OptParse, opt};
+use frontend::{OptionScanner, OptionSpec, RawMessage, last_os_errno, system_error_text};
 
 use clap::{Parser, Subcommand};
 use rondi::time::{
@@ -155,15 +153,15 @@ async fn async_main(
         let args = std::env::args_os()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        let status = rrdtool_main(&args);
+        let status = frontend::run_rrdtool(&args);
         let _ = std::io::stdout().flush();
         std::process::exit(status);
     }
-    if matches!(invoked_as.as_str(), "rrdupdate" | "rrdcreate" | "rrdinfo") {
+    if let Some(alias) = frontend::Alias::from_program(&invoked_as) {
         let args = std::env::args_os()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
-        let status = rrdupdate_main(&invoked_as, &args);
+        let status = frontend::run_alias(alias, &args);
         let _ = std::io::stdout().flush();
         std::process::exit(status);
     }
@@ -954,511 +952,6 @@ const RRDCACHED_HELP: &str = concat!(
     "to the rrdcached(1) manual page.\n",
 );
 
-const RRDTOOL_COMMANDS: &[&str] = &[
-    "create",
-    "fetch",
-    "update",
-    "updatev",
-    "last",
-    "lastupdate",
-    "first",
-    "info",
-    "dump",
-    "restore",
-    "tune",
-    "list",
-    "resize",
-    "xport",
-    "graph",
-    "graphv",
-    "flushcached",
-];
-
-const RRDTOOL_USAGE_HEADER: &str = concat!(
-    "RRDtool 1.11.0  Copyright by Tobias Oetiker <tobi@oetiker.ch>\n",
-    "               Compiled \n\n",
-    "Usage: rrdtool [options] command command_options\n",
-);
-
-const RRDTOOL_USAGE_FOOTER: &str = concat!(
-    "RRDtool is distributed under the Terms of the GNU General\n",
-    "Public License Version 2. (www.gnu.org/copyleft/gpl.html)\n\n",
-    "For more information read the RRD manpages\n\n",
-);
-
-fn rrdtool_usage(remote: bool) -> String {
-    let mut text = String::from(RRDTOOL_USAGE_HEADER);
-    text.push_str(concat!(
-        "Valid commands: create, update, updatev, graph, graphv,  dump, restore,\n",
-        "\t\tlast, lastupdate, first, info, list, fetch, tune,\n",
-        "\t\tresize, xport, flushcached\n\n",
-    ));
-    if remote {
-        text.push_str("Valid remote commands: quit, ls, cd, mkdir, pwd\n\n");
-    }
-    text.push_str(RRDTOOL_USAGE_FOOTER);
-    text
-}
-
-/// `PrintUsage` (rrd_tool.c:43). Kadupul reads the version from this
-/// banner, so `-v` and unknown words print it and succeed.
-fn print_usage(command: &str, remote: bool) {
-    if RRDTOOL_COMMANDS.contains(&command) {
-        // Each command prints its own usage when given no arguments.
-        let _ = rrdtool_dispatch(&[command.to_owned()]);
-        return;
-    }
-    let body = match command {
-        "quit" => " * quit - closing a session in remote mode\n\n\trrdtool quit\n",
-        "ls" => " * ls - lists all *.rrd files in current directory\n\n\trrdtool ls\n",
-        "cd" => " * cd - changes the current directory\n\n\trrdtool cd new directory\n",
-        "mkdir" => " * mkdir - creates a new directory\n\n\trrdtool mkdir newdirectoryname\n",
-        "pwd" => " * pwd - returns the current working directory\n\n\trrdtool pwd\n",
-        _ => {
-            print!("{}", rrdtool_usage(remote));
-            return;
-        }
-    };
-    print!("{RRDTOOL_USAGE_HEADER}{body}\n{RRDTOOL_USAGE_FOOTER}");
-}
-
-/// rrd_tool.c:447 `main` after `setlocale`. Returns the exit status.
-fn rrdtool_main(argv: &[String]) -> i32 {
-    match argv.len() {
-        1 => {
-            print_usage("", false);
-            0
-        }
-        2 | 3 if argv[1] == "-" => rrdtool_batch(argv),
-        2 => {
-            print_usage(&argv[1], false);
-            0
-        }
-        3 if argv[1] == "help" => {
-            print_usage(&argv[2], false);
-            0
-        }
-        _ => handle_input_line(argv, false),
-    }
-}
-
-/// `rrdupdate.c`: the one executable installed as rrdupdate, rrdcreate and
-/// rrdinfo. `argv[0]` stands where `rrdtool` puts the command name, and
-/// errors go to stdout after the program's usage text.
-fn rrdupdate_main(name: &str, argv: &[String]) -> i32 {
-    // The library parsers fail on a lone argv[0]; Rondi's command functions
-    // print their help there instead.
-    let result = match (name, argv.len()) {
-        ("rrdcreate", 1) => Err("need name of an rrd file to create".into()),
-        ("rrdcreate", _) => rrdtool_create(argv),
-        ("rrdinfo", 1) => Err(format!(
-            "Usage: rrdtool {} [--daemon |-d <addr> [--noflush|-F]] <file>",
-            argv[0]
-        )
-        .into()),
-        ("rrdinfo", _) => rrdtool_info(argv),
-        (_, 1) => Err("Not enough arguments".into()),
-        _ => rrdtool_update(argv),
-    };
-    let Err(error) = result else {
-        return 0;
-    };
-    if error.downcast_ref::<RrdcachedPathUnavailable>().is_some() {
-        return 0;
-    }
-    print!("RRDtool 1.11.0  Copyright by Tobi Oetiker\n\n");
-    match name {
-        "rrdcreate" => print!(
-            "Usage: rrdcreate <filename>\n\t\t\t[--start|-b start time]\n\t\t\t[--step|-s step]\n\t\t\t[--no-overwrite]\n\t\t\t[DS:ds-name:DST:dst arguments]\n\t\t\t[RRA:CF:cf arguments]\n\n"
-        ),
-        "rrdinfo" => println!("Usage: rrdinfo <filename>"),
-        _ => print!(
-            "Usage: rrdupdate <filename>\n\t\t\t[--locking|-L <try|block|none>]\n\t\t\t[--template|-t ds-name[:ds-name]...]\n\t\t\t[--skip-past-updates]\n\t\t\ttime|N:value[:value...]\n\n\t\t\tat-time@value[:value...]\n\n\t\t\t[ time:value[:value...] ..]\n\n"
-        ),
-    }
-    println!("ERROR: {error}");
-    1
-}
-
-/// The command switch in `HandleInputLine` (rrd_tool.c:713), shared by
-/// argv and pipe mode. `args[0]` is the command name.
-fn rrdtool_dispatch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let result: Result<(), Box<dyn std::error::Error>> = match args[0].as_str() {
-        "create" => rrdtool_create(args),
-        "dump" => rrdtool_dump(args),
-        "info" => rrdtool_info(args),
-        "updatev" => rrdtool_updatev(args),
-        "list" => rrdtool_list(args),
-        "restore" => rrdtool_restore(args),
-        "resize" => rrdtool_resize(args),
-        "last" => print_minus_one_on_error(rrdtool_last(args)),
-        "lastupdate" => rrdtool_lastupdate(args),
-        "first" => print_minus_one_on_error(rrdtool_first(args)),
-        "update" => rrdtool_update(args),
-        "fetch" => rrdtool_fetch(args),
-        "xport" => rrdtool_xport(args),
-        "graph" => rrdtool_graph(args, false),
-        "graphv" => rrdtool_graph(args, true),
-        "tune" => rrdtool_tune(args),
-        "flushcached" => rrdtool_flushcached(args),
-        command => Err(format!("unknown function '{command}'").into()),
-    };
-    // HandleInputLine checks rrd_test_error, not the command's return code.
-    // get_path's silent refusals therefore end the command with status 0.
-    match result {
-        Err(error) if error.downcast_ref::<RrdcachedPathUnavailable>().is_some() => Ok(()),
-        result => result,
-    }
-}
-
-fn rrd_strerror(errno: libc::c_int) -> String {
-    // SAFETY: strerror returns a pointer to a NUL-terminated message.
-    unsafe { std::ffi::CStr::from_ptr(libc::strerror(errno)) }
-        .to_string_lossy()
-        .into_owned()
-}
-
-fn last_errno() -> libc::c_int {
-    std::io::Error::last_os_error()
-        .raw_os_error()
-        .unwrap_or(libc::EIO)
-}
-
-/// `HandleInputLine` (rrd_tool.c:579). `argv[0]` is the program name.
-fn handle_input_line(argv: &[String], remote: bool) -> i32 {
-    let argc = argv.len();
-    let word = |index: usize| argv.get(index).map(String::as_str);
-    if remote {
-        match word(1) {
-            Some("quit") => {
-                if argc != 2 {
-                    println!("ERROR: invalid parameter count for quit");
-                    return 1;
-                }
-                let _ = std::io::stdout().flush();
-                std::process::exit(0);
-            }
-            Some("cd") => {
-                if argc != 3 {
-                    println!("ERROR: invalid parameter count for cd");
-                    return 1;
-                }
-                if let Err(errno) = c_path_call(&argv[2], |path| unsafe { libc::chdir(path) }) {
-                    println!("ERROR: chdir {} {}", argv[2], rrd_strerror(errno));
-                    return 1;
-                }
-                return 0;
-            }
-            Some("pwd") => {
-                if argc != 2 {
-                    println!("ERROR: invalid parameter count for pwd");
-                    return 1;
-                }
-                match std::env::current_dir() {
-                    Ok(cwd) => {
-                        let mut stdout = std::io::stdout().lock();
-                        let _ = stdout.write_all(cwd.as_os_str().as_encoded_bytes());
-                        let _ = stdout.write_all(b"\n");
-                    }
-                    Err(error) => {
-                        let errno = error.raw_os_error().unwrap_or(libc::EIO);
-                        println!("ERROR: getcwd {}", rrd_strerror(errno));
-                        return 1;
-                    }
-                }
-                return 0;
-            }
-            Some("mkdir") => {
-                if argc != 3 {
-                    println!("ERROR: invalid parameter count for mkdir");
-                    return 1;
-                }
-                if let Err(errno) =
-                    c_path_call(&argv[2], |path| unsafe { libc::mkdir(path, 0o777) })
-                {
-                    println!("ERROR: mkdir {}: {}", argv[2], rrd_strerror(errno));
-                    return 1;
-                }
-                return 0;
-            }
-            Some("ls") => {
-                if argc != 2 {
-                    println!("ERROR: invalid parameter count for ls");
-                    return 1;
-                }
-                return remote_ls();
-            }
-            _ => {}
-        }
-    }
-    if argc < 3 || matches!(word(1), Some("help" | "--help" | "-help" | "-?" | "-h")) {
-        print_usage("", remote);
-        return 0;
-    }
-    let result = if matches!(
-        word(1),
-        Some("--version" | "version" | "v" | "-v" | "-version")
-    ) {
-        println!("RRDtool 1.11.0  Copyright by Tobi Oetiker (1.011000)");
-        Ok(())
-    } else {
-        rrdtool_dispatch(&argv[1..])
-    };
-    match result {
-        Ok(()) => 0,
-        Err(error) => {
-            let mut line = b"ERROR: ".to_vec();
-            match error.downcast_ref::<RawRrdError>() {
-                Some(RawRrdError(message)) => line.extend_from_slice(message),
-                None => line.extend_from_slice(error.to_string().as_bytes()),
-            }
-            line.push(b'\n');
-            // Nothing is left to report a failed write to.
-            let _ = if remote {
-                std::io::stdout().write_all(&line)
-            } else {
-                std::io::stderr().write_all(&line)
-            };
-            1
-        }
-    }
-}
-
-/// An `rrd_get_error()` text that quotes header bytes, printed unchanged
-/// because they need not be UTF-8.
-#[derive(Debug)]
-struct RawRrdError(Vec<u8>);
-
-impl std::fmt::Display for RawRrdError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&String::from_utf8_lossy(&self.0))
-    }
-}
-
-impl std::error::Error for RawRrdError {}
-
-/// Runs a libc call that takes one path and reports `errno` on failure.
-fn c_path_call(
-    path: &str,
-    call: impl FnOnce(*const libc::c_char) -> libc::c_int,
-) -> Result<(), libc::c_int> {
-    let Ok(path) = std::ffi::CString::new(path) else {
-        return Err(libc::ENOENT);
-    };
-    if call(path.as_ptr()) == 0 {
-        Ok(())
-    } else {
-        Err(last_errno())
-    }
-}
-
-/// The remote `ls` command (rrd_tool.c:669), in readdir order with `.`
-/// and `..`.
-fn remote_ls() -> i32 {
-    // SAFETY: opendir/readdir/stat/closedir are used on a directory handle
-    // owned by this function; each entry name is NUL-terminated.
-    unsafe {
-        let directory = libc::opendir(c".".as_ptr());
-        if directory.is_null() {
-            let errno = last_errno();
-            println!("ERROR: opendir .: {}", rrd_strerror(errno));
-            return errno;
-        }
-        let mut stdout = std::io::stdout().lock();
-        loop {
-            let entry = libc::readdir(directory);
-            if entry.is_null() {
-                break;
-            }
-            let name = std::ffi::CStr::from_ptr((*entry).d_name.as_ptr());
-            let mut status = std::mem::zeroed::<libc::stat>();
-            if libc::stat(name.as_ptr(), &mut status) != 0 {
-                continue;
-            }
-            let bytes = name.to_bytes();
-            let kind = status.st_mode & libc::S_IFMT;
-            if kind == libc::S_IFDIR {
-                let _ = stdout.write_all(b"d ");
-                let _ = stdout.write_all(bytes);
-                let _ = stdout.write_all(b"\n");
-            }
-            if bytes.len() > 4
-                && kind == libc::S_IFREG
-                && matches!(&bytes[bytes.len() - 4..], b".rrd" | b".RRD")
-            {
-                let _ = stdout.write_all(b"- ");
-                let _ = stdout.write_all(bytes);
-                let _ = stdout.write_all(b"\n");
-            }
-        }
-        libc::closedir(directory);
-    }
-    0
-}
-
-const MAX_LENGTH: u64 = 10000;
-
-/// `fgetslong` (rrd_tool.c:414): one line of raw bytes. Text after an
-/// embedded NUL is lost and the next `fgets` chunk is appended, as in C.
-fn fgetslong(input: &mut impl BufRead) -> Option<Vec<u8>> {
-    let mut line = Vec::new();
-    loop {
-        let mut chunk = Vec::new();
-        match input.take(MAX_LENGTH - 1).read_until(b'\n', &mut chunk) {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {}
-        }
-        let text = chunk.split(|byte| *byte == 0).next().unwrap_or_default();
-        line.extend_from_slice(text);
-        if line.last() == Some(&b'\n') {
-            return Some(line);
-        }
-    }
-    (!line.is_empty()).then_some(line)
-}
-
-/// `CountArgs` (rrd_tool.c:880): words separated by spaces only.
-fn count_args(line: &[u8]) -> usize {
-    let mut count = 0;
-    let mut in_arg = false;
-    let start = line
-        .iter()
-        .position(|byte| *byte != b' ')
-        .unwrap_or(line.len());
-    for byte in &line[start..] {
-        if *byte == b' ' && in_arg {
-            in_arg = false;
-        }
-        if *byte != b' ' && !in_arg {
-            in_arg = true;
-            count += 1;
-        }
-    }
-    count
-}
-
-/// `CreateArgs` (rrd_tool.c:905): split on spaces, single and double quotes
-/// group (the other kind is literal inside), backslash is literal. `None`
-/// for an unterminated quote.
-fn create_args(line: &[u8]) -> Option<Vec<String>> {
-    // The comparisons use the platform's `char`, so bytes from 0x80 count
-    // as blanks where `char` is signed.
-    let blank = |byte: u8| byte as libc::c_char <= b' ' as libc::c_char;
-    let mut end = line.len();
-    // The trailing-blank loop stops before index 0.
-    while end > 1 && blank(line[end - 1]) {
-        end -= 1;
-    }
-    let mut start = 0;
-    while start < end && blank(line[start]) {
-        start += 1;
-    }
-    let mut args = Vec::<Vec<u8>>::new();
-    let mut quote = 0_u8;
-    let mut in_arg = false;
-    for &byte in &line[start..end] {
-        match byte {
-            b' ' => {
-                if quote != 0 {
-                    args.last_mut()?.push(byte);
-                } else {
-                    in_arg = false;
-                }
-            }
-            b'"' | b'\'' => {
-                if quote != 0 {
-                    if quote == byte {
-                        quote = 0;
-                    } else {
-                        args.last_mut()?.push(byte);
-                    }
-                } else {
-                    if !in_arg {
-                        args.push(Vec::new());
-                        in_arg = true;
-                    }
-                    quote = byte;
-                }
-            }
-            _ => {
-                if !in_arg {
-                    args.push(Vec::new());
-                    in_arg = true;
-                }
-                args.last_mut()?.push(byte);
-            }
-        }
-    }
-    if quote != 0 {
-        return None;
-    }
-    Some(
-        args.iter()
-            .map(|arg| String::from_utf8_lossy(arg).into_owned())
-            .collect(),
-    )
-}
-
-/// The `rrdtool -` loop in rrd_tool.c `main` (rrd_tool.c:473). Cacti and
-/// Kadupul keep this process open while polling.
-fn rrdtool_batch(argv: &[String]) -> i32 {
-    let started = std::time::Instant::now();
-    // rrd_tool.c:491 chroots only under HAVE_GETEUID, which configure.ac
-    // never checks for (it tests getuid), so every build takes the chdir
-    // path, root included.
-    let firstdir = argv.get(2).map_or("", String::as_str);
-    if !firstdir.is_empty()
-        && let Err(errno) = c_path_call(firstdir, |path| unsafe { libc::chdir(path) })
-    {
-        eprintln!("ERROR: chdir {firstdir} {}", rrd_strerror(errno));
-        std::process::exit(errno);
-    }
-    let mut stdin = std::io::stdin().lock();
-    while let Some(line) = fgetslong(&mut stdin) {
-        if count_args(&line) == 0 {
-            println!("ERROR: not enough arguments");
-            continue;
-        }
-        match create_args(&line) {
-            None => println!("ERROR: creating arguments"),
-            Some(words) => {
-                let mut args = Vec::with_capacity(words.len() + 1);
-                args.push(argv[0].clone());
-                args.extend(words);
-                if handle_input_line(&args, true) == 0 {
-                    println!("{}", rrdtool_batch_ack(started));
-                }
-            }
-        }
-        let _ = std::io::stdout().flush();
-    }
-    0
-}
-
-#[cfg(unix)]
-fn rrdtool_batch_ack(started: std::time::Instant) -> String {
-    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
-    // SAFETY: getrusage writes one `rusage` struct into the valid buffer.
-    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
-    if status != 0 {
-        return "OK".to_owned();
-    }
-    // SAFETY: successful getrusage initialized the struct.
-    let usage = unsafe { usage.assume_init() };
-    let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1_000_000.0;
-    format!(
-        "OK u:{:.2} s:{:.2} r:{:.2}",
-        seconds(usage.ru_utime),
-        seconds(usage.ru_stime),
-        started.elapsed().as_secs_f64()
-    )
-}
-
-#[cfg(not(unix))]
-fn rrdtool_batch_ack(_started: std::time::Instant) -> String {
-    "OK".to_owned()
-}
-
 fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
         print!("{}", rrdtool_create_help());
@@ -1476,22 +969,21 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut source_files = Vec::<String>::new();
     let mut daemon_address = None::<String>;
     // rrd_create.c:81.
-    const LONGOPTS: &[LongOpt] = &[
-        opt("start", b'b' as i32, ArgType::Required),
-        opt("step", b's' as i32, ArgType::Required),
-        opt("daemon", b'd' as i32, ArgType::Required),
-        opt("source", b'r' as i32, ArgType::Required),
-        opt("template", b't' as i32, ArgType::Required),
-        opt("no-overwrite", b'O' as i32, ArgType::None),
+    const LONGOPTS: &[OptionSpec<char>] = &[
+        OptionSpec::value("start", Some('b'), 'b'),
+        OptionSpec::value("step", Some('s'), 's'),
+        OptionSpec::value("daemon", Some('d'), 'd'),
+        OptionSpec::value("source", Some('r'), 'r'),
+        OptionSpec::value("template", Some('t'), 't'),
+        OptionSpec::flag("no-overwrite", Some('O'), 'O'),
     ];
-    let mut options = OptParse::new(args.to_vec());
-    loop {
-        let option = options.long(LONGOPTS);
-        let value = options.value().to_owned();
-        match u8::try_from(option).map(char::from) {
-            _ if option == optparse::DONE => break,
-            Ok('d') => daemon_address = Some(value),
-            Ok('b') => {
+    let mut options = OptionScanner::new(args.get(1..).unwrap_or_default(), LONGOPTS);
+    for found in options.by_ref() {
+        let found = found?;
+        let value = found.text().to_owned();
+        match found.key {
+            'd' => daemon_address = Some(value),
+            'b' => {
                 start = parse_time_spec(&value, now)
                     .map_err(|error| format!("start time: {error}"))?
                     .absolute()
@@ -1503,18 +995,18 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 start_was_set = true;
             }
-            Ok('s') => {
+            's' => {
                 step = parse_scaled_duration_option(&value, "step size")?;
                 step_was_set = true;
             }
-            Ok('O') => no_overwrite = true,
-            Ok('r') => {
+            'O' => no_overwrite = true,
+            'r' => {
                 match std::fs::metadata(&value) {
                     Err(error) => {
                         let errno = error.raw_os_error().unwrap_or(libc::EIO);
                         return Err(format!(
                             "error checking for source RRD {value}: {}",
-                            rrd_strerror(errno)
+                            system_error_text(errno)
                         )
                         .into());
                     }
@@ -1525,17 +1017,16 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 source_files.push(value);
             }
-            Ok('t') => {
+            't' => {
                 if template_file.is_some() {
                     return Err("template already set".into());
                 }
                 template_file = Some(value);
             }
-            Ok('?') => return Err(options.errmsg.into()),
             _ => {}
         }
     }
-    let mut positional = options.positionals().to_vec();
+    let mut positional = options.into_operands();
     if positional.is_empty() {
         return Err("need name of an rrd file to create".into());
     }
@@ -1737,12 +1228,12 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     // rrd_fetch.c:83.
-    const LONGOPTS: &[LongOpt] = &[
-        opt("resolution", b'r' as i32, ArgType::Required),
-        opt("start", b's' as i32, ArgType::Required),
-        opt("end", b'e' as i32, ArgType::Required),
-        opt("align-start", b'a' as i32, ArgType::None),
-        opt("daemon", b'd' as i32, ArgType::Required),
+    const LONGOPTS: &[OptionSpec<char>] = &[
+        OptionSpec::value("resolution", Some('r'), 'r'),
+        OptionSpec::value("start", Some('s'), 's'),
+        OptionSpec::value("end", Some('e'), 'e'),
+        OptionSpec::flag("align-start", Some('a'), 'a'),
+        OptionSpec::value("daemon", Some('d'), 'd'),
     ];
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -1752,23 +1243,21 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut resolution = 1_u64;
     let mut align_start = false;
     let mut daemon_address = None::<String>;
-    let mut options = OptParse::new(args.to_vec());
-    loop {
-        let option = options.long(LONGOPTS);
-        match u8::try_from(option).map(char::from) {
-            _ if option == optparse::DONE => break,
-            Ok('s') => {
-                start_tv = parse_time_spec(options.value(), now)
+    let mut options = OptionScanner::new(args.get(1..).unwrap_or_default(), LONGOPTS);
+    for found in options.by_ref() {
+        let found = found?;
+        match found.key {
+            's' => {
+                start_tv = parse_time_spec(found.text(), now)
                     .map_err(|error| format!("start time: {error}"))?;
             }
-            Ok('e') => {
-                end_tv = parse_time_spec(options.value(), now)
+            'e' => {
+                end_tv = parse_time_spec(found.text(), now)
                     .map_err(|error| format!("end time: {error}"))?;
             }
-            Ok('a') => align_start = true,
-            Ok('r') => resolution = parse_rrd_resolution(options.value())?,
-            Ok('d') => daemon_address = Some(options.value().to_owned()),
-            Ok('?') => return Err(options.errmsg.into()),
+            'a' => align_start = true,
+            'r' => resolution = parse_rrd_resolution(found.text())?,
+            'd' => daemon_address = Some(found.text().to_owned()),
             _ => {}
         }
     }
@@ -1786,7 +1275,7 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if end < start {
         return Err(format!("start ({start}) should be less than end ({end})").into());
     }
-    let [filename, cf, ..] = options.positionals() else {
+    let [filename, cf, ..] = options.operands() else {
         return Err("Usage: rrdtool fetch <file> <CF> [options]".into());
     };
     let filename = PathBuf::from(filename);
@@ -1828,7 +1317,7 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .find_map(|archive| rondi::cf_conv_error(&archive.raw_consolidation));
     write_fetch_rows(&fetch.data_sources, fetch.rows())?;
     match name_error {
-        Some(message) => Err(RawRrdError(message).into()),
+        Some(message) => Err(RawMessage(message).into()),
         None => Ok(()),
     }
 }
@@ -2497,7 +1986,7 @@ impl std::fmt::Display for OutputError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Refused(message) => f.write_str(message),
-            Self::Open(errno) | Self::Write(errno) => f.write_str(&rrd_strerror(*errno)),
+            Self::Open(errno) | Self::Write(errno) => f.write_str(&system_error_text(*errno)),
         }
     }
 }
@@ -4632,52 +4121,51 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
         return Ok(());
     }
     // rrd_update.c:304 (updatev) and :679 (update).
-    const UPDATE_LONGOPTS: &[LongOpt] = &[
-        opt("template", b't' as i32, ArgType::Required),
-        opt("daemon", b'd' as i32, ArgType::Required),
-        opt("skip-past-updates", b's' as i32, ArgType::None),
-        opt("locking", b'L' as i32, ArgType::Required),
+    const UPDATE_LONGOPTS: &[OptionSpec<char>] = &[
+        OptionSpec::value("template", Some('t'), 't'),
+        OptionSpec::value("daemon", Some('d'), 'd'),
+        OptionSpec::flag("skip-past-updates", Some('s'), 's'),
+        OptionSpec::value("locking", Some('L'), 'L'),
     ];
-    const UPDATEV_LONGOPTS: &[LongOpt] = &[
-        opt("template", b't' as i32, ArgType::Required),
-        opt("skip-past-updates", b's' as i32, ArgType::None),
-        opt("locking", b'L' as i32, ArgType::Required),
+    const UPDATEV_LONGOPTS: &[OptionSpec<char>] = &[
+        OptionSpec::value("template", Some('t'), 't'),
+        OptionSpec::flag("skip-past-updates", Some('s'), 's'),
+        OptionSpec::value("locking", Some('L'), 'L'),
     ];
     let mut template = None;
     let mut skip_past_updates = false;
     let mut daemon_address = None;
     let mut locking = String::new();
-    let mut options = OptParse::new(args.to_vec());
-    loop {
-        let option = options.long(if verbose {
-            UPDATEV_LONGOPTS
-        } else {
-            UPDATE_LONGOPTS
-        });
-        match u8::try_from(option).map(char::from) {
-            _ if option == optparse::DONE => break,
-            Ok('t') => {
+    let table = if verbose {
+        UPDATEV_LONGOPTS
+    } else {
+        UPDATE_LONGOPTS
+    };
+    let mut options = OptionScanner::new(args.get(1..).unwrap_or_default(), table);
+    for found in options.by_ref() {
+        let found = found?;
+        match found.key {
+            't' => {
                 template = Some(
-                    options
-                        .value()
+                    found
+                        .text()
                         .split(':')
                         .map(str::to_owned)
                         .collect::<Vec<_>>(),
                 );
             }
-            Ok('s') => skip_past_updates = true,
-            Ok('d') => daemon_address = Some(options.value().to_owned()),
-            Ok('L') => {
-                if !rondi::is_rrd_locking_mode(options.value()) {
-                    return Err(format!("unsupported locking mode '{}'\n", options.value()).into());
+            's' => skip_past_updates = true,
+            'd' => daemon_address = Some(found.text().to_owned()),
+            'L' => {
+                if !rondi::is_rrd_locking_mode(found.text()) {
+                    return Err(format!("unsupported locking mode '{}'\n", found.text()).into());
                 }
-                locking = options.value().to_owned();
+                locking = found.text().to_owned();
             }
-            Ok('?') => return Err(options.errmsg.into()),
             _ => {}
         }
     }
-    let [filename_text, samples @ ..] = options.positionals() else {
+    let [filename_text, samples @ ..] = options.operands() else {
         return Err("Not enough arguments".into());
     };
     if samples.is_empty() {
@@ -4907,18 +4395,16 @@ fn rrdtool_flushcached(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         return Ok(());
     }
     // rrd_flushcached.c:27.
-    const LONGOPTS: &[LongOpt] = &[opt("daemon", b'd' as i32, ArgType::Required)];
+    const LONGOPTS: &[OptionSpec<char>] = &[OptionSpec::value("daemon", Some('d'), 'd')];
     let mut daemon = None;
-    let mut options = OptParse::new(args.to_vec());
-    loop {
-        match options.long(LONGOPTS) {
-            optparse::DONE => break,
-            option if option == b'd' as i32 => daemon = Some(options.value().to_owned()),
-            optparse::ERROR => return Err(options.errmsg.into()),
-            _ => {}
+    let mut options = OptionScanner::new(args.get(1..).unwrap_or_default(), LONGOPTS);
+    for found in options.by_ref() {
+        let found = found?;
+        if found.key == 'd' {
+            daemon = Some(found.text().to_owned());
         }
     }
-    let files = options.positionals().to_vec();
+    let files = options.operands().to_vec();
     if files.is_empty() {
         return Err(format!(
             "Usage: rrdtool {} [--daemon|-d <addr>] <file> [<file> ...]",
@@ -5073,18 +4559,16 @@ fn rrdtool_last(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     // rrd_last.c:18.
-    const LONGOPTS: &[LongOpt] = &[opt("daemon", b'd' as i32, ArgType::Required)];
+    const LONGOPTS: &[OptionSpec<char>] = &[OptionSpec::value("daemon", Some('d'), 'd')];
     let mut daemon_address = None::<String>;
-    let mut options = OptParse::new(args.to_vec());
-    loop {
-        match options.long(LONGOPTS) {
-            optparse::DONE => break,
-            option if option == b'd' as i32 => daemon_address = Some(options.value().to_owned()),
-            optparse::ERROR => return Err(options.errmsg.into()),
-            _ => {}
+    let mut options = OptionScanner::new(args.get(1..).unwrap_or_default(), LONGOPTS);
+    for found in options.by_ref() {
+        let found = found?;
+        if found.key == 'd' {
+            daemon_address = Some(found.text().to_owned());
         }
     }
-    let [filename] = options.positionals() else {
+    let [filename] = options.operands() else {
         return Err(format!("Usage: rrdtool {} [--daemon|-d <addr>] <file>", args[0]).into());
     };
     if let Some(address) = daemon_address
@@ -5110,18 +4594,16 @@ fn rrdtool_lastupdate(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         return Ok(());
     }
     // rrd_lastupdate.c:19.
-    const LONGOPTS: &[LongOpt] = &[opt("daemon", b'd' as i32, ArgType::Required)];
+    const LONGOPTS: &[OptionSpec<char>] = &[OptionSpec::value("daemon", Some('d'), 'd')];
     let mut daemon_address = None::<String>;
-    let mut options = OptParse::new(args.to_vec());
-    loop {
-        match options.long(LONGOPTS) {
-            optparse::DONE => break,
-            option if option == b'd' as i32 => daemon_address = Some(options.value().to_owned()),
-            optparse::ERROR => return Err(options.errmsg.into()),
-            _ => {}
+    let mut options = OptionScanner::new(args.get(1..).unwrap_or_default(), LONGOPTS);
+    for found in options.by_ref() {
+        let found = found?;
+        if found.key == 'd' {
+            daemon_address = Some(found.text().to_owned());
         }
     }
-    let [filename] = options.positionals() else {
+    let [filename] = options.operands() else {
         return Err(format!("Usage: rrdtool {} [--daemon|-d <addr>] <file>", args[0]).into());
     };
     if let Some(address) = daemon_address
@@ -5154,29 +4636,28 @@ fn rrdtool_first(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     // rrd_first.c:18.
-    const LONGOPTS: &[LongOpt] = &[
-        opt("rraindex", 129, ArgType::Required),
-        opt("daemon", b'd' as i32, ArgType::Required),
+    const LONGOPTS: &[OptionSpec<char>] = &[
+        OptionSpec::value("rraindex", None, 'i'),
+        OptionSpec::value("daemon", Some('d'), 'd'),
     ];
     let mut archive_index = 0_i32;
     let mut daemon_address = None::<String>;
-    let mut options = OptParse::new(args.to_vec());
-    loop {
-        match options.long(LONGOPTS) {
-            optparse::DONE => break,
-            129 => {
+    let mut options = OptionScanner::new(args.get(1..).unwrap_or_default(), LONGOPTS);
+    for found in options.by_ref() {
+        let found = found?;
+        match found.key {
+            'i' => {
                 // rrd_first.c:33 stores strtol(optarg, &endptr, 0) in an int.
-                archive_index = rondi::c_strtol(options.value(), 0).0 as i32;
+                archive_index = rondi::c_strtol(found.text(), 0).0 as i32;
                 if archive_index < 0 {
                     return Err("invalid rraindex number".into());
                 }
             }
-            option if option == b'd' as i32 => daemon_address = Some(options.value().to_owned()),
-            optparse::ERROR => return Err(options.errmsg.into()),
+            'd' => daemon_address = Some(found.text().to_owned()),
             _ => {}
         }
     }
-    let Some(filename) = options.positionals().first() else {
+    let Some(filename) = options.operands().first() else {
         return Err(format!(
             "usage rrdtool {} [--rraindex number] [--daemon|-d <addr>] file.rrd",
             args[0]
@@ -5199,40 +4680,28 @@ fn rrdtool_first(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// rrd_tool.c:736-750 prints the time_t that rrd_first and rrd_last return,
-/// which is -1 on every error, before the ERROR line.
-fn print_minus_one_on_error(
-    result: Result<(), Box<dyn std::error::Error>>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if result.is_err() {
-        println!("-1");
-    }
-    result
-}
-
 fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
         print!("{}", include_str!("help/info.txt"));
         return Ok(());
     }
     // rrd_info.c:72.
-    const LONGOPTS: &[LongOpt] = &[
-        opt("daemon", b'd' as i32, ArgType::Required),
-        opt("noflush", b'F' as i32, ArgType::None),
+    const LONGOPTS: &[OptionSpec<char>] = &[
+        OptionSpec::value("daemon", Some('d'), 'd'),
+        OptionSpec::flag("noflush", Some('F'), 'F'),
     ];
     let mut daemon_address = None::<String>;
     let mut noflush = false;
-    let mut options = OptParse::new(args.to_vec());
-    loop {
-        match options.long(LONGOPTS) {
-            optparse::DONE => break,
-            option if option == b'd' as i32 => daemon_address = Some(options.value().to_owned()),
-            option if option == b'F' as i32 => noflush = true,
-            optparse::ERROR => return Err(options.errmsg.into()),
+    let mut options = OptionScanner::new(args.get(1..).unwrap_or_default(), LONGOPTS);
+    for found in options.by_ref() {
+        let found = found?;
+        match found.key {
+            'd' => daemon_address = Some(found.text().to_owned()),
+            'F' => noflush = true,
             _ => {}
         }
     }
-    let [filename] = options.positionals() else {
+    let [filename] = options.operands() else {
         return Err(format!(
             "Usage: rrdtool {} [--daemon |-d <addr> [--noflush|-F]] <file>",
             args[0]
@@ -5323,7 +4792,7 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     std::io::stdout().write_all(&out)?;
     match rondi::rrd_name_error(&info) {
-        Some(message) => Err(RawRrdError(message).into()),
+        Some(message) => Err(RawMessage(message).into()),
         None => Ok(()),
     }
 }
@@ -5334,10 +4803,10 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     // rrd_dump.c:556.
-    const LONGOPTS: &[LongOpt] = &[
-        opt("daemon", b'd' as i32, ArgType::Required),
-        opt("header", b'h' as i32, ArgType::Required),
-        opt("no-header", b'n' as i32, ArgType::None),
+    const LONGOPTS: &[OptionSpec<char>] = &[
+        OptionSpec::value("daemon", Some('d'), 'd'),
+        OptionSpec::value("header", Some('h'), 'h'),
+        OptionSpec::flag("no-header", Some('n'), 'n'),
     ];
     let usage = format!(
         "usage rrdtool {} [--header|-h {{none,xsd,dtd}}]\n[--no-header|-n]\n[--daemon|-d address]\nfile.rrd [file.xml]",
@@ -5345,16 +4814,18 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     );
     let mut header = RrdDumpHeader::Dtd;
     let mut daemon_address = None::<String>;
-    let mut options = OptParse::new(args.to_vec());
-    loop {
-        match options.long(LONGOPTS) {
-            optparse::DONE => break,
-            option if option == b'd' as i32 => daemon_address = Some(options.value().to_owned()),
-            option if option == b'n' as i32 => header = RrdDumpHeader::None,
+    let mut options = OptionScanner::new(args.get(1..).unwrap_or_default(), LONGOPTS);
+    for found in options.by_ref() {
+        let Ok(found) = found else {
+            return Err(usage.into());
+        };
+        match found.key {
+            'd' => daemon_address = Some(found.text().to_owned()),
+            'n' => header = RrdDumpHeader::None,
             // parse_opt_xmlheader returns -1 for other words, which
             // rrd_dump_opt_r writes like "none".
-            option if option == b'h' as i32 => {
-                header = match options.value() {
+            'h' => {
+                header = match found.text() {
                     "dtd" => RrdDumpHeader::Dtd,
                     "xsd" => RrdDumpHeader::Xsd,
                     _ => RrdDumpHeader::None,
@@ -5363,7 +4834,7 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             _ => return Err(usage.into()),
         }
     }
-    let positional = options.positionals().to_vec();
+    let positional = options.operands().to_vec();
     if !(1..=2).contains(&positional.len()) {
         return Err(usage.into());
     }
@@ -5382,7 +4853,9 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             // an error, so rrdtool reports nothing and exits 0.
             Err(OutputError::Open(_)) => return Ok(()),
             Err(OutputError::Write(errno)) => {
-                return Err(format!("error writing output file: {}", rrd_strerror(errno)).into());
+                return Err(
+                    format!("error writing output file: {}", system_error_text(errno)).into(),
+                );
             }
             Err(error) => return Err(error.into()),
         }
@@ -5392,7 +4865,7 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // rrd_dump_opt_r finishes the dump before rrd_tool.c sees the error
     // a rejected DS type or CF name left behind.
     match rondi::rrd_name_error(&inspect_rrd(&positional[0])?) {
-        Some(message) => Err(RawRrdError(message).into()),
+        Some(message) => Err(RawMessage(message).into()),
         None => Ok(()),
     }
 }
@@ -5407,25 +4880,24 @@ fn rrdtool_restore(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     static RANGE_CHECK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     static FORCE_OVERWRITE: std::sync::atomic::AtomicBool =
         std::sync::atomic::AtomicBool::new(false);
-    const LONGOPTS: &[LongOpt] = &[
-        opt("range-check", b'r' as i32, ArgType::None),
-        opt("force-overwrite", b'f' as i32, ArgType::None),
+    const LONGOPTS: &[OptionSpec<char>] = &[
+        OptionSpec::flag("range-check", Some('r'), 'r'),
+        OptionSpec::flag("force-overwrite", Some('f'), 'f'),
     ];
-    let mut options = OptParse::new(args.to_vec());
-    loop {
-        match options.long(LONGOPTS) {
-            optparse::DONE => break,
-            option if option == b'r' as i32 => {
+    let mut options = OptionScanner::new(args.get(1..).unwrap_or_default(), LONGOPTS);
+    for found in options.by_ref() {
+        let found = found?;
+        match found.key {
+            'r' => {
                 RANGE_CHECK.store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            option if option == b'f' as i32 => {
+            'f' => {
                 FORCE_OVERWRITE.store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            optparse::ERROR => return Err(options.errmsg.into()),
             _ => {}
         }
     }
-    let positional = options.positionals();
+    let positional = options.operands();
     if positional.len() != 2 {
         return Err(format!(
             "usage rrdtool {} [--range-check|-r] [--force-overwrite|-f] file.xml file.rrd",
@@ -5485,43 +4957,53 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     // rrd_tune.c:78. rrd_tune reads only --daemon in a first pass that
     // ignores errors; rrd_tune_r then applies every option in order.
-    const LONGOPTS: &[LongOpt] = &[
-        opt("heartbeat", b'h' as i32, ArgType::Required),
-        opt("minimum", b'i' as i32, ArgType::Required),
-        opt("maximum", b'a' as i32, ArgType::Required),
-        opt("data-source-type", b'd' as i32, ArgType::Required),
-        opt("data-source-rename", b'r' as i32, ArgType::Required),
-        opt("deltapos", b'p' as i32, ArgType::Required),
-        opt("deltaneg", b'n' as i32, ArgType::Required),
-        opt("window-length", b'w' as i32, ArgType::Required),
-        opt("failure-threshold", b'f' as i32, ArgType::Required),
-        opt("alpha", b'x' as i32, ArgType::Required),
-        opt("beta", b'y' as i32, ArgType::Required),
-        opt("gamma", b'z' as i32, ArgType::Required),
-        opt("gamma-deviation", b'v' as i32, ArgType::Required),
-        opt("smoothing-window", b's' as i32, ArgType::Required),
-        opt("smoothing-window-deviation", b'S' as i32, ArgType::Required),
-        opt("aberrant-reset", b'b' as i32, ArgType::Required),
-        opt("step", b't' as i32, ArgType::Required),
-        opt("daemon", b'D' as i32, ArgType::Required),
+    const LONGOPTS: &[OptionSpec<char>] = &[
+        OptionSpec::value("heartbeat", Some('h'), 'h'),
+        OptionSpec::value("minimum", Some('i'), 'i'),
+        OptionSpec::value("maximum", Some('a'), 'a'),
+        OptionSpec::value("data-source-type", Some('d'), 'd'),
+        OptionSpec::value("data-source-rename", Some('r'), 'r'),
+        OptionSpec::value("deltapos", Some('p'), 'p'),
+        OptionSpec::value("deltaneg", Some('n'), 'n'),
+        OptionSpec::value("window-length", Some('w'), 'w'),
+        OptionSpec::value("failure-threshold", Some('f'), 'f'),
+        OptionSpec::value("alpha", Some('x'), 'x'),
+        OptionSpec::value("beta", Some('y'), 'y'),
+        OptionSpec::value("gamma", Some('z'), 'z'),
+        OptionSpec::value("gamma-deviation", Some('v'), 'v'),
+        OptionSpec::value("smoothing-window", Some('s'), 's'),
+        OptionSpec::value("smoothing-window-deviation", Some('S'), 'S'),
+        OptionSpec::value("aberrant-reset", Some('b'), 'b'),
+        OptionSpec::value("step", Some('t'), 't'),
+        OptionSpec::value("daemon", Some('D'), 'D'),
     ];
     let mut daemon_address = None::<String>;
     // The settings in long form, for the daemon's TUNE command.
     let mut raw_settings = Vec::new();
-    let mut options = OptParse::new(args.to_vec());
-    loop {
-        match options.long(LONGOPTS) {
-            optparse::DONE => break,
-            option if option == b'D' as i32 => daemon_address = Some(options.value().to_owned()),
-            option => {
-                if let Some(longopt) = LONGOPTS.iter().find(|longopt| longopt.short == option) {
-                    raw_settings.push(format!("--{}", longopt.name));
-                    raw_settings.push(options.value().to_owned());
-                }
-            }
+    let mut first_pass = OptionScanner::new(args.get(1..).unwrap_or_default(), LONGOPTS);
+    for found in first_pass.by_ref() {
+        // The second pass reports option errors.
+        let Ok(found) = found else {
+            continue;
+        };
+        if found.key == 'D' {
+            daemon_address = Some(found.text().to_owned());
+        } else if let Some(spec) = LONGOPTS.iter().find(|spec| spec.key == found.key) {
+            raw_settings.push(format!("--{}", spec.long));
+            raw_settings.push(found.text().to_owned());
         }
     }
-    let Some(filename) = options.positionals().first().cloned() else {
+    let mut operands = first_pass.operands().to_vec();
+    // Compatibility: a long option left without its value at the end also
+    // drops the last operand before it, so `tune a.rrd --heartbeat`
+    // reports a missing file name while `tune a.rrd b.rrd --heartbeat`
+    // reports the missing value.
+    // Provenance: black-box compatibility test (CLI-31, cli-truncate-006
+    // to -011).
+    if first_pass.has_dangling_long() {
+        operands.pop();
+    }
+    let Some(filename) = operands.first().cloned() else {
         return Err("missing file name".into());
     };
     if let Some(address) = daemon_address
@@ -5571,29 +5053,27 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             .position(|source| source == name)
             .ok_or_else(|| format!("unknown data source name '{name}'"))
     };
-    // rrd_tune_r re-parses the argv the first pass permuted, so a trailing
-    // option without a value takes the file name as its value there.
-    let mut options = OptParse::new(options.permuted_argv().to_vec());
+    // The second pass sees the options before the operands, so a trailing
+    // short option without a value takes the file name as its value there.
+    let second_words = first_pass.rearranged();
+    let mut options = OptionScanner::new(&second_words, LONGOPTS);
     // rrd_tune.c:423: --step feeds handle_modify's stretch.
     let mut newstep: libc::c_int = -1;
     // rrd_tune_r edits the header through the file mapping, so settings
     // applied before a failing option stay written.
     let applied = (|| -> Result<(), Box<dyn std::error::Error>> {
-        loop {
-            let option = options.long(LONGOPTS);
-            if option == optparse::DONE {
-                break;
-            }
-            let value = options.value();
-            match u8::try_from(option).map(char::from) {
-                Ok('h') => {
+        for found in options.by_ref() {
+            let found = found?;
+            let value = found.text();
+            match found.key {
+                'h' => {
                     let Some((name, heartbeat)) = tune_scan_heartbeat(value) else {
                         return Err("invalid arguments for heartbeat".into());
                     };
                     let ds = ds_match(&current_names, &name)?;
                     changes[ds].heartbeat = Some(heartbeat as u64);
                 }
-                Ok(kind @ ('i' | 'a')) => {
+                kind @ ('i' | 'a') => {
                     let which = if kind == 'i' { "minimum" } else { "maximum" };
                     let bound = tune_scan_pair(value, c"%19[a-zA-Z0-9_-]:%40[U0-9.e+-]").and_then(
                         |(name, text)| {
@@ -5620,7 +5100,7 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                         changes[ds].maximum = Some(bound);
                     }
                 }
-                Ok('d') => {
+                'd' => {
                     let Some((name, kind)) = tune_scan_pair(value, c"%19[a-zA-Z0-9_-]:%19[A-Z]")
                     else {
                         return Err("invalid arguments for data source type".into());
@@ -5640,7 +5120,7 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     changes[ds].kind = Some(kind);
                 }
-                Ok('r') => {
+                'r' => {
                     let Some((name, new_name)) =
                         tune_scan_pair(value, c"%19[a-zA-Z0-9_-]:%19[a-zA-Z0-9_-]")
                     else {
@@ -5652,7 +5132,7 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 // Rondi opens no Holt-Winters file, so after the value checks
                 // these always find their RRA missing (rrd_tune.c:475-640).
-                Ok('p' | 'n') => {
+                'p' | 'n' => {
                     let (status, parsed) = cparse::rrd_strtodbl_status(value, None);
                     let param = parsed.unwrap_or_else(|_| cparse::rrd_strtod_prefix(value));
                     if matches!(status, 1 | 2) && param < 0.1 {
@@ -5663,14 +5143,14 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     return Err("Failures RRA does not exist in this RRD".into());
                 }
-                Ok('f' | 'w') => {
+                'f' | 'w' => {
                     let param = cparse::atoi(value) as libc::c_ulong;
                     if !(1..=28).contains(&param) {
                         return Err("Parameter must be between 1 and 28".into());
                     }
                     return Err("Failures RRA does not exist in this RRD".into());
                 }
-                Ok(kind @ ('x' | 'y' | 'z' | 'v' | 's' | 'S')) => {
+                kind @ ('x' | 'y' | 'z' | 'v' | 's' | 'S') => {
                     let (status, parsed) = cparse::rrd_strtodbl_status(value, None);
                     let param = parsed.unwrap_or_else(|_| cparse::rrd_strtod_prefix(value));
                     let out_of_range = if matches!(kind, 's' | 'S') {
@@ -5686,7 +5166,7 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     }
                     return Err("Holt-Winters RRA does not exist in this RRD".into());
                 }
-                Ok('b') => {
+                'b' => {
                     let Some(name) = tune_scan_name(value) else {
                         return Err("invalid argument for aberrant-reset".into());
                     };
@@ -5694,8 +5174,7 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     // Holt-Winters archives.
                     ds_match(&current_names, &name)?;
                 }
-                Ok('t') => newstep = cparse::atoi(value),
-                Ok('?') => return Err(options.errmsg.clone().into()),
+                't' => newstep = cparse::atoi(value),
                 _ => {}
             }
         }
@@ -5714,7 +5193,7 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     applied?;
 
     // rrd_tune.c:427. Only reached when an option consumed the file name.
-    if options.positionals().is_empty() {
+    if options.operands().is_empty() {
         for source in rondi::inspect_rrd_file(&filename)?.data_sources {
             if source.kind == "COMPUTE" {
                 return Err(
@@ -5739,7 +5218,7 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // The words after the file name are all classified and parsed before
     // anything changes (docs/compatibility/tune-modify.md, TM-8 to TM-13).
     let mut structure_ops = Vec::new();
-    for argument in options.positionals().get(1..).unwrap_or_default() {
+    for argument in options.operands().get(1..).unwrap_or_default() {
         if let Some(name) = argument
             .strip_prefix("DEL:")
             .filter(|name| !name.is_empty())
@@ -5907,22 +5386,21 @@ fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     // rrd_list.c:256.
-    const LONGOPTS: &[LongOpt] = &[
-        opt("daemon", b'd' as i32, ArgType::Required),
-        opt("noflush", b'F' as i32, ArgType::None),
-        opt("recursive", b'r' as i32, ArgType::None),
+    const LONGOPTS: &[OptionSpec<char>] = &[
+        OptionSpec::value("daemon", Some('d'), 'd'),
+        OptionSpec::flag("noflush", Some('F'), 'F'),
+        OptionSpec::flag("recursive", Some('r'), 'r'),
     ];
     let mut recursive = false;
     let mut daemon = None;
     let mut noflush = false;
-    let mut options = OptParse::new(args.to_vec());
-    loop {
-        match options.long(LONGOPTS) {
-            optparse::DONE => break,
-            option if option == b'd' as i32 => daemon = Some(options.value().to_owned()),
-            option if option == b'F' as i32 => noflush = true,
-            option if option == b'r' as i32 => recursive = true,
-            optparse::ERROR => return Err(options.errmsg.into()),
+    let mut options = OptionScanner::new(args.get(1..).unwrap_or_default(), LONGOPTS);
+    for found in options.by_ref() {
+        let found = found?;
+        match found.key {
+            'd' => daemon = Some(found.text().to_owned()),
+            'F' => noflush = true,
+            'r' => recursive = true,
             _ => {
                 return Err(format!(
                     "Usage: rrdtool {} [--daemon <addr> [--noflush]] <file>",
@@ -5932,7 +5410,7 @@ fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    let [directory] = options.positionals() else {
+    let [directory] = options.operands() else {
         return Err(format!(
             "Usage: rrdtool {} [--daemon <addr> [--noflush]] [--recursive] <directory>",
             args[0]
@@ -5973,8 +5451,8 @@ fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // newline and the command still succeeds.
     match rrd_list_r(recursive, &directory.to_string_lossy()) {
         Ok(Some(text)) => print!("{text}"),
-        Ok(None) => eprint!("{}", rrd_strerror(0)),
-        Err(errno) => eprint!("{}", rrd_strerror(errno)),
+        Ok(None) => eprint!("{}", system_error_text(0)),
+        Err(errno) => eprint!("{}", system_error_text(errno)),
     }
     Ok(())
 }
@@ -6432,7 +5910,7 @@ fn c_stat(path: &std::ffi::CStr) -> Result<libc::stat, libc::c_int> {
     unsafe {
         let mut status = std::mem::zeroed::<libc::stat>();
         if libc::stat(path.as_ptr(), &mut status) != 0 {
-            return Err(last_errno());
+            return Err(last_os_errno());
         }
         Ok(status)
     }
@@ -6453,7 +5931,7 @@ fn rrd_list_rec(
     unsafe {
         let dir = libc::opendir(c_dirname.as_ptr());
         if dir.is_null() {
-            return Err(last_errno());
+            return Err(last_os_errno());
         }
         loop {
             let entry = libc::readdir(dir);
