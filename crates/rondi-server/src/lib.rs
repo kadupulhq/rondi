@@ -410,18 +410,23 @@ impl PidFile {
             return Ok(None);
         };
         let display = path.display();
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            && let Err(error) = std::fs::create_dir_all(parent)
-        {
-            eprintln!(
-                "Failed to create pidfile directory '{}': {}",
-                parent.display(),
-                errno_text(&error)
-            );
-            return Err(PidFileFailed);
-        }
+        let make_parent = || {
+            let Some(parent) = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+            else {
+                return true;
+            };
+            std::fs::create_dir_all(parent)
+                .map_err(|error| {
+                    eprintln!(
+                        "Failed to create pidfile directory '{}': {}",
+                        parent.display(),
+                        errno_text(&error)
+                    );
+                })
+                .is_ok()
+        };
         let pid = std::process::id();
         let mut options = OpenOptions::new();
         options.write(true).create_new(true);
@@ -430,13 +435,25 @@ impl PidFile {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o644).custom_flags(libc::O_NOFOLLOW);
         }
-        let file = match options.open(&path) {
-            Ok(file) => file,
-            Err(error) => {
+        let created = if make_parent() {
+            options.open(&path).map_err(|error| {
                 eprintln!(
                     "rrdcached: can't create pid file '{display}' ({})",
                     errno_text(&error)
                 );
+            })
+        } else {
+            Err(())
+        };
+        let file = match created {
+            Ok(file) => file,
+            Err(()) => {
+                // check_pidfile reopens through open_pidfile, which repeats
+                // the directory creation and its message.
+                if !make_parent() {
+                    eprintln!("FATAL: Fail to create/open PID file ");
+                    return Err(PidFileFailed);
+                }
                 let existing = match read_pid_file(&path) {
                     Ok(existing) => existing,
                     Err(error) => {
@@ -1666,16 +1683,24 @@ pub async fn run(prepared: PreparedServer) -> Result<(), Box<dyn std::error::Err
 /// listeners in `args`. UPDATE is acknowledged after the accepted write is
 /// synced to the journal; file visibility follows a flush.
 pub async fn run_rrdcached(mut args: RrdcachedConfig) -> Result<(), Box<dyn std::error::Error>> {
-    let mut shutdown_signals = {
-        use tokio::signal::unix::{SignalKind, signal};
-        (
-            signal(SignalKind::interrupt())?,
-            signal(SignalKind::terminate())?,
-        )
-    };
+    let mut signals = rrdcached_listen::RRDCACHED_SIGNALS
+        .into_iter()
+        .map(|number| {
+            use tokio::signal::unix::{SignalKind, signal};
+            signal(SignalKind::from_raw(number)).map(|stream| (number, stream))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     rrdcached_listen::unblock_shutdown_signals();
+    // Without -o, do_log writes to stderr in the foreground, and only at
+    // upstream's default LOG_ERR level, so stdout stays empty and stderr
+    // carries no lifecycle chatter.
+    let default_level = if args.log_file.is_some() {
+        "info"
+    } else {
+        "error"
+    };
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
     if let Some(file) = args.log_file.take() {
         let _ = tracing_subscriber::fmt()
             .json()
@@ -1686,11 +1711,38 @@ pub async fn run_rrdcached(mut args: RrdcachedConfig) -> Result<(), Box<dyn std:
         let _ = tracing_subscriber::fmt()
             .json()
             .with_env_filter(filter)
+            .with_writer(std::io::stderr)
             .try_init();
     }
     // Without -b upstream has no base directory, so nothing is locked or
     // created in /tmp on its behalf.
-    let _store = args.root.as_deref().map(Store::open).transpose()?;
+    // Upstream needs no write access to -b; Rondi's ownership lock does, so
+    // a failure here is reported plainly and the published sockets removed.
+    let root = args.root.clone();
+    let socket_paths = args
+        .listeners
+        .iter()
+        .filter_map(|listener| match &listener.socket {
+            RrdcachedSocket::Unix { path, .. } => Some(path.clone()),
+            RrdcachedSocket::Tcp(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let _store = tokio::task::spawn_blocking(move || {
+        root.as_deref()
+            .map(Store::open)
+            .transpose()
+            .map_err(|error| {
+                for path in &socket_paths {
+                    let _ = std::fs::remove_file(path);
+                }
+                let root = root.as_deref().unwrap_or(Path::new(""));
+                format!(
+                    "rrdcached: cannot lock base directory '{}': {error}",
+                    root.display()
+                )
+            })
+    })
+    .await??;
     let base = RrdcachedBase::new(args.root.as_deref(), args.base_only)?;
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } == 0 && !base.confined() {
@@ -1839,8 +1891,22 @@ pub async fn run_rrdcached(mut args: RrdcachedConfig) -> Result<(), Box<dyn std:
                 })
                 .await??;
             }
-            _ = shutdown_signals.0.recv() => break,
-            _ = shutdown_signals.1.recv() => break,
+            number = next_rrdcached_signal(&mut signals) => {
+                tracing::info!(signal = number, "rrdcached_caught_signal");
+                match number {
+                    libc::SIGINT | libc::SIGTERM => break,
+                    // signal_receiver sets config_flush_at_shutdown before
+                    // shutting down, so USR2 drops pending values even
+                    // without -j.
+                    libc::SIGUSR1 | libc::SIGUSR2 => {
+                        if let Ok(mut queue) = queue.lock() {
+                            queue.flush_at_shutdown = number == libc::SIGUSR1;
+                        }
+                        break;
+                    }
+                    _ => {}
+                }
+            }
         }
     }
     // An idle client must not hold the final flush hostage. Connections stop
@@ -1889,6 +1955,20 @@ pub async fn run_rrdcached(mut args: RrdcachedConfig) -> Result<(), Box<dyn std:
     .await?;
     tracing::info!("rrdcached_stopped");
     Ok(())
+}
+
+async fn next_rrdcached_signal(
+    signals: &mut [(libc::c_int, tokio::signal::unix::Signal)],
+) -> libc::c_int {
+    std::future::poll_fn(|context| {
+        for (number, stream) in signals.iter_mut() {
+            if stream.poll_recv(context).is_ready() {
+                return std::task::Poll::Ready(*number);
+            }
+        }
+        std::task::Poll::Pending
+    })
+    .await
 }
 
 async fn flush_rrdcached_paths(
