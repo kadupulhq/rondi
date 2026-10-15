@@ -78,7 +78,7 @@
 
 		<params>
 		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
-		<seasonal_smooth_idx>0</seasonal_smooth_idx>
+		<seasonal_smooth_idx>1</seasonal_smooth_idx>
 		<dependent_rra_idx>1</dependent_rra_idx>
 		</params>
 		<cdp_prep>
@@ -102,7 +102,7 @@
 
 		<params>
 		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
-		<seasonal_smooth_idx>0</seasonal_smooth_idx>
+		<seasonal_smooth_idx>1</seasonal_smooth_idx>
 		<dependent_rra_idx>1</dependent_rra_idx>
 		</params>
 		<cdp_prep>

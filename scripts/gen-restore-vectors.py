@@ -883,6 +883,11 @@ def digest(data):
     return "none" if data is None else hashlib.sha256(data).hexdigest()[:20]
 
 
+# Cases where the reference corrupts memory (RS-64): three runs can agree
+# on one machine and still differ on the next, so they are never pinned.
+UNSTABLE = {"dup-database"}
+
+
 def record(program, cases, runs=2):
     results = {}
     with tempfile.TemporaryDirectory() as work:
@@ -890,7 +895,7 @@ def record(program, cases, runs=2):
             seen = [run_case(program, case, work, pad) for pad in range(runs)]
             first = seen[0]
             flags = []
-            if any(other != first for other in seen[1:]):
+            if any(other != first for other in seen[1:]) or case.id.split("@")[0] in UNSTABLE:
                 flags.append("nondeterministic")
             if first["status"] in ("hang", "signal"):
                 flags.append(first["status"])

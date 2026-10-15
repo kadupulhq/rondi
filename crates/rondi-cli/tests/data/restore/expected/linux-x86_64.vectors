@@ -2674,20 +2674,20 @@ signal
 
 @@ dup-database stderr 0
 
-@@ dup-database file 4
-none
-@@ dup-database flags 6
-signal
+@@ dup-database file 9
+undefined
+@@ dup-database flags 23
+nondeterministic signal
 @@ dup-database@stdin status 6
 signal
 @@ dup-database@stdin stdout 0
 
 @@ dup-database@stdin stderr 0
 
-@@ dup-database@stdin file 4
-none
-@@ dup-database@stdin flags 6
-signal
+@@ dup-database@stdin file 9
+undefined
+@@ dup-database@stdin flags 23
+nondeterministic signal
 @@ v-self-closing status 1
 1
 @@ v-self-closing stdout 0

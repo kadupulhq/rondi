@@ -78,7 +78,7 @@
 
 		<params>
 		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
-		<seasonal_smooth_idx>0</seasonal_smooth_idx>
+		<seasonal_smooth_idx>2</seasonal_smooth_idx>
 		<smoothing_window>0.0000000000e+00</smoothing_window>
 		<dependent_rra_idx>1</dependent_rra_idx>
 		</params>
@@ -88,7 +88,7 @@
 			<secondary_value>0.0000000000e+00</secondary_value>
 			<seasonal>NaN</seasonal>
 			<last_seasonal>NaN</last_seasonal>
-			<init_flag>2</init_flag>
+			<init_flag>1</init_flag>
 			</ds>
 		</cdp_prep>
 		<database>
@@ -103,7 +103,7 @@
 
 		<params>
 		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
-		<seasonal_smooth_idx>0</seasonal_smooth_idx>
+		<seasonal_smooth_idx>2</seasonal_smooth_idx>
 		<smoothing_window>0.0000000000e+00</smoothing_window>
 		<dependent_rra_idx>1</dependent_rra_idx>
 		</params>
@@ -113,7 +113,7 @@
 			<secondary_value>0.0000000000e+00</secondary_value>
 			<seasonal>NaN</seasonal>
 			<last_seasonal>NaN</last_seasonal>
-			<init_flag>1</init_flag>
+			<init_flag>2</init_flag>
 			</ds>
 		</cdp_prep>
 		<database>

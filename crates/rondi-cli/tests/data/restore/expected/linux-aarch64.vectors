@@ -2528,26 +2528,16 @@ ERROR: ling 40: get_xml_double from ' 1' Numerical result out of range
 none
 @@ float-v-nbsp@stdin flags 0
 
-@@ dup-database status 6
-signal
-@@ dup-database stdout 0
-
-@@ dup-database stderr 0
-
-@@ dup-database file 4
-none
-@@ dup-database flags 6
-signal
 @@ dup-database@stdin status 6
 signal
 @@ dup-database@stdin stdout 0
 
 @@ dup-database@stdin stderr 0
 
-@@ dup-database@stdin file 4
-none
-@@ dup-database@stdin flags 6
-signal
+@@ dup-database@stdin file 9
+undefined
+@@ dup-database@stdin flags 23
+nondeterministic signal
 @@ v-self-closing status 1
 1
 @@ v-self-closing stdout 0

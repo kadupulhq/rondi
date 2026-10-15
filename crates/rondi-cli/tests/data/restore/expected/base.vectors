@@ -45,7 +45,7 @@
 @@ seed-hw stderr 0
 
 @@ seed-hw file 20
-0e169e5e76665c36e418
+2fc04a3c81bcc04571e6
 @@ seed-hw flags 0
 
 @@ seed-hw@stdin status 1
@@ -55,7 +55,7 @@
 @@ seed-hw@stdin stderr 0
 
 @@ seed-hw@stdin file 20
-0e169e5e76665c36e418
+2fc04a3c81bcc04571e6
 @@ seed-hw@stdin flags 0
 
 @@ seed-mhw status 1
@@ -65,7 +65,7 @@
 @@ seed-mhw stderr 0
 
 @@ seed-mhw file 20
-436b0044a40d32a445eb
+5a7a642394fe42f96162
 @@ seed-mhw flags 0
 
 @@ seed-mhw@stdin status 1
@@ -75,7 +75,7 @@
 @@ seed-mhw@stdin stderr 0
 
 @@ seed-mhw@stdin file 20
-436b0044a40d32a445eb
+5a7a642394fe42f96162
 @@ seed-mhw@stdin flags 0
 
 @@ seed-mini status 1
@@ -12073,16 +12073,16 @@ f5c59111780e6cd73b04
 f5c59111780e6cd73b04
 @@ drop-database@stdin flags 0
 
-@@ dup-database status 6
-signal
+@@ dup-database status 1
+0
 @@ dup-database stdout 0
 
 @@ dup-database stderr 0
 
 @@ dup-database file 9
 undefined
-@@ dup-database flags 23
-nondeterministic signal
+@@ dup-database flags 16
+nondeterministic
 @@ dup-database@stdin status 1
 0
 @@ dup-database@stdin stdout 0
