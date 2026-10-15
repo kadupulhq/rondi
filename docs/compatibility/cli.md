@@ -85,8 +85,8 @@ Before comparison both sides are normalized, line by line:
 | The work directory, given and canonical spellings, becomes `{CWD}` | `pwd` and `chdir` errors |
 | Consecutive lines starting with `d ` or `- ` are sorted | pipe-mode `ls` order is directory order (PM-22) |
 
-Vectors tagged `dir-order` list a directory with several entries of the
-same kind; their standard output is compared as a sorted set of lines
+Vectors tagged `dir-order` run `list`, which prints entries in directory
+order; their standard output is compared as a sorted set of lines
 (CLI-75). Vectors tagged `locale` need the `de_DE.UTF-8` locale and are
 skipped where it is missing. A vector whose `TZ` names a zone that
 `/usr/share/zoneinfo` lacks is compared only live, not frozen. A vector
@@ -523,15 +523,17 @@ floating point values use `%.10e` (`5.0000000000e-01`) except that NaN is
 `[<time>]RRA[<cf>][<rows>]DS[<name>] = <value>` line per consolidated
 value written, with `%.10e` values.
 
-**CLI-70** (doc, bb; must). `list <dir>` prints the names of the
-subdirectories of `<dir>` and then the names of the regular files whose
-name ends in `.rrd`, one per line, without a path prefix. Other files are
-not listed.
+**CLI-70** (doc, bb; must). `list <dir>` prints, one per line and without
+a path prefix, the name of every entry of `<dir>` that is a subdirectory
+or a regular file whose name ends in `.rrd`. Other files are not listed.
+Directories and files are not grouped: entries appear in directory order
+(CLI-75).
 
 **CLI-71** (doc, bb; must). `list -r <dir>` (`--recursive`) instead prints
-every `.rrd` file below `<dir>`, as a path relative to `<dir>`; the files
-of a subdirectory come before the files of its parent
-(`sub/deep/c.rrd`, `sub/b.rrd`, `a.rrd`).
+every `.rrd` file below `<dir>` as a path relative to `<dir>`
+(`sub/deep/c.rrd`). Directory names are not printed. A subdirectory's
+files are printed, recursively, at the position where the subdirectory
+appears in its parent's directory order.
 
 **CLI-72** (bb; must). A trailing `/` or a leading `./` in the directory
 does not change the output.
@@ -545,11 +547,15 @@ standard error and exits 0. For an empty directory the text is the
 platform's message for error number 0 (macOS `Undefined error: 0`, glibc
 `Success`).
 
-**CLI-75** (bb; should). Within each group (directories, files, and the
-files of each directory in recursive mode) entries appear in the order the
-operating system enumerates the directory, which differs between file
-systems. Vectors with several entries per group carry the tag `dir-order`
-and are compared as sorted lines.
+**CLI-75** (bb; should). Entries appear in the order the operating
+system enumerates the directory, which differs between file systems
+(macOS APFS and the overlay file systems of the recording and CI
+containers gave different orders for the
+same fixture). The reference does not sort. Every `list` vector carries
+the tag `dir-order` and is compared as a set of sorted lines, so the
+vectors pin which entries are printed, not their order. A replacement
+should keep the enumeration order rather than sort, so that it matches the
+reference on the same file system.
 
 **CLI-76** (bb; must). Opening a path that is not a valid RRD file fails
 with the error of the file layer: `opening '<path>': <system error>` for a
@@ -584,6 +590,7 @@ expectation stays RRDtool's.
 | `cli-truncate-014` to `-017` | CLI-35 | error messages are not cut to 4095 bytes |
 | `cli-commands-160` | CLI-39 | `graph /dev/null` with no elements prints `0x0` |
 | `cli-locale-002`, `-006`, `-010` | CLI-49 | `info` ignores the numeric locale |
+| `pipe-session-143`, `-144`, `-146` (Linux aarch64 only) | PM-10 | trims bytes 128 to 255 at line ends and prints U+FFFD for them |
 
 Pipe-mode and format divergences are listed in
 [pipe-mode.md](pipe-mode.md) and [format-strings.md](format-strings.md).

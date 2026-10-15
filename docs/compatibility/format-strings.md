@@ -352,4 +352,4 @@ expectation stays RRDtool's:
 |---|---|---|
 | `format-badprint-041`, `-042`, `format-badgprint-041`, `-042`, `format-bounds-020` | FS-10 | rejects widths and precisions above its own limit as an invalid format |
 | `format-bounds-003`, `-006`, `-009`, `-012`, `-015`, `-018`, `-021`, `-032` to `-035` | FS-34 | prints an empty line when the `strftime` result is long |
-| `format-duration-048` | FS-45 | modulo seconds of 10^20 ms differ from macOS |
+| `format-duration-048` (macOS, Linux aarch64) | FS-45 | modulo seconds of 10^20 ms differ; Rondi matches Linux x86_64 |

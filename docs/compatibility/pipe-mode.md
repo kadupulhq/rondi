@@ -228,6 +228,6 @@ Vectors that fail against Rondi at the time of writing are listed in
 reason; the expectation stays RRDtool's. For pipe mode they are the
 daemon fallback of [cli.md](cli.md) CLI-42 (`pipe-env-001`, `-002`,
 `pipe-session-132`), the 4095-byte message limit (`pipe-session-121`),
-non-UTF-8 bytes in error messages (`pipe-session-117`, and the
-end-of-line trimming of high bytes where the platform trims them), and
-`ls`/`list` ordering where it applies.
+non-UTF-8 bytes in error messages (`pipe-session-117`, `-145`), and on
+Linux aarch64 the end-of-line trimming of bytes 128 to 255, which Rondi
+applies on every platform (`pipe-session-143`, `-144`, `-146`).
