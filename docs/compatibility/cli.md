@@ -89,8 +89,11 @@ Vectors tagged `dir-order` run `list`, which prints entries in directory
 order; their standard output is compared as a sorted set of lines
 (CLI-75). Vectors tagged `locale` need the `de_DE.UTF-8` locale and are
 skipped where it is missing. A vector whose `TZ` names a zone that
-`/usr/share/zoneinfo` lacks is compared only live, not frozen. A vector
-tagged `binary-stdout` stores only
+`/usr/share/zoneinfo` lacks is compared only live, not frozen, and so is a
+vector tagged `host-tz` on Linux (FS-35). A vector that is neither frozen-
+nor live-compared on a host is skipped there, and a known divergence that
+was not compared is not reported as fixed. A vector tagged
+`binary-stdout` stores only
 the byte count of standard output. Vectors tagged `undefined` only require
 Rondi to finish without a signal or a timeout.
 

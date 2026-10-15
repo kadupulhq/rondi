@@ -270,8 +270,10 @@ should reproduce the platform's text.
 
 **FS-35** (bb; must). `TZ` selects the zone of `strftime`: an empty
 value or an unknown name falls back to UTC, with `%Z` printing `UTC`
-(macOS), `Universal` (glibc, empty `TZ`) or the given name (glibc, unknown
-zone `Not/AZone` prints `Not`). POSIX rule strings work
+(macOS), the name the host's time zone database gives UTC (glibc, empty
+`TZ`: `Universal` on Debian, `UTC` on the Ubuntu CI runner; the vector is
+tagged `host-tz` and frozen on macOS only) or the given name (glibc,
+unknown zone `Not/AZone` prints `Not`). POSIX rule strings work
 (`<+0530>-5:30` prints `+0530`).
 
 **FS-36** (bb; must). `LC_TIME` (or `LC_ALL`, or `LANG`) changes names and
