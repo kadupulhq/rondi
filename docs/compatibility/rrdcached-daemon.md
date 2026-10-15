@@ -58,19 +58,47 @@ after a failing one clears the failure: `-P BOGUS -P PING` prints the
 `-P` message and then serves with only `PING` allowed (`opt-042`). An
 empty `-P ''` serves without restriction (`opt-047`).
 
-*Rondi difference (known defect)*: `-V LOG_DEBUG` is validated but not
-applied; the reference then logs its lifecycle messages (`starting up`,
+With `-V LOG_INFO` or above the lifecycle messages (`starting up`,
 `listening for connections`, `caught SIGTERM`, `starting shutdown`,
-`clean shutdown; all RRDs flushed`, `goodbye`) on standard error in the
-foreground (`opt-040`). `-z` is validated but not applied (writes are not
-delayed). Rondi reports `File exists` where macOS reports `Not a directory`
-for a `-j` path that is a regular file (`opt-032`).
+`clean shutdown; all RRDs flushed`, `goodbye`) appear on standard error in
+the foreground; `caught <signal>` is at LOG_NOTICE (`opt-040`, RCD-50).
+
+**RCD-1a** (black-box; must). The options are read in order and an error
+does not always stop the reading:
+
+- `-w`, `-f` and `-z` errors, and each unknown `-P` name, set the exit
+  status and reading goes on; each known `-P` name sets it back to 0.
+- `-h` sets the status to 1 and an unknown option or missing argument to 0;
+  each of them prints the usage text once more, and the process then exits
+  with the final status (`-w 0 -h` exits 1, `-h -w 0` exits 2, `-hx` prints
+  the usage twice).
+- `-a`, `-b`, `-G`, `-j`, `-m`, `-o`, `-s`, `-t` and `-U` errors stop the
+  reading at once; the RCD-2 warnings are then not printed. An empty `-t`
+  or `-a` prints `Missing argument for -t` (`-a`).
+- After an unknown letter in a group the rest of the word is skipped and
+  the next option word is read from that letter's position instead of its
+  first letter: `-gx -abc` reads `-b c`, and `-gx -h` reports an empty name
+  (`invalid option -- '` and a newline, the text ending at the NUL byte).
+- `-U` and `-G` take a name or a number read like C `strtoul` over the whole
+  value (white space and a sign allowed, an empty value is 0, wrapped to
+  32 bits); `-s` takes a name or a number read like C `atoi`, where 0 is
+  refused. The id must exist in the account database.
+- A pid file that cannot be created is still opened: `-p ''` prints both
+  `can't create pid file '' (No such file or directory)` and
+  `can't open pid file '' (No such file or directory)`.
 
 **RCD-2** (black-box; must). Warnings that do not stop startup, on
 standard error: `WARNING: flush interval (-f) should be at least 2x write
 interval (-w) !` when `-f` is less than twice `-w` (`opt-034`, `timer-003`);
-`WARNING: -R does not make sense without -B!` followed by
-`  Consult the rrdcached documentation` for `-R` without `-B` (`opt-038`).
+`WARNING: write delay (-z) should NOT be larger than write interval (-w) !`
+when `-z` exceeds `-w`; `WARNING: -B does not make sense without -b!` for
+`-B` without `-b`, or else `WARNING: -R does not make sense without -B!`
+for `-R` without `-B` (`opt-038`), each followed by
+`  Consult the rrdcached documentation`. They print in that order after
+the options are read, and the comparisons use the values as C `int`s, so
+`-w 2147483648` trips the `-z` warning. `-w`, `-f` and `-z` take decimal
+digits and an optional unit letter (`s`, `m`, `h`, `d`, `w`, `M` for 31
+days, `y` for 366 days); text after the unit letter is ignored.
 The defaults are `-w 300`, `-f 3600`, `-t 4`, `-a 1`.
 
 ## 2. Base directory
@@ -238,7 +266,8 @@ syslog (created 0644). Without `-g` messages go to syslog after the fork.
 Log text is not part of the contract.
 
 *Rondi difference (known defect)*: `-o` writes Rondi's structured log
-format and `-V` is not applied (RD-007).
+format, JSON lines whose message names the event (`rrdcached_started`,
+`rrdcached_stopped`), not the reference's text (RD-007).
 
 ## Resource bounds
 
