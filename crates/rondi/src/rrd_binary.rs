@@ -389,6 +389,21 @@ pub fn fetch_rrd_rows(
     )
 }
 
+/// [`fetch_rrd_rows`] on a file the caller opened, under a shared RRD lock
+/// released when the result is built. `path` names it in errors. As in
+/// `rrd_fetch_fn`, an end before the start fails only when the aligned
+/// range is empty.
+pub fn fetch_rrd_open_rows(
+    file: File,
+    path: &Path,
+    consolidation: &str,
+    start: i64,
+    end: i64,
+    resolution: u64,
+) -> Result<RrdFetchRows, StoreError> {
+    prepare_fetch(file, path, consolidation, start, end, resolution, None)
+}
+
 fn prepare_fetch(
     file: File,
     path: &Path,
@@ -978,29 +993,61 @@ pub fn update_rrd_text(
     arguments: &[&str],
     skip_past_updates: bool,
 ) -> (Vec<RrdUpdateSummary>, Result<(), StoreError>) {
+    let path = path.as_ref();
     let mut summaries = Vec::new();
-    let result = update_text_arguments(
-        path.as_ref(),
-        template,
-        arguments,
-        skip_past_updates,
-        &mut summaries,
-    );
+    let result = if arguments.is_empty() {
+        // rrd_update.c:864-867
+        Err(StoreError::Rrd("Not enough arguments".into()))
+    } else {
+        open_rrd_write(path).and_then(|file| {
+            update_text_arguments(
+                file,
+                path,
+                template,
+                arguments,
+                skip_past_updates,
+                &mut summaries,
+            )
+        })
+    };
+    (summaries, result)
+}
+
+/// [`update_rrd_text`] on a file the caller opened read-write, so it can
+/// check the descriptor it writes through. `path` names it in errors.
+pub fn update_rrd_text_file(
+    file: File,
+    path: &Path,
+    template: Option<&str>,
+    arguments: &[&str],
+    skip_past_updates: bool,
+) -> (Vec<RrdUpdateSummary>, Result<(), StoreError>) {
+    let mut summaries = Vec::new();
+    let result = if arguments.is_empty() {
+        Err(StoreError::Rrd("Not enough arguments".into()))
+    } else {
+        update_text_arguments(
+            file,
+            path,
+            template,
+            arguments,
+            skip_past_updates,
+            &mut summaries,
+        )
+    };
     (summaries, result)
 }
 
 fn update_text_arguments(
+    file: File,
     path: &Path,
     template: Option<&str>,
     arguments: &[&str],
     skip_past_updates: bool,
     summaries: &mut Vec<RrdUpdateSummary>,
 ) -> Result<(), StoreError> {
-    // rrd_update.c:864-867
-    if arguments.is_empty() {
-        return Err(StoreError::Rrd("Not enough arguments".into()));
-    }
-    let mut file = RrdFileLock::exclusive(open_rrd_write(path)?)?;
+    let mut file = RrdFileLock::exclusive(file)?;
+    file.seek(SeekFrom::Start(0))?;
     let mut info = read_info(&mut file, path)?;
     let ds_count = info.data_sources.len();
     // parse_template (rrd_update.c:1073-1116): slot 0 is the time; each

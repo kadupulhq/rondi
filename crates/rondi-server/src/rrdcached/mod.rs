@@ -6,17 +6,34 @@
 //! rrdcached 1.11.0. The command line is read by the `rrdcached`
 //! personality of the `rondi` executable, which builds a [`DaemonConfig`]
 //! and calls [`run`]. Requests, the cache and the journal are reached only
-//! through the engine adapter in `engine.rs`.
+//! through the engine in `engine.rs`.
+//!
+//! The request protocol follows docs/compatibility/rrdcached.md (`RC-n`
+//! rules): `session.rs` reads requests and runs batches, `service.rs`
+//! holds the handlers and the shared cache, `files.rs` resolves names and
+//! applies `-B`, and `journal.rs` writes and replays the journal.
 
 mod accounts;
+mod cache;
+mod commands;
 mod config;
-mod daemon;
-mod engine;
+mod create;
+pub(crate) mod daemon;
+mod depth;
+pub(crate) mod engine;
+mod fetch;
+mod files;
+mod journal;
 mod listener;
+mod listing;
 mod log;
 mod paths;
 mod pidfile;
+mod protocol;
+mod service;
+mod session;
 mod signals;
+mod tune;
 
 pub use accounts::{lookup_group, lookup_socket_group, lookup_user};
 pub use config::{
@@ -192,7 +209,6 @@ pub fn run(config: DaemonConfig) -> i32 {
         max_pending_bytes: config.max_pending_bytes,
         write_interval: config.write_interval.timer_seconds(),
         flush_at_shutdown: config.flush_at_shutdown,
-        allocation_chunk: config.allocation_chunk,
         no_overwrite: config.no_overwrite,
         recursive_create: config.recursive_create,
     });

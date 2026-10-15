@@ -16,7 +16,6 @@ mod rrd_definitions;
 mod rrd_number;
 mod rrd_resize;
 mod rrd_restore;
-pub mod rrdc_proto;
 #[cfg(unix)]
 pub mod safe_fs;
 pub(crate) mod storage;
@@ -33,13 +32,13 @@ pub use rrd_binary::{
     RrdFetchRows, RrdInfo, RrdRawUpdate, RrdResizeAction, RrdTuneBound, RrdUpdateSummary,
     cf_conv_error, create_rrd_file, dst_conv_error, dump_rrd_file, dump_rrd_file_with_header,
     dump_rrd_file_with_header_bytes, dump_rrd_open_file, dump_rrd_open_file_bytes, fetch_rrd_file,
-    fetch_rrd_open_file, fetch_rrd_rows, first_rrd_time, first_rrd_time_from_info,
-    inspect_rrd_file, inspect_rrd_open_file, is_rrd_locking_mode, open_output_file,
-    parse_rrd_scaled_duration, rrd_name_error, tune_rrd_data_sources, tune_rrd_data_sources_file,
-    update_rrd_file, update_rrd_file_precise, update_rrd_raw_batch, update_rrd_raw_batch_file,
-    update_rrd_raw_values, update_rrd_raw_values_precise, update_rrd_raw_values_precise_verbose,
-    update_rrd_raw_values_verbose, update_rrd_text, update_rrd_values, update_rrd_values_verbose,
-    with_rrd_locking,
+    fetch_rrd_open_file, fetch_rrd_open_rows, fetch_rrd_rows, first_rrd_time,
+    first_rrd_time_from_info, inspect_rrd_file, inspect_rrd_open_file, is_rrd_locking_mode,
+    open_output_file, parse_rrd_scaled_duration, rrd_name_error, tune_rrd_data_sources,
+    tune_rrd_data_sources_file, update_rrd_file, update_rrd_file_precise, update_rrd_raw_batch,
+    update_rrd_raw_batch_file, update_rrd_raw_values, update_rrd_raw_values_precise,
+    update_rrd_raw_values_precise_verbose, update_rrd_raw_values_verbose, update_rrd_text,
+    update_rrd_text_file, update_rrd_values, update_rrd_values_verbose, with_rrd_locking,
 };
 pub use rrd_create::{CreateOptions, create_rrd};
 #[cfg(unix)]

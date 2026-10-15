@@ -400,11 +400,6 @@ without normalization. `a.rrd` and `{ROOT}/b/a.rrd` share an entry;
 `sub/../a.rrd`, `./a.rrd` and `link.rrd` each get their own entry, which
 reads the file's last update time on creation. (`update-018`, `update-019`.)
 
-*Rondi difference (known defect)*: Rondi keys entries by the canonical
-path, so these spellings share one entry and the second update with the
-same timestamp is refused. Listed under RD-007 and pinned as a `defect`
-divergence (`update-018`, `update-019`, `cache-010`).
-
 **RC-48** (documentation, black-box; must). `UPDATE` increments the STATS
 counter `UpdatesReceived` once per request, whether or not any value is
 accepted (RC-55).
@@ -437,9 +432,6 @@ answer before that write has finished; the vectors do not depend on it.
 `0 Started flush.` at once and schedules every entry with pending values
 for writing; it does not wait. Further fields are ignored. `FLUSHALL` does
 not count in `FlushesReceived` (`update-022`).
-
-*Rondi difference (known defect)*: Rondi counts `FLUSHALL` in
-`FlushesReceived`.
 
 **RC-52** (documentation, black-box; must). `PENDING <file>` answers
 `<n> updates pending` followed by the *n* queued values in arrival order,
@@ -659,9 +651,10 @@ configured` on macOS). *path* in these replies is the base directory joined
 with the requested path. Order of entries is not specified (see
 Normalization).
 
-*Rondi difference (known defect)*: Rondi does not follow symbolic links
-when listing (`list-003`, `list-030`) and gives `-1 Cannot read: <path>`
-for `/../` without `-B` (`list-048`).
+*Rondi policy (intentional difference)*: under `-B` Rondi follows no
+symbolic link inside the listed tree with `RECURSIVE` (`list-003`), and a
+listed path whose links lead out of the base directory lists nothing
+(`0 RRDs`).
 
 ## 13. SUSPEND and RESUME
 
@@ -764,7 +757,7 @@ removed).
 `scripts/rrdcached-spec-vectors.py --record-rondi` assigns each case to the
 first matching entry of `DIVERGENCE_RULES` and fails on a divergence no
 entry explains; the note of each entry is stored with the case. At the time
-of writing (128 cases):
+of writing (104 cases):
 
 | Class | Cases | Rule | Difference |
 |---|---|---|---|
@@ -782,17 +775,105 @@ of writing (128 cases):
 | policy | 17 `opt-*` cases, `opt-037` | RCD-3, RCD-5 | Unix sockets 0600 without `-m`/`-s`; new `-b` directories 0750 |
 | policy | `pid-005` | RCD-11 | a live socket is refused, not replaced |
 | policy | 29 `signal-*` and `journal-*` cases | RCD-30 | journal files 0600 |
-| defect | 18 cases naming `a.rrd/` | RC-30 | trailing slash after a file name ignored |
-| defect | `update-018`, `update-019`, `cache-010` | RC-47 | cache keyed by canonical path |
-| defect | `update-022` | RC-51 | `FLUSHALL` counted in `FlushesReceived` |
 | defect | `create-043` to `create-046` | RC-80 | `CREATE -r`, `-t`, COMPUTE and Holt-Winters refused |
-| defect | `list-030` | RC-100 | `LIST RECURSIVE` does not follow directory links |
-| defect | `list-048` | RC-100 | wrong error text for `/../` without `-B` |
 | defect | `update-015`, `fetch-002`, `fetch-005`, `fetch-006`, `fetch-008` (x86_64 only) | RC-70 | stored NaN sign not kept |
 
 Some entries also carry per-platform variants of Rondi's result
-(`rondi.expect_platform`): on Linux the trailing-slash cases and the NaN
-signs differ from macOS.
+(`rondi.expect_platform`): on Linux x86_64 the NaN signs differ from
+macOS.
+
+Rondi policies that no vector shows, because the reference cannot be
+driven into them on the fixture tree:
+
+- `UPDATE`, `FLUSH` and the write threads write only through a regular
+  file with one link, and a daemon running as root only through a file
+  owned by root; anything else is refused (`TUNE`: `-1 Got error opening
+  ...`) or, for queued values, dropped and logged.
+- Under `-B` a `..` component is refused like `../` (`sub/..`), and
+  journal replay applies `-B` to the names it reads: a record outside the
+  base directory counts in `UpdatesReceived` and queues nothing.
+- Values whose estimated memory would pass the bound (64 MiB by default)
+  are refused with `-1 Pending updates exceed the daemon's memory limit;
+  retry later` before they are journaled; a journal that replays past the
+  bound stops startup.
+- `CREATE` never replaces `.rondi.lock` or `rondi.journal` (Rondi's store
+  files) and refuses a name ending in `/` that names a directory with
+  `-1 RRD Error: I/O error: Is a directory (os error 21)`.
+- `FETCH` and `FETCHBIN` answer at most 10 million rows
+  (`-1 rrd_fetch_r failed: RRD fetch output exceeds the 10000000 row
+  safety limit`) and send them as they are formatted. `LIST` descends at
+  most 64 directories, never into one it is already listing, and stops
+  with `E2BIG` (`Argument list too long`) past 1,048,576 names.
+- Journal `wrote` and `forget` lines write the name as a request field
+  (a space or backslash is escaped), so a name holding a space replays as
+  itself; for other names the line is the reference's. Values that arrive
+  while an entry is being written are journaled again after its `wrote`
+  line, so a replay does not drop them.
+- Journal replay reads each file in pieces and skips a line longer than
+  8192 bytes and a file that is a symbolic link.
+
+## Rules settled by black-box runs during the rewrite
+
+The reimplementation of the request handlers found the behaviors below,
+which the rules above did not state. Each was observed on
+`/opt/homebrew/bin/rrdcached` 1.11.0 with
+`scripts/rrdcached-spec-vectors.py`'s fixture tree and step runner, and is
+pinned by the vector or test named.
+
+- **RC-12a, Rondi's answer.** A field whose backslash is the line's last
+  byte is dropped. A command word dropped this way closes the connection
+  without a reply; a dropped argument is missing, so `LAST a.rrd\` is the
+  usage reply and `HELP PING\` the overview (`frame-030`).
+- **RC-41, RC-48.** A request without a file name is only a usage error and
+  counts nowhere; once the name is present the request counts in
+  `UpdatesReceived`, also when `-B` refuses it. `UPDATE <file>` without
+  values creates the entry and journals the line before answering
+  `-1 No values updated.`. Leading white space before a timestamp is
+  skipped; `inf`, `nan` and hexadecimal forms are refused; the number
+  converts as `rrdtool update` converts decimals, so `1000000300.123456789`
+  and `1000000300.1234567891` are different times while
+  `1000000300.1234567891` and `1000000300.1234567892` are the same.
+- **RC-50.** `FLUSH` counts in `FlushesReceived` once its name is present,
+  inside `BATCH` too. `FETCH`, `FETCHBIN` and `DUMP` write the entry first
+  without counting.
+- **RC-61.** `LAST` uses the latest time the cache accepted for the file
+  when it has an entry, else the file's last update, rounded down to a
+  multiple of the file's step (`info-004`).
+- **RC-80.** Options are read anywhere among the words, also after a
+  definition (`DS:a -b 100 RRA:b` gives the 1980 error), and definitions
+  may come in any order; a trailing space or a lone `-` is a usage error.
+  Options are read before the start time is checked. A name ending in `/`
+  gives `-1 RRD Error: Cannot create temporary file` for a missing or
+  regular file.
+- **RC-90.** The file is opened read-write before the options are read, so
+  its errors come first. Each option reads `name:value` before looking the
+  name up; a name has 1 to 19 bytes. `-i` and `-a` take `U` alone or a
+  finite number with trailing text ignored. `-r` takes the leading run of
+  letters, digits, `_` and `-` of the new name, cut at 19 bytes. `-D` is
+  ignored and `-t` with a value of zero or less leaves the step alone. On
+  a file without Holt-Winters archives, `-x`, `-y`, `-z` and `-v` check
+  that the value parses (`Unable to parse Holt-Winters parameter`) and lies
+  strictly between 0 and 1 (`Holt-Winters parameter must be between 0 and
+  1`), `-s` and `-S` check only that it parses, and all six then give
+  `Holt-Winters RRA does not exist in this RRD`; `-f` and `-w` need a value
+  from 1 to 28 (`Parameter must be between 1 and 28`) and `-p`, `-n`, `-f`
+  and `-w` give `Failures RRA does not exist in this RRD`; `-b <name>`
+  checks the name and succeeds. (defect-or-undefined) After a failed
+  request on the same connection the reference answers `-b` with that
+  failure's text again; Rondi answers `0 Success`. Long options must be spelled out
+  (`--heart` is `invalid option -- 'heart'`).
+- **RC-100.** With `RECURSIVE` the path need not start with `/`, and is
+  joined to the base with one `/` (`LIST RECURSIVE sub`). A path holding
+  `..` anywhere is refused with `-1 List <path>: Permission denied`; under
+  `-B` one holding `../` gives `Cannot read:` first. A path ending in
+  `.rrd` that names a symbolic link answers `0 RRDs`. Names starting with
+  `.` are listed like any other.
+- **RC-112, shutdown.** A suspended entry is not written at shutdown, by
+  SIGTERM or SIGUSR1 (see rrdcached-daemon.md RCD-20).
+
+Verification of these rules is in `rrdcached_protocol_parity.rs`
+(`settled_rules_match_upstream`), the vectors, and the unit tests of
+`crates/rondi-server/src/rrdcached/`.
 
 ## Rules by provenance
 

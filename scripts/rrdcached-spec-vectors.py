@@ -907,24 +907,10 @@ DIVERGENCE_RULES: list[tuple[object, str, str]] = [
      'CREATE refuses to replace a directory, link or special file (RC-31).'),
     (lambda c: _has(c, 'CREATE  -b'), 'policy',
      'CREATE refuses an empty file name (RC-31).'),
-    (lambda c: _has(c, ' a.rrd/ ', ' a.rrd/\n'), 'defect',
-     'Rondi ignores a trailing slash after a file name; the reference fails '
-     'with ENOTDIR (RC-30).'),
-    (lambda c: c['id'] in ('update-018', 'update-019', 'cache-010'), 'defect',
-     'Rondi keys the cache by canonical path, so differently spelled names '
-     'share one entry (RC-47).'),
-    (lambda c: _has(c, 'FLUSHALL') and _has(c, 'STATS'), 'defect',
-     'Rondi counts FLUSHALL in FlushesReceived (RC-55).'),
     (lambda c: _has(c, ' -r a.rrd', ' -t a.rrd', 'COMPUTE', 'HWPREDICT'), 'defect',
      'Rondi refuses CREATE -r, -t, COMPUTE and Holt-Winters archives (RC-80).'),
     (lambda c: _has(c, 'LIST RECURSIVE /\n') and '-B' in _argv(c), 'policy',
      'Under -B Rondi does not follow symbolic links when listing (RC-100).'),
-    (lambda c: _has(c, 'LIST RECURSIVE /\n'), 'defect',
-     'Rondi does not follow symbolic links to directories in LIST RECURSIVE '
-     '(RC-100).'),
-    (lambda c: _has(c, 'LIST /../'), 'defect',
-     'Rondi answers "Cannot read" for a LIST path that escapes the base '
-     'directory without -B (RC-100).'),
     (lambda c: '{ROOT}/new/base' in _argv(c), 'policy',
      'Rondi creates missing -b components with mode 0750 and Unix sockets '
      'with mode 0600 (RCD-3, RCD-5).'),

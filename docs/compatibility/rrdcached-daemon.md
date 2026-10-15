@@ -206,7 +206,8 @@ pending values, after an `UPDATE` that is still pending (`signal-*`):
 | SIGUSR2 | lost | kept in the journal, not written | kept in the journal, not written | lost |
 
 The exit status is 0 in every case and nothing is printed at the default
-log level.
+log level. An entry suspended with `SUSPEND` or `SUSPENDALL` is not written
+by any of these signals (black-box run, rrdcached.md RC-112).
 
 **RCD-21** (black-box; must). SIGHUP, SIGPIPE and SIGALRM do not stop the
 daemon; it keeps serving (`signal-017` to `signal-019`).
@@ -215,15 +216,19 @@ daemon; it keeps serving (`signal-017` to `signal-019`).
 
 **RCD-30** (documentation, black-box; must). With `-j <dir>` the daemon
 appends to a journal file named `rrd.journal.<seconds>.<microseconds>` in
-*dir*. Each accepted `UPDATE` request adds one line `update <name as sent>
-<values as sent separated by spaces>`; a completed write adds
+*dir*. Each `UPDATE` request whose file name passes the file check adds
+one line, `update ` followed by the request's text after the command word
+exactly as sent (escapes, double spaces and values that were then refused
+included; `journal-004`, black-box run); a completed write adds
 `wrote <resolved path>`; `FORGET` adds `forget <resolved path>`
 (`journal-004`, `journal-005`). Lines are buffered: the file may be empty
 until the buffer is written, at the latest at shutdown. `JournalBytes` in
 `STATS` counts the bytes once written out (rrdcached.md RC-55). A missing
 `-j` directory exits 6 with `Unable to resolve journal path (<dir>,No such
-file or directory)`; a path through a file exits 6 with `Failed to create
-journal directory '<dir>': Not a directory`.
+file or directory)`; a path that resolves to something other than a
+directory exits 6 with `Failed to create journal directory '<real path>':
+Not a directory`, naming the file a symbolic link points to (black-box
+run; `rrdcached_journal_directory_errors_match_upstream`).
 
 *Rondi policy (intentional difference)*: journal files are created with
 mode 0600 (the reference uses 0644 under umask 022), opened without
@@ -231,6 +236,10 @@ following symbolic links, and must be single-link regular files owned by
 the daemon user; a `-j` directory writable by group or others is neither
 replayed nor written unless it is sticky and owned by the daemon user.
 Every journal case records this as a `policy` divergence on the file mode.
+`wrote` and `forget` lines escape a space or backslash in the name as a
+request field would, so a name holding a space replays as itself (the
+reference writes it raw); values accepted while an entry was being written
+are journaled again after its `wrote` line.
 
 **RCD-31** (documentation, black-box; must). At startup every file in the
 journal directory whose name starts with `rrd.journal` is replayed in name
@@ -240,6 +249,9 @@ but not in `JournalBytes`. The replayed files stay in place and a new
 journal file is started (`journal-007`). A file named exactly
 `rrd.journal` is renamed to `rrd.journal.0001` and replayed
 (`journal-028`). On a flushing shutdown (RCD-20) journal files are removed.
+Each `-f` pass starts a new file and removes the files older than the
+previous one, so two generations remain; files replayed at startup belong
+to the first generation (`rrdcached_journal_shutdown_and_rotation_match_upstream`).
 
 **RCD-32** (black-box; must). Replay reads each LF-terminated line as a
 request: `update` (any case) queues values as an `UPDATE` would, with a
@@ -251,7 +263,9 @@ unknown words and other commands (`ping`, `PING`, `flush`) are skipped
 and replay continues. A carriage return before the LF is kept as part of
 the last value (`journal-026`; unlike a connection, RC-8). A last line
 without LF is not replayed (`journal-016`). Names are used as recorded,
-without `-B` checks. (`journal-009` to `journal-030`; each case's journal
+without `-B` checks. *Rondi policy*: under `-B` a recorded name outside the
+base directory counts in `UpdatesReceived` and queues nothing; a line longer
+than 8192 bytes is skipped. (`journal-009` to `journal-030`; each case's journal
 text is in its `write` step.)
 
 ## 7. Timers

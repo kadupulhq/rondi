@@ -523,3 +523,53 @@ fn requests_before_a_half_close_are_answered() {
     );
     daemon.wait().unwrap();
 }
+
+/// Rules the protocol rewrite settled by black-box runs
+/// (docs/compatibility/rrdcached.md, "Rules settled by black-box runs").
+#[test]
+fn settled_rules_match_upstream() {
+    let Some(work) = Work::new() else { return };
+    const D: &str = "DS:a:GAUGE:120:U:U RRA:AVERAGE:0.5:1:5";
+    let sessions = [
+        "UPDATE a.rrd 1000000310:1:2\nLAST a.rrd\n".to_owned(),
+        "UPDATE\nFLUSH\nSTATS\n".to_owned(),
+        "UPDATE sub/d.rrd\nSTATS\nPENDING sub/d.rrd\n".to_owned(),
+        "UPDATE sub/deep/f.rrd \t1000000300:1:2\nUPDATE sub/deep/f.rrd inf:1\n\
+         UPDATE sub/deep/f.rrd nan:1\nUPDATE sub/deep/f.rrd 1000000300.123456789:1\n\
+         UPDATE sub/deep/f.rrd 1000000300.1234567891:1\n\
+         UPDATE sub/deep/f.rrd 1000000300.1234567892:1\n"
+            .to_owned(),
+        "BATCH\nFLUSH a.rrd\n.\nSTATS\n".to_owned(),
+        "CREATE n1.rrd DS:a:GAUGE:120:U:U -b 100 RRA:AVERAGE:0.5:1:5\n".to_owned(),
+        "CREATE n2.rrd -b 1000000000 RRA:AVERAGE:0.5:1:5 DS:a:GAUGE:120:U:U -s 60\n\
+         LAST n2.rrd\n"
+            .to_owned(),
+        format!("CREATE n3.rrd -b 1000000000 - {D}\n"),
+        format!("CREATE n4.rrd -b 100 -z {D}\n"),
+        format!("CREATE a.rrd/ -b 1000000000 {D}\n"),
+        format!("CREATE missing.rrd/ -b 1000000000 {D}\n"),
+        "TUNE missing.rrd 2 tune -q\n".to_owned(),
+        // Upstream repeats an earlier failure's text for -b on the same
+        // connection, so it runs first on its own (RC-90 note).
+        "TUNE a.rrd 3 tune -b x\n".to_owned(),
+        "TUNE a.rrd 3 tune -x 0.5\nTUNE a.rrd 3 tune -x 2\nTUNE a.rrd 3 tune -x abc\n\
+         TUNE a.rrd 3 tune -s 1\nTUNE a.rrd 3 tune -f 29\nTUNE a.rrd 3 tune -p x\n\
+         TUNE a.rrd 3 tune -D foo\nTUNE a.rrd 3 tune -t 0\n\
+         TUNE a.rrd 3 tune --heart x:5\nTUNE a.rrd 3 tune -i x:U5\n\
+         TUNE a.rrd 3 tune -h abcdefghijklmnopqrst:5\n"
+            .to_owned(),
+        "TUNE sub/d.rrd 3 tune -r x:abcdefghijklmnopqrstuvwxyz\nINFO sub/d.rrd\n".to_owned(),
+        "TUNE sub/deep/f.rrd 3 tune -r x:bad!\nINFO sub/deep/f.rrd\n".to_owned(),
+        "LIST RECURSIVE sub\nLIST /x..y\nLIST /sub/..\nLIST RECURSIVE missing\n".to_owned(),
+    ];
+    let sessions = sessions.iter().map(String::as_bytes).collect::<Vec<_>>();
+    for options in [&["-B"][..], &[][..]] {
+        let observed = work.differential(options, &sessions);
+        assert!(
+            observed[0][0].ends_with("\n0 1000000200\n"),
+            "{}",
+            observed[0][0]
+        );
+        assert_same(&observed);
+    }
+}

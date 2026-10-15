@@ -316,6 +316,37 @@ fn rrdcached_base_directory_validation_matches_upstream() {
 }
 
 #[test]
+fn rrdcached_journal_directory_errors_match_upstream() {
+    if !upstream_rrdcached_available() {
+        oracle_skip!("skipping rrdcached -j differential: upstream tools are not installed");
+        return;
+    }
+    common::require_oracle();
+    let dir = tempfile::tempdir().unwrap();
+    let work = std::fs::canonicalize(dir.path()).unwrap();
+    std::fs::create_dir_all(work.join("real")).unwrap();
+    std::fs::write(work.join("file"), b"").unwrap();
+    std::os::unix::fs::symlink(work.join("file"), work.join("file-link")).unwrap();
+    give_to_nobody(&work);
+    let path = |name: &str| work.join(name).to_str().unwrap().to_owned();
+    // A link to a file is reported by the file's real path (RCD-30).
+    let cases = [
+        String::new(),
+        path("missing"),
+        path("file"),
+        path("file-link"),
+        path("file/below"),
+        path("real/missing/below"),
+    ];
+    for journal in &cases {
+        let upstream = startup_outcome(&work, false, &["-j", journal]);
+        let observed = startup_outcome(&work, true, &["-j", journal]);
+        assert_eq!(observed, upstream, "-j {journal}");
+        assert_eq!(upstream.status, Some(6), "-j {journal}: {upstream:?}");
+    }
+}
+
+#[test]
 fn rrdcached_unwritable_base_directory_error_is_plain_and_leaves_no_socket() {
     use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
