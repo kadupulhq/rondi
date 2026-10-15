@@ -3,7 +3,7 @@ name = "rondi-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
-license = "GPL-2.0-or-later WITH RRDtool-FLOSS-exception-2.0"
+license = "MIT OR Apache-2.0"
 
 [package.metadata]
 cargo-fuzz = true

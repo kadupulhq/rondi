@@ -1,6 +1,8 @@
-RONDI - Rust-native round-robin storage and RRDtool compatibility
+RRDTOOL - Round Robin Database Tool
+A tool for fast logging of numerical data graphical display
+of this data.
 
-Copyright (c) 2026 Thomas Vincent
+Copyright (c) 1997-2019 Tobias Oetiker
 All rights reserved.
 
 GNU GPL License

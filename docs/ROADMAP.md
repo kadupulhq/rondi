@@ -13,7 +13,7 @@ The maintainer has decided the following. The work is in progress.
 - rrdcached implements `-U`, `-G`, and multiple `-l` options as upstream does.
 - After "Unable to connect to rrdcached", the client prints upstream's local-fallback text.
 - All behavior differences listed in COMPATIBILITY_DEFECTS.md are closed. Documented exceptions are limited to behavior that depends on undefined memory (see Risks).
-- Rondi is relicensed to match RRDtool: GPL-2.0-or-later with the RRDtool FLOSS exception. The license change merged in #45. Author audit, EXECUTED with `git log --format='%an <%ae>%n%(trailers:key=Signed-off-by,valueonly)'`: every human commit and sign-off is Thomas Vincent; the only other author is dependabot[bot], with two workflow SHA bumps (#33, #42).
+- Rondi is licensed `MIT OR Apache-2.0`, replacing the GPL-2.0-or-later plus RRDtool FLOSS exception terms from #45. RRDtool's notice stays in `COPYRIGHT` as third-party attribution. Author audit, EXECUTED with `git log --format='%an <%ae>%n%(trailers:key=Signed-off-by,valueonly)'`: every human commit and sign-off is Thomas Vincent; the only other author is dependabot[bot], with two workflow SHA bumps (#33, #42).
 - CI runs on GitHub-hosted runners.
 
 ## Method and labels
@@ -211,7 +211,7 @@ Nothing. EXECUTED: no `crate-type` in `crates/*/Cargo.toml`; no FFI, no headers.
 - Argc/argv entry points reuse the CLI option parser so behavior is identical, including `optind` reset.
 - Allocate `rrd_info_t` lists and fetch buffers with `libc::malloc`, so `rrd_info_free` and `rrd_freemem` (which call `free`) work.
 - `rrd_open` and `rrd_t` exposure sits on the layout descriptor from the format section. It is the hardest part; start with an error stub and inventory which consumers call it (`nm -D --undefined-only`).
-- License: with the relicense to GPL-2.0-or-later plus the RRDtool FLOSS exception (#45; author audit above), a Rondi `librrd` can carry the same terms as upstream. This is not legal advice.
+- License: Rondi is `MIT OR Apache-2.0`, while upstream `librrd` is GPL-2.0-or-later with the FLOSS exception. Parts of Rondi translate RRDtool C source, so the terms a Rondi `librrd` can ship under need the owner's confirmation. This is not legal advice.
 
 ### Effort
 
@@ -321,7 +321,7 @@ RRDProxy (RD-008) is a Cacti protocol, not part of RRDtool. Track it outside thi
 3. **Platform-dependent output.** NaN text, `qsort` order, `printf` of `%le`, `strftime`, and locale week start differ by libc. Mitigation: generate expectations from the matching upstream build for each target; never write them by hand.
 4. **Time and locale.** `rrd_parsetime` and RPN calendar operators depend on `TZ`, DST tables, and `LC_TIME`. CI images often lack locales. Mitigation: a fixed locale and tzdata version in the CI image, and a frozen "now" in tests.
 5. **Dropping per-update sync.** Matching upstream removes a durability guarantee Rondi gives today. This is decided. Say so in the release notes.
-6. **Licensing.** Rondi is GPL-2.0-or-later with the RRDtool FLOSS exception (#45). The author audit found no contributor besides the maintainer and Dependabot, so no other consent is needed.
+6. **Licensing.** Rondi is `MIT OR Apache-2.0`. The author audit found no contributor besides the maintainer and Dependabot, so no other consent is needed for Rondi-authored code. Code translated from RRDtool keeps RRDtool's GPL-2.0-or-later plus FLOSS exception terms upstream; whether that is compatible with the dual license is for the owner to confirm.
 7. **32-bit `time_t`.** Some 32-bit distributions moved to 64-bit `time_t`, which changes `live_head_t`. Measure upstream per distribution build; do not assume (READ-ONLY concern).
 8. **Undefined upstream behavior.** `ROLL` above count 3 reads past the RPN stack (RD-005). Do not chase results that depend on stray memory; document the deviation. This is the only class of difference the goal allows.
 9. **Hosted-runner cost.** Moving CI to GitHub-hosted runners removes the self-hosted option for long fuzz and benchmark jobs. Run those on a schedule with a time limit, or add a runner later by a separate decision.
