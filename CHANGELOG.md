@@ -12,6 +12,7 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ### Changed
 
+- License Rondi under `MIT OR Apache-2.0`, replacing `GPL-2.0-or-later WITH RRDtool-FLOSS-exception-2.0`. `COPYRIGHT` now carries RRDtool's unmodified notice as third-party attribution, and the GPL version 2 text moves to `LICENSE-GPL-2.0` (#100).
 - Replace the library entry point `run(config)` with `prepare_server(config)`, called before threads start, and `run(prepared)`. Library callers must update (breaking API change) (#80).
 
 ### Fixed

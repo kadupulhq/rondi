@@ -49,7 +49,7 @@ Each pull request below merged to `main` with differential tests against RRDtool
 ### Open work in progress
 
 - #79 is a draft against `review/rrdtool-compatibility-baseline`, not `main` (EXECUTED: `gh pr view 79`). It reports 196 passing tests, so it predates most of the work above, and its diff is about 37,600 added lines. What it still adds over `main` has not been re-checked; it needs that check before it is rebased or split.
-- #99 (this documentation update) and #100 (the `MIT OR Apache-2.0` license) are open.
+- #99 (this documentation update) is open. #100, which licenses Rondi under `MIT OR Apache-2.0`, merged as `4018b7f`; the compatibility work above is unaffected by it.
 
 ## Surface: on-disk `.rrd` format (RD-001, RD-003, RD-004, RD-005)
 
