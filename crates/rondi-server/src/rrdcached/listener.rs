@@ -417,10 +417,9 @@ impl Stage {
         // Some C libraries cannot change a mode without following links;
         // the entry was just checked to be the bound socket in a directory
         // only this user can write, so the plain call is used then.
-        if !matches!(
-            error.raw_os_error(),
-            Some(libc::EOPNOTSUPP) | Some(libc::ENOTSUP)
-        ) {
+        // ENOTSUP and EOPNOTSUPP are one value on Linux and two on macOS.
+        let code = error.raw_os_error();
+        if code != Some(libc::EOPNOTSUPP) && code != Some(libc::ENOTSUP) {
             return Err(error);
         }
         if call(0) != 0 {
