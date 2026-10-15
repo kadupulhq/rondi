@@ -9,8 +9,12 @@ mod frontend;
 /// Options that only affect Cairo/Pango rendering are validated exactly as
 /// upstream validates them and then left unused.
 mod graph_options;
+/// Text of graph PRINT and GPRINT items, written from
+/// docs/compatibility/format-strings.md.
+mod print_format;
 
 use frontend::{OptionScanner, OptionSpec, RawMessage, last_os_errno, system_error_text};
+use print_format::{PrintOutcome, local_tm, printf_double as c_printf_double};
 
 use clap::{Parser, Subcommand};
 use rondi::time::{
@@ -1589,17 +1593,19 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         if buffered {
             image = Some(output.into_bytes());
         }
-        match print_calc(&mut im, si_base, force_utc, &mut info)? {
-            PrintCalc::Done(_) => {}
-            PrintCalc::Silent => return pending_error(&im),
+        if let PrintOutcome::Abandoned =
+            print_format::format_print_items(&mut im, si_base, force_utc, &mut info)?
+        {
+            return pending_error(&im);
         }
     } else {
         flush_and_prepare_data(&mut im)?;
-        let graph_elements = match print_calc(&mut im, si_base, force_utc, &mut info)? {
-            PrintCalc::Done(count) => count,
-            PrintCalc::Silent => return pending_error(&im),
-        };
-        // graph_paint stops after print_calc when nothing is drawn.
+        let graph_elements =
+            match print_format::format_print_items(&mut im, si_base, force_utc, &mut info)? {
+                PrintOutcome::Finished { draws } => draws,
+                PrintOutcome::Abandoned => return pending_error(&im),
+            };
+        // Nothing more is done when no element draws.
         if graph_elements {
             use rondi::graph_layout::{
                 ALTAUTOSCALE, ALTAUTOSCALE_MAX, ALTAUTOSCALE_MIN, FORCE_RULES_LEGEND,
@@ -2168,356 +2174,6 @@ struct RenderedGraphXport {
     end: i64,
     variables: Vec<String>,
     rows: Vec<Vec<Option<f64>>>,
-}
-
-enum PrintCalc {
-    /// Whether any element draws on the canvas.
-    Done(bool),
-    /// A formatter failed without setting an error; RRDtool returns from
-    /// the command with no output and status 0.
-    Silent,
-}
-
-/// `LOCALTIME_R(..., FORCE_UTC_TIME)` without `--utc`.
-fn local_tm(timestamp: i64) -> libc::tm {
-    let timestamp = timestamp as libc::time_t;
-    let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
-    unsafe { libc::localtime_r(&timestamp, &mut tm) };
-    tm
-}
-
-/// `LOCALTIME_R(..., FORCE_UTC_TIME)` with `--utc`.
-fn utc_tm(timestamp: i64) -> libc::tm {
-    let timestamp = timestamp as libc::time_t;
-    let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
-    unsafe { libc::gmtime_r(&timestamp, &mut tm) };
-    tm
-}
-
-fn c_strftime(format: &str, tm: &libc::tm, max: usize) -> Option<String> {
-    let format = std::ffi::CString::new(format).ok()?;
-    let mut buffer = vec![0_u8; max];
-    let length = unsafe { libc::strftime(buffer.as_mut_ptr().cast(), max, format.as_ptr(), tm) };
-    Some(String::from_utf8_lossy(&buffer[..length]).into_owned())
-}
-
-/// Port of `print_calc`: pushes `print[n]` info entries, writes GPRINT
-/// legends back into the elements, and resolves rule values.
-fn print_calc(
-    im: &mut rondi::graph::GraphImage,
-    si_base: u32,
-    force_utc: bool,
-    info: &mut GraphInfo,
-) -> Result<PrintCalc, Box<dyn std::error::Error>> {
-    use rondi::graph::{FMT_LEG_LEN, Gf, ValueFormatter};
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as i64;
-    let breakdown = if force_utc { utc_tm } else { local_tm };
-    let mut tmvdef = breakdown(now);
-    let mut graphelement = false;
-    let mut si_scale = GraphSiScale::new(si_base);
-    let mut prline_cnt = 0;
-    for i in 0..im.gdes.len() {
-        let vidx = im.gdes[i].vidx;
-        match im.gdes[i].gf {
-            Gf::Print | Gf::Gprint => {
-                let source = vidx.map(|vidx| &im.gdes[vidx]);
-                if let Some(source) = source.filter(|source| source.gf == Gf::Vdef) {
-                    tmvdef = breakdown(source.vf.when);
-                }
-                let printval = im.print_value(i);
-                let never = source.is_some_and(|source| source.vf.never);
-                let mut format = im.gdes[i].format.clone();
-                let element = &im.gdes[i];
-                // GPRINT writes into the FMT_LEG_LEN legend buffer: numeric
-                // formats through snprintf(FMT_LEG_LEN - 2), the `%.0f`
-                // timestamp fallback through snprintf(FMT_LEG_LEN).
-                let legend_limit = match (element.strftm, element.vformatter) {
-                    (false, ValueFormatter::Numeric) => FMT_LEG_LEN - 2,
-                    _ => FMT_LEG_LEN,
-                };
-                let text = if element.strftm {
-                    if never {
-                        Some(time_clean(&element.format))
-                    } else {
-                        // A result longer than the buffer leaves its
-                        // contents undefined; treat it as empty.
-                        Some(c_strftime(&element.format, &tmvdef, FMT_LEG_LEN).unwrap_or_default())
-                    }
-                } else {
-                    match element.vformatter {
-                        ValueFormatter::Numeric => {
-                            match format_graph_numeric(
-                                printval,
-                                &mut format,
-                                &mut si_scale,
-                                GraphPrintf::Libc,
-                            ) {
-                                Ok(text) => Some(text),
-                                Err(_) => {
-                                    return Err(format!(
-                                        "invalid format string '{format}' (should match '{BAD_FORMAT_PRINT_PATTERN}')"
-                                    )
-                                    .into());
-                                }
-                            }
-                        }
-                        ValueFormatter::Timestamp => {
-                            format_value_timestamp(printval, &element.format)
-                        }
-                        ValueFormatter::Duration => {
-                            format_value_duration(printval, &element.format)?
-                        }
-                    }
-                };
-                im.gdes[i].format = format;
-                let Some(text) = text else {
-                    return Ok(PrintCalc::Silent);
-                };
-                if im.gdes[i].gf == Gf::Print {
-                    info.push(format!("print[{prline_cnt}]"), InfoValue::Str(text));
-                    prline_cnt += 1;
-                } else {
-                    im.gdes[i].legend = truncate_c_buffer(text, legend_limit);
-                    graphelement = true;
-                }
-            }
-            Gf::Line | Gf::Area | Gf::Tick => graphelement = true,
-            Gf::Hrule => {
-                if im.gdes[i].yrule.is_nan() {
-                    im.gdes[i].yrule = vidx.map_or_else(rrd_nan, |vidx| im.gdes[vidx].vf.val);
-                }
-                graphelement = true;
-            }
-            Gf::Vrule => {
-                if im.gdes[i].xrule == 0 {
-                    im.gdes[i].xrule = vidx.map_or(0, |vidx| im.gdes[vidx].vf.when);
-                }
-                graphelement = true;
-            }
-            Gf::Stack => {
-                return Err("STACK should already be turned into LINE or AREA here".into());
-            }
-            _ => {}
-        }
-    }
-    Ok(PrintCalc::Done(graphelement))
-}
-
-const BAD_FORMAT_PRINT_PATTERN: &str =
-    "^(?:[^%]+|%%)*%[-+ 0#]?[0-9]*(?:[.][0-9]+)?l[eEfFgG](?:[^%]+|%%)*(?:%[sS])?(?:[^%]+|%%)*$";
-
-/// `VALUE_FORMATTER_TIMESTAMP` in print_calc: gmtime of the value truncated
-/// to whole seconds, or `%.0f` outside the `long long` range. `None` is a
-/// strftime failure, which RRDtool reports without an error message.
-fn format_value_timestamp(value: f64, format: &str) -> Option<String> {
-    // timestamp_to_tm (rrd_graph.c:1810) compares the truncated value with
-    // itself, so only the range check can reject a finite value.
-    if !value.is_finite() || value < i64::MIN as f64 || value > i64::MAX as f64 {
-        return Some(c_printf_double("%.0f", value));
-    }
-    let timestamp = value as i64 as libc::time_t;
-    let mut tm = unsafe { std::mem::zeroed::<libc::tm>() };
-    unsafe { libc::gmtime_r(&timestamp, &mut tm) };
-    let format = if format.is_empty() {
-        "%Y-%m-%d %H:%M:%S"
-    } else {
-        format
-    };
-    let text = c_strftime(format, &tm, rondi::graph::FMT_LEG_LEN)?;
-    (!text.is_empty()).then_some(text)
-}
-
-/// `VALUE_FORMATTER_DURATION` in print_calc.
-fn format_value_duration(
-    value: f64,
-    format: &str,
-) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    if !value.is_finite() {
-        return Ok(Some(c_printf_double("%f", value)));
-    }
-    let format = if format.is_empty() {
-        "%H:%02m:%02s"
-    } else {
-        format
-    };
-    strfduration(format, value)
-        .map(|text| Some(truncate_c_buffer(text, rondi::graph::FMT_LEG_LEN)))
-        .map_err(Into::into)
-}
-
-fn truncate_c_buffer(mut text: String, size: usize) -> String {
-    if text.len() >= size {
-        let mut cut = size - 1;
-        while !text.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        text.truncate(cut);
-    }
-    text
-}
-
-fn c_printf_double(format: &str, value: f64) -> String {
-    let format = std::ffi::CString::new(format).unwrap_or_default();
-    let mut buffer = [0 as libc::c_char; 512];
-    let length =
-        unsafe { libc::snprintf(buffer.as_mut_ptr(), buffer.len(), format.as_ptr(), value) };
-    let length = usize::try_from(length).unwrap_or(0).min(buffer.len() - 1);
-    let bytes = unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), length) };
-    String::from_utf8_lossy(bytes).into_owned()
-}
-
-/// Port of `strfduration` (rrd_graph.c): `duration` is in milliseconds.
-fn strfduration(format: &str, duration: f64) -> Result<String, String> {
-    let seconds = duration.abs() / 1000.0;
-    let minutes = seconds / 60.0;
-    let hours = minutes / 60.0;
-    let days = hours / 24.0;
-    let weeks = days / 7.0;
-    let mut output = String::new();
-    if duration < 0.0 {
-        output.push('-');
-    }
-    let bytes = format.as_bytes();
-    let mut f = 0;
-    while f < bytes.len() {
-        if bytes[f] != b'%' {
-            let ch = format[f..].chars().next().unwrap_or('?');
-            output.push(ch);
-            f += ch.len_utf8();
-            continue;
-        }
-        f += 1;
-        let zpad = bytes.get(f) == Some(&b'0');
-        if zpad {
-            f += 1;
-        }
-        let mut width = 0_i32;
-        if bytes.get(f).is_some_and(u8::is_ascii_digit) {
-            let digits = bytes[f..]
-                .iter()
-                .take_while(|byte| byte.is_ascii_digit())
-                .count();
-            width = format[f..f + digits].parse().unwrap_or(i32::MAX);
-            f += digits;
-        }
-        let mut precision = 0_i32;
-        if bytes.get(f) == Some(&b'.') {
-            f += 1;
-            let negative = bytes.get(f) == Some(&b'-');
-            let start = f + usize::from(negative || bytes.get(f) == Some(&b'+'));
-            let digits = bytes[start.min(bytes.len())..]
-                .iter()
-                .take_while(|byte| byte.is_ascii_digit())
-                .count();
-            if digits > 0 {
-                let value: i32 = format[start..start + digits].parse().unwrap_or(i32::MAX);
-                precision = if negative { -value } else { value };
-                if precision < 0 {
-                    return Err("Wrong duration format".into());
-                }
-                f = start + digits;
-            }
-        }
-        let value = match bytes.get(f) {
-            Some(b'%') => {
-                output.push('%');
-                f += 1;
-                continue;
-            }
-            Some(b'W') => weeks,
-            Some(b'd') => days - weeks.trunc() * 7.0,
-            Some(b'D') => days,
-            Some(b'h') => hours - days.trunc() * 24.0,
-            Some(b'H') => hours,
-            Some(b'm') => minutes - hours.trunc() * 60.0,
-            Some(b'M') => minutes,
-            Some(b's') => seconds - minutes.trunc() * 60.0,
-            Some(b'S') => seconds,
-            Some(b'f') => duration.abs() - seconds.trunc() * 1000.0,
-            _ => return Err("Wrong duration format".into()),
-        };
-        f += 1;
-        let scale = 10_f64.powi(precision);
-        let pval = (value * scale).trunc() / scale;
-        let spec = format!("%{}{width}.{precision}f", if zpad { "0" } else { "" });
-        output.push_str(&c_printf_double(&spec, pval));
-    }
-    Ok(output)
-}
-
-/// Port of `time_clean`: the strftime format with every conversion
-/// replaced by dashes of the expected width.
-fn time_clean(format: &str) -> String {
-    let bytes = format.as_bytes();
-    let mut result = Vec::with_capacity(bytes.len());
-    let mut j = 0;
-    while j < bytes.len() && j < rondi::graph::FMT_LEG_LEN - 1 {
-        if bytes[j] != b'%' {
-            result.push(bytes[j]);
-            j += 1;
-            continue;
-        }
-        let next = bytes.get(j + 1).copied().unwrap_or(0);
-        match next {
-            b'E' | b'O' => {
-                result.push(b'-');
-                j += 2;
-            }
-            b'C' | b'd' | b'g' | b'H' | b'I' | b'm' | b'M' | b'S' | b'U' | b'V' | b'W' | b'y' => {
-                result.extend_from_slice(b"--");
-                j += 1;
-            }
-            b'j' => {
-                result.extend_from_slice(b"---");
-                j += 1;
-            }
-            b'G' | b'Y' => {
-                result.extend_from_slice(b"----");
-                j += 1;
-            }
-            b'R' => {
-                result.extend_from_slice(b"--:--");
-                j += 1;
-            }
-            b'T' => {
-                result.extend_from_slice(b"--:--:--");
-                j += 1;
-            }
-            b'F' => {
-                result.extend_from_slice(b"----------");
-                j += 1;
-            }
-            b'D' => {
-                result.extend_from_slice(b"--/--/--");
-                j += 1;
-            }
-            b'n' => {
-                result.extend_from_slice(b"\r\n");
-                j += 1;
-            }
-            b't' => {
-                result.push(b'\t');
-                j += 1;
-            }
-            b'%' => {
-                result.push(b'%');
-                j += 1;
-            }
-            b' ' | b'.' | b'@' => {
-                result.push(b'%');
-                result.push(next);
-                j += 1;
-            }
-            _ => {
-                result.push(b'-');
-                j += 1;
-            }
-        }
-        j += 1;
-    }
-    String::from_utf8_lossy(&result).into_owned()
 }
 
 #[derive(Clone)]
@@ -3557,259 +3213,6 @@ fn draw_styled_line(
     f64::from(distance)
 }
 
-/// SI scaling state that RRDtool's print_calc shares across every PRINT and
-/// GPRINT of one graph.
-struct GraphSiScale {
-    base: u32,
-    magnitude: Option<f64>,
-    symbol: &'static str,
-}
-
-impl GraphSiScale {
-    fn new(base: u32) -> Self {
-        Self {
-            base,
-            magnitude: None,
-            symbol: "",
-        }
-    }
-}
-
-/// Which printf formats a PRINT value: print_calc uses the C library
-/// (`sprintf_alloc`, locale aware) and rrd_xport.c:1235 uses `rrd_snprintf`.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum GraphPrintf {
-    Libc,
-    Rrd,
-}
-
-/// Format one numeric PRINT/GPRINT value. Like print_calc and rrd_xport.c,
-/// this rewrites the element's first "%S" to "%s" in place, so a later pass
-/// over the same element (graphv's xport, then print_calc) scales afresh.
-fn format_graph_numeric(
-    value: f64,
-    format: &mut String,
-    si_scale: &mut GraphSiScale,
-    printf: GraphPrintf,
-) -> Result<String, Box<dyn std::error::Error>> {
-    use std::ffi::CString;
-
-    // The unit conversion is found with strstr on the raw format, so "%%S"
-    // and "%%s" also scale the value.
-    let scaling = match format.find("%S") {
-        Some(position) => {
-            format.replace_range(position + 1..position + 2, "s");
-            Some(true)
-        }
-        None => format.contains("%s").then_some(false),
-    };
-    let format = format.as_str();
-    let parsed = parse_graph_numeric_format(format)
-        .map_err(|_| format!("bad format for PRINT in \"{format}'"))?;
-    let scaled_value = match scaling {
-        Some(reuse) => {
-            // %S reuses the magnitude chosen by the first scaled value, unless
-            // that value scaled to zero; %s always picks a new one.
-            match si_scale.magnitude {
-                Some(magnitude) if reuse => value / magnitude,
-                _ => {
-                    let (scaled, magnitude, symbol) = graph_si_scale(value, si_scale.base);
-                    si_scale.magnitude = (!reuse || scaled != 0.0).then_some(magnitude);
-                    si_scale.symbol = symbol;
-                    scaled
-                }
-            }
-        }
-        None => value,
-    };
-    let si_symbol = si_scale.symbol;
-    if printf == GraphPrintf::Rrd {
-        return Ok(rondi::rrd_snprintf::rrd_snprintf(
-            format,
-            &[
-                rondi::rrd_snprintf::Arg::Double(scaled_value),
-                rondi::rrd_snprintf::Arg::Str(si_symbol),
-            ],
-        ));
-    }
-    let mut output = String::with_capacity(format.len() + 32);
-    let mut cursor = 0;
-    for substitution in parsed.substitutions {
-        append_graph_format_literal(&mut output, &format[cursor..substitution.start]);
-        match substitution.kind {
-            GraphFormatSubstitutionKind::Floating => {
-                let conversion = CString::new(&format[substitution.start..substitution.end])?;
-                let mut buffer = [0 as libc::c_char; 4096];
-                let length = unsafe {
-                    libc::snprintf(
-                        buffer.as_mut_ptr(),
-                        buffer.len(),
-                        conversion.as_ptr(),
-                        scaled_value,
-                    )
-                };
-                if length < 0 || length as usize >= buffer.len() {
-                    return Err("graph print output exceeds its buffer".into());
-                }
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), length as usize)
-                };
-                output.push_str(&String::from_utf8_lossy(bytes));
-            }
-            GraphFormatSubstitutionKind::SiSymbol => output.push_str(si_symbol),
-        }
-        cursor = substitution.end;
-    }
-    append_graph_format_literal(&mut output, &format[cursor..]);
-    Ok(output)
-}
-
-#[derive(Clone, Copy)]
-struct GraphFormatSubstitution {
-    start: usize,
-    end: usize,
-    kind: GraphFormatSubstitutionKind,
-}
-
-#[derive(Clone, Copy)]
-enum GraphFormatSubstitutionKind {
-    Floating,
-    SiSymbol,
-}
-
-struct ParsedGraphNumericFormat {
-    substitutions: Vec<GraphFormatSubstitution>,
-}
-
-fn parse_graph_numeric_format(format: &str) -> Result<ParsedGraphNumericFormat, ()> {
-    let bytes = format.as_bytes();
-    let mut substitutions = Vec::with_capacity(2);
-    let mut si_symbol = None;
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] != b'%' {
-            index += 1;
-            continue;
-        }
-        let start = index;
-        index += 1;
-        let Some(&next) = bytes.get(index) else {
-            return Err(());
-        };
-        if next == b'%' {
-            index += 1;
-            continue;
-        }
-        if matches!(next, b's' | b'S') {
-            if substitutions.is_empty() || si_symbol.is_some() {
-                return Err(());
-            }
-            si_symbol = Some(substitutions.len());
-            substitutions.push(GraphFormatSubstitution {
-                start,
-                end: index + 1,
-                kind: GraphFormatSubstitutionKind::SiSymbol,
-            });
-            index += 1;
-            continue;
-        }
-        if substitutions
-            .iter()
-            .any(|item| matches!(item.kind, GraphFormatSubstitutionKind::Floating))
-        {
-            return Err(());
-        }
-        if matches!(next, b'-' | b'+' | b' ' | b'0' | b'#') {
-            index += 1;
-        }
-        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
-            index += 1;
-        }
-        if bytes.get(index) == Some(&b'.') {
-            index += 1;
-            let precision_start = index;
-            while bytes.get(index).is_some_and(u8::is_ascii_digit) {
-                index += 1;
-            }
-            if precision_start == index {
-                return Err(());
-            }
-        }
-        if bytes.get(index) != Some(&b'l') {
-            return Err(());
-        }
-        index += 1;
-        if !bytes
-            .get(index)
-            .is_some_and(|code| matches!(code, b'e' | b'E' | b'f' | b'F' | b'g' | b'G'))
-        {
-            return Err(());
-        }
-        index += 1;
-        substitutions.push(GraphFormatSubstitution {
-            start,
-            end: index,
-            kind: GraphFormatSubstitutionKind::Floating,
-        });
-    }
-    if !substitutions
-        .iter()
-        .any(|item| matches!(item.kind, GraphFormatSubstitutionKind::Floating))
-    {
-        return Err(());
-    }
-    if let Some(symbol_index) = si_symbol {
-        let numeric_index = substitutions
-            .iter()
-            .position(|item| matches!(item.kind, GraphFormatSubstitutionKind::Floating))
-            .ok_or(())?;
-        if symbol_index < numeric_index {
-            return Err(());
-        }
-    }
-    Ok(ParsedGraphNumericFormat { substitutions })
-}
-
-fn append_graph_format_literal(output: &mut String, literal: &str) {
-    let mut chars = literal.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '%' && chars.clone().next() == Some('%') {
-            output.push('%');
-            chars.next();
-        } else {
-            output.push(ch);
-        }
-    }
-}
-
-fn graph_si_scale(value: f64, base: u32) -> (f64, f64, &'static str) {
-    const SYMBOLS: [&str; 13] = [
-        "a", "f", "p", "n", "u", "m", " ", "k", "M", "G", "T", "P", "E",
-    ];
-    if value == 0.0 || value.is_nan() {
-        return (value, 1.0, SYMBOLS[6]);
-    }
-    if value.is_infinite() {
-        // auto_scale converts floor(log(inf)) to int: aarch64 saturates to
-        // INT_MAX and divides by pow(base, INT_MAX) = inf, while x86_64 yields
-        // INT_MIN and divides by zero. Either index is outside the table.
-        #[cfg(target_arch = "x86_64")]
-        let factor = 0.0;
-        #[cfg(not(target_arch = "x86_64"))]
-        let factor = f64::INFINITY;
-        return (value / factor, factor, "?");
-    }
-    let base = f64::from(base);
-    let exponent = (value.abs().ln() / base.ln()).floor() as i32;
-    let factor = base.powf(f64::from(exponent));
-    let symbol = usize::try_from(exponent + 6)
-        .ok()
-        .and_then(|index| SYMBOLS.get(index))
-        .copied()
-        .unwrap_or("?");
-    (value / factor, factor, symbol)
-}
-
 /// `escapeJSON` from rrd_xport.c.
 fn escape_json(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
@@ -3846,7 +3249,7 @@ fn format_xport_addprints(
         .map_or(0, |duration| duration.as_secs() as i64);
     let mut tmvdef = local_tm(now);
     let (mut prints, mut gprints, mut rules) = (String::new(), String::new(), String::new());
-    let mut si_scale = GraphSiScale::new(si_base);
+    let mut si_scale = rondi::format_value::UnitScale::new(si_base);
     // time_clean writes to a different buffer than the one printed, so a
     // never-set VDEF time repeats the previous formatted text.
     let mut dbuf = String::new();
@@ -3870,18 +3273,13 @@ fn format_xport_addprints(
                 let element = &im.gdes[i];
                 if element.strftm {
                     if !never {
-                        dbuf = c_strftime(&element.format, &tmvdef, 1024).unwrap_or_default();
+                        dbuf = print_format::strftime_text(&element.format, &tmvdef, 1024);
                     }
                 } else {
                     // bad_format_print runs before the "%S" rewrite here.
                     let original = element.format.clone();
                     let mut format = original.clone();
-                    match format_graph_numeric(
-                        printval,
-                        &mut format,
-                        &mut si_scale,
-                        GraphPrintf::Rrd,
-                    ) {
+                    match print_format::xport_print_text(printval, &mut format, &mut si_scale) {
                         Ok(text) => dbuf = text,
                         Err(_) => {
                             return Err(format!("bad format for PRINT in \"{original}'"));
@@ -4532,11 +3930,11 @@ fn send_rrdcached_update_on_stream(
         .into())
 }
 
-/// xport and graph data values go through `rrd_snprintf("%0.10e")`
-/// (rrd_xport.c:714, 968, 985), which is not correctly rounded and never
-/// signs -0. updatev uses libc printf and keeps the sign.
+/// xport and graph data values use RRDtool's own printf, which is not
+/// correctly rounded and never signs -0. updatev uses libc printf and
+/// keeps the sign.
 fn format_xport_value(value: f64) -> String {
-    rondi::rrd_snprintf::rrd_snprintf("%0.10e", &[rondi::rrd_snprintf::Arg::Double(value)])
+    rondi::format_value::data_value(value)
 }
 
 fn format_rrd_scientific(value: f64) -> String {

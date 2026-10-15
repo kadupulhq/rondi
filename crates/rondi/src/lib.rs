@@ -3,6 +3,7 @@ pub mod compatibility;
 mod consolidation;
 mod data_source;
 mod format;
+pub mod format_value;
 pub mod graph;
 pub mod graph_layout;
 pub mod import_export;
@@ -15,7 +16,6 @@ mod rrd_definitions;
 mod rrd_number;
 mod rrd_resize;
 mod rrd_restore;
-pub mod rrd_snprintf;
 pub mod rrdc_proto;
 #[cfg(unix)]
 pub mod safe_fs;

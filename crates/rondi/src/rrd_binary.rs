@@ -2200,10 +2200,10 @@ fn format_rrd_optional(value: Option<f64>) -> String {
     value.map_or_else(|| "NaN".to_owned(), format_rrd_float)
 }
 
-// rrd_dump.c formats every value with CB_FMTS, i.e. rrd_snprintf("%0.10e"),
-// whose fmtflt drops the sign of -0 and renders subnormals unnormalized.
+// Dump writes values with RRDtool's own printf, which drops the sign of -0
+// and leaves subnormals unnormalized.
 fn format_rrd_float(value: f64) -> String {
-    crate::rrd_snprintf::rrd_snprintf("%0.10e", &[crate::rrd_snprintf::Arg::Double(value)])
+    crate::format_value::data_value(value)
 }
 
 fn rrd_local_timestamp(timestamp: i64) -> Result<String, StoreError> {
