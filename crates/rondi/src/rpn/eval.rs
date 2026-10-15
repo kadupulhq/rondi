@@ -852,7 +852,15 @@ impl Stack {
         self.require(2)?;
         let shift = c_int(self.pop()?);
         let count = c_int(self.pop()?);
-        if i64::from(count) > self.len as i64 {
+        // Compatibility: the depth check is `depth - n < 0` in wrapping
+        // 32-bit arithmetic, so a count below about -2^31 + depth (and
+        // unknown or infinite counts on x86_64, which convert to INT_MIN) is
+        // an underflow rather than the negative-count error.
+        // Provenance: black-box compatibility test
+        // (graph_data_differential.rs `x,INF,-1,ROLL`; probes of
+        // `a,-3e9,1,ROLL` and `a,-2147483649,1,ROLL`).
+        let depth = i32::try_from(self.len).unwrap_or(i32::MAX);
+        if depth.wrapping_sub(count) < 0 {
             return Err(RpnError::StackUnderflow);
         }
         if count < 0 {

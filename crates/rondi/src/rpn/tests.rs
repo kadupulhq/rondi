@@ -104,6 +104,13 @@ fn stack_operators() {
     );
     assert_eq!(first("a,POP,1,2,-2,1,ROLL"), Err(RpnError::OutOfMemory(-2)));
     assert_eq!(first("a,POP,1,2,3,ROLL"), Err(RpnError::StackUnderflow));
+    for count in ["-3e9", "-2147483649", "NEGINF"] {
+        assert_eq!(
+            first(&format!("a,POP,1,2,{count},1,ROLL")),
+            Err(RpnError::StackUnderflow),
+            "{count}"
+        );
+    }
 }
 
 #[test]

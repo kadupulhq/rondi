@@ -377,7 +377,11 @@ step. [bb]
 a,d,b,c`). Its observable behavior is: [rsi] [bb]
 
 1. Pop `m`, then `n`, both truncated to integers. If the remaining depth is
-   less than `n`, fail with `RPN stack underflow`.
+   less than `n`, fail with `RPN stack underflow`. The comparison is
+   `depth - n < 0` in wrapping 32-bit arithmetic, so `n` below about
+   `-2^31 + depth` is also an underflow: `-3e9`, `-2147483649` and `NEGINF`
+   on macOS, and `INF` on x86_64, where it converts to `INT_MIN`
+   (`graph_data_differential.rs`). [bb]
 2. If `n` is negative, fail with `RPN out of memory (allocating <n>
    objects)`. If `n` is 0 or 1 the stack is unchanged.
 3. Form a window `W[0..n-1]` from the current top value followed by the
