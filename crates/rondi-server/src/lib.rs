@@ -1718,22 +1718,31 @@ pub async fn run_rrdcached(mut args: RrdcachedConfig) -> Result<(), Box<dyn std:
     // created in /tmp on its behalf.
     // Upstream needs no write access to -b; Rondi's ownership lock does, so
     // a failure here is reported plainly and the published sockets removed.
-    let _store = match args.root.as_deref().map(Store::open).transpose() {
-        Ok(store) => store,
-        Err(error) => {
-            for listener in &args.listeners {
-                if let RrdcachedSocket::Unix { path, .. } = &listener.socket {
+    let root = args.root.clone();
+    let socket_paths = args
+        .listeners
+        .iter()
+        .filter_map(|listener| match &listener.socket {
+            RrdcachedSocket::Unix { path, .. } => Some(path.clone()),
+            RrdcachedSocket::Tcp(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let _store = tokio::task::spawn_blocking(move || {
+        root.as_deref()
+            .map(Store::open)
+            .transpose()
+            .map_err(|error| {
+                for path in &socket_paths {
                     let _ = std::fs::remove_file(path);
                 }
-            }
-            let root = args.root.as_deref().unwrap_or(Path::new(""));
-            return Err(format!(
-                "rrdcached: cannot lock base directory '{}': {error}",
-                root.display()
-            )
-            .into());
-        }
-    };
+                let root = root.as_deref().unwrap_or(Path::new(""));
+                format!(
+                    "rrdcached: cannot lock base directory '{}': {error}",
+                    root.display()
+                )
+            })
+    })
+    .await??;
     let base = RrdcachedBase::new(args.root.as_deref(), args.base_only)?;
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } == 0 && !base.confined() {
