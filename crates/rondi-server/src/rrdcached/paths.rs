@@ -57,7 +57,9 @@ pub fn prepare_base_directory(value: &str) -> Result<PathBuf, OptionFailure> {
 }
 
 /// Resolves `-j` to the real path of an existing directory.
-// Compatibility: status 6 with these texts (RCD-30, opt-031, opt-032).
+// Compatibility: status 6 with these texts; a path that resolves to
+// something other than a directory is named by its real path, so a
+// symbolic link to a file reports the file (RCD-30, opt-031, opt-032).
 // Provenance: black-box compatibility test.
 pub fn resolve_journal_directory(value: &str) -> Result<PathBuf, OptionFailure> {
     let real = std::fs::canonicalize(value).map_err(|error| {
@@ -73,7 +75,8 @@ pub fn resolve_journal_directory(value: &str) -> Result<PathBuf, OptionFailure> 
         return Err(OptionFailure::new(
             6,
             format!(
-                "Failed to create journal directory '{value}': {}",
+                "Failed to create journal directory '{}': {}",
+                real.display(),
                 errno_text(libc::ENOTDIR)
             ),
         ));
@@ -215,14 +218,18 @@ mod tests {
                 missing.display()
             )
         );
-        let failure = resolve_journal_directory(file.to_str().unwrap()).unwrap_err();
-        assert_eq!(
-            failure.message,
-            format!(
-                "Failed to create journal directory '{}': Not a directory",
-                file.display()
-            )
-        );
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        for given in [&file, &link] {
+            let failure = resolve_journal_directory(given.to_str().unwrap()).unwrap_err();
+            assert_eq!(
+                failure.message,
+                format!(
+                    "Failed to create journal directory '{}': Not a directory",
+                    file.display()
+                )
+            );
+        }
     }
 
     #[test]
