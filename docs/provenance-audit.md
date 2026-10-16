@@ -12,8 +12,8 @@ About 12,400 lines of Rust (38 percent of non-test source) are rated High: modul
 
 | File | Risk tier | Approx. lines | Primary concern |
 |---|---|---:|---|
-| `crates/rondi/src/time.rs` | High (FLAG) | 1,001 | Declares it keeps the C control flow of the at-style time parser; scanner state names match |
-| `crates/rondi/src/rpn.rs` | High | 1,084 | Declared port of the RPN parser and evaluator |
+| `crates/rondi/src/time.rs` | Replaced | 1,001 | Declared port; replaced by the clean-room `time/` modules from `docs/compatibility/time-spec.md` |
+| `crates/rondi/src/rpn.rs` | Replaced | 1,084 | Declared port; replaced by the clean-room `rpn/` modules from `docs/compatibility/rpn.md` |
 | `crates/rondi/src/rrd_modify.rs` | Removed | 981 | Declared port; replaced by the clean-room `tune_modify.rs` |
 | `crates/rondi/src/rrd_restore.rs` | Replaced | 912 | Declared port; replaced by a clean-room rewrite from `docs/compatibility/restore.md` |
 | `crates/rondi/src/rrd_create.rs` | Removed | 790 | Declared port; replaced by the clean-room `rrd_create.rs` and `rrd_definitions.rs` |
@@ -21,7 +21,7 @@ About 12,400 lines of Rust (38 percent of non-test source) are rated High: modul
 | `crates/rondi/src/graph.rs` | High | 2,357 | Declared port of graph script parsing and data preparation; 18 shared function names |
 | `crates/rondi/src/graph_layout.rs` | High | 1,011 | Declared port of image layout functions |
 | `crates/rondi-cli/src/graph_options.rs` | Replaced | 880 | Option tables keyed to C line numbers; replaced by the clean-room `graph_args.rs` from `docs/compatibility/graph.md` |
-| `crates/rondi-cli/src/optparse.rs` | High (FLAG) | 445 | Port of the bundled option parser; models C struct and enum |
+| `crates/rondi-cli/src/optparse.rs` | Removed | 445 | Port of the bundled option parser; replaced by the clean-room `frontend/options.rs` |
 | `crates/rondi/src/rrd_snprintf.rs` | Replaced | 702 | Declared port of the portable snprintf; replaced by the clean-room `format_value/` from `docs/compatibility/format-strings.md` and black-box runs |
 | `crates/rondi-server/src/rrdcached_listen.rs` | Removed | 926 | Declared port of listener setup and daemonize (GPL-2.0-only file); replaced by the clean-room `rrdcached/` daemon modules |
 | `crates/rondi-cli/src/main.rs` (front end, print/time helpers, list) | High | ~1,020 of 7,295 | Ports of the command dispatcher, batch-mode tokenizer, print_calc and helpers, directory listing |
