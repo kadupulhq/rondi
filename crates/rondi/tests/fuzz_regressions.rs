@@ -1,7 +1,7 @@
 //! Inputs found by the cargo-fuzz targets in `fuzz/`.
 
 /// fuzz: rrd_file seed `386_gauge_v3.rrd` (rrdtool 1.7.2 on i386, where the
-/// float cookie sits at offset 12). rrd_open.c:465-470 checks the float
+/// float cookie sits at offset 12). RRDtool checks the float
 /// cookie before it reads the 64-bit counts, so RRDtool 1.11.0 reports the
 /// foreign architecture instead of a layout error.
 #[test]
@@ -19,7 +19,7 @@ fn foreign_architecture_file_fails_on_the_float_cookie() {
     );
 }
 
-/// rrd_create.c:1136 reads `%18[^:]` as bytes, so a bound whose 18th byte
+/// RRDtool reads `%18[^:]` as bytes, so a bound whose 18th byte
 /// falls inside a multibyte character is cut mid-character. A cut min no
 /// longer meets its ':' and a cut max fails strtod; both are errors, not a
 /// slice panic.

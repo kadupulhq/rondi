@@ -145,7 +145,7 @@ fn sides() -> Option<common::Sides> {
 #[test]
 fn unwritable_output_paths_report_like_rrdtool() {
     let Some(sides) = sides() else { return };
-    // rrd_dump_opt_r returns -1 from a failed fopen without setting an
+    // RRDtool's dump returns -1 from a failed fopen without setting an
     // error, so dump is silent; the cairo PNG writer reports its own text.
     sides.assert_same(&["dump", "a.rrd", "/nonexistent/x"]);
     for command in ["graph", "graphv"] {
@@ -158,7 +158,7 @@ fn unwritable_output_paths_report_like_rrdtool() {
 #[test]
 fn fetch_resolution_beyond_i64_aligns_like_rrdtool() {
     let Some(sides) = sides() else { return };
-    // rrd_fetch.c computes start % step in unsigned long.
+    // RRDtool computes start % step in unsigned long.
     for resolution in ["9999999999999999999", "18446744073709551615"] {
         sides.assert_same(&[
             "fetch",
@@ -178,7 +178,7 @@ fn fetch_resolution_beyond_i64_aligns_like_rrdtool() {
 #[test]
 fn data_graphs_to_an_unwritable_path_print_the_data() {
     let Some(sides) = sides() else { return };
-    // rrd_graph_xport keeps the buffer when rrd_fopen fails, so the data
+    // RRDtool's graph export keeps the buffer when the file cannot be opened, so the data
     // goes to stdout, followed by 0x0 for graph, and the exit status is 0.
     for command in ["graph", "graphv"] {
         for format in ["CSV", "TSV", "SSV", "XML", "XMLENUM", "JSON", "JSONTIME"] {

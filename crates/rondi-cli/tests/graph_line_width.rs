@@ -1,5 +1,5 @@
 #![cfg(unix)]
-//! A LINE width found by fuzzing. rrd_graph_helper.c (newGraphDescription,
+//! A LINE width found by fuzzing. RRDtool (newGraphDescription,
 //! PARSE_LINEWIDTH) only rejects negative widths; Cairo strokes the rest.
 
 use std::os::unix::fs::symlink;

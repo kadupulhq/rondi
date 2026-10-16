@@ -1,7 +1,7 @@
 #![cfg(unix)]
 //! Damaged-header repros: RRDtool trusts the fixed-width name fields and the
 //! row and PDP counts it reads back, so each test patches an upstream-created
-//! file and compares the commands against pinned RRDtool.
+//! file and compares the commands against pinned RRDtool 1.11.0.
 
 #[macro_use]
 mod common;
@@ -61,7 +61,7 @@ fn last_ds() -> usize {
     STAT_HEAD + DS_DEF + 4 * RRA_DEF + LIVE_HEAD
 }
 
-// rrd_info_print and rrd_tool.c's lastupdate print names and last_ds with
+// RRDtool's info output and RRDtool's lastupdate print names and last_ds with
 // %s, so bytes that are not UTF-8 reach stdout unchanged.
 #[test]
 fn info_and_lastupdate_print_raw_name_bytes() {
@@ -78,7 +78,7 @@ fn rra_def(index: usize) -> usize {
     STAT_HEAD + DS_DEF + index * RRA_DEF
 }
 
-// dst_conv and rrd_cf_conv set an error for a name they do not know and
+// the type and consolidation function name checks set an error for a name they do not know and
 // return -1. info and dump print everything through their default branches
 // and exit 1 with the last such error; fetch does the same when the bad CF
 // belongs to an RRA it did not pick; tune -h never converts the type.
@@ -125,7 +125,7 @@ fn unknown_type_and_cf_names_report_conversion_errors() {
     cf_only.assert_same_bytes(&["dump", "t.rrd"]);
 }
 
-// rrd_fetch_fn's own message when no RRA serves the CF.
+// fetch's own message when no RRA serves the CF.
 #[test]
 fn fetch_without_matching_rra_uses_rrd_fetch_message() {
     let Some(sides) = fixture() else {
@@ -134,9 +134,9 @@ fn fetch_without_matching_rra_uses_rrd_fetch_message() {
     sides.assert_same(&["fetch", "t.rrd", "HWPREDICT", "-s", "1000000000"]);
 }
 
-// rrd_open sizes the archives in wrapping unsigned long arithmetic, so a
+// Opening sizes the archives in wrapping unsigned long arithmetic, so a
 // row_cnt of 2^61 + 10 adds the same 80 bytes as 10 and the file opens.
-// update then runs into the end of the file in rrd_write.
+// update then runs into the end of the file at write time.
 #[test]
 fn huge_row_count_wraps_like_rrd_open() {
     let Some(sides) = fixture() else {
@@ -180,7 +180,7 @@ fn huge_pdp_count_wraps_like_rrd_first_and_dump() {
 }
 
 // Two billion steps ahead, write_to_rras would store a billion rows into the
-// damaged archive; rrd_write stops at the end of the file instead, and Rondi
+// damaged archive; writing stops at the end of the file instead, and Rondi
 // must stop queuing rows there too rather than allocate for all of them.
 #[test]
 fn huge_row_count_update_stops_at_end_of_file() {
@@ -199,7 +199,7 @@ fn huge_row_count_update_stops_at_end_of_file() {
     }
 }
 
-// rrd_resize copies once per stored value of the unwrapped row count, so
+// resize copies once per stored value of the unwrapped row count, so
 // Rondi refuses the file (docs/COMPATIBILITY_DEFECTS.md ID-001).
 #[test]
 fn huge_row_count_resize_is_refused() {

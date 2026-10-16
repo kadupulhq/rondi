@@ -125,7 +125,7 @@ pub async fn run(prepared: PreparedServer) -> Result<(), Box<dyn std::error::Err
                 let (stream, _) = match accepted {
                     Ok(accepted) => accepted,
                     // listen_thread_main logs a failed accept(2) and keeps
-                    // listening (rrd_daemon.c:4395). The pause stops an
+                    // listening. The pause stops an
                     // exhausted descriptor table from spinning the loop.
                     Err(error) => {
                         tracing::error!(error = %error, "server_accept_failed");

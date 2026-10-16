@@ -1262,7 +1262,7 @@ fn verbose_update_parses_numbers_like_plain_update() {
         "RRA:LAST:0:1:5",
     );
     std::fs::copy(&plain, &verbose).unwrap();
-    // rrd_strtodbl and str::parse round this decimal to different doubles.
+    // RRDtool's number parser and str::parse round this decimal to different doubles.
     rondi::update_rrd_raw_values(&plain, 1_000_000_010, &[Some("1234567.891")]).unwrap();
     rondi::update_rrd_raw_values_verbose(&verbose, 1_000_000_010, &[Some("1234567.891")]).unwrap();
     assert_eq!(
@@ -1435,7 +1435,7 @@ fn dderive_previous_sample_is_parsed_like_rrdtool() {
         .unwrap();
     assert!(created.status.success());
     std::fs::copy(&oracle, &ours).unwrap();
-    // str::parse and rrd_strtod round "444.636" to neighbouring doubles.
+    // str::parse and RRDtool's decimal parser round "444.636" to neighbouring doubles.
     for (timestamp, value) in [(1_000_000_005, "444.636"), (1_000_000_010, "43")] {
         let updated = Command::new("rrdtool")
             .args([

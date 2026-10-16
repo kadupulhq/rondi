@@ -1,6 +1,6 @@
 #![cfg(unix)]
-//! rrd_open.c differentials: every command that opens an existing file must
-//! fail with RRDtool's text, in rrd_open's order, for files it cannot read.
+//! RRDtool differentials: every command that opens an existing file must
+//! fail with RRDtool's text, in the order the file is checked, for files it cannot read.
 
 mod common;
 
@@ -15,7 +15,7 @@ const COMMANDS: &[&[&str]] = &[
     &["resize", "0", "GROW", "1"],
 ];
 
-// B11 and fuzz C5: rrd_open.c:336 (open), 434 (mmap), 465-470 (cookie, float
+// B11 and fuzz C5: RRDtool (open), 434 (mmap), 465-470 (cookie, float
 // cookie, version), 471-497 (header pieces) and 538-541 (file length). The
 // i386 seed has its float cookie at offset 12, so it fails on the float
 // cookie before its 32-bit counts are read.

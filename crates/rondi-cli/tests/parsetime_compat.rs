@@ -1,5 +1,5 @@
 #![cfg(unix)]
-//! Differential checks of the `rrd_parsetime.c` port. Every case runs pinned
+//! Differential checks of the `RRDtool` port. Every case runs pinned
 //! RRDtool and the Rondi alias with the same arguments and TZ, then compares
 //! stdout, stderr and exit status.
 
@@ -289,7 +289,7 @@ fn fetch_leading_sign_offset_without_reference() {
 #[test]
 fn relative_range_keeps_the_anchor_dst_flag() {
     let Some(fx) = fixture() else { return };
-    // rrd_proc_start_end() calls localtime_r() on the anchor and does not
+    // RRDtool's start and end parsing calls localtime_r() on the anchor and does not
     // reset tm_isdst before mktime(), so end-1d across a DST change is
     // exactly 86400 s.
     fx.assert_same(

@@ -2899,7 +2899,7 @@ fn rrdtool_xport_prediction_matches_mixed_resolution_history() {
     symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
     // Exporting the fine DEF must not change the coarse CDEF's evaluation
     // interval. Also force a fine CDEF with a coarse prediction input to check
-    // rrd_rpncalc.c's source-pointer advancement between coarse boundaries.
+    // RRDtool's source-pointer advancement between coarse boundaries.
     for (start, end) in [("1000000000", "1000000100"), ("1000000005", "1000000100")] {
         for expression in [
             "0,10,2,20,coarse,PREDICT",
@@ -4658,7 +4658,7 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
             image_dimensions(&path_upstream)
         );
     }
-    // rrd_strtodbl accepts "NaN" and rrd_graph_options has no range check.
+    // RRDtool's number parser accepts "NaN" and RRDtool's graph option parser has no range check.
     let nan_angle = render_options(
         alias.as_path(),
         &temp.path().join("nan-angle.png"),
@@ -7693,7 +7693,7 @@ fn rrdtool_update_converts_dcounter_text_only_after_a_known_sample() {
     }
 }
 
-/// rrd_fetch.c copies stored values unchanged, so a stored infinity is printed
+/// RRDtool copies stored values unchanged, so a stored infinity is printed
 /// as one; only NaN is unknown.
 #[test]
 fn stored_infinity_survives_fetch_and_xport() {
@@ -9025,7 +9025,7 @@ fn graph_base_utc_and_shared_si_units_match_rrdtool() {
 }
 
 /// print_calc checks the format after rewriting its first "%S" to "%s", so
-/// graph errors quote the rewritten text; rrd_xport.c checks first and
+/// graph errors quote the rewritten text; RRDtool checks first and
 /// quotes the format as given.
 #[test]
 fn invalid_percent_s_print_formats_report_upstream_error_text() {

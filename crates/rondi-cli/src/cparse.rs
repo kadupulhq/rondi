@@ -28,7 +28,7 @@ pub(crate) fn buffer_text(buffer: &[u8]) -> String {
     String::from_utf8_lossy(&buffer[..end]).into_owned()
 }
 
-/// `rrd_strtod` (rrd_strtod.c:97). The second value is the end of the
+/// RRDtool's decimal string conversion. The second value is the end of the
 /// conversion; 0 means none, which also covers an out-of-range exponent.
 fn rrd_strtod(text: &[u8]) -> (f64, usize) {
     let digit = |position: usize| text.get(position).filter(|byte| byte.is_ascii_digit());
@@ -114,13 +114,13 @@ fn rrd_strtod(text: &[u8]) -> (f64, usize) {
     (number, position)
 }
 
-/// `rrd_strtodbl` (rrd_strtod.c:59): `Ok` only when the whole string
+/// RRDtool's whole-string conversion: `Ok` only when the whole string
 /// converts. With a label the error carries RRDtool's message.
 pub(crate) fn rrd_strtodbl(text: &str, error: Option<&str>) -> Result<f64, String> {
     rrd_strtodbl_status(text, error).1
 }
 
-/// `rrd_strtodbl` with its return code: 0 for no conversion, 1 for a
+/// The same conversion with its return code: 0 for no conversion, 1 for a
 /// partial one (the value is still set), 2 for the whole string.
 pub(crate) fn rrd_strtodbl_status(text: &str, error: Option<&str>) -> (u32, Result<f64, String>) {
     let bytes = text.as_bytes();

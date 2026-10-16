@@ -1,6 +1,6 @@
 #![cfg(unix)]
 //! Differential tests for the number formatting of xport and graph output:
-//! `rrd_snprintf` (rrd_snprintf.c fmtflt) for data values and xport PRINT
+//! RRDtool's own number formatter for data values and xport PRINT
 //! entries, and the C library printf for graph PRINT/GPRINT, under the C
 //! locale and de_DE.
 
@@ -125,7 +125,7 @@ fn check_all(results: impl IntoIterator<Item = Result<(), String>>) {
     );
 }
 
-// fmtflt (rrd_snprintf.c:1111) scales by repeated powers of ten and rounds
+// fmtflt scales by repeated powers of ten and rounds
 // the scaled fraction, so near-ties and subnormals differ from libc printf.
 #[test]
 fn xport_values_use_rrd_snprintf_rounding() {
@@ -162,7 +162,7 @@ fn locale_available(name: &str) -> bool {
         })
 }
 
-// rrd_tool.c:464 sets LC_ALL from the environment. rrd_snprintf is built
+// RRDtool sets LC_ALL from the environment. RRDtool's number formatter is built
 // without localeconv, so xport values and xport PRINT entries keep '.',
 // while graph print_calc and graphv values use the C library and follow
 // LC_NUMERIC.
@@ -202,7 +202,7 @@ fn locale_decimal_point_follows_the_printf_used() {
     graph_csv.extend(["--imgformat", "CSV", "LINE1:x#ff0000:x"].map(String::from));
     let mut graph_print = base("graph", Some("graph-output.png"));
     graph_print.extend(["--imgformat", "XML", "LINE1:x#ff0000:x"].map(String::from));
-    // PNG graphv: print[n], value_min/value_max (rrd_info_print's printf)
+    // PNG graphv: print[n], value_min/value_max (RRDtool's info output's printf)
     // and the GPRINT legend.
     let mut graphv_png = base("graphv", Some("graph-output.png"));
     graphv_png.extend(["-l", "-0.5", "LINE1:x#ff0000:x"].map(String::from));
