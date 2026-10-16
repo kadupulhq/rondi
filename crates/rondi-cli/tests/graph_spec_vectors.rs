@@ -228,6 +228,12 @@ const KNOWN_DIVERGENCES: &[Divergence] = &[
         "GR-60: fallback font metrics",
     ),
     div(
+        "graph-fit-093",
+        ALL,
+        DEFECT,
+        "GR-64: markup measured as text",
+    ),
+    div(
         "graph-legend-079",
         ALL,
         DEFECT,
