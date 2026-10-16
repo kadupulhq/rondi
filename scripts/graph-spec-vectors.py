@@ -42,6 +42,7 @@ import argparse
 import json
 import math
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -861,6 +862,175 @@ def legend_cases() -> None:
             'VRULE:900000000#0000ff:early', 'HRULE:5#0000ff:in')
 
 
+FIT_WORDS = ['a', 'bb', 'ccc', 'alpha', 'x' * 20, 'y' * 45, 'tab\\tz',
+             '<b>m</b>', 'sp  ']
+FIT_MARKS = ['', '', '', '\\l', '\\r', '\\c', '\\j', '\\g', '\\s', '\\n',
+             '\\.']
+
+
+def fit_sample(rng: random.Random) -> list[str]:
+    """One random combination of layout options and legend entries."""
+    def legend() -> str:
+        return rng.choice(FIT_WORDS) + rng.choice(FIT_MARKS)
+
+    args = [DEFY]
+    for chance, opts in [(0.5, ['-w', rng.choice(['10', '50', '100', '237',
+                                                  '400', '700'])]),
+                         (0.3, ['-h', rng.choice(['10', '33', '100', '250'])])]:
+        if rng.random() < chance:
+            args += opts
+    for tag in ['DEFAULT', 'TITLE', 'AXIS', 'UNIT', 'LEGEND', 'WATERMARK']:
+        if rng.random() < 0.15:
+            size = rng.choice(['3', '5.5', '7', '8.25', '9', '11.75', '14',
+                               '20'])
+            args += ['-n', f'{tag}:{size}']
+    for chance, opts in [
+            (0.3, ['-t', rng.choice(['T', 'Two\\nLines', 'a<br/>b<br/>c',
+                                     ' '])]),
+            (0.2, ['-v', 'units']), (0.2, ['--right-axis', '2:0']),
+            (0.15, ['--right-axis-label', 'r']), (0.15, ['-W', 'mark']),
+            (0.15, ['-L', rng.choice(['0', '3', '9'])]),
+            (0.1, ['-y', 'none']), (0.1, ['-x', 'none']), (0.1, ['-g']),
+            (0.1, ['-j']), (0.15, ['-D']), (0.1, ['--disable-rrdtool-tag']),
+            (0.3, ['--legend-position',
+                   rng.choice(['north', 'south', 'east', 'west'])]),
+            (0.2, ['--legend-direction',
+                   rng.choice(['topdown', 'bottomup', 'bottomup2'])]),
+            (0.15, ['-T', rng.choice(['10', '40', '80'])]), (0.1, ['-P']),
+            (0.2, [rng.choice(['-A', '-J', '-M', '-r', '-o'])]),
+            (0.2, ['-u', rng.choice(['10', '100', '-5'])]),
+            (0.2, ['-l', rng.choice(['0', '-100', '3'])])]:
+        if rng.random() < chance:
+            args += opts
+    for _ in range(rng.randint(0, 7)):
+        kind = rng.random()
+        if kind < 0.3:
+            args.append(f'COMMENT:{legend()}')
+        elif kind < 0.5:
+            args.append(f'LINE1:{rng.choice("xy")}#ff0000:{legend()}'
+                        + rng.choice(['', ':STACK', ':skipscale']))
+        elif kind < 0.6:
+            args.append(f'AREA:{rng.choice("xy")}#00ff00:{legend()}')
+        elif kind < 0.7:
+            args.append(f'GPRINT:{rng.choice("xy")}:AVERAGE:%6.2lf'
+                        + rng.choice(FIT_MARKS))
+        elif kind < 0.8:
+            args.append(f'HRULE:{rng.choice(["5", "500"])}#0000ff:{legend()}')
+        elif kind < 0.85:
+            args.append(f'VRULE:{rng.choice(["1000000600", "900000000"])}'
+                        f'#0000ff:{legend()}')
+        elif kind < 0.9:
+            args.append('TEXTALIGN:'
+                        + rng.choice(['left', 'right', 'center', 'justified']))
+        else:
+            args.append(f'TICK:x#00ff00:0.5:{legend()}')
+    if not any(a.startswith(('LINE', 'AREA', 'HRULE', 'VRULE', 'TICK',
+                             'GPRINT')) for a in args):
+        args.append(LINE)
+    return args
+
+
+def fit_cases() -> None:
+    """Layout rules fitted to black-box measurements (GR-60 to GR-66)."""
+    two = ['COMMENT:a\\l', 'COMMENT:b\\l']
+    # Line advance, `\s` and the space below the legend at several sizes.
+    for size in ['3', '4.25', '5.5', '6.5', '8.25', '9.75', '11', '13',
+                 '17.5', '20']:
+        for opts in [[], ['--legend-position', 'north']]:
+            run('fit', *GV, LINE, '-n', f'LEGEND:{size}', *opts,
+                'COMMENT:a\\s', *two)
+    # Title lines and sizes.
+    for title in ['a\\nb\\nc\\nd', 'a<br>b<br/>c', '\\nb', 'a\\n',
+                  'a\\n\\nb']:
+        for size in ['9', '13.5']:
+            run('fit', *GV, LINE, '-t', title, '-n', f'TITLE:{size}')
+    # Margins from the axis, unit and watermark sizes.
+    for opts in [['-n', 'AXIS:11', '-L', '4'], ['-n', 'UNIT:13', '-v', 'v'],
+                 ['-n', 'UNIT:13', '--right-axis-label', 'r'],
+                 ['-n', 'WATERMARK:9.5', '-W', 'w'],
+                 ['-n', 'AXIS:13', '--right-axis', '1:0'],
+                 ['-n', 'AXIS:9', '-x', 'none']]:
+        run('fit', *GV, LINE, *opts, 'COMMENT:a')
+    # Tab stops with and without the y-axis labels.
+    for size in ['5', '8', '10', '20']:
+        for opts in [[], ['-y', 'none'], ['-y', 'none', '-L', '0']]:
+            run('fit', *GV, LINE, '-n', f'LEGEND:{size}', '-T', '10', *opts,
+                'COMMENT:\\tz\\l', 'COMMENT:aaa\\tz\\l',
+                'HRULE:5#0000ff:aaaaa\\tz\\l')
+    # Empty lines: alignment, elements after the last marker.
+    for elements in [['TEXTALIGN:right'], ['COMMENT:a\\l', 'TEXTALIGN:center'],
+                     ['COMMENT:a\\l', 'COMMENT:\\r', 'COMMENT:b\\l'],
+                     ['COMMENT:a\\l', 'COMMENT:\\c', 'COMMENT:b\\l'],
+                     ['TEXTALIGN:right', 'COMMENT:a\\l', 'CDEF:c=x'],
+                     ['TEXTALIGN:right', 'COMMENT:a\\l'],
+                     ['COMMENT:a\\l', 'TEXTALIGN:right', 'LINE1:x#00ff00',
+                      'COMMENT:b\\l'],
+                     ['COMMENT:xx\\n', 'TEXTALIGN:center', 'COMMENT:yy\\s']]:
+        run('fit', *GV, LINE, *elements)
+    # Rule legends against the given limits.
+    for opts in [['-u', '100'], ['-l', '10'], ['-u', '100', '-F'],
+                 ['-u', 'nan']]:
+        run('fit', *GV, LINE, *opts, 'HRULE:500#0000ff:high',
+            'HRULE:5#0000ff:low', 'HRULE:50#0000ff:mid')
+    # Entries wider than the line, glue after a wrap, overlapping justified
+    # lines and right alignment in a narrow image.
+    wide = 'COMMENT:' + 'y' * 45
+    for opts, elements in [
+            (['-w', '50'], [wide, 'TEXTALIGN:right', 'COMMENT:a']),
+            (['-w', '50'], ['TEXTALIGN:right', wide, 'COMMENT:a']),
+            ([], ['COMMENT:' + 'x' * 20 + '\\g', wide + '\\g', 'COMMENT:c']),
+            ([], ['LINE1:x#00ff00:ccc', 'COMMENT:' + 'y' * 123 + '\\j']),
+            ([], ['LINE1:x#00ff00:ccc', 'COMMENT:' + 'y' * 124 + '\\j']),
+            (['-n', 'LEGEND:20'], ['COMMENT:ccc', wide + '\\j']),
+            (['-D', '-w', '16'], ['COMMENT:m\\r', 'COMMENT:n\\r']),
+            (['-D', '-w', '20'], ['COMMENT:m\\r', 'COMMENT:n\\r']),
+            (['-g', '--legend-position', 'east'], []),
+            (['-g', '--legend-position', 'east', '-D'], [])]:
+        run('fit', *GV, LINE, *opts, *elements)
+    # Bottom-up orders with `\s` lines and comments that share a line.
+    for direction in ['bottomup', 'bottomup2']:
+        for elements in [['COMMENT:a\\s', 'COMMENT:b\\l', 'COMMENT:c\\l'],
+                         ['COMMENT:c1\\l', 'COMMENT:c2\\l', 'LINE1:x#0f0:A\\l',
+                          'LINE1:x#0f0:B\\l', 'COMMENT:c3\\l',
+                          'COMMENT:c4\\l'],
+                         ['COMMENT:bb', 'LINE1:x#0f0:ccc', 'COMMENT:' + 'y' * 45
+                          + '\\r', 'LINE1:x#0f0:sp\\j'],
+                         ['LINE1:x#f00:tz\\j', 'LINE1:x#0f0:' + 'x' * 20,
+                          'COMMENT:ccc\\r'],
+                         ['COMMENT:a\\l', 'COMMENT:b\\l', 'TEXTALIGN:right']]:
+            run('fit', *GV, LINE, '--legend-direction', direction, *elements)
+    # Random combinations from a fixed seed.
+    rng = random.Random(2026)
+    for _ in range(80):
+        run('fit', *GV, *fit_sample(rng))
+
+
+def range_cases() -> None:
+    """Value range rules found by black-box probes (GR-70 to GR-73)."""
+    line = 'LINE1:y#ff0000'
+    for opts in [['-o', '-u', '100'], ['-o', '-u', '57'], ['-o', '-u', '56'],
+                 ['-o', '-l', '3.3'], ['-o', '-l', '3.4'],
+                 ['-o', '-l', '5', '-u', '10', '-r']]:
+        run('range', *GV, DEFY, line, *opts)
+    for opts in [['-o', '-u', '5'], ['-o', '-u', '5.1'], ['-o', '-u', '6'],
+                 ['-o', '-u', '9.99'], ['-o', '-l', '4e-9'],
+                 ['-o', '-l', '5.1e-9'], ['-o', '-l', '6e-9']]:
+        run('range', *GV, 'TICK:x#00ff00:0.5', *opts)
+    for opts in [['-u', '5', '-l', '10', '-r'], ['-u', '-5', '-l', '-1', '-r'],
+                 ['-u', '0', '-l', '0', '-r'], ['-y', '3:1'], ['-y', '7:2'],
+                 ['-y', '0.25:1', '-u', '0.5']]:
+        run('range', *GV, DEFY, line, *opts)
+    for opts in [[], ['-A'], ['-o']]:
+        run('range', *GV, 'CDEF:c=x,INF,*', 'LINE1:c#ff0000', *opts)
+        run('range', *GV, 'CDEF:c=x,-1,*,0,*', 'LINE1:c#ff0000', *opts)
+    # Limits that overflow the range are drawn; only an infinite limit
+    # abandons the graph (GR-21).
+    for opts in [['-u', '1.7e308'], ['-l', '-1.7e308'],
+                 ['-u', '1e308', '-l', '-1e308'],
+                 ['-u', '1e308', '-l', '-1e308', '-r']]:
+        run('range', *GV, 'LINE1:x#ff0000:a', *opts)
+
+
 def scale_cases() -> None:
     transforms = ['x', 'x,1000000,*', 'x,0.001,*', 'x,3,-', 'x,-1,*',
                   '0,x,*,7,+', '0,x,*', 'x,1e-9,*', 'x,1e12,*',
@@ -1303,6 +1473,8 @@ def all_cases() -> list[dict]:
     misc_element_cases()
     layout_cases()
     legend_cases()
+    fit_cases()
+    range_cases()
     scale_cases()
     data_cases()
     xport_cases()

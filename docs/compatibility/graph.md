@@ -140,6 +140,8 @@ directory as `<dir>`.
 | `layout` | `graphv` geometry for size, title, labels, axes, fonts, borders, legends |
 | `legend` | legend placement: markers, alignment, spacing, wrapping, direction, position |
 | `scale` | `value_min`/`value_max` under autoscale and the scaling options |
+| `fit` | the fitted legend and frame rules of GR-60 to GR-66 at several font sizes, and random combinations from a fixed seed |
+| `range` | the value range rules of GR-70 to GR-73 found by black-box probes |
 | `data` | `--imgformat` XML, XMLENUM, JSON, JSONTIME, CSV, TSV, SSV |
 | `xport` | `xport` options, elements and output |
 | `out` | output files, `-`, `graphv -`, `--imginfo` output, `--lazy` |
@@ -827,77 +829,112 @@ line prints. They hold for the default fonts of the pinned builds on both
 macOS and Linux; text widths come from the font (GR-60).
 
 **GR-60** (bb; platform-specific). Text is measured with the default font,
-which in both pinned builds is a monospace face: legend text advances
-7 px per character and the y-axis label width is 6 px per character of
-`--units-length`. A legend line is 14 px high. Characters are counted, not
+which in both pinned builds is DejaVu Sans Mono at 100 dots per inch. At
+*s* points a character advances floor(*s*·100/72·1233/2048 + 0.5) px and
+a line of text is ceil(*p*·1901/2048) + ceil(*p*·483/2048) px high, with
+*p* = *s*·100/72 (the face's advance, ascent and descent in its 2048-unit
+em). At the default legend size of 8 that is 7 px per character and 14 px
+per line; at 12 it is 10 and 20 (`layout-043`). Characters are counted, not
 bytes: UTF-8 text such as `café` is four characters. Characters outside
 the default face (CJK) are measured through font fallback and their
-metrics depend on the host (`legend-030`). `--font` changes these metrics
-(`--font DEFAULT:12:` gives 10 px legend characters and 20 px lines,
-`layout-043`; a family such as `Courier` changes them in a host-dependent
-way, `layout-049`).
+metrics depend on the host (`legend-030`). A family such as `Courier`
+changes the metrics in a host-dependent way (`layout-049`). (Fitted to
+`graphv` coordinates at legend sizes from 1 to 40 points in steps of
+0.25; `fit-001` to `-020`.)
 
-**GR-61** (bb; compat). With the default south legend and no title, for a
-graph of width W and height H:
+The font sizes default to 9 (title), 7 (axis), 8 (unit), 8 (legend) and
+5.5 (watermark); `--font DEFAULT:<size>:` sets all five.
 
-- `graph_left` = 15 + 6·L, where L is `--units-length` (default 6), so 51.
-  `--vertical-label` adds 16. `--y-grid none` sets L to 0 unless
+**GR-61** (bb; compat). With a south legend, for a graph of width W and
+height H, and with *t*, *a*, *u*, *g* and *w* the title, axis, unit,
+legend and watermark sizes (GR-60):
+
+- `graph_left` = 15 + floor(2·*u*) with `--vertical-label` + L·*c*, where
+  L is `--units-length` (default 6) and *c* the character advance at the
+  axis size, so 51 by default. `--y-grid none` sets L to 0 unless
   `--units-length` is given explicitly (`layout-039`, `-041`). L is not
   checked; a negative L that makes `graph_left` negative prints the value
   as an unsigned 64-bit number (`L=-5` gives `18446744073709551601`,
   `layout-038`).
-- `graph_top` = 15.
+- `graph_top` is 15 without a title (GR-63).
 - `graph_width` = W and `graph_height` = H.
-- `image_width` = `graph_left` + W + 30; the 30 is 15 of margin and 15 for
-  the vertical RRDtool tag, which `--disable-rrdtool-tag` removes (15).
-  `--right-axis` adds 15 + 6·L; `--right-axis-label` adds 1 more.
-- `image_height` = 15 + H + 26 with no legend line, + 14 per legend line;
-  `--no-legend` removes 2 more (139 for the default graph), `--x-grid none`
-  removes 17. `COMMENT:\s` adds 6 (GR-66).
+- `image_width` = `graph_left` + W + *r* + *e* + 15, where *r* is 15 + L·*c*
+  with `--right-axis` and 0 without, *e* is floor(2·*u*) with
+  `--right-axis-label` and 15 without, and the last 15 is the vertical
+  RRDtool tag, which `--disable-rrdtool-tag` removes. An empty vertical
+  label, right-axis label or watermark takes no room.
+- `image_height` = `graph_top` + H + *x* + the legend block + floor(2·*w*)
+  with a watermark, where *x* = floor(2.5·*a*) for the x-axis labels (0
+  with `--x-grid none`). The legend block is the advance of its lines
+  (GR-66, not below 0) plus floor(0.6·floor(2·*g*)), so 9 at the default
+  size even without legend lines (141 for the default graph);
+  `--no-legend` makes it 7 (139), or 8 in `--full-size-mode`.
 - The size line prints `<image_width>x<image_height>`.
 
-(`layout-001` to `-069`, `opt-*` size lines.)
+(`layout-001` to `-069`, `fit-031` to `-036`, `opt-*` size lines.)
 
 **GR-62** (doc, bb; compat). `--only-graph` makes the image exactly W×H
 with `graph_left` and `graph_top` 0 and no legend keys; the title,
 labels and legend are dropped (`layout-005` to `-009`, `-066`).
 `--full-size-mode` makes W×H the image size and fits the graph area inside
-it: `graph_width` = W − (`graph_left` + 30), `graph_height` = H − (the
-space above and below as in GR-61, including the legend). When the
-remaining area is smaller than 1, it is 1 (`layout-010` to `-013`,
+it: `graph_width` = W − (`graph_left` + *r* + *e* + 15), `graph_height` =
+H − (the space above and below as in GR-61, including the legend). When
+the remaining area is smaller than 1, it is 1 (`layout-010` to `-013`,
 `legend-090` to `-094`).
 
-**GR-63** (bb; compat). A title adds 13 px above the graph for one line
-and 15 px for each further line (`\n` and `<br/>` both break the line,
-`layout-015` to `-017`); an empty title adds nothing. A watermark adds
-11 px at the bottom (`layout-023`). The title font size changes the title
-height (`layout-045`).
+**GR-63** (bb; compat). A title moves the graph down to
+floor(1.6·*t*·(n + 1)), where n is the number of title lines: 28 for one
+line at the default size, 43 for two. `\n`, `<br>` and `<br/>` break the
+line, but only a break that follows some text adds one, and at most three
+lines count (`layout-015` to `-017`, `fit-021` to `-030`). An empty title
+adds nothing. The title font size changes the title height (`layout-045`).
 
 **GR-64** (doc, bb; compat). `--pango-markup` interprets markup in legend
-text for measuring and drawing; `graphv` still reports the legend text
-with the markup (`legend-075` to `-079`). Without it, markup is literal
-text. Tab characters (literal or `\t`) advance to the next multiple of
-`--tabwidth` (default 40 px) from the start of the legend item
-(`comment-016` to `-018`, `legend-009`, `-010`).
+text: an item is measured as its text with the tags removed and the
+predefined and numeric character entities decoded; `graphv` still reports
+the legend text with the markup (`legend-075` to `-079`). Markup that
+changes the font size is not modelled. Without `--pango-markup`, markup is
+literal text.
+
+Tab characters (literal or `\t`) advance to the next tab stop after the
+current position, measured from the start of the item's text (after the
+two spaces of a colour box, GR-66). The stops are the multiples of
+floor(T + 2·*g*) px, where T is `--tabwidth` (default 40); with
+`--y-grid none` and no `--units-length` they are the multiples of T
+itself. Either way a stop at or before floor(2·*g*) is skipped
+(`comment-016` to `-018`, `legend-009`, `-010`, `fit-037` to `-048`).
 
 **GR-65** (doc, bb; compat). Legend position and direction:
 
-- `south` (default): legend lines below the graph, the first line top at
-  `graph_top` + H + 19; lines are 14 px apart.
-- `north`: legend lines start at y 17 and the graph moves down by the
-  legend height plus 9 (`layout-029`, `legend-060` to `-064`).
-- `east`/`west`: the legend is a column beside the graph, one item per
-  line unless items are on one line without markers (`legend-050` to
-  `-059`); `graph_left` grows by 15 for `east` and by the legend width
-  for `west`, and `image_height` is the graph height plus 32.
-- `bottomup` places the legend lines in reverse order; `bottomup2` does
-  the same but keeps the leading and trailing COMMENT lines in place
-  (`legend-065` to `-074`).
+- `south` (default): the first legend line has its bottom at
+  floor(`graph_top` + H + *x* + 2·*g*), the area spans x = floor(2·*g*) to
+  `image_width` − floor(2·*g*), and lines are floor(1.8·*g*) px apart
+  (14 at the default size).
+- `north`: the first line has its bottom at floor(`graph_top` + 2·*g*),
+  where `graph_top` is the title space of GR-63, and the graph moves down
+  by the legend block of GR-61 (`layout-029`, `legend-060` to `-064`).
+- `east`/`west`: the legend is a column beside the graph whose lines end
+  only at markers (`legend-050` to `-059`). Its width is the largest fill
+  of a line (GR-66); every line is aligned within that width. For `east`,
+  `graph_left` grows by the tag's 15 and the legend starts floor(2·*g*)
+  right of the graph's right edge (`graph_left` + W + *r* + *e*); the image
+  ends floor(2·*g*) after the legend. For `west`, `graph_left` grows by the
+  legend width plus 2·floor(2·*g*) and the legend starts at floor(2·*g*).
+  `image_height` is `graph_top` + H + *x* (+ the watermark). With
+  `--no-legend`, `east` still moves the graph right by 15 when the tag is
+  shown (`fit-069`, `-070`).
+- `bottomup` mirrors the vertical positions of the legend items within the
+  lines they occupy, so the first line comes last and the space after a
+  line (for `\s`, for example) stays between the same two lines.
+  `bottomup2` mirrors only the items from the first to the last graph
+  element (an item that is not a `COMMENT`) within the lines those items
+  occupy; comments before and after them keep their places, even on a line
+  they share with a mirrored item (`legend-065` to `-074`, `fit-071` to
+  `-080`).
 
 The vectors pin the exact coordinates of each combination.
 
-**GR-66** (doc, bb; compat). Legend items and lines (default south
-legend, legend area from x = 16 to x = `image_width` − 16):
+**GR-66** (doc, bb; compat). Legend items and lines:
 
 - A drawing element with a colour and a legend shows its legend as two
   spaces (the colour box) followed by the text; so do `HRULE`, `VRULE`,
@@ -906,40 +943,66 @@ legend, legend area from x = 16 to x = `image_width` − 16):
   Legend text longer than 200 bytes is cut to 200 bytes (`comment-020`,
   `-021`).
 - `coords[n]` is `x0,y0,x1,y1` of the item's text box; x1 − x0 is the text
-  width (GR-60).
+  width (GR-60) and y1 − y0 the line height.
 - An item ends a line when its text ends with a marker: `\l` (or its alias
-  `\n`) left, `\r` right, `\c` centered, `\j` justified. `\s` ends the
-  line and adds 6 px of vertical space; `\u` moves back up one line so the
-  next items share the previous line (`legend-005`, `-006`). `\g` removes
-  the gap that normally follows an item and the trailing spaces of its
-  text. `\.` at the end is removed and has no other effect
-  (`COMMENT:a\.` shows `a`). Only the last two characters are examined,
-  so `COMMENT:b\.\l` ends the line and shows `b\.` (`legend-011`).
-- On a left-aligned line, items are separated by 16 px.
-- Items on a line without a terminating marker are justified across the
-  legend area when there are two or more: the first starts at 16, the
-  last ends at `image_width` − 16, and the space between is shared equally
-  (`legend-002`, `-031`). A single unterminated item is left-aligned.
-  `TEXTALIGN` changes the alignment of unterminated lines that follow it.
-- An item that does not fit after the items already on the line starts a
-  new line (`legend-014`). An item wider than the legend area gets a line
-  of its own and extends past the image edge; it is not cut or wrapped
-  (`legend-012`, `-013`, `-087`).
+  `\n`) left, `\r` right, `\c` centered, `\j` justified, `\s` and `\u`
+  left. `\g` removes the gap that normally follows an item and the
+  trailing spaces of its text. `\.` at the end is removed and has no other
+  effect (`COMMENT:a\.` shows `a`). A backslash before any other last
+  character fails with `ERROR: Unknown control code at the end of
+  '<text>'`. Only the last two characters are examined, so `COMMENT:b\.\l`
+  ends the line and shows `b\.` (`legend-011`).
+- The gap is floor(2·*g*) px (16 at the default size). A line's *fill* is
+  the sum of its item widths plus one gap for each item after the first
+  that has no `\g`. When drawn, each item without `\g` is followed by a
+  gap.
+- A line without a terminating marker takes the alignment `TEXTALIGN`
+  gives at the time the line ends (default justified). Left starts at the
+  area's left edge; right ends the fill at the right edge; center centers
+  the fill. Justified spreads (room − fill)/(n − 1) extra between the n
+  items; a single item is left-aligned (`legend-002`, `-031` to `-044`).
+- Wrapping, with *room* the width of the legend area: an item without a
+  line-ending marker starts a new line when the fill with it would exceed
+  the room; it then loses its `\g`. An item with
+  a line-ending marker always joins the current line. An item without a
+  line-ending marker that is wider than the room on its own ends its line
+  at once (`legend-012`, `-013`, `-014`, `-087`, `fit-061` to `-063`).
+  Items are not cut.
+- Vertical advance after a line: a line with items advances
+  floor(1.8·*g*); `\s` advances floor(1.8·*g*) − ceil(*g*) (6 at the
+  default size); a line ended by `\u` moves the next line 1 px up when it
+  has items (not at all when it is the first line) and a whole line up
+  when it has none (an empty `\u` line on its own is open, `comment-009`).
+  An
+  empty line advances a whole line only when right-aligned or centered
+  (`COMMENT:\r` between two lines). Any element after the last marker,
+  even a `DEF`, `CDEF` or an element without a legend, opens one more
+  line, which is empty unless items follow (`fit-049` to `-056`).
+- A right-aligned line takes no room when the area ends at or before x 0,
+  and a justified line of two or more items takes none when the spread is
+  below −(room + gap); the items are still placed (`fit-064` to `-068`).
+- Rules: an `HRULE` above a given `--upper-limit` or below a given
+  `--lower-limit` shows no legend, whatever the final value range; a
+  `VRULE` outside the time range shows none. `--force-rules-legend` shows
+  both (`fit-057` to `-060`).
 
-The interaction of `\g` with justification is pinned by the vectors but
-not reduced to a rule; see [Unsettled questions](#unsettled-questions).
+`fit-081` to `-160` are random combinations of these options and entries
+from a fixed seed.
 
 ## 10. Value range
 
 **GR-70** (doc, bb; compat). Default autoscaling. Let *min* and *max* be
 the smallest and largest values of the drawing elements that take part in
-scaling (not rules, not `skipscale`; STACK sums count), and let `-u`/`-l`
-extend them when given (without `--rigid` the limits only widen the
-range). Then:
+scaling (not rules, not `skipscale`, not `TICK`; STACK sums count,
+including a `TICK` below the stack), ignoring unknown and infinite values,
+and let `-u`/`-l` extend them when given (without `--rigid` the limits
+only widen the range). Then:
 
 1. If no value is known, the range is 0..1.
-2. If min = max, max is increased by 1 % of its magnitude (0..0 becomes
-   0..1).
+2. If min = max, max is increased by 1 % of its magnitude; 0..0 (also of
+   negative zeros) becomes 0..1 (`range-021`). If min > max (inverted
+   limits), min becomes max·0.99 when min is positive and max·1.01
+   otherwise.
 3. Each bound is rounded to a "sensible" value. Let *s* be the larger of
    |min| and |max|, and *k* the largest integer power of the base (1000,
    or 1024 with `--base 1024`) not above *s*. With *v* = bound / *k*, the
@@ -959,35 +1022,42 @@ Examples pinned by black-box sweeps and the `scale` vectors: data 1.333 to
 gives 800 to 2000; 5e-4 computed as a double may round up to 6e-4.
 
 With `--rigid`, the range is exactly `-l`..`-u` (still applying step 2),
-whatever the data (`scale-169`, `-176`). Without `--rigid`, `-u`/`-l`
-outside the data range widen it and are then rounded like data
-(`scale-008`, `-019`, `-096`). `--rigid --allow-shrink` lets the range
-shrink below the limits toward the data: `-l 1 -u 2` over data -70..60
-gives 0.8..2, `-l 0 -u 100` gives 0..60 (`scale-170`, `-171`); the
-general rule is open (see Unsettled questions).
+whatever the data (`scale-169`, `-176`, `range-014` to `-016`). Without
+`--rigid`, `-u`/`-l` outside the data range widen it and are then rounded
+like data (`scale-008`, `-019`, `-096`). `--rigid --allow-shrink`
+intersects the data range with the limits and rounds the result like data:
+`-l 1 -u 2` over data -70..60 gives 0.8..2, `-l 0 -u 100` gives 0..60
+(`scale-170`, `-171`). Only an infinite limit abandons the graph
+(GR-21); a finite limit that overflows the range is drawn and reported
+(`-u 1.7e308` gives `value_max = inf`, `range-026` to `-029`).
 
 **GR-71** (doc, bb; compat). `--alt-autoscale` sets the range to the data
 range widened by 10 % of its width at each end (after step 2 of GR-70;
 an all-zero range becomes -0.1..1.1). `--alt-autoscale-min` widens only
 the minimum and `--alt-autoscale-max` only the maximum; the other bound is
 the data value, unrounded. This contradicts the manual, which says the
-other bound is 0 (`scale-002` to `-004`, `-182` to `-184`). Tiny values
-(1e-9) give a range that the vectors pin but this rule does not explain
-(`scale-079`).
+other bound is 0 (`scale-002` to `-004`, `-182` to `-184`). Tiny ranges
+(data near 1e-3 or 1e-9) give a range that the vectors pin but this rule
+does not explain (`scale-024`, `-079`).
 
 **GR-72** (doc, bb; compat). `--logarithmic` requires positive values: a
 `-l` of 0 or less fails with
-`ERROR: for a logarithmic yaxis you must specify a lower-limit > 0`. The
-range is the smallest positive data value divided by 2 to the largest
-value multiplied by 2 (data -70..60 whose smallest positive value is
-3.33 gives 1.67..113.3); when no value is positive the range is
-`2.5500000000e-09`..`1.0200000000e+01` (`scale-006`, `-050`, `-072`,
-`-177` to `-181`).
+`ERROR: for a logarithmic yaxis you must specify a lower-limit > 0`. Let
+*lo* and *hi* be the smallest positive and the largest data value, or
+5.1e-9 and 5.1 when no value is positive. The minimum is `-l` when it is
+below *lo* and *lo*/2 otherwise; the maximum is `-u` when it is at least
+*hi* and *hi*·2 otherwise. With `--rigid` the limits are used as given.
+Data -70..60 whose smallest positive value is 3.33 gives 1.67..113.3; with
+no positive value the range is `2.5500000000e-09`..`1.0200000000e+01`;
+`-u 100` over the same data gives a maximum of 100 (`scale-006`, `-050`,
+`-072`, `-177` to `-181`, `range-001` to `-013`).
 
 **GR-73** (bb; compat). `--units-exponent`, `--alt-y-grid` and
-`--alt-y-mrtg` do not change the range. `--y-grid` does: with data
--70..60, `-y 2:1` and `-y 0.5:4` give a maximum of 58 and `-y 1:1 -u 3`
-gives 57 (`scale-189` to `-191`); the rule is open.
+`--alt-y-mrtg` do not change the range. `--y-grid <step>:<factor>` does:
+instead of sensible values, the bounds move out to whole multiples of
+step·factor. With data -70..60, `-y 2:1` and `-y 0.5:4` give a maximum of
+58 and `-y 1:1 -u 3` gives 57 (`scale-189` to `-191`, `range-017` to
+`-019`).
 
 ## 11. Output
 
@@ -1229,13 +1299,13 @@ their class; the expectation stays RRDtool's. They are summarized here.
 | `limit-004`, `-006`, `-009`, `-012`, `-015`, `-016`, `-019` | GR-91 | policy | refuses large PNG graphs |
 | `limit-020` to `-025` | GR-92 | policy | refuses fetches over 10 million rows |
 | `grammar-055`, `-056`, `-061`, `out-008`, `order-009`, `-010`, `scan-001`, `-002`, `-009`, `-010`, `-012` to `-014`, `-016`, `-029`, `-031`, `-035`, `-038`, `-039`, `-048`, `-049`, `-057` to `-060`, `-062`, `-072`, `-073`, `-080`, `-087`, `-091`, `repeat-015` | GR-3 | defect | prints `0x0` for a graph with no elements |
-| `vertical-label-002` | GR-61 | defect | a 300-character vertical label panics (subtract overflow) |
 | `def-073` | GR-43 | defect | `-Z` with a missing DS gives `nan`; the reference prints another value (`-5.438596`) |
 | `cdef-019` | GR-45 | defect | a CDEF that names itself is refused instead of giving `nan` |
 | `grid-dash-011`, `line-044`, `-045`, `hrule-027`, `-028`, `vrule-027`, `-028` | GR-24, GR-50, GR-54 | defect | no Cairo warning for zero or negative dashes |
 | `font-003`, `layout-049` (macOS); `font-019` (Linux) | GR-60 | defect | one font's metrics for every family |
 | `legend-030` | GR-60 | defect | CJK fallback metrics |
-| `legend-079` | GR-64 | defect | Pango markup measured as text |
+| `comment-009` | GR-66 | defect | an empty `\u` line on its own (rule open) |
+| `scale-024`, `-079` | GR-71 | defect | `--alt-autoscale` with a tiny range (rule open) |
 | `layout-026` to `-028` (Linux) | GR-81 | defect | legend `coords` under `--zoom` |
 
 `def-073` is listed as a defect, but the reference value comes from a
@@ -1250,18 +1320,14 @@ implementation that matches the vectors without a general rule is
 acceptable, and a rule found later should be added here with its
 provenance.
 
-1. **Justification with `\g`.** For three COMMENT items `a b c` on an
-   unterminated line, `\g` on the first moves the second and third 16 px
-   left (b at 221 instead of 237, c ending at 449); on the second it moves
-   b 8 px right and leaves c; on the third it moves b 8 px right and c
-   16 px past the legend edge (each after an unlabelled `LINE1`). The
-   vectors `legend-031` to `-044` pin these and related cases; the general
-   formula is open.
+1. **Justification with `\g`** is settled by GR-66: the fill counts the
+   gap of each later item without `\g`, while drawing puts the gap after
+   each item without `\g` (`legend-031` to `-044`).
 2. **Autoscale of tiny ranges with `--alt-autoscale`**: data near 1e-9
-   gives -0.11..0.11 (`scale-079`).
-3. **East and west legend widths** are pinned by `legend-050` to `-059`
-   and `layout-030`, `-031`, `-068`; the width formula (longest line plus
-   margins) was not derived.
+   gives -0.11..0.11 and data near 1e-3 gives -0.0988..0.1194 (`scale-024`,
+   `-079`); neither follows GR-71.
+3. **East and west legend widths** are settled by GR-65 (the widest fill
+   plus a margin at each side).
 4. **Legend coordinates under `--zoom` on Linux** were reported in #93 to
    differ from macOS; the `layout` zoom cases record both platforms.
 5. **Fonts other than the default.** `--font` with a family name and
@@ -1270,9 +1336,8 @@ provenance.
 6. **`--tabwidth`** below 1 and **`--x-grid` with a zero step** depend on
    undefined reference behavior (Pango warnings with a process id; a
    crash). Rondi finishes without a signal; the outputs are not compared.
-7. **`--rigid --allow-shrink`** and **`--y-grid`** change the value range
-   in ways pinned by `scale-170`, `-171` and `scale-189` to `-191` but not
-   reduced to a rule.
+7. **`--rigid --allow-shrink`** and **`--y-grid`** are settled by GR-70
+   and GR-73.
 8. **`--lazy` freshness** is settled by GR-84: the output file is
    compared with the current time minus one pixel's duration. Whether
    that duration is rounded was not settled.
@@ -1281,3 +1346,11 @@ provenance.
 10. **Message length**: option errors are cut to 47 bytes after `ERROR: `
     (GR-12); whether `invalid option` messages are cut the same way was not
     tested with a long enough name.
+11. **An empty `\u` line.** On its own, `COMMENT:\u` gives an image 13 px
+    lower than without a legend line at the default size and 18 px lower
+    at size 10 (`comment-009`); after two lines it moves the end of the
+    legend 15 px up, not 14. The rule for the end of a legend that a `\u`
+    line closes is open.
+12. **Tab stops with a fractional `--tabwidth`** under `--y-grid none` do
+    not fall on multiples of the value (`-T 16.5` gives stops at 16, 33,
+    50 and 67); only whole tab widths are specified there (GR-64).

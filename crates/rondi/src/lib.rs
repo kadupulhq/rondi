@@ -4,9 +4,13 @@ mod consolidation;
 mod data_source;
 mod format;
 pub mod format_value;
+// The legacy element parser keeps two tab-stop fields that only the old
+// layout code read; both go with its clean-room replacement.
+#[allow(dead_code)]
 pub mod graph;
 pub mod graph_layout;
 pub mod import_export;
+pub mod layout;
 mod numeric_cast;
 mod queries;
 mod rpn;
