@@ -168,78 +168,10 @@ fn round_bound(value: f64, power: f64, up: bool) -> f64 {
 
 /// Chooses the value range (GR-70 to GR-73).
 pub fn value_range(scale: &Scale, options: &RangeOptions) -> ValueRange {
-    let lower = known(options.lower);
-    let upper = known(options.upper);
     if options.logarithmic {
-        let (low, high) = if scale.min_positive.is_finite() {
-            (scale.min_positive, scale.max)
-        } else {
-            LOG_EMPTY
-        };
-        // Compatibility: a limit that reaches past the extreme replaces it;
-        // otherwise the extreme is halved or doubled.
-        // Provenance: black-box compatibility test (layout fuzzing against
-        // the oracle; -o with -u between 5 and 10.2 and no positive value,
-        // and -u 100 with a largest value of 56.67).
-        let min = match lower {
-            // Compatibility: a lower limit equal to the extreme is still
-            // halved, while an equal upper limit is kept (-l 5.1e-9 and
-            // -u 5.1 without a positive value).
-            Some(lower) if options.rigid || lower < low => lower,
-            _ => low / 2.0,
-        };
-        let max = match upper {
-            Some(upper) if options.rigid || upper >= high => upper,
-            _ => high * 2.0,
-        };
-        return ValueRange { min, max };
+        return logarithmic_range(scale, options);
     }
-    let (mut min, mut max) = if scale.any {
-        (scale.min, scale.max)
-    } else {
-        (0.0, 1.0)
-    };
-    if options.rigid {
-        if options.allow_shrink {
-            // Compatibility: shrinking keeps the part of the limits the data
-            // covers, which is then rounded like data.
-            // Provenance: black-box compatibility test (scale-170, -171).
-            if let Some(lower) = lower {
-                min = min.max(lower);
-            }
-            if let Some(upper) = upper {
-                max = max.min(upper);
-            }
-        } else {
-            min = lower.unwrap_or(min);
-            max = upper.unwrap_or(max);
-        }
-    } else {
-        if let Some(lower) = lower {
-            min = min.min(lower);
-        }
-        if let Some(upper) = upper {
-            max = max.max(upper);
-        }
-    }
-    if min == max {
-        if max == 0.0 {
-            // Compatibility: a range of zeros is 0..1 even when the zeros
-            // are negative.
-            // Provenance: black-box compatibility test (range-021).
-            min = 0.0;
-            max = 1.0;
-        } else {
-            max += max.abs() * 0.01;
-        }
-    } else if min > max {
-        // Compatibility: inverted limits keep the upper one and put the
-        // lower one just beside it, below for a positive lower limit and
-        // otherwise past it, so the range can stay inverted.
-        // Provenance: black-box compatibility test (graph_data_differential
-        // and the inverted-limit probes recorded under GR-70).
-        min = max * if min > 0.0 { 0.99 } else { 1.01 };
-    }
+    let (min, max) = settle(limited(scale, options));
     if options.rigid && !options.allow_shrink {
         return ValueRange { min, max };
     }
@@ -247,13 +179,10 @@ pub fn value_range(scale: &Scale, options: &RangeOptions) -> ValueRange {
     let alt_max = options.alt_autoscale || options.alt_autoscale_max;
     if alt_min || alt_max {
         let spread = (max - min) * 0.1;
-        if alt_min {
-            min -= spread;
-        }
-        if alt_max {
-            max += spread;
-        }
-        return ValueRange { min, max };
+        return ValueRange {
+            min: if alt_min { min - spread } else { min },
+            max: if alt_max { max + spread } else { max },
+        };
     }
     if let Some((step, factor)) = options.y_grid {
         // Compatibility: with --y-grid the bounds move out to whole label
@@ -271,6 +200,81 @@ pub fn value_range(scale: &Scale, options: &RangeOptions) -> ValueRange {
     ValueRange {
         min: round_bound(min, power, false),
         max: round_bound(max, power, true),
+    }
+}
+
+/// The range of a logarithmic axis (GR-72).
+fn logarithmic_range(scale: &Scale, options: &RangeOptions) -> ValueRange {
+    let (low, high) = if scale.min_positive.is_finite() {
+        (scale.min_positive, scale.max)
+    } else {
+        LOG_EMPTY
+    };
+    // Compatibility: a limit that reaches past the extreme replaces it;
+    // otherwise the extreme is halved or doubled.
+    // Provenance: black-box compatibility test (layout fuzzing against the
+    // oracle; -o with -u between 5 and 10.2 and no positive value, and
+    // -u 100 with a largest value of 56.67).
+    let min = match known(options.lower) {
+        // Compatibility: a lower limit equal to the extreme is still halved,
+        // while an equal upper limit is kept (-l 5.1e-9 and -u 5.1 without
+        // a positive value).
+        Some(lower) if options.rigid || lower < low => lower,
+        _ => low / 2.0,
+    };
+    let max = match known(options.upper) {
+        Some(upper) if options.rigid || upper >= high => upper,
+        _ => high * 2.0,
+    };
+    ValueRange { min, max }
+}
+
+/// The data extremes with the limits applied (GR-70).
+fn limited(scale: &Scale, options: &RangeOptions) -> (f64, f64) {
+    let (min, max) = if scale.any {
+        (scale.min, scale.max)
+    } else {
+        (0.0, 1.0)
+    };
+    let (lower, upper) = (known(options.lower), known(options.upper));
+    if !options.rigid {
+        return (
+            lower.map_or(min, |lower| min.min(lower)),
+            upper.map_or(max, |upper| max.max(upper)),
+        );
+    }
+    if options.allow_shrink {
+        // Compatibility: shrinking keeps the part of the limits the data
+        // covers, which is then rounded like data.
+        // Provenance: black-box compatibility test (scale-170, -171).
+        return (
+            lower.map_or(min, |lower| min.max(lower)),
+            upper.map_or(max, |upper| max.min(upper)),
+        );
+    }
+    (lower.unwrap_or(min), upper.unwrap_or(max))
+}
+
+/// Step 2 of GR-70: an empty or inverted range.
+fn settle((min, max): (f64, f64)) -> (f64, f64) {
+    if min == max {
+        if max == 0.0 {
+            // Compatibility: a range of zeros is 0..1 even when the zeros
+            // are negative.
+            // Provenance: black-box compatibility test (range-021).
+            (0.0, 1.0)
+        } else {
+            (min, max + max.abs() * 0.01)
+        }
+    } else if min > max {
+        // Compatibility: inverted limits keep the upper one and put the
+        // lower one just beside it, below for a positive lower limit and
+        // otherwise past it, so the range can stay inverted.
+        // Provenance: black-box compatibility test (graph_data_differential
+        // and the inverted-limit probes recorded under GR-70).
+        (max * if min > 0.0 { 0.99 } else { 1.01 }, max)
+    } else {
+        (min, max)
     }
 }
 

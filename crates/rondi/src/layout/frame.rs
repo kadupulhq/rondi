@@ -144,6 +144,69 @@ fn floor(value: f64) -> i64 {
     value.floor() as i64
 }
 
+/// The fixed parts of the image around the graph and the legend metrics
+/// (GR-60 to GR-63).
+struct Parts {
+    metrics: Metrics,
+    /// The legend margin and gap.
+    border: f64,
+    /// Space above the graph: the title, or the margin without one.
+    top: i64,
+    /// Space left of the graph.
+    left: i64,
+    /// Height of the x-axis labels below the graph.
+    x_labels: i64,
+    /// Width of the right axis and its labels.
+    right_axis: i64,
+    /// Space right of the graph or its right axis.
+    right_edge: i64,
+    tag: i64,
+    watermark: i64,
+}
+
+impl Parts {
+    fn new(options: &Options) -> Self {
+        let sizes = options.sizes;
+        let metrics = Metrics {
+            size: sizes.legend,
+            // Compatibility: a tab advances by the tab width in pixels plus
+            // the legend margin, or by the tab width alone when the y-axis
+            // labels are hidden and no units length is given; either way a
+            // stop lies beyond the margin.
+            // Provenance: black-box compatibility test (legend-009, -010 and
+            // the tab probes recorded under GR-64; -y none with and without
+            // -L at legend sizes 5, 8, 10 and 20 and -T 10, 13 and 40).
+            tab: if options.tab_margin {
+                (options.tab_width + 2.0 * sizes.legend).floor()
+            } else {
+                options.tab_width
+            },
+            markup: options.markup,
+        };
+        let units = options.units_length * text::advance(sizes.axis) as i64;
+        let either = |set: bool, value: i64, otherwise: i64| if set { value } else { otherwise };
+        Self {
+            border: metrics.gap(),
+            metrics,
+            top: match options.title.as_deref().filter(|title| !title.is_empty()) {
+                Some(title) => floor(sizes.title * 1.6 * (title_lines(title) + 1) as f64),
+                None => MARGIN,
+            },
+            left: MARGIN + either(options.vertical_label, floor(2.0 * sizes.unit), 0) + units,
+            x_labels: either(options.x_labels, floor(2.5 * sizes.axis), 0),
+            right_axis: either(options.right_axis, MARGIN + units, 0),
+            right_edge: either(options.right_axis_label, floor(2.0 * sizes.unit), MARGIN),
+            tag: either(options.rrdtool_tag, TAG, 0),
+            watermark: either(options.watermark, floor(2.0 * sizes.watermark), 0),
+        }
+    }
+
+    /// Bottom of the first legend line when the lines start below `y`.
+    fn first_line(&self, y: i64) -> i64 {
+        floor(y as f64 + 2.0 * self.metrics.size)
+    }
+}
+
 /// Lays out the image (GR-61 to GR-66).
 pub fn frame(options: &Options, entries: &[Entry]) -> Result<Frame, String> {
     if options.only_graph {
@@ -157,207 +220,187 @@ pub fn frame(options: &Options, entries: &[Entry]) -> Result<Frame, String> {
             legend: Vec::new(),
         });
     }
-    let sizes = options.sizes;
-    let metrics = Metrics {
-        size: sizes.legend,
-        // Compatibility: a tab advances by the tab width in pixels plus the
-        // legend margin, or by the tab width alone when the y-axis labels
-        // are hidden and no units length is given; either way a stop lies
-        // beyond the margin.
-        // Provenance: black-box compatibility test (legend-009, -010 and
-        // the tab probes recorded under GR-64; -y none with and without -L
-        // at legend sizes 5, 8, 10 and 20 and -T 10, 13 and 40).
-        tab: if options.tab_margin {
-            (options.tab_width + 2.0 * sizes.legend).floor()
-        } else {
-            options.tab_width
-        },
-        markup: options.markup,
-    };
-    let border = metrics.gap();
-    let top = match options.title.as_deref().filter(|title| !title.is_empty()) {
-        Some(title) => floor(sizes.title * 1.6 * (title_lines(title) + 1) as f64),
-        None => MARGIN,
-    };
-    let units = options.units_length * text::advance(sizes.axis) as i64;
-    let left = MARGIN
-        + if options.vertical_label {
-            floor(2.0 * sizes.unit)
-        } else {
-            0
+    let parts = Parts::new(options);
+    match options.placement {
+        Placement::East | Placement::West if options.show_legend => {
+            beside(options, entries, &parts)
         }
-        + units;
-    let x_labels = if options.x_labels {
-        floor(2.5 * sizes.axis)
-    } else {
-        0
-    };
-    let right_axis = if options.right_axis {
-        MARGIN + units
-    } else {
-        0
-    };
-    let right_edge = if options.right_axis_label {
-        floor(2.0 * sizes.unit)
-    } else {
-        MARGIN
-    };
-    let tag = if options.rrdtool_tag { TAG } else { 0 };
-    let watermark = if options.watermark {
-        floor(2.0 * sizes.watermark)
-    } else {
-        0
-    };
-    let placement = if options.show_legend {
-        options.placement
-    } else {
-        Placement::South
-    };
-    let side = matches!(placement, Placement::East | Placement::West) && options.show_legend;
-
-    // A legend beside the graph is measured first, since its width moves
-    // the graph; above or below the graph it needs the image width.
-    let beside = |first_bottom: i64, x: f64| {
-        legend::place(entries, &metrics, None, x, first_bottom, options.order)
-    };
-    let mut frame = Frame::default();
-    if side {
-        let first_bottom = floor(top as f64 + 2.0 * sizes.legend);
-        let probe = beside(first_bottom, 0.0)?;
-        let legend_width = probe.width;
-        let fixed_height = top + x_labels + watermark;
-        let (graph_width, graph_height) = if options.full_size {
-            let used =
-                left + tag + right_axis + right_edge + legend_width as i64 + 2 * border as i64;
-            (
-                (options.width - used).max(1),
-                (options.height - fixed_height).max(1),
-            )
-        } else {
-            (options.width, options.height)
-        };
-        let (graph_left, legend_left) = if placement == Placement::East {
-            let graph_left = left + tag;
-            let legend_left = (graph_left + graph_width + right_axis + right_edge) as f64 + border;
-            (graph_left, legend_left)
-        } else {
-            (left + legend_width as i64 + 2 * border as i64, border)
-        };
-        let laid = beside(first_bottom, legend_left)?;
-        frame.graph_left = graph_left;
-        frame.graph_top = top;
-        frame.graph_width = graph_width;
-        frame.graph_height = graph_height;
-        frame.image_width = if options.full_size {
-            options.width
-        } else if placement == Placement::East {
-            (legend_left + legend_width + border) as i64
-        } else {
-            graph_left + graph_width + right_axis + right_edge + tag
-        };
-        frame.image_height = if options.full_size {
-            options.height
-        } else {
-            top + graph_height + x_labels + watermark
-        };
-        frame.legend = laid.placed;
-        return Ok(frame);
+        Placement::North if options.show_legend => above(options, entries, &parts),
+        _ => below(options, entries, &parts),
     }
+}
 
+/// A legend beside the graph (GR-65). It is measured first, since its width
+/// moves the graph.
+fn beside(options: &Options, entries: &[Entry], parts: &Parts) -> Result<Frame, String> {
+    let border = parts.border;
+    let first_bottom = parts.first_line(parts.top);
+    let place = |x: f64| {
+        legend::place(
+            entries,
+            &parts.metrics,
+            None,
+            x,
+            first_bottom,
+            options.order,
+        )
+    };
+    let legend_width = place(0.0)?.width;
+    let (graph_width, graph_height) = if options.full_size {
+        let used = parts.left
+            + parts.tag
+            + parts.right_axis
+            + parts.right_edge
+            + legend_width as i64
+            + 2 * border as i64;
+        (
+            (options.width - used).max(1),
+            (options.height - parts.top - parts.x_labels - parts.watermark).max(1),
+        )
+    } else {
+        (options.width, options.height)
+    };
+    let east = options.placement == Placement::East;
+    let (graph_left, legend_left) = if east {
+        let graph_left = parts.left + parts.tag;
+        let legend_left =
+            (graph_left + graph_width + parts.right_axis + parts.right_edge) as f64 + border;
+        (graph_left, legend_left)
+    } else {
+        (parts.left + legend_width as i64 + 2 * border as i64, border)
+    };
     let image_width = if options.full_size {
         options.width
+    } else if east {
+        (legend_left + legend_width + border) as i64
     } else {
-        left + options.width + right_axis + right_edge + tag
+        graph_left + graph_width + parts.right_axis + parts.right_edge + parts.tag
     };
-    let graph_width = if options.full_size {
-        (options.width - (left + right_axis + right_edge + tag)).max(1)
+    let image_height = if options.full_size {
+        options.height
     } else {
-        options.width
+        parts.top + graph_height + parts.x_labels + parts.watermark
     };
-    let area = Some((border, image_width as f64 - border));
-    let block = |laid: &Laid| laid.height + metrics.trailer();
-    match placement {
-        Placement::North if options.show_legend => {
-            let laid = legend::place(
-                entries,
-                &metrics,
-                area,
-                border,
-                floor(top as f64 + 2.0 * sizes.legend),
-                options.order,
-            )?;
-            let graph_top = top + block(&laid);
-            let graph_height = if options.full_size {
-                (options.height - graph_top - x_labels - watermark).max(1)
-            } else {
-                options.height
-            };
-            frame.graph_top = graph_top;
-            frame.graph_height = graph_height;
-            frame.image_height = if options.full_size {
-                options.height
-            } else {
-                graph_top + graph_height + x_labels + watermark
-            };
-            frame.legend = laid.placed;
-        }
-        _ => {
-            // The lines' positions depend on the graph height, which in
-            // full-size mode depends on the legend's height: measure first.
-            let measure = |graph_height: i64| {
-                legend::place(
-                    entries,
-                    &metrics,
-                    area,
-                    border,
-                    floor((top + graph_height + x_labels) as f64 + 2.0 * sizes.legend),
-                    options.order,
-                )
-            };
-            let legend_block = |laid: &Laid| {
-                if options.show_legend {
-                    block(laid)
-                } else if options.full_size {
-                    // Compatibility: full-size mode leaves one more pixel.
-                    // Provenance: black-box compatibility test
-                    // (graph_data_differential -D -g and the probes
-                    // recorded under GR-62).
-                    NO_LEGEND_PAD + 1
-                } else {
-                    NO_LEGEND_PAD
-                }
-            };
-            let mut graph_height = options.height;
-            if options.full_size {
-                let probe = measure(0)?;
-                graph_height =
-                    (options.height - top - x_labels - legend_block(&probe) - watermark).max(1);
-            }
-            let laid = measure(graph_height)?;
-            frame.graph_top = top;
-            frame.graph_height = graph_height;
-            frame.image_height = if options.full_size {
-                options.height
-            } else {
-                top + graph_height + x_labels + legend_block(&laid) + watermark
-            };
-            if options.show_legend {
-                frame.legend = laid.placed;
-            }
-        }
+    Ok(Frame {
+        graph_left,
+        graph_top: parts.top,
+        graph_width,
+        graph_height,
+        image_width,
+        image_height,
+        legend: place(legend_left)?.placed,
+    })
+}
+
+/// The image width and the graph width for a legend above or below.
+fn widths(options: &Options, parts: &Parts) -> (i64, i64) {
+    let fixed = parts.left + parts.right_axis + parts.right_edge + parts.tag;
+    if options.full_size {
+        (options.width, (options.width - fixed).max(1))
+    } else {
+        (fixed + options.width, options.width)
     }
-    // Compatibility: without a legend, an east placement still moves the
-    // graph right by the tag's width, as it does with a legend.
-    // Provenance: black-box compatibility test (layout fuzzing against the
-    // oracle; -g with --legend-position east, with and without the tag).
-    frame.graph_left = if options.placement == Placement::East {
-        left + tag
+}
+
+/// The span legend lines fill above or below the graph: the image width
+/// less the legend margin at each side.
+fn area(image_width: i64, parts: &Parts) -> Option<(f64, f64)> {
+    Some((parts.border, image_width as f64 - parts.border))
+}
+
+/// A legend above the graph (GR-65).
+fn above(options: &Options, entries: &[Entry], parts: &Parts) -> Result<Frame, String> {
+    let (image_width, graph_width) = widths(options, parts);
+    let laid = legend::place(
+        entries,
+        &parts.metrics,
+        area(image_width, parts),
+        parts.border,
+        parts.first_line(parts.top),
+        options.order,
+    )?;
+    let graph_top = parts.top + laid.height + parts.metrics.trailer();
+    let graph_height = if options.full_size {
+        (options.height - graph_top - parts.x_labels - parts.watermark).max(1)
     } else {
-        left
+        options.height
     };
-    frame.graph_width = graph_width;
-    frame.image_width = image_width;
-    Ok(frame)
+    Ok(Frame {
+        graph_left: parts.left,
+        graph_top,
+        graph_width,
+        graph_height,
+        image_width,
+        image_height: if options.full_size {
+            options.height
+        } else {
+            graph_top + graph_height + parts.x_labels + parts.watermark
+        },
+        legend: laid.placed,
+    })
+}
+
+/// A legend below the graph, or none (GR-61, GR-65).
+fn below(options: &Options, entries: &[Entry], parts: &Parts) -> Result<Frame, String> {
+    let (image_width, graph_width) = widths(options, parts);
+    // The lines' positions depend on the graph height, which in full-size
+    // mode depends on the legend's height: measure first.
+    let measure = |graph_height: i64| {
+        legend::place(
+            entries,
+            &parts.metrics,
+            area(image_width, parts),
+            parts.border,
+            parts.first_line(parts.top + graph_height + parts.x_labels),
+            options.order,
+        )
+    };
+    let block = |laid: &Laid| {
+        if options.show_legend {
+            laid.height + parts.metrics.trailer()
+        } else if options.full_size {
+            // Compatibility: full-size mode leaves one more pixel.
+            // Provenance: black-box compatibility test
+            // (graph_data_differential -D -g and the probes recorded under
+            // GR-62).
+            NO_LEGEND_PAD + 1
+        } else {
+            NO_LEGEND_PAD
+        }
+    };
+    let fixed = parts.top + parts.x_labels + parts.watermark;
+    let graph_height = if options.full_size {
+        (options.height - fixed - block(&measure(0)?)).max(1)
+    } else {
+        options.height
+    };
+    let laid = measure(graph_height)?;
+    Ok(Frame {
+        // Compatibility: without a legend, an east placement still moves
+        // the graph right by the tag's width, as it does with a legend.
+        // Provenance: black-box compatibility test (layout fuzzing against
+        // the oracle; -g with --legend-position east, with and without the
+        // tag).
+        graph_left: if options.placement == Placement::East {
+            parts.left + parts.tag
+        } else {
+            parts.left
+        },
+        graph_top: parts.top,
+        graph_width,
+        graph_height,
+        image_width,
+        image_height: if options.full_size {
+            options.height
+        } else {
+            fixed + graph_height + block(&laid)
+        },
+        legend: if options.show_legend {
+            laid.placed
+        } else {
+            Vec::new()
+        },
+    })
 }
 
 #[cfg(test)]
