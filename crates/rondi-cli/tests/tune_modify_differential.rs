@@ -1,10 +1,10 @@
 #![cfg(unix)]
-//! rrd_modify.c differentials: `rrdtool tune` with DEL:, DS:, DELRRA:,
+//! RRDtool differentials: `rrdtool tune` with DEL:, DS:, DELRRA:,
 //! RRA#n:[+-=]rows, RRA: and --step. Each fixture is created and updated by
 //! RRDtool once and copied to both sides, so both start from the same
 //! randomly chosen rows. Results are compared byte for byte, except the
-//! parts of an added DS definition that parseDS leaves uninitialized
-//! (rrd_create.c:328 never clears dst[19] or par[3..9]).
+//! parts of an added DS definition that RRDtool leaves uninitialized
+//! (the type name tail and the unused parameter slots).
 
 mod common;
 
@@ -219,10 +219,9 @@ fn fixtures() -> Option<common::Sides> {
     )
 }
 
-// handle_rra_defs, mod_rras, add_dss and add_rras (rrd_modify.c:202-384,
-// 563-697, 1171-1297): rows come out oldest first with cur_row at the end,
-// grown rows are back-filled from other archives by populate_row, and the
-// CDP of an added archive is rebuilt by prepare_CDPs.
+// Archive changes: rows come out oldest first with cur_row at the end,
+// grown rows are back-filled from other archives, and the
+// CDP of an added archive is rebuilt.
 #[test]
 fn tune_modify_rewrites_files_like_rrd_modify() {
     let Some(sides) = fixtures() else {
@@ -285,7 +284,7 @@ fn tune_modify_rewrites_files_like_rrd_modify() {
     }
 }
 
-// rrd_modify_r2 (rrd_modify.c:936-1005): --step stretches every archive
+// RRDtool's tune: --step stretches every archive
 // before the other changes, and must divide the old step.
 #[test]
 fn tune_modify_step_stretches_like_rrd_modify() {
@@ -309,9 +308,8 @@ fn tune_modify_step_stretches_like_rrd_modify() {
     }
 }
 
-// handle_modify parses every word before changing anything, and
-// add_dss refuses a name that is already taken (rrd_modify.c:347-351,
-// 1299-1433). The archive-less result matches too, though RRDtool's own
+// tune parses every word before changing anything, and
+// adding a DS refuses a name that is already taken. The archive-less result matches too, though RRDtool's own
 // info and dump abort on it, so only the bytes are compared there.
 #[test]
 fn tune_modify_errors_match_rrd_modify() {
@@ -395,7 +393,7 @@ fn tune_modify_refuses_without_writing_where_upstream_writes_garbage() {
     }
 }
 
-// write_rrd (rrd_create.c:1406) writes a temporary file, gives it the old
+// write_rrd writes a temporary file, gives it the old
 // file's mode and renames it over the old name.
 #[test]
 fn tune_modify_keeps_the_file_mode_and_replaces_the_inode() {

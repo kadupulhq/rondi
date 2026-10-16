@@ -79,7 +79,7 @@ pub enum VdefError {
 /// Evaluate one RRDtool VDEF aggregate over regularly spaced values.
 ///
 /// `start` is the beginning of the first interval, and values are ordered in
-/// ascending time. NaN and infinity handling follows rrd_graph.c's vdef_calc.
+/// ascending time. NaN and infinity handling follows RRDtool's vdef_calc.
 pub fn evaluate_vdef(
     function: VdefFunction,
     percentile: Option<f64>,
@@ -277,7 +277,7 @@ fn interval_timestamp(start: i64, index: usize, step: u64) -> Result<i64, VdefEr
 }
 
 fn rrd_qsort_compatible(values: &mut [f64]) {
-    // rrd_graph.c passes vdef_percent_compar to the host C library's qsort.
+    // RRDtool passes vdef_percent_compar to the host C library's qsort.
     // In particular, its comparisons involving infinities are not a strict
     // weak order, so a Rust sort produces different results from RRDtool.
     // Matching the same libc qsort call preserves the pinned implementation's
@@ -327,7 +327,7 @@ mod tests {
 
     #[test]
     fn generated_unknown_aggregates_use_rrdtool_dnan_bits() {
-        // vdef_calc stores DNAN, the runtime 0.0/0.0 from rrd_nan_inf.c. That
+        // RRDtool stores its DNAN, the runtime 0.0/0.0. That
         // is the target's default NaN: sign set on x86-64 SSE, clear on AArch64.
         #[cfg(target_arch = "x86_64")]
         assert_eq!(rrd_nan().to_bits(), 0xfff8_0000_0000_0000);

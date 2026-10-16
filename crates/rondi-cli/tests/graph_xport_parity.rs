@@ -152,7 +152,7 @@ fn xport_of_a_non_numeric_looking_constant_exports_nothing() {
     }
 }
 
-// rrd_graph.c data_calc adds the normalized shift to time_t start and end,
+// RRDtool data_calc adds the normalized shift to time_t start and end,
 // which wraps for a shift near the type's limits.
 #[test]
 fn shift_by_a_huge_offset_wraps_like_rrdtool() {
@@ -177,7 +177,7 @@ fn xport_xml_prints_infinities_and_json_prints_null() {
     }
 }
 
-// rrd_xport.c copies legend and PRINT text into the XML document without
+// RRDtool copies legend and PRINT text into the XML document without
 // escaping it.
 #[test]
 fn xml_output_writes_legend_and_print_text_verbatim() {
@@ -207,7 +207,7 @@ fn xml_output_writes_legend_and_print_text_verbatim() {
     assert_same_stdout(&fixture, &graph);
 }
 
-// rrd_tool.c prints "WxH" unless an exact --imginfo/-f argument is present,
+// RRDtool prints "WxH" unless an exact --imginfo/-f argument is present,
 // then the image_info line and every PRINT result. Rondi's PNG canvas size
 // is not pixel-compatible yet, so its dimension line is checked against the
 // written file instead of the upstream text.
@@ -323,7 +323,7 @@ fn graph_args(
     args
 }
 
-// rrd_graph.c print_calc keeps one magnitude across PRINT and GPRINT: the
+// RRDtool print_calc keeps one magnitude across PRINT and GPRINT: the
 // first %S (or any %s) sets it, later %S values reuse it, and a zero %S
 // result leaves it unset. auto_scale divides by powers of --base.
 #[test]
@@ -395,9 +395,9 @@ fn graph_cdefs_and_vdefs_cover_the_right_edge_slot() {
     }
 }
 
-// rrd_graph_helper.c accepts DEF options anywhere after vname=rrd, with `\:`
+// RRDtool accepts DEF options anywhere after vname=rrd, with `\:`
 // escaping a colon. A step coarser than the fetched archive goes through
-// rrd_reduce_data, which also applies to the export-wide --step.
+// RRDtool's data reduction, which also applies to the export-wide --step.
 #[test]
 fn def_options_match_rrdtool_graph_helper() {
     let Some(fixture) = fixture() else { return };
@@ -465,7 +465,7 @@ fn def_options_match_rrdtool_graph_helper() {
     }
 }
 
-// rrd_tool.c prints fetch rows with printf("%0.10e"), so a decimal-comma
+// RRDtool prints fetch rows with printf("%0.10e"), so a decimal-comma
 // LC_NUMERIC changes the separator.
 #[test]
 fn fetch_values_follow_lc_numeric() {

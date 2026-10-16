@@ -207,7 +207,7 @@ fn daemon_file_commands_share_upstream_path_translation() {
     }
 }
 
-/// rrd_client.c `client_connect` treats anything without a `unix:` prefix
+/// RRDtool `client_connect` treats anything without a `unix:` prefix
 /// or leading slash as a network address, and `connect_network` reports
 /// parse and resolver failures in its own words.
 #[test]

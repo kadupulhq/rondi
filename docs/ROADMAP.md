@@ -32,17 +32,17 @@ EXECUTED: `RONDI_REQUIRE_ORACLE=1 cargo test --workspace --no-fail-fast` at `204
 
 Each behavior change below merged to `main` with differential tests against RRDtool 1.11.0. Nothing has been released.
 
-- #79: PRINT/GPRINT `%S` scaling and in-place rewrite as `print_calc` does (so graphv rescales and format errors quote the rewritten text), VDEF times in UTC under `--utc`, HRULE and VRULE painted after the data elements, all-unknown VDEF results filled with the target's DNAN bits, new differential tests for SHIFT, `%S`, rules and daemon FETCH, and the `rrd_queries` Criterion benchmark (results in [benchmarks.md](benchmarks.md)).
+- #79: PRINT/GPRINT `%S` scaling and in-place rewrite as RRDtool does (so graphv rescales and format errors quote the rewritten text), VDEF times in UTC under `--utc`, HRULE and VRULE painted after the data elements, all-unknown VDEF results filled with the target's DNAN bits, new differential tests for SHIFT, `%S`, rules and daemon FETCH, and the `rrd_queries` Criterion benchmark (results in [benchmarks.md](benchmarks.md)).
 - #86: socket ancestors another account can replace are refused, daemon RRD parents are walked without following symlinks, rrdcached CREATE is capped at 64 MiB, and native journals are checked before they are modified.
 - #87: command output may go to a character device such as `/dev/null`.
-- #88: a data graph whose output file cannot be opened prints the data and exits 0, as `rrd_graph_xport` does.
-- #91: `tune` ports `rrd_modify.c` (`DEL:`, `DS:`, `DELRRA:`, `RRA#n:[+-=]rows`, `RRA:`, `--step`), compared file-for-file with RRDtool, including the glibc `realloc(p, 0)` and Clang FMA platform differences.
-- #92: graph and xport data preparation follow `data_fetch`, `rrd_reduce_data` and CDEF/VDEF arithmetic, with FMA contraction at the sites the pinned aarch64 builds fuse; graph falls back to the local file when rrdcached is unreachable.
+- #88: a data graph whose output file cannot be opened prints the data and exits 0, as RRDtool does.
+- #91: `tune` matches RRDtool 1.11.0 for (`DEL:`, `DS:`, `DELRRA:`, `RRA#n:[+-=]rows`, `RRA:`, `--step`), compared file-for-file with RRDtool, including the glibc `realloc(p, 0)` and Clang FMA platform differences.
+- #92: graph and xport data preparation follow RRDtool 1.11.0 fetch, data reduction and CDEF/VDEF arithmetic, with FMA contraction at the sites the pinned aarch64 builds fuse; graph falls back to the local file when rrdcached is unreachable.
 - #93: `--zoom`, infinite `-u`/`-l`, negative `--units-length`, malformed `PREV(`, and a 2^24-pixel PNG limit in place of 4096 per side (RD-016).
-- #94: dump values through `rrd_snprintf`, update times past 2^63, raw DS name bytes in `info`/`lastupdate`/`dump`, and damaged headers opened with `rrd_open`'s wrapping arithmetic (ID-001 to ID-003).
-- #95: rrdcached request handlers (CREATE, FETCH/FETCHBIN, HELP, SUSPEND/RESUME, LIST, TUNE, empty names, NUL separators) match `rrd_daemon.c`; the half-close race is recorded as RD-015.
-- #96: `--daemon` addresses parse like `rrd_client.c` (bare hosts use port 42217), `tune` re-parses its permuted argv, and `rrdtool fetch` streams past 10 million rows (the collected paths keep the limit as RD-017).
-- #97: rrdcached `-b`, `-P`, `-p`, default logging, and SIGUSR1, SIGUSR2 and SIGHUP match `rrd_daemon.c`.
+- #94: dump values through RRDtool's number formatting, update times past 2^63, raw DS name bytes in `info`/`lastupdate`/`dump`, and damaged headers opened with RRDtool's wrapping size arithmetic (ID-001 to ID-003).
+- #95: rrdcached request handlers (CREATE, FETCH/FETCHBIN, HELP, SUSPEND/RESUME, LIST, TUNE, empty names, NUL separators) match RRDtool 1.11.0; the half-close race is recorded as RD-015.
+- #96: `--daemon` addresses parse as RRDtool 1.11.0 does (bare hosts use port 42217), `tune` re-parses its permuted argv, and `rrdtool fetch` streams past 10 million rows (the collected paths keep the limit as RD-017).
+- #97: rrdcached `-b`, `-P`, `-p`, default logging, and SIGUSR1, SIGUSR2 and SIGHUP match RRDtool 1.11.0.
 - #98: restore reads XML through a port of libxml2 2.9.14's `xmlTextReader`, so integer field errors, a byte order mark, trailing content and libxml2 error text match (RD-018 lists what is not modeled).
 
 - #100: Rondi is licensed `MIT OR Apache-2.0`; no behavior change.
@@ -53,12 +53,12 @@ Each behavior change below merged to `main` with differential tests against RRDt
 
 ### What RRDtool does
 
-- Cookie `RRD`, versions 0003 to 0005 current; 0001 and 0002 are legacy (`src/rrd_format.h`, `src/rrd_open.c`). Versions above 5 are rejected.
+- Cookie `RRD`, versions 0003 to 0005 current; 0001 and 0002 are legacy (`src/rrd_format.h`, RRDtool 1.11.0). Versions above 5 are rejected.
 - The header structs follow the C ABI of the host: `long` and `time_t` width, `double` alignment, byte order. A file from another architecture fails with `This RRD was created on another architecture`. Cross-architecture transfer is by dump and restore.
 - Data source types: COUNTER, ABSOLUTE, GAUGE, DERIVE, COMPUTE, DCOUNTER, DDERIVE. Consolidation functions: AVERAGE, MIN, MAX, LAST, plus the Holt-Winters family HWPREDICT, MHWPREDICT, SEASONAL, DEVSEASONAL, DEVPREDICT, FAILURES (`src/rrd_hw*.c`).
-- COMPUTE values are never supplied by the caller (`src/rrd_update.c`).
-- The initial ring row is random (`src/rrd_open.c`).
-- Writers `mmap` the file. No `fsync`, `fdatasync`, or `msync` appears in `rrd_open.c`, `rrd_update.c`, or `rrd_create.c`.
+- COMPUTE values are never supplied by the caller (RRDtool 1.11.0).
+- The initial ring row is random (RRDtool 1.11.0).
+- Writers `mmap` the file. No `fsync`, `fdatasync`, or `msync` appears in RRDtool 1.11.0, RRDtool 1.11.0, or RRDtool 1.11.0.
 - Locking is a whole-file `fcntl` lock. Default `try` (`F_SETLK`); `$RRD_LOCKING` and `update --locking` select `try`, `block`, or `none`.
 
 ### What Rondi does
@@ -67,7 +67,7 @@ Each behavior change below merged to `main` with differential tests against RRDt
 - Requires a 64-bit little-endian target (`rrd_binary.rs`, `target_pointer_width` and `target_endian` check). READ-ONLY.
 - Supports GAUGE, COUNTER, DERIVE, ABSOLUTE, DCOUNTER, DDERIVE with AVERAGE, MIN, MAX, LAST. COMPUTE and Holt-Winters still fail. EXECUTED (macOS probe): Rondi `create` refuses `DS:b:COMPUTE:a,2,*` and `RRA:HWPREDICT:100:0.1:0.0035:10`; on files upstream created with them, `update` and `info` fail.
 - Updates no longer sync each write (EXECUTED: no `sync` call in `rrd_binary.rs`). `update --locking` and `RRD_LOCKING` are accepted (EXECUTED: `update --locking none` succeeds).
-- `tune` performs the `rrd_modify` operations (#91). `resize` accepts v3 and v4 only (READ-ONLY).
+- `tune` performs the structure operations (#91). `resize` accepts v3 and v4 only (READ-ONLY).
 - Damaged headers open as upstream does; three cases that would need undefined behavior are refused on purpose (ID-001 to ID-003).
 - The NaN bit pattern follows the target architecture (`rrd_nan`, READ-ONLY); aarch64 update arithmetic fuses `a * b + c` where the pinned builds do.
 
@@ -82,7 +82,7 @@ Each behavior change below merged to `main` with differential tests against RRDt
 
 ### Effort
 
-Estimated at `de820e9`: 13 to 17 engineer-weeks, of which locking, sync policy and the tune modify forms are now done. Holt-Winters 5 to 7 (port about 1,500 lines of C state machines and their scratch layout, then difference each). Layout abstraction and multi-arch CI 3 to 4. COMPUTE 1. Resize and source handling 2 to 3.
+Estimated at `de820e9`: 13 to 17 engineer-weeks, of which locking, sync policy and the tune modify forms are now done. Holt-Winters 5 to 7 (implement the state machines and their scratch layout from the specification, then difference each). Layout abstraction and multi-arch CI 3 to 4. COMPUTE 1. Resize and source handling 2 to 3.
 
 ### Verification
 
@@ -95,7 +95,7 @@ Estimated at `de820e9`: 13 to 17 engineer-weeks, of which locking, sync policy a
 
 ### What RRDtool does
 
-- `src/rrd_tool.c` dispatches create, dump, info, updatev, list, version, restore, resize, last, lastupdate, first, update, fetch, xport, graph, graphv, tune, flushcached. An unknown name sets `unknown function '%s'`.
+- RRDtool 1.11.0 dispatches create, dump, info, updatev, list, version, restore, resize, last, lastupdate, first, update, fetch, xport, graph, graphv, tune, flushcached. An unknown name sets `unknown function '%s'`.
 - Errors print `ERROR: <msg>` to stderr and exit 1. A bare `rrdtool` or a single argument prints usage and exits 0.
 - Pipe mode `rrdtool - [dir]`: optional chroot, extra commands `quit`, `cd`, `pwd`, `mkdir`, `ls`, errors on stdout, success line `OK u:%1.2f s:%1.2f r:%1.2f`.
 - The pipe tokenizer `CreateArgs` splits on space only, honors single and double quotes, has no backslash escape, and treats tab as an ordinary character.
@@ -105,9 +105,9 @@ Estimated at `de820e9`: 13 to 17 engineer-weeks, of which locking, sync policy a
 ### What Rondi does
 
 - `argv[0]` dispatch for `rrdtool`, `rrdcached`, `rrdupdate`, `rrdcreate`, `rrdinfo`, `rrdtool-proxy`, `rrdproxy`. No `rrdcgi`.
-- Pipe mode runs every command through a port of `rrd_tool.c` dispatch and `CreateArgs`. EXECUTED (macOS probe): a session of `cd /tmp`, `pwd`, `xport ...` and `quit` gives the same output as upstream once the timing digits are masked, and `info no\:such.rrd` prints `opening 'no\:such.rrd'` from both.
+- Pipe mode runs every command through an implementation compatible with RRDtool 1.11.0 dispatch and `CreateArgs`. EXECUTED (macOS probe): a session of `cd /tmp`, `pwd`, `xport ...` and `quit` gives the same output as upstream once the timing digits are masked, and `info no\:such.rrd` prints `opening 'no\:such.rrd'` from both.
 - No-argument help for `create`, `last`, `flushcached`, `first` and `lastupdate` matches upstream byte for byte apart from the `Compiled` line. EXECUTED (macOS probe).
-- `--daemon` and `RRDCACHED_ADDRESS` parse like `rrd_client.c`; `RRDCACHED_STRIPPATH` follows `get_path` (#76, #96). `RRD_DEFAULT_FONT` is not read (EXECUTED: grep).
+- `--daemon` and `RRDCACHED_ADDRESS` parse as RRDtool 1.11.0 does; `RRDCACHED_STRIPPATH` follows `get_path` (#76, #96). `RRD_DEFAULT_FONT` is not read (EXECUTED: grep).
 - After a failed daemon connection, `fetch`, `first`, `last`, `info`, `lastupdate` and `dump` print only the error where RRDtool also prints a local read (RD-010). EXECUTED (macOS probe).
 - `tune --daemon` drops `DS:`/`RRA:` words and exits 0 (RD-019). EXECUTED (macOS probe, each client against its own daemon).
 - The upstream `tests/` shell suite has not been run against `main`; there is no CI job for it.
@@ -138,15 +138,15 @@ Estimated at `de820e9`: 9 to 12 engineer-weeks, of which pipe mode, the tokenize
 
 - Image formats PNG, SVG, EPS, PDF; data formats XML, XMLENUM, CSV, TSV, SSV, JSON, JSONTIME.
 - Elements: PRINT, GPRINT, COMMENT, HRULE, VRULE, LINE, AREA, STACK, TICK, TEXTALIGN, DEF, CDEF, VDEF, SHIFT, XPORT.
-- Rendering uses Cairo and Pango, with a font list resolved at run time (`src/rrd_graph.c`, overridable by `RRD_DEFAULT_FONT`).
+- Rendering uses Cairo and Pango, with a font list resolved at run time (RRDtool 1.11.0, overridable by `RRD_DEFAULT_FONT`).
 - `graphv` prints layout metadata: `graph_left`, `graph_top`, `graph_width`, `graph_height`, `image_width`, `image_height`, `value_min`, `value_max`, `legend[n]`, `coords[n]`.
 
 ### What Rondi does
 
 - PNG through the `png` crate with its own rasterizer and font; CSV, TSV, SSV, XML and JSON data output. `--imgformat SVG`, `PDF` and `EPS` exit 1 with `RRDtool graph format X is unsupported`. EXECUTED (macOS probe).
-- Every option in the `rrd_graph.c` table is accepted and validated. EXECUTED (macOS probe): `--logarithmic --slope-mode --right-axis 1:0 --watermark w --utc --x-grid none --units-exponent 0 --no-gridfit --legend-position=east --dynamic-labels` succeed for both and print the same `585x126`.
+- Every option in the RRDtool 1.11.0 table is accepted and validated. EXECUTED (macOS probe): `--logarithmic --slope-mode --right-axis 1:0 --watermark w --utc --x-grid none --units-exponent 0 --no-gridfit --legend-position=east --dynamic-labels` succeed for both and print the same `585x126`.
 - `graphv` output for a 400x100 LINE graph is identical to upstream; the PNG has the same size but different bytes. EXECUTED (macOS probe).
-- Elements parse through a port of `rrd_graph_script`; data preparation and PRINT values follow `data_fetch`, `data_calc` and `print_calc` (#92).
+- Elements parse through an implementation compatible with RRDtool 1.11.0; data preparation and PRINT values follow `data_fetch`, `data_calc` and `print_calc` (#92).
 - Collected fetches stop at 10 million rows (RD-017). EXECUTED for `xport`.
 - The last `xport` row of a PREDICT-family CDEF with shift 0 differs (RD-020). EXECUTED (macOS probe).
 
@@ -168,7 +168,7 @@ The clean-room specification of the graph front end is [compatibility/graph.md](
 
 ### Effort
 
-Estimated at `de820e9`: 18 to 26 engineer-weeks, mostly a port of `rrd_graph.c` and `rrd_graph_helper.c` onto Cairo and Pango. Layout metadata and option parsing, which were part of that estimate, are now done, so the remaining work is concentrated in rendering. Budget 4 weeks for pixel work after the renderer lands and stop when the corpus metric plateaus. Streaming collected fetches is a separate 1 to 2 weeks (not estimated before).
+Estimated at `de820e9`: 18 to 26 engineer-weeks, mostly an implementation compatible with RRDtool 1.11.0 onto Cairo and Pango. Layout metadata and option parsing, which were part of that estimate, are now done, so the remaining work is concentrated in rendering. Budget 4 weeks for pixel work after the renderer lands and stop when the corpus metric plateaus. Streaming collected fetches is a separate 1 to 2 weeks (not estimated before).
 
 ### Verification
 
@@ -178,11 +178,11 @@ Estimated at `de820e9`: 18 to 26 engineer-weeks, mostly a port of `rrd_graph.c` 
 
 ## Surface: RPN, CDEF, VDEF, time (RD-005)
 
-RRDtool has 61 named RPN operators plus `+ - * / %` (counted from the `match_op` calls in `src/rrd_rpncalc.c` in an earlier review; not recounted) and 12 VDEF functions.
+RRDtool has 61 named RPN operators plus `+ - * / %` (counted from the `match_op` calls in RRDtool 1.11.0 in an earlier review; not recounted) and 12 VDEF functions.
 
 What Rondi does:
 
-- `crates/rondi/src/rpn.rs` ports `rpn_parse` and `rpn_calc`, including the per-variable data cursors that mixed-resolution `PREV`, `TREND` and `PREDICT` read; `vdef.rs` ports the 12 VDEF functions with the pinned compilers' FMA contraction (#92). The `rpn_diff` and `rpn_xport` fuzz targets exist.
+- `crates/rondi/src/rpn.rs` follows RRDtool 1.11.0, including the per-variable data cursors that mixed-resolution `PREV`, `TREND` and `PREDICT` read; `vdef.rs` implements the 12 VDEF functions with the pinned compilers' FMA contraction (#92). The `rpn_diff` and `rpn_xport` fuzz targets exist.
 - RPN is reachable from xport and graph, not from COMPUTE data sources.
 - SORT, MEDIAN, PERCENT and PREDICTPERC call the host `qsort`, whose order with NaN and infinities is not defined by the comparator. Tested on macOS and Linux glibc.
 
@@ -232,14 +232,14 @@ Nothing. No `crate-type` in `crates/*/Cargo.toml`; no FFI, no headers (READ-ONLY
 
 ### What RRDtool does
 
-- 25 commands: UPDATE, WROTE, TUNE, DUMP, FLUSH, FLUSHALL, PENDING, FORGET, QUEUE, STATS, HELP, PING, BATCH, FETCH, FETCHBIN, INFO, FIRST, LAST, CREATE, LIST, SUSPEND, RESUME, SUSPENDALL, RESUMEALL, QUIT (`src/rrd_daemon.c`).
+- 25 commands: UPDATE, WROTE, TUNE, DUMP, FLUSH, FLUSHALL, PENDING, FORGET, QUEUE, STATS, HELP, PING, BATCH, FETCH, FETCHBIN, INFO, FIRST, LAST, CREATE, LIST, SUSPEND, RESUME, SUSPENDALL, RESUMEALL, QUIT (RRDtool 1.11.0).
 - Options `-a -B -b -F -f -g -G -h -j -L -l -m -O -o -P -p -R -s -t -U -V -w -z`.
 - Listeners: Unix paths and TCP `host:port`, several `-l` allowed. systemd socket activation through `LISTEN_PID` and `LISTEN_FDS`. Without `-g` the daemon forks into the background.
 - Journal: text lines `<cmd> <args>`, files `rrd.journal.%010d.%06d`, rotated at 1 GiB (`JOURNAL_MAX`), legacy names handled on replay. Written through stdio with no per-record `fsync`. It exists only when `-j` is given.
 
 ### What Rondi does
 
-- Handles the 25 commands; the handlers for CREATE, FETCH/FETCHBIN, HELP, SUSPEND/RESUME, LIST and TUNE follow `rrd_daemon.c` argument parsing and error text (#95).
+- Handles the 25 commands; the handlers for CREATE, FETCH/FETCHBIN, HELP, SUSPEND/RESUME, LIST and TUNE follow RRDtool 1.11.0 argument parsing and error text (#95).
 - Unix and TCP listeners, several `-l` and `-L`, each with the `-m`, `-s` and `-P` given before it; `-U` and `-G` drop privileges after binding (#50). Root container tests run in CI.
 - SIGUSR1, SIGUSR2 and SIGHUP behave as upstream; `-b`, `-P`, `-p` and default logging match (#97).
 - Journal: upstream format and file layout, written only with `-j`, buffered with no sync, replayed in both directions between upstream and Rondi.
@@ -331,12 +331,12 @@ In rough order of value against effort:
 
 RRDProxy (RD-008) is a Cacti protocol, not part of RRDtool. Track it outside this roadmap.
 
-`rrdcgi`: include it only if a consumer inventory finds users. It is small (`src/rrd_cgi.c`) but parses untrusted HTTP input and needs its own security review.
+`rrdcgi`: include it only if a consumer inventory finds users. It is small but parses untrusted HTTP input and needs its own security review.
 
 ## Risks
 
 1. **Graph pixels.** Upstream pixels depend on the host font stack. A faithful Cairo and Pango port still differs across hosts. Mitigation: the tiered bar above; never promise pixel identity outside the pinned container.
-2. **Holt-Winters numerics.** The update code mixes float accumulation order, smoothing windows, and seasonal index arithmetic over `unsigned long` scratch slots. Small order changes alter bytes. Mitigation: port line by line before refactoring, keep C operation order, and compare every CDP scratch slot, not only archive rows.
+2. **Holt-Winters numerics.** The update code mixes float accumulation order, smoothing windows, and seasonal index arithmetic over `unsigned long` scratch slots. Small order changes alter bytes. Mitigation: match RRDtool's floating-point operation order, and compare every CDP scratch slot, not only archive rows.
 3. **Platform-dependent output.** NaN bits, `qsort` order, FMA contraction, double-to-integer casts, `realloc(p, 0)`, `strtoll` errno and the libxml2 version differ by compiler, CPU or libc. [compatibility.md](compatibility.md#platform-notes) lists the cases Rondi reproduces. Mitigation: generate expectations from the matching upstream build for each target; never write them by hand.
 4. **Time and locale.** `rrd_parsetime` and RPN calendar operators depend on `TZ`, DST tables, and `LC_TIME`. CI images often lack locales. Mitigation: a fixed locale and tzdata version in the CI image, and a frozen "now" in tests.
 5. **Dropping per-update sync.** Matching upstream removed a durability guarantee Rondi used to give. Say so in the release notes.
@@ -354,4 +354,4 @@ RRDProxy (RD-008) is a Cacti protocol, not part of RRDtool. Track it outside thi
 - Do not add features under compatibility names (TLS in `rrdcached`, new graph options, new RPN operators). Put them behind `rondi` subcommands.
 - Do not merge `.rondi` and `.rrd` code paths, and never write a `.rondi` file with an `.rrd` name.
 - Do not use a pure-Rust rasterizer if pixel parity in the pinned container is a goal.
-- Do not refactor ported update or Holt-Winters code for style until its differential coverage is complete.
+- Do not refactor update or Holt-Winters code for style until its differential coverage is complete.

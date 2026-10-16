@@ -1,5 +1,5 @@
 /// C library conversions RRDtool's command parsers call, either through
-/// libc itself or as ports of RRDtool's own helpers in rrd_strtod.c.
+/// libc itself or as Rust implementations that match RRDtool 1.11.0.
 mod cparse;
 /// The `rrdtool` front end: command selection, option scanning, error
 /// reporting, pipe mode and the single-command programs.
@@ -304,7 +304,6 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut template_file = None::<String>;
     let mut source_files = Vec::<String>::new();
     let mut daemon_address = None::<String>;
-    // rrd_create.c:81.
     const LONGOPTS: &[OptionSpec<char>] = &[
         OptionSpec::value("start", Some('b'), 'b'),
         OptionSpec::value("step", Some('s'), 's'),
@@ -563,7 +562,6 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/fetch.txt"));
         return Ok(());
     }
-    // rrd_fetch.c:83.
     const LONGOPTS: &[OptionSpec<char>] = &[
         OptionSpec::value("resolution", Some('r'), 'r'),
         OptionSpec::value("start", Some('s'), 's'),
@@ -602,7 +600,7 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Err("the first entry to fetch should be after 1980".into());
     }
     if align_start {
-        // rrd_fetch.c takes start % step in unsigned long, so a step above
+        // RRDtool takes start % step in unsigned long, so a step above
         // i64::MAX is valid and leaves delta equal to start.
         let delta = (start as u64) % resolution;
         start = start.wrapping_sub(delta as i64);
@@ -640,10 +638,10 @@ fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let result = parse_rrdcached_fetch(&send_rrdcached_multiline_command(&address, &command)?)?;
         return write_fetch_rows(&result.data_sources, result.rows);
     }
-    // rrd_fetch.c allocates the whole range; streaming keeps memory bounded
+    // RRDtool allocates the whole range; streaming keeps memory bounded
     // by the archive while printing the same rows.
     let fetch = fetch_rrd_rows(&filename, cf, start, end, resolution)?;
-    // rrd_fetch_fn runs rrd_cf_conv over every RRA while it looks for a
+    // Fetch checks the consolidation function name of every RRA while it looks for a
     // match and keeps going past a name it rejects, so the data prints
     // and rrdtool still exits with that error.
     let name_error = inspect_rrd(&filename.to_string_lossy())?
@@ -762,7 +760,7 @@ fn parse_rrdcached_fetch(
         let values = values
             .split_whitespace()
             .map(|value| {
-                // rrd_client.c:345 uses rrd_strtodbl, whose NaN conversion
+                // RRDtool uses its number parser, whose NaN conversion
                 // differs from Rust's parser. Reuse the existing C port and
                 // retain the converted value for printf-compatible output.
                 rondi::parse_rrd_number(value)
@@ -865,7 +863,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         return Err(PNG_DIMENSION_LIMIT_MESSAGE.into());
     }
     let time_format = options.x_label_format.as_deref();
-    // rrd_graph_v: graph_paint, then image_info and the image itself.
+    // RRDtool's graphv: graph_paint, then image_info and the image itself.
     let mut info = GraphInfo::default();
     let to_memory = filename == "-";
     let mut image = None::<Vec<u8>>;
@@ -897,7 +895,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                 (format_xport_sv(separator, &data, time_format), None)
             }
         };
-        // rrd_graph_xport only streams to the file when rrd_fopen worked;
+        // RRDtool's graph export only streams to the file when it could be opened;
         // otherwise the buffered data is returned like the "-" image.
         let mut buffered = to_memory;
         if !to_memory {
@@ -987,7 +985,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                 // graph_cairo_setup sizes the surface as int(ximg * zoom). cairo
                 // refuses a negative or oversized surface and a zero-sized one
                 // cannot be written; graph_cairo_finish then fails the save
-                // while rrd_graph_v still reports image_info.
+                // while RRDtool's graphv still reports image_info.
                 let save_failed = format!(
                     "Could not save png to '{}'",
                     if to_memory { "memory" } else { filename }
@@ -1002,7 +1000,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                     );
                     save_error = Some(save_failed);
                 } else if surface_width == 0 || surface_height == 0 {
-                    // rrd_strtodbl accepts "nan", which cairo_scale rejects.
+                    // RRDtool's number parser accepts "nan", which cairo_scale rejects.
                     if zoom.is_nan() {
                         eprintln!(
                             "OOPS: Cairo has issues it can't even die: invalid matrix (not invertible)"
@@ -1048,7 +1046,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                     if to_memory {
                         image = Some(png);
                     } else {
-                        // rrd_graph_v keeps building the result after a failed
+                        // RRDtool's graphv keeps building the result after a failed
                         // save and rrdtool reports the error once it has printed it.
                         match write_output_file(filename, &png) {
                             Ok(()) => {}
@@ -1060,7 +1058,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             }
         }
     }
-    // rrd_graph_v adds image_info for every format once graph_paint
+    // RRDtool's graphv adds image_info for every format once graph_paint
     // succeeds; ximg and yimg stay 0 when nothing was drawn.
     if let Some(format) = imginfo.as_deref().filter(|format| !format.is_empty()) {
         let basename = if to_memory {
@@ -1094,7 +1092,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     if verbose {
         info.print(&mut stdout)?;
     } else {
-        // rrd_tool.c only recognizes the separate `--imginfo`/`-f` spelling
+        // RRDtool only recognizes the separate `--imginfo`/`-f` spelling
         // when deciding whether to print the canvas size.
         let imginfo_flag = args[2..]
             .iter()
@@ -1442,7 +1440,7 @@ fn scale_values(im: &rondi::graph::GraphImage, width: i64) -> rondi::layout::Sca
     scale
 }
 
-/// The error `rrd_tool.c` still finds set when a graph or xport otherwise
+/// The error `RRDtool` still finds set when a graph or xport otherwise
 /// succeeded, such as a daemon that `data_fetch` could not reach.
 fn pending_error(im: &rondi::graph::GraphImage) -> Result<(), Box<dyn std::error::Error>> {
     match &im.pending_error {
@@ -1464,7 +1462,7 @@ enum InfoValue {
     Blob(Vec<u8>),
 }
 
-/// The ordered `rrd_info_t` list `grinfo_push` builds.
+/// The ordered info list a graphv run builds.
 #[derive(Default)]
 struct GraphInfo {
     entries: Vec<(String, InfoValue)>,
@@ -1475,7 +1473,7 @@ impl GraphInfo {
         self.entries.push((key.into(), value));
     }
 
-    /// `rrd_info_print`.
+    /// Info output.
     fn print(&self, out: &mut impl Write) -> std::io::Result<()> {
         for (key, value) in &self.entries {
             write!(out, "{key} = ")?;
@@ -1494,7 +1492,7 @@ impl GraphInfo {
         Ok(())
     }
 
-    /// `rrd_graph` plus the `graph` branch of rrd_tool.c: the WxH line,
+    /// The graph command: the WxH line,
     /// image_info and PRINT lines, or the image itself for `-`.
     fn print_graph(
         &self,
@@ -1547,7 +1545,7 @@ struct GraphImageRequest<'a> {
     elements: &'a [String],
 }
 
-/// The image step and `rrd_graph_script`, after the option parser checked
+/// The image step and the graph element parser, after the option parser checked
 /// the time range. The flag reports a parser that stopped
 /// without an error, after which RRDtool keeps the elements read so far.
 fn prepare_graph_image(
@@ -1612,7 +1610,7 @@ fn flush_and_prepare_data(
 
 /// Why an output file could not be written. `Refused` is Rondi's own
 /// safety check; the others carry the errno RRDtool would report through
-/// `rrd_strerror`.
+/// The strerror text.
 #[derive(Debug)]
 enum OutputError {
     Refused(String),
@@ -1685,7 +1683,7 @@ fn render_xport(args: &[String]) -> Result<(String, Option<String>), Box<dyn std
     if im.gdes.is_empty() {
         return Err("can't make an xport without contents".into());
     }
-    // Unlike graph, rrd_xport connects to the image-wide daemon up front
+    // Unlike graph, RRDtool's xport connects to the image-wide daemon up front
     // and gives up when that fails.
     #[cfg(unix)]
     if let Some(address) = im
@@ -2460,7 +2458,7 @@ fn format_imginfo(
     width: i64,
     height: i64,
 ) -> Result<String, Box<dyn std::error::Error>> {
-    // bad_format_imginfo (rrd_graph.c:5880).
+    // bad_format_imginfo.
     let bad_format = || -> Box<dyn std::error::Error> {
         format!(
             "invalid format string '{format}' (should match '^(?:[^%]+|%%)*%s(?:[^%]+|%%)*%lu(?:[^%]+|%%)*%lu(?:[^%]+|%%)*$')"
@@ -2721,7 +2719,7 @@ fn draw_line_with_width(
         draw_line(pixels, width, height, start, end, color);
         return;
     }
-    // rrd_graph_helper.c only rejects negative widths and leaves the rest to
+    // RRDtool only rejects negative widths and leaves the rest to
     // cairo_set_line_width. A stroke whose half width reaches past every
     // corner covers the whole surface, which is what Cairo paints.
     if stroke_width / 2.0 >= f64::from(width).hypot(f64::from(height)) {
@@ -2848,7 +2846,7 @@ fn draw_styled_line(
     f64::from(distance)
 }
 
-/// `escapeJSON` from rrd_xport.c.
+/// JSON string escaping as RRDtool 1.11.0 writes it in xport output.
 fn escape_json(text: &str) -> String {
     let mut output = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -2869,7 +2867,7 @@ fn escape_json(text: &str) -> String {
     output
 }
 
-/// Port of `rrd_xport_format_addprints`. Elements are visited in definition
+/// Collects the PRINT, GPRINT and rule elements for xport output. Elements are visited in definition
 /// order and written to separate prints, gprints and rules lists. A numeric
 /// format error is reported after the head of the document was written.
 fn format_xport_addprints(
@@ -2997,7 +2995,7 @@ fn format_xport_addprints(
     Ok(())
 }
 
-/// Port of `rrd_xport_format_xmljson`. Flags: 1 JSON, 2 show time, 4
+/// Writes the xport XML or JSON document. Flags: 1 JSON, 2 show time, 4
 /// enumerate value tags. RRDtool only removes a trailing comma after the
 /// meta lists when the document is built in memory (`graph -`); xport and
 /// graph files stream it out. On a format error the partial document and
@@ -3130,7 +3128,7 @@ fn export_time(time: i64, format: Option<&str>) -> String {
     }
 }
 
-/// Port of `rrd_xport_format_sv` for CSV, TSV and SSV.
+/// Writes xport output as CSV, TSV or SSV.
 fn format_xport_sv(
     separator: char,
     data: &rondi::graph::XportData,
@@ -3175,7 +3173,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
         }
         return Ok(());
     }
-    // rrd_update.c:304 (updatev) and :679 (update).
+    // RRDtool (updatev) and :679 (update).
     const UPDATE_LONGOPTS: &[OptionSpec<char>] = &[
         OptionSpec::value("template", Some('t'), 't'),
         OptionSpec::value("daemon", Some('d'), 'd'),
@@ -3233,7 +3231,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
             .filter(|address| !address.is_empty())
     });
     if verbose {
-        // rrd_update_v refuses only an empty RRDCACHED_ADDRESS and otherwise
+        // RRDtool's update refuses only an empty RRDCACHED_ADDRESS and otherwise
         // updates the file directly.
         if std::env::var_os("RRDCACHED_ADDRESS").is_some_and(|address| address.is_empty()) {
             return Err("The \"RRDCACHED_ADDRESS\" environment variable is defined, but \"updatev\" cannot work with rrdcached. Either unset the environment variable or use \"update\" instead.".into());
@@ -3245,7 +3243,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
     // lock would serialize unrelated files and stop parallel poller updates.
     if daemon_address.is_none() {
         if let Err(error) = ensure_rrd_file_exists(&filename) {
-            // rrd_update_v pushes return_value before _rrd_updatex opens the
+            // RRDtool prints the return value before it opens the
             // file, so the open failure still prints it.
             if verbose {
                 println!("return_value = -1");
@@ -3263,7 +3261,7 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
             )
         });
         if verbose {
-            // rrd_update_v reports the rows written before a failure too.
+            // RRDtool's update reports the rows written before a failure too.
             println!("return_value = {}", if result.is_ok() { 0 } else { -1 });
             let names = inspect_rrd(filename_text)
                 .map(|info| info.data_sources)
@@ -3449,7 +3447,6 @@ fn rrdtool_flushcached(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         );
         return Ok(());
     }
-    // rrd_flushcached.c:27.
     const LONGOPTS: &[OptionSpec<char>] = &[OptionSpec::value("daemon", Some('d'), 'd')];
     let mut daemon = None;
     let mut options = OptionScanner::new(args.get(1..).unwrap_or_default(), LONGOPTS);
@@ -3467,7 +3464,7 @@ fn rrdtool_flushcached(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         )
         .into());
     }
-    // rrd_client_connect reads RRDCACHED_ADDRESS only when no --daemon was
+    // RRDtool's daemon client reads RRDCACHED_ADDRESS only when no --daemon was
     // given, and the message prints opt_daemon with %s.
     let address = match &daemon {
         Some(address) => address.clone(),
@@ -3613,7 +3610,6 @@ fn rrdtool_last(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", rrdtool_last_help());
         return Ok(());
     }
-    // rrd_last.c:18.
     const LONGOPTS: &[OptionSpec<char>] = &[OptionSpec::value("daemon", Some('d'), 'd')];
     let mut daemon_address = None::<String>;
     let mut options = OptionScanner::new(args.get(1..).unwrap_or_default(), LONGOPTS);
@@ -3648,7 +3644,6 @@ fn rrdtool_lastupdate(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         print!("{}", include_str!("help/lastupdate.txt"));
         return Ok(());
     }
-    // rrd_lastupdate.c:19.
     const LONGOPTS: &[OptionSpec<char>] = &[OptionSpec::value("daemon", Some('d'), 'd')];
     let mut daemon_address = None::<String>;
     let mut options = OptionScanner::new(args.get(1..).unwrap_or_default(), LONGOPTS);
@@ -3669,7 +3664,7 @@ fn rrdtool_lastupdate(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     }
     ensure_rrd_file_exists(std::path::Path::new(filename))?;
     let info = inspect_rrd(filename)?;
-    // rrd_tool.c prints the names and last_ds text with %s, byte for byte.
+    // RRDtool prints the names and last_ds text with %s, byte for byte.
     let mut out = Vec::new();
     for source in &info.data_sources {
         out.push(b' ');
@@ -3690,7 +3685,6 @@ fn rrdtool_first(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/first.txt"));
         return Ok(());
     }
-    // rrd_first.c:18.
     const LONGOPTS: &[OptionSpec<char>] = &[
         OptionSpec::value("rraindex", None, 'i'),
         OptionSpec::value("daemon", Some('d'), 'd'),
@@ -3702,7 +3696,7 @@ fn rrdtool_first(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         let found = found?;
         match found.key {
             'i' => {
-                // rrd_first.c:33 stores strtol(optarg, &endptr, 0) in an int.
+                // RRDtool stores strtol(optarg, &endptr, 0) in an int.
                 archive_index = rondi::c_strtol(found.text(), 0).0 as i32;
                 if archive_index < 0 {
                     return Err("invalid rraindex number".into());
@@ -3740,7 +3734,6 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/info.txt"));
         return Ok(());
     }
-    // rrd_info.c:72.
     const LONGOPTS: &[OptionSpec<char>] = &[
         OptionSpec::value("daemon", Some('d'), 'd'),
         OptionSpec::flag("noflush", Some('F'), 'F'),
@@ -3773,7 +3766,7 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     ensure_rrd_file_exists(std::path::Path::new(&filename))?;
     let info = inspect_rrd(&filename)?;
-    // rrd_info prints a DS or RRA with a name dst_conv or rrd_cf_conv
+    // info prints a DS or RRA whose name the type or consolidation function check
     // rejects through its default branch and reports the error afterwards.
     if info.data_sources.iter().any(|ds| ds.kind == "COMPUTE")
         || info.archives.iter().any(|archive| {
@@ -3788,7 +3781,7 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 .into(),
         );
     }
-    // rrd_info_print writes names and strings with %s, byte for byte.
+    // RRDtool's info output writes names and strings with %s, byte for byte.
     let mut out = Vec::new();
     writeln!(out, "filename = \"{filename}\"")?;
     writeln!(out, "rrd_version = \"{}\"", info.version)?;
@@ -3857,7 +3850,6 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/dump.txt"));
         return Ok(());
     }
-    // rrd_dump.c:556.
     const LONGOPTS: &[OptionSpec<char>] = &[
         OptionSpec::value("daemon", Some('d'), 'd'),
         OptionSpec::value("header", Some('h'), 'h'),
@@ -3878,7 +3870,7 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             'd' => daemon_address = Some(found.text().to_owned()),
             'n' => header = RrdDumpHeader::None,
             // parse_opt_xmlheader returns -1 for other words, which
-            // rrd_dump_opt_r writes like "none".
+            // RRDtool's dump writes like "none".
             'h' => {
                 header = match found.text() {
                     "dtd" => RrdDumpHeader::Dtd,
@@ -3904,7 +3896,7 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(output) = positional.get(1) {
         match write_output_file(output, &xml) {
             Ok(()) => {}
-            // rrd_dump_opt_r returns -1 from a failed fopen without setting
+            // RRDtool's dump returns -1 from a failed fopen without setting
             // an error, so rrdtool reports nothing and exits 0.
             Err(OutputError::Open(_)) => return Ok(()),
             Err(OutputError::Write(errno)) => {
@@ -3917,7 +3909,7 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     } else {
         std::io::stdout().write_all(&xml)?;
     }
-    // rrd_dump_opt_r finishes the dump before rrd_tool.c sees the error
+    // dump finishes the dump before RRDtool sees the error
     // a rejected DS type or CF name left behind.
     match rondi::rrd_name_error(&inspect_rrd(&positional[0])?) {
         Some(message) => Err(RawMessage(message).into()),
@@ -3930,7 +3922,7 @@ fn rrdtool_restore(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/restore.txt"));
         return Ok(());
     }
-    // rrd_restore.c:1383. Upstream keeps both flags in file statics that
+    // Upstream keeps both flags in file statics that
     // nothing resets, so in pipe mode they stay set for later restores.
     static RANGE_CHECK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     static FORCE_OVERWRITE: std::sync::atomic::AtomicBool =
@@ -3962,7 +3954,7 @@ fn rrdtool_restore(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     let range_check = RANGE_CHECK.load(std::sync::atomic::Ordering::Relaxed);
     let force_overwrite = FORCE_OVERWRITE.load(std::sync::atomic::Ordering::Relaxed);
-    // rrd_restore.c:1242-1263: stdin ends at the first ctrl-Z and silences
+    // Stdin ends at the first ctrl-Z and silences
     // libxml2's error printing for the rest of the process, as
     // xmlSetGenericErrorFunc does upstream.
     static XML_ERRORS_SILENCED: std::sync::atomic::AtomicBool =
@@ -4010,8 +4002,8 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/tune.txt"));
         return Ok(());
     }
-    // rrd_tune.c:78. rrd_tune reads only --daemon in a first pass that
-    // ignores errors; rrd_tune_r then applies every option in order.
+    // RRDtool's tune reads only --daemon in a first pass that
+    // ignores errors; RRDtool's tune then applies every option in order.
     const LONGOPTS: &[OptionSpec<char>] = &[
         OptionSpec::value("heartbeat", Some('h'), 'h'),
         OptionSpec::value("minimum", Some('i'), 'i'),
@@ -4112,9 +4104,9 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // short option without a value takes the file name as its value there.
     let second_words = first_pass.rearranged();
     let mut options = OptionScanner::new(&second_words, LONGOPTS);
-    // rrd_tune.c:423: --step feeds handle_modify's stretch.
+    // --step feeds handle_modify's stretch.
     let mut newstep: libc::c_int = -1;
-    // rrd_tune_r edits the header through the file mapping, so settings
+    // RRDtool's tune edits the header through the file mapping, so settings
     // applied before a failing option stay written.
     let applied = (|| -> Result<(), Box<dyn std::error::Error>> {
         for found in options.by_ref() {
@@ -4186,7 +4178,7 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     current_names[ds] = new_name;
                 }
                 // Rondi opens no Holt-Winters file, so after the value checks
-                // these always find their RRA missing (rrd_tune.c:475-640).
+                // these always find their RRA missing.
                 'p' | 'n' => {
                     let (status, parsed) = cparse::rrd_strtodbl_status(value, None);
                     let param = parsed.unwrap_or_else(|_| cparse::rrd_strtod_prefix(value));
@@ -4247,7 +4239,7 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     }
     applied?;
 
-    // rrd_tune.c:427. Only reached when an option consumed the file name.
+    // Only reached when an option consumed the file name.
     if options.operands().is_empty() {
         for source in rondi::inspect_rrd_file(&filename)?.data_sources {
             if source.kind == "COMPUTE" {
@@ -4324,7 +4316,7 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// `sscanf(spec, "%u:%c%u", &idx, &sign, &number) == 3` (rrd_modify.c:1352).
+/// `sscanf(spec, "%u:%c%u", &idx, &sign, &number) == 3`.
 fn tune_scan_rra_op(spec: &str) -> Option<(libc::c_uint, u8, libc::c_uint)> {
     let input = cparse::c_string(spec);
     let mut index: libc::c_uint = 0;
@@ -4343,7 +4335,7 @@ fn tune_scan_rra_op(spec: &str) -> Option<(libc::c_uint, u8, libc::c_uint)> {
     (matched == 3).then_some((index, sign as u8, number))
 }
 
-/// `sscanf(value, DS_NAM_FMT ":%ld", ...) == 2` (rrd_tune.c:258).
+/// `sscanf(value, DS_NAM_FMT ":%ld", ...) == 2`.
 fn tune_scan_heartbeat(value: &str) -> Option<(String, libc::c_long)> {
     let input = cparse::c_string(value);
     let mut name = [0_u8; 20];
@@ -4397,7 +4389,7 @@ fn rrdtool_resize(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/resize.txt"));
         return Ok(());
     }
-    // rrd_resize.c:27-64, in order.
+    // Checks run in this order: reserved name, argument count, then values.
     if args[1] == "resize.rrd" {
         return Err("resize.rrd is a reserved name".into());
     }
@@ -4440,7 +4432,6 @@ fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         print!("{}", include_str!("help/list.txt"));
         return Ok(());
     }
-    // rrd_list.c:256.
     const LONGOPTS: &[OptionSpec<char>] = &[
         OptionSpec::value("daemon", Some('d'), 'd'),
         OptionSpec::flag("noflush", Some('F'), 'F'),
@@ -4473,7 +4464,7 @@ fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .into());
     };
     let directory = PathBuf::from(directory);
-    // rrdc_connect treats an empty address as none (rrd_client.c:956).
+    // rrdc_connect treats an empty address as none.
     if let Some(address) = daemon
         .clone()
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
@@ -4498,11 +4489,11 @@ fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
     if daemon.is_some() {
-        // rrd_list.c:340: an explicit address that did not connect.
+        // An explicit address that did not connect.
         eprintln!("Error connecting to rrdcached");
         return Ok(());
     }
-    // rrd_list.c:350: a failed listing prints strerror(errno) without a
+    // A failed listing prints strerror(errno) without a
     // newline and the command still succeeds.
     match rrd_list_r(recursive, &directory.to_string_lossy()) {
         Ok(Some(text)) => print!("{text}"),
@@ -4516,9 +4507,9 @@ fn escape_rrdcached_field(value: &str) -> String {
     value.replace('\\', "\\\\").replace(' ', "\\ ")
 }
 
-/// get_path can return NULL without setting rrd_error (empty local paths
-/// and a remote strip-prefix mismatch). FIRST and LAST then print -1
-/// without making rrd_tool.c's final rrd_test_error check fail.
+/// Path selection can yield no path without setting an error (empty local
+/// paths and a remote strip-prefix mismatch). FIRST and LAST then print -1
+/// without making RRDtool's final error check fail.
 #[derive(Debug)]
 struct RrdcachedPathUnavailable;
 
@@ -4543,7 +4534,7 @@ fn rrdcached_time_value(
         .ok_or_else(|| format!("invalid rrdcached {verb} response").into())
 }
 
-/// Port of RRDtool 1.11.0 rrd_client.c `get_path` (105-193). A local
+/// Chooses the path sent to the daemon, as RRDtool 1.11.0 does. A local
 /// daemon receives a canonical absolute path; a remote daemon receives its
 /// own relative path after the configured literal prefix is stripped.
 fn rrdcached_client_path(
@@ -4587,7 +4578,7 @@ fn rrdcached_client_path(
     Ok(filename.to_owned())
 }
 
-/// Translate the file field after connecting, preserving rrd_client.c's
+/// Rewrites the file field after connecting, preserving RRDtool's
 /// connection-error precedence. LIST uses daemon-relative directory names
 /// directly upstream and deliberately does not pass through get_path.
 fn translate_rrdcached_file_command(
@@ -4746,7 +4737,7 @@ impl std::fmt::Display for RrdcachedConnectError {
 
 impl std::error::Error for RrdcachedConnectError {}
 
-/// Port of RRDtool 1.11.0 rrd_client.c `client_connect` (868-878). Only a
+/// Opens the daemon connection, as RRDtool 1.11.0 does. Only a
 /// `unix:` prefix or a leading slash names a socket path; everything else,
 /// including a bare host, is a network address.
 #[cfg(unix)]
@@ -4763,7 +4754,7 @@ fn open_rrdcached_stream(
     Ok(Box::new(connect_rrdcached_network(&host, &port)?))
 }
 
-/// `connect_unix` (782-814). The path is truncated to `sun_path` and the
+/// Unix socket connect. The path is truncated to `sun_path` and the
 /// whole structure goes to connect(2), so an empty or overlong path fails
 /// the way the kernel reports it rather than being rejected here.
 #[cfg(unix)]
@@ -4798,7 +4789,7 @@ fn connect_rrdcached_unix(path: &str) -> std::io::Result<std::os::unix::net::Uni
     }
 }
 
-/// The host and service `connect_network` (816-856) hands to getaddrinfo:
+/// The host and service handed to getaddrinfo:
 /// `[v6]` or `[v6]:port`, otherwise a split at the last colon, with port
 /// 42217 when none is given.
 #[cfg(unix)]
@@ -4837,7 +4828,7 @@ fn split_rrdcached_network_address(
     ))
 }
 
-/// `connect_network` (857-896): try each resolved address in turn and
+/// Network connect: try each resolved address in turn and
 /// report the errno of the last failed attempt.
 #[cfg(unix)]
 fn connect_rrdcached_network(
@@ -4901,7 +4892,7 @@ fn send_rrdcached_multiline_command(
     Err("rrdcached Unix socket commands are unavailable on this platform".into())
 }
 
-/// `rrd_list_r` (rrd_list.c:150). `Ok(None)` is an empty listing, which
+/// Lists a directory. `Ok(None)` is an empty listing, which
 /// upstream reports through errno 0; `Err` carries errno.
 #[cfg(unix)]
 fn rrd_list_r(recursive: bool, dirname: &str) -> Result<Option<String>, libc::c_int> {
@@ -4971,7 +4962,7 @@ fn c_stat(path: &std::ffi::CStr) -> Result<libc::stat, libc::c_int> {
     }
 }
 
-/// `rrd_list_rec` (rrd_list.c:39): readdir order, directories listed unless
+/// Recursive listing: readdir order, directories listed unless
 /// recursing, regular files only with an `.rrd` suffix.
 #[cfg(unix)]
 fn rrd_list_rec(
@@ -5059,7 +5050,7 @@ fn inspect_rrd(path: &str) -> Result<rondi::RrdInfo, Box<dyn std::error::Error>>
     Ok(rondi::inspect_rrd_file(path)?)
 }
 
-// rrd_tool.c prints fetch rows with printf, so LC_NUMERIC picks the decimal
+// RRDtool prints fetch rows with printf, so LC_NUMERIC picks the decimal
 // separator.
 fn format_fetch_value(value: f64) -> String {
     let mut buffer = [0 as libc::c_char; 64];
@@ -5101,7 +5092,7 @@ fn parse_rrd_resolution(value: &str) -> Result<u64, Box<dyn std::error::Error>> 
     parse_scaled_duration_option(value, "resolution")
 }
 
-/// `rrd_scaled_duration(value, 1, ...)` with its message after `label: `.
+/// The duration parser with a scale of 1 and its message after `label: `.
 fn parse_scaled_duration_option(
     value: &str,
     label: &str,
@@ -5241,7 +5232,7 @@ async fn server_mode(socket: PathBuf, command: Command) -> Result<(), Box<dyn st
 mod xml_output_tests {
     use super::format_xport_xmljson;
 
-    // rrd_xport.c writes these text nodes unescaped, so the document is not
+    // RRDtool writes these text nodes unescaped, so the document is not
     // well-formed XML when they contain markup characters.
     #[test]
     fn writes_graph_xport_text_nodes_verbatim() {
@@ -5273,7 +5264,7 @@ mod graph_stroke_tests {
         prepare_graph_series, render_graph_png, set_pixel, tick_mark_range,
     };
 
-    /// Parses one drawing element through rrd_graph_script after DEFs for
+    /// Parses one drawing element through the graph element parser after DEFs for
     /// every source name used here, and returns its renderer series with
     /// the source name as its column.
     /// A renderer series plus the legend and scale exclusion of its element.
@@ -5419,7 +5410,7 @@ mod graph_stroke_tests {
                 .dash_pattern,
             [2.0, 4.0, 6.0, 8.0]
         );
-        // getDouble accepts any rrd_strtodbl number, so these parse.
+        // getDouble accepts any number the number parser accepts, so these parse.
         for accepted in ["0", "-1,2", "1,2,3", "NaN", "inf"] {
             assert!(
                 parse_graph_series(&format!("LINE:x#ffffff:x:dashes={accepted}")).is_ok(),
@@ -5562,7 +5553,7 @@ mod graph_stroke_tests {
 
     #[test]
     fn tick_directive_uses_source_default_fraction_and_vertical_direction() {
-        // rrd_graph_helper.c requires the positional fraction.
+        // RRDtool requires the positional fraction.
         assert!(element("TICK:events#ff000080").is_err());
 
         let labeled_tick = element("TICK:events#ff0000:-0.25:Events").unwrap();

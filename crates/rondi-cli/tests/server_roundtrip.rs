@@ -753,7 +753,7 @@ fn rrdtool_xport_daemon_flushes_pending_values_like_upstream() {
         assert_eq!(actual.stderr, expected.stderr);
     }
     let daemon_created = Command::new(&rondi_alias)
-        // rrd_client.c resolves a relative Unix-daemon filename from the
+        // RRDtool resolves a relative Unix-daemon filename from the
         // client's working directory before sending it to the daemon.
         .current_dir(&root)
         .args([
@@ -2979,7 +2979,7 @@ fn rrdtool_update_daemon_and_environment_route_writes_through_rrdcached() {
         "{}",
         String::from_utf8_lossy(&created.stderr)
     );
-    // rrd_client.c canonicalizes Unix-daemon filenames; query its actual key.
+    // RRDtool canonicalizes Unix-daemon filenames; query its actual key.
     let file = std::fs::canonicalize(&file).unwrap();
     let oracle_file = root.join("oracle.rrd");
     std::fs::copy(&file, &oracle_file).unwrap();
@@ -3291,7 +3291,7 @@ fn rrdcached_journal_replays_across_upstream_and_rondi() {
     killed_writes.push_str("STATS\nQUIT\n");
     // Upstream counts QueueLength and UpdatesWritten differently (RD-007),
     // and bumps DataSetsWritten only after waking the FLUSH waiter, so a
-    // following STATS can race it (rrd_daemon.c queue_thread_main).
+    // following STATS can race it.
     let comparable = |response: String| {
         response
             .lines()

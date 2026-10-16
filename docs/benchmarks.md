@@ -39,7 +39,7 @@ This is one cached-file, single-request run on a shared development machine. It 
 
 ### Historical: pre-merge engine measurements
 
-The measurements below were recorded on the compatibility branch before `main` was merged. They measured a per-row buffered fetch loop and the shared-grid xport engine. `main` has since replaced both: fetch reads the archive's circular run in at most two reads, and graph calculation runs the `rrd_graph.c` port in `graph.rs`. The numbers are kept as a record and do not describe the current code.
+The measurements below were recorded on the compatibility branch before `main` was merged. They measured a per-row buffered fetch loop and the shared-grid xport engine. `main` has since replaced both: fetch reads the archive's circular run in at most two reads, and graph calculation runs the RRDtool 1.11.0 port in `graph.rs`. The numbers are kept as a record and do not describe the current code.
 
 The native `.rrd` fetch loop then sought and read each row separately. A five-second macOS `sample` profile attributed 3,445 of 3,577 samples (96%) to `read` and `lseek`. A 64 KiB read buffer that sought initially and at the ring boundary changed a four-source, 7,200-row fetch of 7,201 rows from 220.9 to 5,058.9 fetches/s over 200 fetches (905,386 µs to 39,534 µs), recorded 2026-10-13 on the macOS host above.
 

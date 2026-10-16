@@ -1,10 +1,10 @@
 //! Numeric conversion used by RRDtool's update path.
 
 /// Parse a decimal using the conversion algorithm in RRDtool 1.11's
-/// `rrd_strtodbl`. The order of the floating-point operations is observable in
+/// RRDtool's number parser: the order of the floating-point operations is observable in
 /// epoch-sized values with fractional seconds.
 pub fn parse_rrd_number(input: &str) -> Option<f64> {
-    // rrd_strtodbl only consults the special spellings when rrd_strtod made
+    // RRDtool's number parser only consults the special spellings when RRDtool's decimal parser made
     // no conversion, which also covers an out-of-range exponent.
     match parse_rrd_decimal(input) {
         Some((number, end)) => (end == input.len()).then_some(number),
@@ -12,7 +12,7 @@ pub fn parse_rrd_number(input: &str) -> Option<f64> {
     }
 }
 
-/// `rrd_strtodbl()` with an error context, returning RRDtool's message for
+/// The number parser with an error context, returning RRDtool's message for
 /// text that does not convert or converts only in part.
 pub(crate) fn rrd_strtodbl(input: &str, context: &str) -> Result<f64, String> {
     match parse_rrd_decimal(input) {
@@ -168,8 +168,8 @@ fn strtol_parts(text: &str, base: u32) -> (bool, u64, bool, usize) {
     (negative, magnitude, overflow, position)
 }
 
-/// `rrd_diff()` from rrd_diff.c: the decimal difference `a - b` of two
-/// integer strings, computed digit by digit and converted with rrd_strtod.
+/// The counter difference: the decimal difference `a - b` of two
+/// integer strings, computed digit by digit and converted with RRDtool's decimal parser.
 /// Any `-` before the first digit makes a number negative; mixed signs,
 /// missing digits, and more than LAST_DS_LEN digits give NaN.
 pub(crate) fn rrd_diff(a: &str, b: &str) -> f64 {
@@ -250,7 +250,7 @@ pub(crate) fn rrd_diff(a: &str, b: &str) -> f64 {
     result
 }
 
-/// `rrd_strtod()`: the value and the end of the converted text, or `None`
+/// The decimal parser: the value and the end of the converted text, or `None`
 /// when it leaves `endptr` at the start (no digits, or an exponent outside
 /// the double range).
 pub(crate) fn parse_rrd_decimal(input: &str) -> Option<(f64, usize)> {
@@ -317,7 +317,7 @@ pub(crate) fn parse_rrd_decimal(input: &str) -> Option<(f64, usize)> {
         };
         let mut explicit_exponent = 0_i32;
         while let Some(byte @ b'0'..=b'9') = bytes.get(position).copied() {
-            // rrd_strtod accumulates into a C int, which wraps.
+            // RRDtool's decimal parser accumulates into a C int, which wraps.
             explicit_exponent = explicit_exponent
                 .wrapping_mul(10)
                 .wrapping_add(i32::from(byte - b'0'));
@@ -329,7 +329,7 @@ pub(crate) fn parse_rrd_decimal(input: &str) -> Option<(f64, usize)> {
             exponent.wrapping_add(explicit_exponent)
         };
     }
-    // DBL_MIN_EXP and DBL_MAX_EXP bound the decimal exponent in rrd_strtod.
+    // DBL_MIN_EXP and DBL_MAX_EXP bound the decimal exponent in RRDtool's decimal parser.
     if !(f64::MIN_EXP..=f64::MAX_EXP).contains(&exponent) {
         return None;
     }

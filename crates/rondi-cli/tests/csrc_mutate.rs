@@ -1,5 +1,5 @@
 #![cfg(unix)]
-//! Differentials for rrd_resize.c, rrd_tune.c and rrd_restore.c.
+//! Differentials for resize and restore against pinned RRDtool 1.11.0.
 
 mod common;
 
@@ -19,7 +19,7 @@ const BASE: &[&str] = &[
     "RRA:MAX:0.5:2:4",
 ];
 
-// D2: rrd_resize.c:27-64 checks the reserved name, the argument count, the
+// D2: RRDtool checks the reserved name, the argument count, the
 // action and the row count in that order, parses both numbers with
 // strtol(..., 0) and ignores trailing text; the RRA checks follow the open.
 #[test]
@@ -50,7 +50,7 @@ fn d2_resize_argument_checks_follow_c_order_and_text() {
     }
 }
 
-/// Restored files carry a random rra_ptr (rrd_restore.c:450); compare
+/// Restored files carry a random rra_ptr; compare
 /// them in logical row order.
 fn assert_same_restored(sides: &common::Sides, name: &str) {
     let up = std::fs::read(sides.up.join(name)).ok();
@@ -87,9 +87,8 @@ const SOURCE: &[&[&str]] = &[
     &["dump", "s.rrd", "s.xml"],
 ];
 
-// D1: rrd_resize opens resize.rrd through rrd_open with RRD_CREAT, so an
-// existing file is truncated and replaced upstream (rrd_resize.c:105,
-// rrd_open.c:284-293); the copy follows rrd_resize.c:183-298, including the
+// D1: RRDtool's resize opens resize.rrd with create-and-truncate semantics, so an
+// existing file is truncated and replaced upstream; the copy matches RRDtool, including the
 // warning for a version 0001 file whose output is sized for a time_t live
 // head and the zero-filled output left behind by an unsupported version.
 #[test]
@@ -124,7 +123,7 @@ fn d1_resize_writes_resize_rrd_like_rrd_resize() {
     }
 }
 
-// D7: restore takes -r and -f (rrd_restore.c:1384-1385).
+// D7: restore takes -r and -f.
 #[test]
 fn d7_restore_accepts_short_options() {
     let Some(sides) = common::Sides::new(SOURCE, &[]) else {
@@ -136,7 +135,7 @@ fn d7_restore_accepts_short_options() {
     assert_same_restored(&sides, "s.rrd");
 }
 
-// D9: get_xml_double (rrd_restore.c:296-339) converts with rrd_strtodbl,
+// D9: get_xml_double converts with RRDtool's number parser,
 // whose result can differ from correctly rounded parsing in the last bits.
 #[test]
 fn d9_restore_numbers_use_rrd_strtod() {
@@ -167,7 +166,7 @@ fn d9_restore_numbers_use_rrd_strtod() {
     assert_same_restored(&sides, "out.rrd");
 }
 
-// D10: write_file writes the target "-" to stdout (rrd_restore.c:1334).
+// D10: write_file writes the target "-" to stdout.
 #[test]
 fn d10_restore_dash_target_writes_stdout() {
     let Some(sides) = common::Sides::new(SOURCE, &[]) else {
@@ -192,7 +191,7 @@ fn d10_restore_dash_target_writes_stdout() {
 // (get_xml_text), treats any text containing "nan" or "inf" as special,
 // reads integers with strtoul/strtoll base 0 (get_xml_ulong, get_xml_time_t),
 // leaves missing fields zero, accepts any version and rejects unknown tags,
-// each with rrd_restore.c's text (rrd_restore.c:183-350, 1049-1157).
+// each with RRDtool's text.
 #[test]
 fn d11_restore_xml_reading_matches_the_pull_parser() {
     let Some(sides) = common::Sides::new(SOURCE, &[]) else {
@@ -284,7 +283,7 @@ fn assert_same_restore(sides: &common::Sides, name: &str, xml: &[u8]) {
     assert_same_restored(sides, &target);
 }
 
-// get_xml_ulong and get_xml_time_t (rrd_restore.c:261-312) fail on any
+// get_xml_ulong and get_xml_time_t fail on any
 // errno after strtoul/strtoll. FreeBSD-derived libcs set EINVAL when nothing
 // converts, so there a non-numeric or empty integer field is an error;
 // glibc leaves errno alone and the field reads as 0.
@@ -386,10 +385,10 @@ fn restore_error_lines_follow_the_parser() {
     assert!(cases > 30, "{cases}");
 }
 
-// Malformed XML fails inside libxml2, whose message rrd_restore.c reports
+// Malformed XML fails inside libxml2, whose message RRDtool reports
 // as "error reading/parsing XML: ..." (newlines turned into spaces). For a
 // named file libxml2 also prints "file:line: parser error : ..." and the
-// offending line to stderr first; for stdin rrd_restore.c silences it.
+// offending line to stderr first; for stdin RRDtool silences it.
 #[test]
 fn restore_reports_libxml2_parse_errors() {
     let Some(sides) = common::Sides::new(SOURCE, &[]) else {
@@ -487,7 +486,7 @@ fn restore_stops_where_rrdtool_spins_after_a_parse_error() {
     assert!(!sides.ro.join("spin.rrd").exists());
 }
 
-// An RRA without rows reaches `rrd_random() % 0` (rrd_restore.c:473). On
+// An RRA without rows reaches a random row modulo 0. On
 // aarch64 the division yields 0, the row rotation's malloc size wraps and fails; on
 // x86-64 RRDtool dies with SIGFPE, which Rondi does not imitate.
 #[test]
@@ -514,7 +513,7 @@ fn restore_rejects_an_empty_database() {
     assert!(!sides.ro.join("emptydb.rrd").exists());
 }
 
-// write_file (rrd_restore.c:1318-1336) opens the target O_WRONLY|O_CREAT,
+// write_file opens the target O_WRONLY|O_CREAT,
 // adding O_EXCL without -f, with mode 0666, and writes it in place.
 #[test]
 fn restore_writes_the_target_in_place() {

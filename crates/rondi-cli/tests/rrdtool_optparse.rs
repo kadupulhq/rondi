@@ -1,6 +1,6 @@
 #![cfg(unix)]
-//! Differential tests for the `rrdtool` front end: rrd_tool.c argv and pipe
-//! mode dispatch, CountArgs/CreateArgs, and optparse.c as used by graph,
+//! Differential tests for the `rrdtool` front end: RRDtool argv and pipe
+//! mode dispatch, CountArgs/CreateArgs, and RRDtool as used by graph,
 //! graphv and xport. Each case runs pinned RRDtool 1.11.0 and the Rondi
 //! alias in copies of one scratch directory.
 
@@ -97,7 +97,7 @@ fn compare(args: &[&OsStr], stdin: &[u8], full: bool) {
     }
     let up_dir = tempfile::tempdir().unwrap();
     let ro_dir = tempfile::tempdir().unwrap();
-    // rrd_create randomizes each RRA's cur_row, so build one fixture and copy it.
+    // RRDtool's create randomizes each RRA's cur_row, so build one fixture and copy it.
     fixture(up_dir.path());
     let copied = Command::new("cp")
         .arg("-R")
@@ -145,7 +145,7 @@ fn each<T: std::fmt::Debug>(cases: &[T], test: impl Fn(&T)) {
     );
 }
 
-// rrd_tool.c main(): pipe mode arguments.
+// RRDtool main(): pipe mode arguments.
 #[test]
 fn pipe_workdir_argument() {
     check(&["-", "sub"], b"last b.rrd\n");
@@ -161,7 +161,7 @@ fn dash_with_two_arguments_is_an_unknown_function() {
     check(&["-", "a", "b"], b"last a.rrd\n");
 }
 
-// rrd_tool.c:491 would chroot as root, but HAVE_GETEUID is never defined,
+// RRDtool would chroot as root, but HAVE_GETEUID is never defined,
 // so root also gets a plain chdir. The CI container runs as root.
 #[test]
 fn pipe_workdir_is_chdir_even_for_root() {
@@ -265,7 +265,7 @@ fn pipe_non_utf8_line_keeps_session() {
     pipe(b"last \xff.rrd\nlast a.rrd\n");
 }
 
-// optparse.c through rrd_xport.c's option table, with atoi/atol values.
+// Each command's option table, with atoi/atol values.
 #[test]
 fn xport_option_forms() {
     let cases: &[&[&str]] = &[
@@ -370,7 +370,7 @@ fn graph_status(extra: &[&str]) {
     compare(&args, b"", true);
 }
 
-// rrd_graph.c:5063 option table, each option's validation text, and
+// RRDtool option table, each option's validation text, and
 // optparse forms.
 #[test]
 fn graph_option_table() {
