@@ -43,10 +43,10 @@ pub enum StoreError {
     #[error("{0}")]
     RrdExpression(String),
     /// An `.rrd` error carrying the exact text RRDtool passes to
-    /// rrd_set_error, with no Rondi prefix.
+    /// An RRDtool error message, with no Rondi prefix.
     #[error("{0}")]
     Rrd(String),
-    /// An `.rrd` file that rrd_open could not open, map or read, with
+    /// An `.rrd` file that could not open, map or read, with
     /// RRDtool's exact text.
     #[error("{0}")]
     RrdFile(String),

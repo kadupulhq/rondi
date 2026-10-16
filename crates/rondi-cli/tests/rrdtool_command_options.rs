@@ -1,8 +1,6 @@
 #![cfg(unix)]
 //! Differential tests for each command's optparse table, positional checks
-//! and usage text (rrd_create.c, rrd_update.c, rrd_fetch.c, rrd_first.c,
-//! rrd_last.c, rrd_lastupdate.c, rrd_info.c, rrd_dump.c, rrd_restore.c,
-//! rrd_resize.c, rrd_tune.c, rrd_list.c, rrd_flushcached.c). Each case runs
+//! and usage text. Each case runs
 //! pinned RRDtool 1.11.0 and the Rondi alias in copies of one scratch
 //! directory and compares output, status and the bytes of `a.rrd`.
 
@@ -120,7 +118,7 @@ fn compare_env(args: &[&OsStr], stdin: &[u8], full: bool, env: &[(&str, &str)]) 
     }
     let up_dir = tempfile::tempdir().unwrap();
     let ro_dir = tempfile::tempdir().unwrap();
-    // rrd_create randomizes each RRA's cur_row, so build one fixture and copy it.
+    // RRDtool's create randomizes each RRA's cur_row, so build one fixture and copy it.
     fixture(up_dir.path());
     let copied = Command::new("cp")
         .arg("-R")
@@ -163,7 +161,7 @@ fn each(cases: &[&[&str]]) {
     );
 }
 
-// rrd_last.c:18 and rrd_tool.c:738, which prints -1 for any error.
+// last prints -1 for any error.
 #[test]
 fn last_options() {
     each(&[
@@ -176,7 +174,7 @@ fn last_options() {
     ]);
 }
 
-// rrd_first.c:18: --rraindex goes through strtol base 0 into an int.
+// --rraindex goes through strtol base 0 into an int.
 #[test]
 fn first_options() {
     each(&[
@@ -191,7 +189,6 @@ fn first_options() {
     ]);
 }
 
-// rrd_lastupdate.c:19 and rrd_info.c:72.
 #[test]
 fn lastupdate_and_info_options() {
     each(&[
@@ -207,7 +204,7 @@ fn lastupdate_and_info_options() {
     ]);
 }
 
-// rrd_dump.c:556: any optparse result outside the table prints usage.
+// Any optparse result outside the table prints usage.
 #[test]
 fn dump_options() {
     each(&[
@@ -222,7 +219,7 @@ fn dump_options() {
     ]);
 }
 
-// rrd_fetch.c:83, with times parsed in option order.
+// Times are parsed in option order.
 #[test]
 fn fetch_options() {
     each(&[
@@ -353,7 +350,7 @@ fn streamed_summary(
     )
 }
 
-// rrd_fetch.c:463 allocates the whole requested range, so RRDtool prints
+// RRDtool allocates the whole requested range, so RRDtool prints
 // ranges past ten million rows; Rondi streams them instead of refusing.
 #[test]
 fn fetch_prints_more_than_ten_million_rows() {
@@ -381,7 +378,7 @@ fn fetch_prints_more_than_ten_million_rows() {
     assert_eq!(rondi, upstream);
 }
 
-// rrd_update.c:304 and :679.
+// RRDtool and :679.
 #[test]
 fn update_options() {
     each(&[
@@ -402,7 +399,7 @@ fn update_options() {
     ]);
 }
 
-// rrd_update_v rejects only an empty RRDCACHED_ADDRESS.
+// RRDtool's update rejects only an empty RRDCACHED_ADDRESS.
 #[test]
 fn updatev_rrdcached_address() {
     for value in ["", "unix:/nonexistent"] {
@@ -411,7 +408,6 @@ fn updatev_rrdcached_address() {
     }
 }
 
-// rrd_create.c:81.
 #[test]
 fn create_options() {
     each(&[
@@ -477,7 +473,6 @@ fn create_options() {
     ]);
 }
 
-// rrd_restore.c:1383 and rrd_resize.c:28.
 #[test]
 fn restore_and_resize_arguments() {
     each(&[
@@ -496,14 +491,14 @@ fn restore_and_resize_arguments() {
     ]);
 }
 
-// The restore flags are file statics in rrd_restore.c and stay set for
+// The restore flags are file statics in RRDtool and stay set for
 // later commands of a pipe session.
 #[test]
 fn restore_flags_persist_in_pipe_mode() {
     check(&["-"], b"restore -f a.xml n.rrd\nrestore a.xml n.rrd\n");
 }
 
-// rrd_tune.c:78: settings apply in order, earlier ones persist when a later
+// Settings apply in order, earlier ones persist when a later
 // one fails, and the file is opened even without settings.
 #[test]
 fn tune_options() {
@@ -538,14 +533,14 @@ fn tune_options() {
     ]);
 }
 
-// rrd_tune.c:113 and 239 parse argv twice. The first pass permutes the file
+// RRDtool parse argv twice. The first pass permutes the file
 // name behind a trailing option that lacks a value, so the second pass
 // reads the file name as that value; a long option there also pushes the
-// file name past argc. When the file name is consumed, rrd_tune.c:427
+// file name past argc. When the file name is consumed, tune
 // prints the data sources.
 #[test]
 fn tune_trailing_option_takes_the_permuted_file_name() {
-    // -s and -S are left out: rrd_tune.c:402 also raises the file to
+    // -s and -S are left out: RRDtool also raises the file to
     // version 0004 before they fail, which Rondi does not do yet.
     let mut cases = [
         "h", "i", "a", "d", "r", "p", "n", "w", "f", "x", "y", "z", "v", "b", "t", "D",
@@ -583,7 +578,6 @@ fn tune_trailing_option_takes_the_permuted_file_name() {
     each(&cases.iter().map(Vec::as_slice).collect::<Vec<_>>());
 }
 
-// rrd_list.c:256 and rrd_flushcached.c:27.
 #[test]
 fn list_and_flushcached_options() {
     each(&[

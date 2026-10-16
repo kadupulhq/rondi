@@ -1,5 +1,5 @@
 #![cfg(unix)]
-//! Differential tests for the graph element parser (`rrd_graph_script`),
+//! Differential tests for the graph element parser (`graph`),
 //! per-element data preparation (`data_fetch`, `data_calc`, `vdef_calc`,
 //! `print_calc`) and the RPN calculator against pinned RRDtool 1.11.0.
 
@@ -187,9 +187,9 @@ fn check_all(results: impl IntoIterator<Item = Result<(), String>>) {
     );
 }
 
-// rrd_graph_script (rrd_graph_helper.c:1952) accepts every graph element in
-// xport; rrd_xport_fn (rrd_xport.c:280) exports only XPORT columns, and
-// rrd_xport_format_addprints still writes PRINT/COMMENT/LINE entries.
+// RRDtool's graph element parser accepts every graph element in
+// xport; RRDtool's xport exports only XPORT columns, and
+// RRDtool's xport PRINT output still writes PRINT/COMMENT/LINE entries.
 #[test]
 fn xport_accepts_graph_elements_and_applies_shift() {
     let Some(f) = fixture() else { return };
@@ -210,7 +210,7 @@ fn xport_accepts_graph_elements_and_applies_shift() {
     );
 }
 
-// data_calc (rrd_graph.c:1120) substitutes VDEF values into CDEFs and
+// data_calc substitutes VDEF values into CDEFs and
 // rejects CDEFs without DEF or CDEF inputs.
 #[test]
 fn vdef_values_substitute_into_cdefs() {
@@ -228,7 +228,7 @@ fn vdef_values_substitute_into_cdefs() {
     );
 }
 
-// parseArguments and newGraphDescription (rrd_graph_helper.c:264, 505):
+// parseArguments and newGraphDescription:
 // escaped colons, kept quotes, key=value fields, colours on XPORT,
 // legend truncation, forward references, vname reuse and error texts.
 #[test]
@@ -272,7 +272,7 @@ fn element_grammar_matches_rrd_graph_helper() {
     );
 }
 
-// rpn_parse and rpn_calc (rrd_rpncalc.c:338, 613), including the operand
+// rpn_parse and rpn_calc, including the operand
 // order, count conversions and error texts.
 #[test]
 fn rpn_edge_cases_match_rrd_rpncalc() {
@@ -346,9 +346,9 @@ fn predictperc_and_signed_zero_match() {
     }));
 }
 
-// print_calc (rrd_graph.c:1856-1890) and vdef_calc (6017) read each
+// print_calc and vdef_calc (6017) read each
 // source at its own fetch window and step; the image step is
-// max(step, (end-start)/width) (rrd_graph.c:5783).
+// max(step, (end-start)/width).
 #[test]
 fn prints_use_each_source_window_and_width_step() {
     let Some(f) = fixture() else { return };
@@ -393,8 +393,8 @@ fn prints_use_each_source_window_and_width_step() {
 }
 
 // print_calc formatters: strftime on DEF data uses the last VDEF time,
-// valstrftime uses gmtime and valstrfduration ports strfduration
-// (rrd_graph.c:1684, 1940-1990); HW CFs average like AVERAGE.
+// valstrftime uses gmtime and valstrfduration follows RRDtool's
+// duration formatter; HW CFs average like AVERAGE.
 #[test]
 fn print_formatters_match_print_calc() {
     let Some(f) = fixture() else { return };
@@ -453,10 +453,10 @@ fn print_formatters_match_print_calc() {
     );
 }
 
-// timestamp_to_tm (rrd_graph.c:1810) truncates any in-range value to
+// timestamp_to_tm truncates any in-range value to
 // seconds; GPRINT formats into the legend buffer with snprintf(FMT_LEG_LEN
 // - 2) for numbers and snprintf(FMT_LEG_LEN) for the `%.0f` fallback
-// (rrd_graph.c:2017-2033), while PRINT allocates.
+// , while PRINT allocates.
 #[test]
 fn print_and_gprint_text_lengths_match_print_calc() {
     let Some(f) = fixture() else { return };
@@ -489,7 +489,7 @@ fn print_and_gprint_text_lengths_match_print_calc() {
     );
 }
 
-// graph_paint (rrd_graph.c:3975) stops after print_calc when nothing is
+// graph_paint stops after print_calc when nothing is
 // drawn: no image, 0x0 and only print lines.
 #[test]
 fn print_only_graph_is_not_rendered() {
@@ -507,7 +507,7 @@ fn print_only_graph_is_not_rendered() {
     ]);
 }
 
-// graph_paint_timestring (rrd_graph.c:4004-4049) pushes graph_left..
+// graph_paint_timestring pushes graph_left..
 // graph_end after graph_size_location (3561), value_min/value_max after
 // data_proc (1365), si_unit (578) and expand_range (613), and the legend
 // loop (3430) pushes legend[n]/coords[n] from leg_place (2115).
@@ -547,8 +547,8 @@ fn graphv_layout_keys_match_graph_paint_timestring() {
     );
 }
 
-// Value range options feed data_proc and expand_range (rrd_graph.c:1365,
-// 613; ALTAUTOSCALE*, rigid, allow_shrink).
+// Value range options feed data_proc and expand_range (ALTAUTOSCALE*, rigid,
+// allow_shrink).
 #[test]
 fn graphv_value_range_matches_data_proc_and_expand_range() {
     let Some(f) = fixture() else { return };
@@ -573,7 +573,7 @@ fn graphv_value_range_matches_data_proc_and_expand_range() {
     );
 }
 
-// leg_place (rrd_graph.c:2115): control codes, \\t, \\g trimming, line
+// leg_place: control codes, \\t, \\g trimming, line
 // breaking at the image width, TEXTALIGN and the legend directions.
 #[test]
 fn graphv_legend_placement_matches_leg_place() {
@@ -645,8 +645,8 @@ fn graphv_legend_placement_matches_leg_place() {
     check_all(cases.iter().map(|case| f.assert_same(&f.graphv(case))));
 }
 
-// The `graph` WxH line comes from the same layout (rrd_tool.c prints
-// ximg x yimg).
+// The `graph` WxH line comes from the same layout (RRDtool prints
+// the image width and height).
 #[test]
 fn graph_image_size_matches_graph_size_location() {
     let Some(f) = fixture() else { return };
@@ -672,7 +672,7 @@ fn graph_image_size_matches_graph_size_location() {
 }
 
 // Infinities produced by a CDEF reach xport and graph exports unchanged
-// (rrd_xport.c writes them with %0.10e, JSON as null).
+// (RRDtool writes them with %0.10e, JSON as null).
 #[test]
 fn infinities_survive_into_exports() {
     let Some(f) = fixture() else { return };
@@ -720,7 +720,7 @@ fn start_daemon(dir: &Path, socket: &Path) -> Child {
     child
 }
 
-// data_fetch (rrd_graph.c:1003) reads a DEF through its own `daemon=`
+// data_fetch reads a DEF through its own `daemon=`
 // address; cached updates must be visible to both implementations.
 #[test]
 fn def_daemon_reads_through_rondi_rrdcached() {

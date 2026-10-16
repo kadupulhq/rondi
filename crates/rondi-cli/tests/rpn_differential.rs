@@ -145,7 +145,7 @@ impl Fixture {
 }
 
 // rpn_parse scans numbers with "%40[0-9.e+-]", requires a following comma,
-// and converts them with rrd_strtodbl.
+// and converts them with RRDtool's number parser.
 #[test]
 fn rpn_number_lexing_matches_rpn_parse() {
     let Some(fixture) = fixture() else { return };
@@ -181,7 +181,7 @@ fn rpn_errors_use_rrdtool_wording() {
     }
 }
 
-// match_op_param (rrd_rpncalc.c:373) takes the PREV( branch whenever sscanf
+// match_op_param takes the PREV( branch whenever sscanf
 // reads a name, even without the closing parenthesis. A failed length check
 // leaves expr on the token, so the separator test reports it as garbage.
 #[test]
@@ -201,7 +201,7 @@ fn malformed_prev_parameter_is_garbage_in_rpn() {
     }
 }
 
-// rrd_graph.c data_calc rejects a CDEF whose expression names no DEF or CDEF.
+// RRDtool data_calc rejects a CDEF whose expression names no DEF or CDEF.
 #[test]
 fn constant_cdef_is_rejected_like_rrdtool() {
     let Some(fixture) = fixture() else { return };
@@ -210,7 +210,7 @@ fn constant_cdef_is_rejected_like_rrdtool() {
     }
 }
 
-// rrd_rpncalc.c OP_PERCENT reads s[start - 1 + round(percent * n / 100)].
+// RRDtool OP_PERCENT reads s[start - 1 + round(percent * n / 100)].
 #[test]
 fn rpn_percent_rank_and_count_edges_match_rrdtool() {
     let Some(fixture) = fixture() else { return };
@@ -226,7 +226,7 @@ fn rpn_percent_rank_and_count_edges_match_rrdtool() {
     }
 }
 
-// rrd_rpncalc.c OP_MEDIAN and OP_PERCENT index the stack with a negative
+// RRDtool OP_MEDIAN and OP_PERCENT index the stack with a negative
 // count, which is undefined behavior in the pinned build (it crashes), so
 // only Rondi's result is checked: a stack error instead of a multi-gigabyte
 // stack allocation.
@@ -247,7 +247,7 @@ fn rpn_negative_element_count_is_a_stack_error() {
     }
 }
 
-// rrd_rpncalc.c OP_ROLL computes j = base + step in int and then j--; a step
+// RRDtool OP_ROLL computes j = base + step in int and then j--; a step
 // of INT_MAX wraps instead of trapping. Each row spins about 2^31 times
 // normalizing j, so the range is cut to a few rows.
 #[test]
@@ -272,7 +272,7 @@ fn rpn_negative_zero_sums_match_rrdtool() {
     fixture.assert_matches(&args);
 }
 
-// vdef_parse scans "%40[0-9.e+-],%29[A-Z]" and converts with rrd_strtodbl.
+// vdef_parse scans "%40[0-9.e+-],%29[A-Z]" and converts with RRDtool's number parser.
 #[test]
 fn vdef_parameter_lexing_matches_vdef_parse() {
     let Some(fixture) = fixture() else { return };
@@ -308,7 +308,7 @@ fn print_si_scale_of_infinity_matches_rrdtool() {
     ]);
 }
 
-// rrd_rpncalc.c keeps one data cursor per variable and advances it only when
+// RRDtool keeps one data cursor per variable and advances it only when
 // TIME % step == 0, so PREV(var), TREND, and PREDICT read z's own 30-second
 // rows inside a CDEF that x makes 10-second. The COUNT mask hides the first
 // and last rows, where RRDtool reads outside its buffers and the result

@@ -1,7 +1,6 @@
 #![cfg(unix)]
-//! Differentials for the graph data engine (`data_fetch`, `rrd_reduce_data`,
-//! `data_calc`, `rpn_calc` and `vdef_calc` in rrd_graph.c and
-//! rrd_rpncalc.c) against pinned RRDtool 1.11.0.
+//! Differentials for the graph data engine (`data_fetch`, RRDtool's data reduction,
+//! `data_calc`, `rpn_calc` and `vdef_calc`) against pinned RRDtool 1.11.0.
 
 mod common;
 
@@ -69,7 +68,7 @@ fn split(line: &str) -> Vec<&str> {
     line.split_whitespace().collect()
 }
 
-// rrd_rpncalc.c:1110, 1131, 1157 and 1302 and rrd_graph.c:6147 and
+// RRDtool and
 // 6236-6264: the pinned aarch64 builds fuse the PREDICT and STDEV
 // accumulators, the PREDICTSIGMA variance, the PREDICTPERC interpolation and
 // the least-squares sums, slope and intercept, so the last bits differ from
@@ -117,8 +116,8 @@ fn rpn_and_vdef_accumulators_round_like_the_pinned_build() {
     }
 }
 
-// rrd_graph.c:972-987 and 1085 key reused fetches by gdes_fetch_key
-// (rrd_graph.h:50). The lookup uses the requested step and the insert the
+// RRDtool key reused fetches by gdes_fetch_key
+// (the reuse cache). The lookup uses the requested step and the insert the
 // reduced one, cf_reduce defaults to AVERAGE whether or not reduce= was
 // given, the DS name is not part of the key, and %d keeps only the low 32
 // bits of the window.
@@ -137,7 +136,7 @@ fn data_fetch_reuses_fetches_by_the_c_key() {
     }
 }
 
-// rrd_graph.c:803-868: rrd_reduce_data counts rows in an unsigned long, so
+// RRDtool's data reduction counts rows in an unsigned long, so
 // a window shorter than the reduced step wraps instead of going negative
 // and fails the modulo check with the wrapped count.
 #[test]
@@ -152,7 +151,7 @@ fn reduce_data_sanity_check_counts_rows_unsigned() {
     }
 }
 
-// rrd_graph.c:1288-1292: a CDEF whose DEFs do not overlap sizes its buffer
+// A CDEF whose DEFs do not overlap sizes its buffer
 // from a negative span converted to unsigned long, and malloc refuses it.
 #[test]
 fn cdef_over_disjoint_windows_fails_the_allocation() {
@@ -171,9 +170,9 @@ fn cdef_over_disjoint_windows_fails_the_allocation() {
     }
 }
 
-// rrd_graph.c:1002-1007: data_fetch reads the local file when rrdc_connect
+// data_fetch reads the local file when rrdc_connect
 // fails but leaves its error set, so rrdtool prints the result and then
-// fails. rrd_xport.c:211 connects to the image-wide daemon first and stops
+// fails. RRDtool connects to the image-wide daemon first and stops
 // there, and an ALLOW_MISSING_DS fallback clears the pending error.
 #[test]
 fn unreachable_daemon_falls_back_to_the_local_file() {

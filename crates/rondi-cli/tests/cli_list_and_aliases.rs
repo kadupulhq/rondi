@@ -1,6 +1,6 @@
 #![cfg(unix)]
-//! Differential tests for `rrd_list.c` (`rrd_list_r`, `rrd_list_rec`), the
-//! `--imginfo` format check, and `rrdupdate.c`'s rrdupdate, rrdcreate and
+//! Differential tests for `list`, the
+//! `--imginfo` format check, and `RRDtool`'s rrdupdate, rrdcreate and
 //! rrdinfo executables. Read-only cases run both programs in one directory
 //! so readdir order is the same for both.
 
@@ -100,7 +100,7 @@ fn each(cases: &[Case<'_>]) {
     );
 }
 
-// rrd_list.c:150-245 and rrd_list.c:350, which prints strerror(errno)
+// A failed listing prints strerror(errno)
 // without a newline and still exits 0.
 #[test]
 fn list_matches_rrd_list_r() {
@@ -127,7 +127,7 @@ fn list_matches_rrd_list_r() {
     ]);
 }
 
-// bad_format_imginfo (rrd_graph.c:5880): the image is written, then the
+// bad_format_imginfo: the image is written, then the
 // format is checked and nothing is printed.
 #[test]
 fn graph_imginfo_format_errors() {
@@ -158,7 +158,7 @@ fn graph_imginfo_format_errors() {
     each(&cases);
 }
 
-// rrdupdate.c: rrdupdate, rrdcreate and rrdinfo, found through PATH so
+// The rrdupdate, rrdcreate and rrdinfo executables, found through PATH so
 // argv[0] is the same bare name for both programs.
 #[test]
 fn rrdupdate_rrdcreate_and_rrdinfo_executables() {

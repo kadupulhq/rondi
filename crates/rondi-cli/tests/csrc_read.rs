@@ -1,6 +1,6 @@
 #![cfg(unix)]
-//! Differentials for rrd_first.c, rrd_last.c and their printing in
-//! rrd_tool.c. Option-form cases wait for the shared option parser.
+//! Differentials for RRDtool and their printing in
+//! Option-form cases wait for the shared option parser.
 
 mod common;
 
@@ -17,8 +17,8 @@ const CREATE: &[&str] = &[
 ];
 const UPDATE: &[&str] = &["update", "f.rrd", "1000000010:1", "1000000050:2"];
 
-// C4: rrd_first.c:33 reads --rraindex with strtol(optarg, &endptr, 0) into
-// an int and ignores trailing text; rrd_first.c:84 rejects an index past
+// C4: RRDtool reads --rraindex with strtol(optarg, &endptr, 0) into
+// an int and ignores trailing text; RRDtool rejects an index past
 // rra_cnt with a bare "invalid rraindex number".
 #[test]
 fn c4_first_rraindex_uses_strtol_base_zero() {
@@ -30,9 +30,8 @@ fn c4_first_rraindex_uses_strtol_base_zero() {
     }
 }
 
-// C5: rrd_first and rrd_last return -1 on every error and rrd_tool.c:736-750
-// prints it before the ERROR line; the usage texts are rrd_first.c:63 and
-// rrd_last.c:44, and rrd_first uses argv[optind] when given more files.
+// C5: first and last return -1 on every error and RRDtool prints it
+// before the ERROR line; first uses argv[optind] when given more files.
 #[test]
 fn c5_first_and_last_print_minus_one_on_any_error() {
     let Some(sides) = common::Sides::new(&[CREATE, UPDATE], &[("g.txt", b"garbage\n")]) else {

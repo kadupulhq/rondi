@@ -1,5 +1,5 @@
 #![cfg(unix)]
-//! Repros from the rrd_update.c line-by-line review. Each test runs the same
+//! Repros from the RRDtool line-by-line review. Each test runs the same
 //! command sequence against pinned RRDtool and the Rondi alias, starting from
 //! one upstream-created file so the randomized initial row cannot differ, and
 //! compares stdout, stderr, exit status and the final file bytes.
@@ -95,7 +95,7 @@ fn a3_extra_data_message_reports_remaining_text() {
 }
 
 // A5: update_pdp_prep treats any value whose first byte is 'U' as unknown,
-// and nothing else (lowercase u/unknown go to rrd_strtodbl and fail).
+// and nothing else (lowercase u/unknown go to RRDtool's number parser and fail).
 #[test]
 fn a5_unknown_is_first_byte_uppercase_u() {
     assert_same(
@@ -108,7 +108,7 @@ fn a5_unknown_is_first_byte_uppercase_u() {
     );
 }
 
-// A6: rrd_strtodbl distinguishes a partial conversion in its message.
+// A6: RRDtool's number parser distinguishes a partial conversion in its message.
 #[test]
 fn a6_partial_conversion_messages() {
     assert_same(
@@ -204,7 +204,7 @@ fn a10_skip_past_updates_precedes_value_validation() {
 }
 
 // A11: COUNTER/DERIVE use a digit scan with "not a simple ... integer" text;
-// an empty value passes it, and rrd_diff accepts up to LAST_DS_LEN digits
+// an empty value passes it, and RRDtool's counter difference accepts up to LAST_DS_LEN digits
 // and turns longer values into unknown without an error.
 #[test]
 fn a11_counter_digit_scan_and_lengths() {
@@ -236,7 +236,7 @@ fn a11_counter_digit_scan_and_lengths() {
     );
 }
 
-// A12: rrd_diff takes the sign from any '-' before the first digit, so "-0"
+// A12: RRDtool's counter difference takes the sign from any '-' before the first digit, so "-0"
 // is negative.
 #[test]
 fn a12_derive_negative_zero_sign() {
@@ -260,7 +260,7 @@ fn a12_derive_negative_zero_sign() {
     );
 }
 
-// A13: rrd_diff converts the decimal difference with rrd_strtod's digit
+// A13: RRDtool's counter difference converts the decimal difference with RRDtool's decimal parser's digit
 // accumulation, which is not correctly rounded above 2^53.
 #[test]
 fn a13_counter_delta_uses_rrd_strtod_rounding() {
@@ -302,7 +302,7 @@ fn a14_updatev_return_value_on_failure() {
     );
 }
 
-// A15: rrd_update_v rejects only an *empty* RRDCACHED_ADDRESS and otherwise
+// A15: RRDtool's update rejects only an *empty* RRDCACHED_ADDRESS and otherwise
 // updates locally; it has no --daemon option.
 #[test]
 fn a15_updatev_rrdcached_address_handling() {
@@ -364,7 +364,7 @@ fn a17_at_style_time_errors() {
     );
 }
 
-// A18: rrd_strtod skips C isspace (including \v) and lets the int exponent wrap.
+// A18: RRDtool's decimal parser skips C isspace (including \v) and lets the int exponent wrap.
 #[test]
 fn a18_rrd_strtod_whitespace_and_exponent_wrap() {
     assert_same(
@@ -384,7 +384,7 @@ fn a18_rrd_strtod_whitespace_and_exponent_wrap() {
 }
 
 // A19: get_time_from_reading converts a time past 2^63 to time_t out of
-// range (rrd_update.c:1409-1410). aarch64 saturates and leaves a huge
+// range. aarch64 saturates and leaves a huge
 // unknown_sec; x86_64 stores LONG_MIN and rejects the update. Separately,
 // calculate_elapsed_steps returns the step count as int.
 #[test]

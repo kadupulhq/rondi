@@ -1,10 +1,10 @@
 #![cfg(unix)]
-//! Repros from the rrd_dump.c review, compared against pinned RRDtool.
+//! Dump repros, compared against pinned RRDtool 1.11.0.
 
 #[macro_use]
 mod common;
 
-// rrd_dump.c:81 CB_FMTS formats values with rrd_snprintf("%0.10e"): fmtflt
+// RRDtool CB_FMTS formats values with its number formatter ("%0.10e"): fmtflt
 // rounds by its own scaling, drops the sign of -0 and prints subnormals
 // without normalizing them.
 #[test]

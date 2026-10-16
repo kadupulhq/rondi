@@ -225,7 +225,7 @@ fn create_arguments_parse_like_handle_request_create() {
         "CREATE n.rrd -b 1000000000 -s\n".to_owned(),
         "CREATE n.rrd -b\n".to_owned(),
         "CREATE n.rrd -b 1000000000 -t\n".to_owned(),
-        // rrd_create_r2 errors carry the RRD Error prefix.
+        // RRDtool's create errors carry the RRD Error prefix.
         "CREATE n.rrd\n".to_owned(),
         "CREATE n.rrd DS:a:GAUGE:120:U:U\n".to_owned(),
         "CREATE n.rrd RRA:AVERAGE:0.5:1:5\n".to_owned(),
@@ -430,7 +430,7 @@ fn empty_file_name_names_the_base_directory() {
         assert_same(&observed);
     }
 
-    // Upstream passes "<base>/" to rrd_create_r2; Rondi refuses it.
+    // Upstream passes "<base>/" to RRDtool's create; Rondi refuses it.
     work.reset();
     let mut daemon = work.start(true, &["-B"]);
     let reply = work.talk(b"CREATE  -b 1000000000 DS:a:GAUGE:120:U:U RRA:AVERAGE:0.5:1:5\n");

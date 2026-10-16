@@ -17,7 +17,7 @@ pub(crate) const RRA_PTR_LEN: usize = 8;
 pub(crate) const VALUE_LEN: usize = 8;
 pub(crate) const FLOAT_COOKIE: f64 = 8.642135E130;
 
-/// Match the NaN produced by RRDtool's `rrd_set_to_DNAN`: the pinned x86_64
+/// Match the NaN produced by RRDtool's DNAN: the pinned x86_64
 /// build uses a negative quiet NaN, while aarch64 and the other supported
 /// targets use the positive quiet NaN representation.
 #[inline]
@@ -122,12 +122,12 @@ pub(crate) fn read_template_definitions(path: &Path) -> Result<TemplateDefinitio
 }
 
 /// Parse RRDtool's integer or suffixed duration syntax, reporting
-/// `rrd_scaled_duration`'s text without a prefix.
+/// The duration parser's text without a prefix.
 pub fn parse_rrd_scaled_duration(text: &str, divisor: u64) -> Result<u64, StoreError> {
     rrd_scaled_duration(text, divisor).map_err(|reason| StoreError::Rrd(reason.into()))
 }
 
-/// rrd_utils.c:235 `rrd_scaled_duration`. A bare count is not scaled; a
+/// RRDtool's duration parser: a bare count is not scaled; a
 /// suffixed duration must divide evenly. As in C, `strtoul` saturates and the
 /// suffix multiplication wraps.
 pub(crate) fn rrd_scaled_duration(token: &str, divisor: u64) -> Result<u64, &'static str> {
@@ -305,7 +305,7 @@ pub fn fetch_rrd_open_file(
     })
 }
 
-/// A fetch whose rows are produced on demand, as rrd_fetch.c fills its data
+/// A fetch whose rows are produced on demand, as RRDtool fills its data
 /// area. Only the stored rows inside the archive are held, so memory is
 /// bounded by the file rather than by the requested range.
 #[derive(Debug)]
@@ -353,7 +353,7 @@ impl RrdFetchRows {
                     .iter()
                     .map(|chunk| {
                         let value = f64::from_le_bytes(*chunk);
-                        // rrd_fetch.c:552 copies stored rows as they are; only
+                        // RRDtool copies stored rows as they are; only
                         // NaN means unknown, so infinities reach the caller.
                         (!value.is_nan()).then_some(value)
                     })
@@ -391,7 +391,7 @@ pub fn fetch_rrd_rows(
 
 /// [`fetch_rrd_rows`] on a file the caller opened, under a shared RRD lock
 /// released when the result is built. `path` names it in errors. As in
-/// `rrd_fetch_fn`, an end before the start fails only when the aligned
+/// For fetch, an end before the start fails only when the aligned
 /// range is empty.
 pub fn fetch_rrd_open_rows(
     file: File,
@@ -413,7 +413,7 @@ fn prepare_fetch(
     requested_step: u64,
     row_limit: Option<usize>,
 ) -> Result<RrdFetchRows, StoreError> {
-    // rrd_fetch_fn itself accepts an end before the start; only the aligned
+    // Fetch itself accepts an end before the start; only the aligned
     // range below can fail. rrdtool fetch checks the order before calling it.
     if requested_step == 0 {
         return Err(StoreError::RrdUnsupported(
@@ -431,7 +431,7 @@ fn prepare_fetch(
         requested_step,
     )?;
     let archive = &info.archives[archive_index];
-    // A damaged row_cnt that rrd_open's wrapped size check lets through
+    // A damaged row_cnt that the wrapped size check on open lets through
     // would otherwise drive the row arithmetic below past the file.
     require_rows_in_file(&info, archive, file.metadata()?.len())?;
     let step = info
@@ -479,7 +479,7 @@ fn prepare_fetch(
     let archive_start = archive_end
         .checked_sub(
             step_i64
-                // rrd_fetch.c:479 computes row_cnt - 1 unsigned, so an empty
+                // RRDtool computes row_cnt - 1 unsigned, so an empty
                 // archive starts one step after its end. Row counts are bound
                 // by the file length, which keeps the cast in range.
                 .checked_mul(archive.rows.wrapping_sub(1) as i64)
@@ -723,7 +723,7 @@ fn apply_update(
     let cdp_start = pdp_start + ds_count * PDP_PREP_LEN;
     let pointer_start = cdp_start + ds_count * info.archives.len() * CDP_PREP_LEN;
 
-    // The steps below follow rrd_update.c process_arg so that every archive
+    // The steps below follow RRDtool process_arg so that every archive
     // value is produced by the same sequence of floating-point operations.
     let mut pdp_new = Vec::with_capacity(ds_count);
     let mut last_ds_bytes: Vec<[u8; 30]> = Vec::with_capacity(ds_count);
@@ -874,7 +874,7 @@ fn apply_update(
         }
     }
 
-    // All format and semantic checks precede the first write. rrd_write
+    // All format and semantic checks precede the first write. RRDtool's file write
     // refuses a value that would end past the mapped file, which a damaged
     // row_cnt can address; write_RRA_row then fails with errno still 0.
     // What was written stays, the prep areas and rra_ptr included, but
@@ -948,12 +948,12 @@ fn apply_update(
     }
     file.seek(SeekFrom::Start(live_start as u64))?;
     file.write_all(&timestamp.to_le_bytes())?;
-    // rrd_update.c:2509-2520 writes only the time_t before version 3.
+    // RRDtool writes only the time_t before version 3.
     if info.live_head_len == LIVE_HEAD_LEN {
         file.write_all(&(timestamp_usec as i64).to_le_bytes())?;
     }
     // No fsync: RRDtool leaves writeback to the kernel on every .rrd write
-    // path (rrd_flush is a no-op, rrd_close only unmaps and closes).
+    // path (flush is a no-op and close only unmaps and closes).
     *state_cache = Some(state);
     for (index, (source, (unknown, value))) in
         info.data_sources.iter_mut().zip(pdp_prep).enumerate()
@@ -982,11 +982,11 @@ fn apply_update(
     Ok(summaries)
 }
 
-/// `rrd_update_r()` over RRDtool's update argument text (`time:v1:v2...` or
+/// Update over RRDtool's update argument text (`time:v1:v2...` or
 /// `time@v1:...`), with an optional `--template` list. The file is opened
-/// and locked once. Like `_rrd_update`, processing stops at the first failing
+/// and locked once. Like RRDtool, processing stops at the first failing
 /// argument and keeps the ones before it; the second element is that error,
-/// worded as rrd_set_error words it (sample errors carry the file name).
+/// worded as RRDtool words it (sample errors carry the file name).
 pub fn update_rrd_text(
     path: impl AsRef<Path>,
     template: Option<&str>,
@@ -996,7 +996,6 @@ pub fn update_rrd_text(
     let path = path.as_ref();
     let mut summaries = Vec::new();
     let result = if arguments.is_empty() {
-        // rrd_update.c:864-867
         Err(StoreError::Rrd("Not enough arguments".into()))
     } else {
         open_rrd_write(path).and_then(|file| {
@@ -1050,7 +1049,7 @@ fn update_text_arguments(
     file.seek(SeekFrom::Start(0))?;
     let mut info = read_info(&mut file, path)?;
     let ds_count = info.data_sources.len();
-    // parse_template (rrd_update.c:1073-1116): slot 0 is the time; each
+    // parse_template: slot 0 is the time; each
     // further slot names the data source it fills.
     let slots = match template {
         None => (0..ds_count).collect::<Vec<_>>(),
@@ -1076,7 +1075,7 @@ fn update_text_arguments(
     let mut state_cache = None;
     for argument in arguments {
         let prefixed = |message: String| StoreError::Rrd(format!("{}: {message}", path.display()));
-        // parse_ds (rrd_update.c:1302-1358)
+        // parse_ds
         let (time_text, values_text, at_style) = if let Some(at) = argument.find('@') {
             (&argument[..at], &argument[at + 1..], true)
         } else if let Some(colon) = argument.find(':') {
@@ -1116,7 +1115,7 @@ fn update_text_arguments(
                 slots.len()
             )));
         }
-        // get_time_from_reading (rrd_update.c:1368-1425)
+        // get_time_from_reading
         let (seconds, mut microseconds) = if at_style {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1146,7 +1145,7 @@ fn update_text_arguments(
                     time +=
                         now.as_secs() as f64 + f64::from(now.subsec_micros()) * f64::from(1e-6_f32);
                 }
-                // rrd_update.c:1409-1410 converts floor(tmp) to time_t and
+                // RRDtool converts floor(tmp) to time_t and
                 // takes the microseconds from what it stored. Past 2^63 that
                 // conversion is out of range: aarch64 saturates, so the
                 // excess becomes a huge (long) microsecond count, while
@@ -1249,7 +1248,7 @@ pub fn update_rrd_raw_batch_file(
     Ok(summaries)
 }
 
-/// rrd_update.c update_pdp_prep: the rate times seconds contributed by one
+/// RRDtool update_pdp_prep: the rate times seconds contributed by one
 /// sample, or NaN when it is unknown, out of range, or past the heartbeat.
 fn update_pdp_new(
     source: &RrdDataSourceInfo,
@@ -1260,7 +1259,7 @@ fn update_pdp_new(
     let Some(sample) = value else {
         return Ok(rrd_nan());
     };
-    // rrd_update.c:1458-1460: text starting with 'U' is unknown, and nothing
+    // Text starting with 'U' is unknown, and nothing
     // is converted past the heartbeat.
     if raw_value.is_some_and(|text| text.starts_with('U')) || (source.heartbeat as f64) < interval {
         return Ok(rrd_nan());
@@ -1281,7 +1280,7 @@ fn update_pdp_new(
         }
         "COUNTER" | "DERIVE" => {
             if let Some(text) = raw_value {
-                // rrd_update.c:1470-1484 checks digits only; a leading '-'
+                // RRDtool checks digits only; a leading '-'
                 // is allowed for DERIVE.
                 let signed = source.kind == "DERIVE";
                 let simple = text.bytes().enumerate().all(|(index, byte)| {
@@ -1319,7 +1318,7 @@ fn update_pdp_new(
             (delta, delta / interval)
         }
         "DCOUNTER" | "DDERIVE" if previous_known => {
-            // rrd_update.c:1520-1533 converts the new text, then the stored
+            // RRDtool converts the new text, then the stored
             // one, and fails the update if either does not convert.
             let sample = raw_value.map_or(Ok(sample), convert)?;
             let previous = convert(previous)?;
@@ -1342,7 +1341,7 @@ fn update_pdp_new(
     Ok(amount)
 }
 
-/// rrd_update.c process_pdp_st for every data source. Returns the rate for
+/// RRDtool process_pdp_st for every data source. Returns the rate for
 /// each completed PDP and leaves the PDP prep area ready for the next update.
 fn process_pdp_steps(
     info: &RrdInfo,
@@ -1388,7 +1387,7 @@ fn process_pdp_steps(
         .collect()
 }
 
-/// rrd_update.c update_all_cdp_prep for the basic consolidation functions.
+/// RRDtool update_all_cdp_prep for the basic consolidation functions.
 /// Returns how many rows each archive must write.
 fn update_cdp_preps(
     info: &RrdInfo,
@@ -1428,7 +1427,7 @@ fn update_cdp_preps(
         .collect()
 }
 
-/// rrd_update.c update_cdp with initialize_cdp_val, initialize_carry_over
+/// RRDtool update_cdp with initialize_cdp_val, initialize_carry_over
 /// and calculate_cdp_val.
 fn update_cdp(
     scratch: &mut RrdCdpPrepInfo,
@@ -1527,10 +1526,10 @@ fn update_cdp(
     }
 }
 
-/// rrd_update.c write_to_rras: advance each archive pointer and queue the
+/// RRDtool write_to_rras: advance each archive pointer and queue the
 /// primary value for the first row and the secondary value for the rest.
 /// Queuing stops after the first row that ends past `file_len`, where
-/// rrd_write fails and the update stops, so a damaged row_cnt cannot make
+/// A failed write ends the update and the update stops, so a damaged row_cnt cannot make
 /// this queue up to `row_cnt` rows.
 #[allow(clippy::too_many_arguments)]
 fn write_rra_rows(
@@ -1575,7 +1574,7 @@ fn write_rra_rows(
                 return Ok(());
             }
             let current_row = &mut current_rows[archive_index];
-            // cur_row is an unsigned long in rrd_update.c, so it wraps.
+            // cur_row is an unsigned long in RRDtool, so it wraps.
             *current_row = current_row.wrapping_add(1);
             if *current_row >= archive.rows {
                 *current_row = 0;
@@ -1620,7 +1619,7 @@ fn write_rra_rows(
 }
 
 /// Refuses an archive whose rows, sized without wrapping, do not fit in the
-/// file. rrd_open accepts such a file because it checks only the wrapped
+/// file. RRDtool accepts such a file because it checks only the wrapped
 /// total; the readers that walk every row then hang or read outside the
 /// mapping (docs/COMPATIBILITY_DEFECTS.md ID-001).
 pub(crate) fn require_rows_in_file(
@@ -1643,7 +1642,7 @@ pub(crate) fn require_rows_in_file(
     }
 }
 
-/// Whether the last queued row ends past the file, where rrd_write fails.
+/// Whether the last queued row ends past the file, where writing fails.
 fn ends_past(row_writes: &[RowWrite], file_len: u64) -> bool {
     row_writes.last().is_some_and(|write| {
         let length = (write.values.len() * VALUE_LEN) as u64;
@@ -1703,7 +1702,7 @@ pub fn update_rrd_values(
 
 /// Update an RRD while preserving the caller's exact decimal text for each
 /// data source. Integer COUNTER and DERIVE differences are calculated before
-/// conversion to `f64`, matching RRDtool's string-based `rrd_diff` behavior.
+/// conversion to `f64`, matching RRDtool's string-based counter difference behavior.
 pub fn update_rrd_raw_values(
     path: impl AsRef<Path>,
     timestamp: i64,
@@ -1729,7 +1728,7 @@ pub fn update_rrd_raw_values_precise(
     .map(|_| ())
 }
 
-/// RRDtool's update and updatev both convert samples with rrd_strtodbl.
+/// RRDtool's update and updatev both convert samples with RRDtool's number parser.
 /// Text that does not convert is kept as NaN here; whether it is an error
 /// depends on the data source type and is decided once the file is read.
 fn parse_raw_values(values: &[Option<&str>]) -> Result<Vec<Option<f64>>, StoreError> {
@@ -1809,7 +1808,7 @@ pub fn tune_rrd_data_sources_file(
     let mut file = RrdFileLock::exclusive(file)?;
     file.seek(SeekFrom::Start(0))?;
     let info = read_info(&mut file, path)?;
-    // rrd_tune.c never converts the stored DS types, so a name dst_conv
+    // RRDtool never converts the stored DS types, so a name dst_conv
     // would reject is no obstacle; only a COMPUTE DS keeps other fields in
     // the parameter slots.
     if info
@@ -1931,7 +1930,7 @@ pub fn inspect_rrd_file(path: impl AsRef<Path>) -> Result<RrdInfo, StoreError> {
     inspect_path(path.as_ref())
 }
 
-/// The error rrd_format.c `dst_conv` sets for a DS type it does not know.
+/// The error RRDtool `dst_conv` sets for a DS type it does not know.
 pub fn dst_conv_error(kind: &[u8]) -> Option<Vec<u8>> {
     const KNOWN: [&[u8]; 7] = [
         b"COUNTER",
@@ -1945,7 +1944,7 @@ pub fn dst_conv_error(kind: &[u8]) -> Option<Vec<u8>> {
     (!KNOWN.contains(&kind)).then(|| conv_error("unknown data acquisition function", kind))
 }
 
-/// The error rrd_format.c `rrd_cf_conv` sets for a consolidation function
+/// The error RRDtool sets for a consolidation function
 /// it does not know.
 pub fn cf_conv_error(cf: &[u8]) -> Option<Vec<u8>> {
     const KNOWN: [&[u8]; 10] = [
@@ -1970,7 +1969,7 @@ fn conv_error(prefix: &str, name: &[u8]) -> Vec<u8> {
     message
 }
 
-/// The error rrd_info and rrd_dump leave set after converting every DS type
+/// The error info and dump leave set after converting every DS type
 /// and then every RRA consolidation function. Neither stops at a failure, so
 /// the output is complete and the last failure is what rrdtool reports.
 pub fn rrd_name_error(info: &RrdInfo) -> Option<Vec<u8>> {
@@ -1999,7 +1998,7 @@ pub fn first_rrd_time_from_info(info: &RrdInfo, archive_index: usize) -> Result<
         .archives
         .get(archive_index)
         .ok_or_else(|| StoreError::Rrd("invalid rraindex number".into()))?;
-    // rrd_first.c:109 negates the unsigned row_cnt - 1, so an empty archive
+    // RRDtool negates the unsigned row_cnt - 1, so an empty archive
     // starts one resolution after its end.
     rra_row_time(
         info,
@@ -2009,7 +2008,7 @@ pub fn first_rrd_time_from_info(info: &RrdInfo, archive_index: usize) -> Result<
 }
 
 /// The time of the row `timer` resolutions before an archive's newest one,
-/// computed as rrd_first.c:113 and rrd_dump.c:427 do: `last_up % (pdp_cnt *
+/// computed as RRDtool do: `last_up % (pdp_cnt *
 /// pdp_step)` converts last_up to unsigned long, and all of it wraps.
 fn rra_row_time(info: &RrdInfo, archive: &RrdArchiveInfo, timer: i64) -> Result<i64, StoreError> {
     let resolution = archive.pdp_per_row.wrapping_mul(info.step);
@@ -2072,7 +2071,7 @@ pub fn dump_rrd_open_file_bytes(
     let mut file = RrdFileLock::shared(file)?;
     file.seek(SeekFrom::Start(0))?;
     let info = read_info(&mut file, path)?;
-    // rrd_dump.c dumps a DS or RRA whose name dst_conv or rrd_cf_conv
+    // RRDtool dumps a DS or RRA whose name the type or consolidation function check
     // rejects like a plain one; the caller reports the conversion error.
     if info.data_sources.iter().any(|ds| ds.kind == "COMPUTE")
         || info.archives.iter().any(|archive| {
@@ -2092,7 +2091,7 @@ pub fn dump_rrd_open_file_bytes(
         RrdDumpHeader::Dtd => out.extend_from_slice(b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!DOCTYPE rrd SYSTEM \"https://oss.oetiker.ch/rrdtool/rrdtool.dtd\">\n<!-- Round Robin Database Dump -->\n<rrd>\n"),
         RrdDumpHeader::Xsd => out.extend_from_slice(b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!-- Round Robin Database Dump -->\n<rrd xmlns=\"https://oss.oetiker.ch/rrdtool/rrdtool-dump.xml\" xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\"\n\txsi:schemaLocation=\"https://oss.oetiker.ch/rrdtool/rrdtool-dump.xml https://oss.oetiker.ch/rrdtool/rrdtool-dump.xsd\">\n"),
     }
-    // rrd_dump.c:119-123 writes 0003 for every version up to 3.
+    // RRDtool writes 0003 for every version up to 3.
     let version = if c_atoi(info.version.as_bytes()) <= 3 {
         "0003"
     } else {
@@ -2191,12 +2190,12 @@ pub fn dump_rrd_open_file_bytes(
         }
         out.extend_from_slice(b"\t\t</cdp_prep>\n\t\t<database>\n");
         // A damaged row_cnt can describe rows past the end of the file.
-        // rrd_dump.c walks them with an unsigned int counter, so above
+        // RRDtool walks them with an unsigned int counter, so above
         // UINT_MAX rows it never finishes, and below that it reads outside
         // the mapping. Refuse instead; see docs/COMPATIBILITY_DEFECTS.md.
         require_rows_in_file(&info, archive, file_len)?;
         let rows = archive.rows as usize;
-        // rrd_dump.c:330-340 steps past cur_row and wraps to row 0 once it
+        // RRDtool steps past cur_row and wraps to row 0 once it
         // reaches row_cnt, so a cur_row at or past the end starts at row 0.
         let first_row = match archive.current_row.checked_add(1) {
             Some(row) if row < archive.rows => row,
@@ -2282,7 +2281,7 @@ fn rrd_local_timestamp(timestamp: i64) -> Result<String, StoreError> {
     String::from_utf8(bytes.to_vec()).map_err(|_| rrd_error("local timestamp is not UTF-8"))
 }
 
-/// rrd_open.c:336-560: RRDtool maps the file and reads the header piece by
+/// RRDtool maps the file and reads the header piece by
 /// piece, failing with these texts in this order before anything else looks
 /// at the contents.
 pub(crate) fn read_info(file: &mut File, path: &Path) -> Result<RrdInfo, StoreError> {
@@ -2419,7 +2418,7 @@ fn c_atoi(field: &[u8]) -> i64 {
     i64::from(crate::rrd_number::c_strtol(&text, 10).0 as i32)
 }
 
-/// `rrd_strerror(errno)` for an I/O error.
+/// The strerror text for an I/O error.
 pub(crate) fn rrd_strerror(error: &std::io::Error) -> String {
     match error.raw_os_error() {
         // SAFETY: strerror returns a valid NUL-terminated string.
@@ -2432,7 +2431,7 @@ pub(crate) fn rrd_strerror(error: &std::io::Error) -> String {
     }
 }
 
-/// Decode a header that passed rrd_open's checks. RRDtool validates nothing
+/// Decode a header that passed the open checks. RRDtool validates nothing
 /// beyond those, so neither does this: a zero step, an out-of-range xff,
 /// cur_row past row_cnt or an empty name are reported as stored.
 fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
@@ -2450,7 +2449,7 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
     let rra_start = checked_add(ds_start, checked_mul(ds_count, DS_DEF_LEN)?)?;
     let live_start = checked_add(rra_start, checked_mul(rra_count, RRA_DEF_LEN)?)?;
     let last_update = i64_at(bytes, live_start)?;
-    // rrd_open.c:519-533: before version 3 the live head is a bare time_t.
+    // Before version 3 the live head is a bare time_t.
     let (live_head_len, last_update_usec) = if c_atoi(version.as_bytes()) < 3 {
         (8, 0)
     } else {
@@ -2508,7 +2507,7 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
     }
 
     let mut archives = Vec::with_capacity(rra_count);
-    // rrd_open.c:560-566 and every reader size the archives in unsigned
+    // RRDtool and every reader size the archives in unsigned
     // long arithmetic that wraps, and check only the wrapped total against
     // the file length. A huge row_cnt therefore still opens; the readers
     // below refuse rows that fall outside the file instead of reading them.
@@ -2670,7 +2669,7 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-/// `_rrd_lock_parse` (rrd_open.c:1216); an empty string is the default.
+/// Parses a locking mode; an empty string is the default.
 #[cfg(unix)]
 fn parse_rrd_lock_mode(mode: &str) -> Option<RrdLockMode> {
     match mode {
@@ -2694,7 +2693,7 @@ pub fn is_rrd_locking_mode(mode: &str) -> bool {
 }
 
 /// Runs `f` with the mode `update --locking` selected
-/// (`_rrd_lock_from_opt`, rrd_open.c:1264) in place of `$RRD_LOCKING`. An
+/// in place of `$RRD_LOCKING`. An
 /// empty mode leaves `$RRD_LOCKING` in charge.
 pub fn with_rrd_locking<T>(mode: &str, f: impl FnOnce() -> T) -> T {
     #[cfg(unix)]
@@ -2982,7 +2981,6 @@ fn open_linked_character_device(path: &Path) -> std::io::Result<File> {
     Ok(file)
 }
 
-/// rrd_open.c:336.
 fn open_error(path: &Path, error: &std::io::Error) -> StoreError {
     StoreError::RrdFile(format!(
         "opening '{}': {}",

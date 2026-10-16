@@ -1,7 +1,7 @@
 #![cfg(unix)]
-//! rrd_create.c and rrd_open.c differentials. Created files are compared
+//! RRDtool differentials. Created files are compared
 //! with each archive rotated to logical order and the rra_ptr words zeroed,
-//! because rrd_select_initial_row (rrd_open.c:1205) picks a random row.
+//! because RRDtool's initial row choice picks a random row.
 //! Option-form cases wait for the shared option parser.
 
 mod common;
@@ -34,9 +34,8 @@ fn create_args<'a>(definitions: &[&'a str]) -> Vec<&'a str> {
 }
 
 // B3, B5: parseDS matches DS_RE and parseGENERIC_DS scans min and max with
-// "%18[^:]:%18[^:]", ignoring what follows (rrd_create.c:309-325,
-// 1098-1164); parseRRA splits with strtok_r, which skips empty fields, and
-// reads the CF with "%19[A-Z]" (rrd_create.c:494-503).
+// "%18[^:]:%18[^:]", ignoring what follows; parseRRA splits with strtok_r, which skips empty fields, and
+// reads the CF with "%19[A-Z]".
 #[test]
 fn b3_b5_definition_grammar_matches_parse_ds_and_parse_rra() {
     let Some(sides) = common::Sides::new(&[], &[]) else {
@@ -60,9 +59,8 @@ fn b3_b5_definition_grammar_matches_parse_ds_and_parse_rra() {
     }
 }
 
-// B4: rrd_set_error texts from parseDS, parseGENERIC_DS (rrd_create.c:368-424,
-// 1098-1164), dst_conv/rrd_cf_conv (rrd_format.c), parseRRA (480-760) and
-// rrd_create_r2 (942-1031), including the later error replacing the first.
+// B4: error texts for malformed DS and RRA definitions, including the
+// later error replacing the first.
 #[test]
 fn b4_definition_errors_use_rrd_create_texts() {
     let Some(sides) = common::Sides::new(&[], &[]) else {
@@ -114,7 +112,7 @@ fn b4_definition_errors_use_rrd_create_texts() {
     }
 }
 
-// B6: xff goes through rrd_strtodbl (rrd_create.c:575-580), not a correctly
+// B6: xff goes through RRDtool's number parser, not a correctly
 // rounded parser.
 #[test]
 fn b6_xff_bits_match_rrd_strtod() {
@@ -127,7 +125,7 @@ fn b6_xff_bits_match_rrd_strtod() {
     }
 }
 
-// B7: write_rrd (rrd_create.c:1406-1491) writes "-" to stdout, creates
+// B7: write_rrd writes "-" to stdout, creates
 // `<name>XXXXXX` beside the target without creating directories, and chmods
 // a new file to 0644 whatever the umask.
 #[test]
@@ -182,8 +180,7 @@ fn b7_write_rrd_filesystem_behavior_matches_upstream() {
     assert!(!sides.up.join("-").exists());
 }
 
-// B8: --no-overwrite has rrd_create_r2's text, no I/O prefix
-// (rrd_create.c:856-859).
+// B8: --no-overwrite has RRDtool's own text, no I/O prefix.
 #[test]
 fn b8_no_overwrite_text_matches_upstream() {
     let Some(sides) = common::Sides::new(&[], &[("o.rrd", b"x")]) else {
@@ -196,7 +193,7 @@ fn b8_no_overwrite_text_matches_upstream() {
 }
 
 // B9: --template memcpy()s ds_def and rra_def and keeps version 0003 unless
-// a command-line DS needs 0005 (rrd_create.c:881-919, 1028-1031).
+// a command-line DS needs 0005.
 #[test]
 fn b9_template_copies_definitions_verbatim() {
     let Some(sides) = common::Sides::new(
@@ -242,7 +239,7 @@ fn b9_template_copies_definitions_verbatim() {
     }
 }
 
-// B10: rrd_open (rrd_open.c:465-560) checks nothing beyond the cookies,
+// B10: RRDtool's file open checks nothing beyond the cookies,
 // version and lengths, so files with a NaN xff, cur_row past row_cnt, an
 // empty DS name or a version 0001/0002 header (whose live head is a time_t)
 // open, read and update. Zero steps are covered separately: RRDtool divides
@@ -339,7 +336,7 @@ fn b10_rrd_open_accepts_what_it_does_not_check() {
     }
 }
 
-// B10, zero step: rrd_open opens it, then RRDtool divides by the step, which
+// B10, zero step: RRDtool's file open opens it, then RRDtool divides by the step, which
 // traps on x86_64 and reads garbage on aarch64. Rondi opens it for `info`,
 // `lastupdate` and `last`, and refuses the dividing commands with an error.
 #[test]

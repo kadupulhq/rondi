@@ -1,5 +1,5 @@
 #![cfg(unix)]
-//! Differential tests for `rrd_graph_options` (rrd_graph.c:5042): optparse
+//! Differential tests for RRDtool's graph option parser: optparse
 //! forms and the full long-option table with each option's validation.
 //! Each test compares the pinned RRDtool 1.11.0 executable with the Rondi
 //! alias on identical arguments in TZ=UTC. PNG bytes are never compared;
@@ -190,7 +190,7 @@ fn args(items: &[&str]) -> Vec<String> {
     items.iter().map(ToString::to_string).collect()
 }
 
-// rrd_graph.c:5042 uses optparse_long: `--opt=value`, attached short values,
+// RRDtool uses optparse_long: `--opt=value`, attached short values,
 // bundled flags, `--`, and options before the filename are all accepted.
 #[test]
 fn graph_options_use_optparse_semantics() {
@@ -270,7 +270,7 @@ fn graph_options_use_optparse_semantics() {
 }
 
 // Options emitted by Kadupul lib/rrd.php (lines 1117-1331, 2642-2714) plus the
-// rest of the rrd_graph.c:5063 long-option table.
+// rest of the RRDtool long-option table.
 #[test]
 fn graph_accepts_the_full_rrd_graph_option_table() {
     let Some(f) = fixture() else { return };
@@ -336,7 +336,7 @@ fn graph_accepts_the_full_rrd_graph_option_table() {
 
 // Output goes to a file in the fixture directory because Rondi refuses to
 // open /dev/null for writing when it is owned by another user.
-// rrd_fetch_empty divides by (end - start) / 100, which is zero for a range
+// RRDtool's empty fetch divides by (end - start) / 100, which is zero for a range
 // under 100 seconds and traps in the pinned build, so only Rondi's result is
 // checked: the graph is drawn from NaN data.
 #[test]

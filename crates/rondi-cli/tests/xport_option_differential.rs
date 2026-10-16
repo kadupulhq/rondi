@@ -1,5 +1,5 @@
 #![cfg(unix)]
-//! Differential tests for `rrd_xport`'s option table (rrd_xport.c:98) and
+//! Differential tests for xport's option table and
 //! its atoi/atol values. Each case runs pinned RRDtool 1.11.0 and the Rondi
 //! alias with the same arguments and compares stdout, stderr and exit
 //! status.
