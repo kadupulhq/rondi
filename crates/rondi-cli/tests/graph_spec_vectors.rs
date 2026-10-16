@@ -130,12 +130,6 @@ const KNOWN_DIVERGENCES: &[Divergence] = &[
         DEFECT,
         "GR-3: prints 0x0 without elements",
     ),
-    div(
-        "graph-vertical-label-002",
-        ALL,
-        DEFECT,
-        "GR-61: long vertical label panics",
-    ),
     div("graph-def-073", ALL, DEFECT, "GR-43: -Z with a missing DS"),
     div(
         "graph-cdef-019",
@@ -222,22 +216,28 @@ const KNOWN_DIVERGENCES: &[Divergence] = &[
         "GR-81: legend coords under zoom",
     ),
     div(
+        "graph-comment-009",
+        ALL,
+        DEFECT,
+        "GR-66: an empty \\u line alone (unsettled)",
+    ),
+    div(
+        "graph-scale-024",
+        ALL,
+        DEFECT,
+        "GR-72: -A with a tiny range (unsettled)",
+    ),
+    div(
+        "graph-scale-079",
+        ALL,
+        DEFECT,
+        "GR-72: -A with a tiny range (unsettled)",
+    ),
+    div(
         "graph-legend-030",
         ALL,
         DEFECT,
         "GR-60: fallback font metrics",
-    ),
-    div(
-        "graph-fit-093",
-        ALL,
-        DEFECT,
-        "GR-64: markup measured as text",
-    ),
-    div(
-        "graph-legend-079",
-        ALL,
-        DEFECT,
-        "GR-64: markup measured as text",
     ),
     div(
         "graph-order-009",

@@ -1299,13 +1299,13 @@ their class; the expectation stays RRDtool's. They are summarized here.
 | `limit-004`, `-006`, `-009`, `-012`, `-015`, `-016`, `-019` | GR-91 | policy | refuses large PNG graphs |
 | `limit-020` to `-025` | GR-92 | policy | refuses fetches over 10 million rows |
 | `grammar-055`, `-056`, `-061`, `out-008`, `order-009`, `-010`, `scan-001`, `-002`, `-009`, `-010`, `-012` to `-014`, `-016`, `-029`, `-031`, `-035`, `-038`, `-039`, `-048`, `-049`, `-057` to `-060`, `-062`, `-072`, `-073`, `-080`, `-087`, `-091`, `repeat-015` | GR-3 | defect | prints `0x0` for a graph with no elements |
-| `vertical-label-002` | GR-61 | defect | a 300-character vertical label panics (subtract overflow) |
 | `def-073` | GR-43 | defect | `-Z` with a missing DS gives `nan`; the reference prints another value (`-5.438596`) |
 | `cdef-019` | GR-45 | defect | a CDEF that names itself is refused instead of giving `nan` |
 | `grid-dash-011`, `line-044`, `-045`, `hrule-027`, `-028`, `vrule-027`, `-028` | GR-24, GR-50, GR-54 | defect | no Cairo warning for zero or negative dashes |
 | `font-003`, `layout-049` (macOS); `font-019` (Linux) | GR-60 | defect | one font's metrics for every family |
 | `legend-030` | GR-60 | defect | CJK fallback metrics |
-| `legend-079`, `fit-093` | GR-64 | defect | Pango markup measured as text |
+| `comment-009` | GR-66 | defect | an empty `\u` line on its own (rule open) |
+| `scale-024`, `-079` | GR-71 | defect | `--alt-autoscale` with a tiny range (rule open) |
 | `layout-026` to `-028` (Linux) | GR-81 | defect | legend `coords` under `--zoom` |
 
 `def-073` is listed as a defect, but the reference value comes from a

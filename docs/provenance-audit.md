@@ -19,7 +19,7 @@ About 12,400 lines of Rust (38 percent of non-test source) are rated High: modul
 | `crates/rondi/src/rrd_create.rs` | Removed | 790 | Declared port; replaced by the clean-room `rrd_create.rs` and `rrd_definitions.rs` |
 | `crates/rondi/src/rrd_resize.rs` | Removed | 288 | Declared port; replaced by a clean-room `rrd_resize.rs` |
 | `crates/rondi/src/graph.rs` | High | 2,357 | Declared port of graph script parsing and data preparation; 18 shared function names |
-| `crates/rondi/src/graph_layout.rs` | High | 1,011 | Declared port of image layout functions |
+| `crates/rondi/src/graph_layout.rs` | Replaced | 1,011 | Declared port of image layout functions; replaced by the clean-room `layout/` from `docs/compatibility/graph.md` |
 | `crates/rondi-cli/src/graph_options.rs` | Replaced | 880 | Option tables keyed to C line numbers; replaced by the clean-room `graph_args.rs` from `docs/compatibility/graph.md` |
 | `crates/rondi-cli/src/optparse.rs` | High (FLAG) | 445 | Port of the bundled option parser; models C struct and enum |
 | `crates/rondi/src/rrd_snprintf.rs` | Replaced | 702 | Declared port of the portable snprintf; replaced by the clean-room `format_value/` from `docs/compatibility/format-strings.md` and black-box runs |
@@ -129,6 +129,7 @@ Risk tiers:
 - Compatibility requirement: `graphv` image size, legend positions, value range and SI unit selection.
 - Likely source: black-box observation of `graphv` output; text metrics from the font; the step-by-step layout from reference-source inspection.
 - Remediation: replace by spec and fresh implementation; derive a layout spec from measured `graphv` outputs across option combinations. Tests: `graph_option_differential.rs` (8), `graph_line_width.rs`, in-module tests.
+- Status: replaced. `crates/rondi/src/layout/` (text metrics, legend lines, frame and value range) was written from GR-60 to GR-73 of `docs/compatibility/graph.md`, its vectors and black-box runs of RRDtool 1.11.0, without reading the removed module's bodies or the C source; the module was deleted from a signature listing. `graph_layout.rs` now holds only two enums and the default font sizes that the legacy `graph.rs` still stores, written fresh.
 
 **`crates/rondi-cli/src/graph_options.rs`: `rrd_graph_options`, `bad_format_axis`, `parse_color`, xport option parsing**
 

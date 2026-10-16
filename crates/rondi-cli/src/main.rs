@@ -871,6 +871,8 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     let mut image = None::<Vec<u8>>;
     let mut save_error = None::<String>;
     let mut duration_error = false;
+    // Zero until a graph is laid out; image_info reports it as 0x0.
+    let mut image_size = (0_i64, 0_i64);
     if let graph_args::ImageFormat::Data(data_format) = options.format {
         use graph_args::DataFormat;
         let xport_format = match data_format {
@@ -925,19 +927,19 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             };
         // Nothing more is done when no element draws.
         if graph_elements {
-            use rondi::graph_layout::{TEXT_PROP_LEGEND, text_height};
             if options.xy_graph {
                 return Err("XY diagram not implemented".into());
             }
-            // graph_paint_timestring.
-            im.graph_size_location(true)?;
+            let frame =
+                rondi::layout::frame(&layout_options(&options), &legend_entries(&im, &options))?;
+            image_size = (frame.image_width, frame.image_height);
             for (key, value) in [
-                ("graph_left", im.xorigin),
-                ("graph_top", im.yorigin - im.ysize),
-                ("graph_width", im.xsize),
-                ("graph_height", im.ysize),
-                ("image_width", im.ximg),
-                ("image_height", im.yimg),
+                ("graph_left", frame.graph_left),
+                ("graph_top", frame.graph_top),
+                ("graph_width", frame.graph_width),
+                ("graph_height", frame.graph_height),
+                ("image_width", frame.image_width),
+                ("image_height", frame.image_height),
                 ("graph_start", im.start),
                 ("graph_end", im.end),
             ] {
@@ -947,45 +949,39 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                 && !to_memory
                 && lazy_output_is_current(filename, im.end - im.start, image_width, now);
             if !kept {
-                im.data_proc()?;
-                if !im.logarithmic {
-                    im.si_unit();
-                }
-                if (!im.rigid || im.allow_shrink) && !im.logarithmic {
-                    im.expand_range();
-                }
-                info.push("value_min", InfoValue::Val(im.minval));
-                info.push("value_max", InfoValue::Val(im.maxval));
-                // calc_horizontal_grid gives up on a NaN scaled range (an
-                // infinite limit) without setting an error, so rrd_graph_v
-                // returns nothing: no file, no output and a zero exit status.
-                if ((im.maxval - im.minval) / im.magfact).is_nan() {
+                let range = rondi::layout::value_range(
+                    &scale_values(&im, frame.graph_width),
+                    &range_options(&options),
+                );
+                info.push("value_min", InfoValue::Val(range.min));
+                info.push("value_max", InfoValue::Val(range.max));
+                // An infinite limit leaves no scale to draw: RRDtool returns
+                // nothing, with no file, no output and a zero exit status.
+                if range_options(&options).abandons() {
                     return Ok(());
                 }
                 duration_error = options.unusable_duration_format();
-                let legend_size = im.text_prop[TEXT_PROP_LEGEND];
                 let mut legends = Vec::new();
-                for (index, x0, y0) in im.legend_origins() {
-                    let legend = im.gdes[index].legend.clone();
-                    let width = im.legend_text_width(&legend);
-                    let height = text_height(legend_size);
-                    let count = legends.len();
-                    info.push(format!("legend[{count}]"), InfoValue::Str(legend.clone()));
+                for (count, item) in frame.legend.iter().enumerate() {
+                    info.push(
+                        format!("legend[{count}]"),
+                        InfoValue::Str(item.text.clone()),
+                    );
                     info.push(
                         format!("coords[{count}]"),
                         InfoValue::Str(format!(
                             "{},{},{},{}",
-                            c_printf_double("%.0f", x0),
-                            c_printf_double("%.0f", y0 - height),
-                            c_printf_double("%.0f", x0 + width),
-                            c_printf_double("%.0f", y0)
+                            c_printf_double("%.0f", item.left),
+                            c_printf_double("%.0f", item.bottom - item.height),
+                            c_printf_double("%.0f", item.left + item.width),
+                            c_printf_double("%.0f", item.bottom)
                         )),
                     );
                     legends.push(GraphLegend {
-                        x: x0,
-                        y: y0,
-                        text: legend,
-                        gdes_index: index,
+                        x: item.left,
+                        y: item.bottom,
+                        text: item.text.clone(),
+                        gdes_index: item.element,
                     });
                 }
                 // graph_cairo_setup sizes the surface as int(ximg * zoom). cairo
@@ -997,7 +993,8 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                     if to_memory { "memory" } else { filename }
                 );
                 let surface = |size: i64| c_double_to_int(size as f64 * zoom);
-                let (surface_width, surface_height) = (surface(im.ximg), surface(im.yimg));
+                let (surface_width, surface_height) =
+                    (surface(frame.image_width), surface(frame.image_height));
                 let surface_valid = |size: i32| (0..=CAIRO_MAX_IMAGE_SIZE).contains(&size);
                 if !surface_valid(surface_width) || !surface_valid(surface_height) {
                     eprintln!(
@@ -1027,16 +1024,16 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                         &series,
                         GraphPngOptions {
                             canvas: GraphCanvas {
-                                width: clamp(im.ximg)?,
-                                height: clamp(im.yimg)?,
+                                width: clamp(frame.image_width)?,
+                                height: clamp(frame.image_height)?,
                                 surface_width: surface_width.unsigned_abs(),
                                 surface_height: surface_height.unsigned_abs(),
-                                left: clamp(im.xorigin)?,
-                                top: clamp(im.yorigin - im.ysize)?,
-                                plot_width: clamp(im.xsize)?,
-                                plot_height: clamp(im.ysize)?,
-                                minimum: im.minval,
-                                maximum: im.maxval,
+                                left: clamp(frame.graph_left)?,
+                                top: clamp(frame.graph_top)?,
+                                plot_width: clamp(frame.graph_width)?,
+                                plot_height: clamp(frame.graph_height)?,
+                                minimum: range.min,
+                                maximum: range.max,
                             },
                             legends: &legends,
                             title: graph_title.as_deref(),
@@ -1080,8 +1077,8 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             InfoValue::Str(format_imginfo(
                 format,
                 basename,
-                scaled(im.ximg),
-                scaled(im.yimg),
+                scaled(image_size.0),
+                scaled(image_size.1),
             )?),
         );
     }
@@ -1242,86 +1239,207 @@ fn graph_colors(colors: &[(graph_args::ColorTag, [u8; 4])]) -> GraphColors {
     palette
 }
 
-/// Hands the parsed options to the layout of the graph engine.
+/// Hands the options the legacy graph engine reads to it.
 fn configure_graph_image(im: &mut rondi::graph::GraphImage, options: &graph_args::GraphArgs) {
-    use graph_args::{LegendOrder, LegendPlacement, YGrid};
-    use rondi::graph_layout::{
-        ALTAUTOSCALE, ALTAUTOSCALE_MAX, ALTAUTOSCALE_MIN, FORCE_RULES_LEGEND, FULL_SIZE_MODE,
-        LegendDirection, LegendPosition, NO_RRDTOOL_TAG, NOLEGEND, ONLY_GRAPH, TEXT_PROP_AXIS,
-        TEXT_PROP_LEGEND, TEXT_PROP_TITLE, TEXT_PROP_UNIT, TEXT_PROP_WATERMARK,
-    };
     im.xsize = options.width;
     im.ysize = options.height;
-    im.title.clone_from(&options.title);
-    im.ylegend.clone_from(&options.vertical_label);
-    im.watermark.clone_from(&options.watermark);
-    im.second_axis_legend.clone_from(&options.right_axis_label);
-    if let Some((scale, _)) = options.right_axis {
-        im.second_axis_scale = scale;
-    }
-    im.minval = options.lower_limit.unwrap_or_else(rrd_nan);
-    im.maxval = options.upper_limit.unwrap_or_else(rrd_nan);
-    im.rigid = options.rigid;
-    im.allow_shrink = options.allow_shrink;
-    im.logarithmic = options.logarithmic;
-    im.base = i64::from(options.base);
     im.allow_missing_ds = options.missing_as_nan;
-    im.draw_x_grid = !options.hide_x_grid;
-    match options.y_grid {
-        Some(YGrid::Hidden) => im.draw_y_grid = false,
-        Some(YGrid::Step { step, factor }) => {
-            im.ygridstep = step;
-            im.ylabfact = factor;
-        }
-        None => {}
-    }
-    if let Some(length) = options.units_length {
-        im.unitslength = length;
-        im.forceleftspace = true;
-    }
-    if let Some(exponent) = options.units_exponent {
-        im.unitsexponent = exponent;
-    }
-    if let Some(width) = options.tab_width {
-        im.tabwidth = width;
-    }
+}
+
+/// The image geometry the options ask for (GR-61 to GR-66).
+fn layout_options(options: &graph_args::GraphArgs) -> rondi::layout::Options {
+    use graph_args::{LegendOrder, LegendPlacement, YGrid};
+    use rondi::layout::{Order, Placement, Sizes};
+    let defaults = Sizes::default();
     let sizes = options.text_sizes;
-    for (slot, size) in [
-        (TEXT_PROP_TITLE, sizes.title),
-        (TEXT_PROP_AXIS, sizes.axis),
-        (TEXT_PROP_UNIT, sizes.unit),
-        (TEXT_PROP_LEGEND, sizes.legend),
-        (TEXT_PROP_WATERMARK, sizes.watermark),
-    ] {
-        if let Some(size) = size {
-            im.text_prop[slot] = size;
-        }
+    // GR-61: --y-grid none leaves no room for labels unless the length is
+    // given.
+    let units_length = options.units_length.map_or_else(
+        || {
+            if options.y_grid == Some(YGrid::Hidden) {
+                0
+            } else {
+                6
+            }
+        },
+        i64::from,
+    );
+    rondi::layout::Options {
+        width: options.width,
+        height: options.height,
+        only_graph: options.only_graph,
+        full_size: options.full_size_mode,
+        show_legend: !options.no_legend,
+        placement: match options.legend_placement {
+            LegendPlacement::North => Placement::North,
+            LegendPlacement::South => Placement::South,
+            LegendPlacement::East => Placement::East,
+            LegendPlacement::West => Placement::West,
+        },
+        order: match options.legend_order {
+            LegendOrder::TopDown => Order::TopDown,
+            LegendOrder::BottomUp => Order::BottomUp,
+            LegendOrder::BottomUpKeepComments => Order::BottomUpKeepComments,
+        },
+        title: options.title.clone(),
+        // An empty text takes no room (vertical-label-001, watermark-001).
+        vertical_label: options
+            .vertical_label
+            .as_ref()
+            .is_some_and(|text| !text.is_empty()),
+        right_axis: options.right_axis.is_some(),
+        right_axis_label: options
+            .right_axis_label
+            .as_ref()
+            .is_some_and(|text| !text.is_empty()),
+        watermark: options
+            .watermark
+            .as_ref()
+            .is_some_and(|text| !text.is_empty()),
+        units_length,
+        x_labels: !options.hide_x_grid,
+        rrdtool_tag: !options.no_rrdtool_tag,
+        sizes: Sizes {
+            title: sizes.title.unwrap_or(defaults.title),
+            axis: sizes.axis.unwrap_or(defaults.axis),
+            unit: sizes.unit.unwrap_or(defaults.unit),
+            legend: sizes.legend.unwrap_or(defaults.legend),
+            watermark: sizes.watermark.unwrap_or(defaults.watermark),
+        },
+        tab_width: options.tab_width.unwrap_or(40.0),
+        tab_margin: options.y_grid != Some(YGrid::Hidden) || options.units_length.is_some(),
+        markup: options.pango_markup,
     }
-    im.legendposition = match options.legend_placement {
-        LegendPlacement::North => LegendPosition::North,
-        LegendPlacement::South => LegendPosition::South,
-        LegendPlacement::East => LegendPosition::East,
-        LegendPlacement::West => LegendPosition::West,
-    };
-    im.legenddirection = match options.legend_order {
-        LegendOrder::TopDown => LegendDirection::TopDown,
-        LegendOrder::BottomUp => LegendDirection::BottomUp,
-        LegendOrder::BottomUpKeepComments => LegendDirection::BottomUp2,
-    };
-    for (set, flag) in [
-        (options.alt_autoscale, ALTAUTOSCALE),
-        (options.alt_autoscale_min, ALTAUTOSCALE_MIN),
-        (options.alt_autoscale_max, ALTAUTOSCALE_MAX),
-        (options.no_legend, NOLEGEND),
-        (options.only_graph, ONLY_GRAPH),
-        (options.force_rules_legend, FORCE_RULES_LEGEND),
-        (options.full_size_mode, FULL_SIZE_MODE),
-        (options.no_rrdtool_tag, NO_RRDTOOL_TAG),
-    ] {
-        if set {
-            im.extra_flags |= flag;
-        }
+}
+
+/// How the value range is chosen (GR-70 to GR-73).
+fn range_options(options: &graph_args::GraphArgs) -> rondi::layout::RangeOptions {
+    rondi::layout::RangeOptions {
+        lower: options.lower_limit,
+        upper: options.upper_limit,
+        rigid: options.rigid,
+        allow_shrink: options.allow_shrink,
+        alt_autoscale: options.alt_autoscale,
+        alt_autoscale_min: options.alt_autoscale_min,
+        alt_autoscale_max: options.alt_autoscale_max,
+        logarithmic: options.logarithmic,
+        base: f64::from(options.base),
+        y_grid: match options.y_grid {
+            Some(graph_args::YGrid::Step { step, factor }) => Some((step, factor)),
+            _ => None,
+        },
     }
+}
+
+/// The legend entries of the elements in order (GR-54, GR-59, GR-66).
+fn legend_entries(
+    im: &rondi::graph::GraphImage,
+    options: &graph_args::GraphArgs,
+) -> Vec<rondi::layout::Entry> {
+    use rondi::graph::{Gf, TextAlign};
+    use rondi::layout::{Align, Entry};
+    let mut align = Align::Justified;
+    let mut entries = Vec::new();
+    for (index, element) in im.gdes.iter().enumerate() {
+        let comment = match element.gf {
+            Gf::TextAlign => {
+                align = match element.txtalign {
+                    TextAlign::Left => Align::Left,
+                    TextAlign::Right => Align::Right,
+                    TextAlign::Center => Align::Center,
+                    TextAlign::Justified => Align::Justified,
+                };
+                entries.push(Entry {
+                    element: index,
+                    text: String::new(),
+                    comment: true,
+                    align,
+                });
+                continue;
+            }
+            Gf::Comment => true,
+            Gf::Gprint | Gf::Line | Gf::Area | Gf::Stack | Gf::Tick | Gf::Xport => false,
+            // Compatibility: an HRULE beyond a given --upper-limit or
+            // --lower-limit shows no legend unless --force-rules-legend asks
+            // for it; the final value range does not matter.
+            // Provenance: black-box compatibility test (layout fuzzing
+            // against the oracle; HRULE probes with -u and -l).
+            Gf::Hrule
+                if options.force_rules_legend
+                    || !(options
+                        .upper_limit
+                        .is_some_and(|upper| element.yrule > upper)
+                        || options
+                            .lower_limit
+                            .is_some_and(|lower| element.yrule < lower)) =>
+            {
+                false
+            }
+            // A VRULE outside the graph's time range shows no legend unless
+            // --force-rules-legend asks for it.
+            Gf::Vrule
+                if options.force_rules_legend || (im.start..=im.end).contains(&element.xrule) =>
+            {
+                false
+            }
+            // Every other element still opens a legend line (GR-66).
+            _ => {
+                entries.push(Entry {
+                    element: index,
+                    text: String::new(),
+                    comment: true,
+                    align,
+                });
+                continue;
+            }
+        };
+        entries.push(Entry {
+            element: index,
+            text: element.legend.clone(),
+            comment,
+            align,
+        });
+    }
+    entries
+}
+
+/// The values the drawing elements put on the graph, one per pixel column
+/// and stacked, for the value range (GR-52, GR-70).
+fn scale_values(im: &rondi::graph::GraphImage, width: i64) -> rondi::layout::Scale {
+    use rondi::graph::Gf;
+    let columns = usize::try_from(width.max(1)).unwrap_or(1);
+    let mut scale = rondi::layout::Scale::new();
+    let mut below = vec![0.0_f64; columns];
+    let span = (im.end - im.start) as f64;
+    for element in &im.gdes {
+        // A TICK carries data that a later STACK builds on, but it takes no
+        // part in the range itself (GR-53).
+        if !matches!(element.gf, Gf::Line | Gf::Area | Gf::Stack | Gf::Tick) {
+            continue;
+        }
+        let mut values: Vec<f64> = (0..columns)
+            .map(|column| {
+                let time = im.start + (span * column as f64 / columns as f64) as i64;
+                match element.vidx.map(|source| &im.gdes[source]) {
+                    Some(source) if source.gf == Gf::Vdef => source.vf.val,
+                    Some(_) => im.value_at(element.vidx.unwrap_or_default(), time),
+                    None => element.yrule,
+                }
+            })
+            .collect();
+        if element.stack {
+            for (value, base) in values.iter_mut().zip(&below) {
+                *value += if base.is_nan() { 0.0 } else { *base };
+            }
+        }
+        if !element.skipscale && element.gf != Gf::Tick {
+            for value in &values {
+                scale.add(*value);
+            }
+        }
+        below = values;
+    }
+    scale
 }
 
 /// The error `rrd_tool.c` still finds set when a graph or xport otherwise
@@ -1952,7 +2070,10 @@ fn render_graph_png(
                 canvas_width,
                 canvas_height,
                 8,
-                top + height / 2 - (label.len() as u32 * 8 / 2),
+                // A label longer than the graph starts above the image.
+                (top + height / 2).saturating_sub(
+                    u32::try_from(label.len().saturating_mul(4)).unwrap_or(u32::MAX),
+                ),
                 &ascii_text(label),
                 colors.font,
                 vertical_label_angle,

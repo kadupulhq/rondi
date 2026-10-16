@@ -354,6 +354,8 @@ pub(crate) struct GraphArgs {
     pub(crate) tab_width: Option<f64>,
     /// `--graph-type XY`, refused once a graph is laid out (GR-19).
     pub(crate) xy_graph: bool,
+    /// `--pango-markup`: legend text is measured without its markup.
+    pub(crate) pango_markup: bool,
 }
 
 /// `--y-grid`: hidden, or a grid step and label factor.
@@ -416,6 +418,7 @@ impl Default for GraphArgs {
             legend_order: LegendOrder::TopDown,
             tab_width: None,
             xy_graph: false,
+            pango_markup: false,
         }
     }
 }
@@ -714,7 +717,8 @@ fn apply_graph_option(
                 _ => return Err(format!("unsupported graphics type '{text}'").into()),
             };
         }
-        Opt::FontSmoothing | Opt::Cosmetic | Opt::CosmeticValue | Opt::PangoMarkup => {}
+        Opt::PangoMarkup => parsed.pango_markup = true,
+        Opt::FontSmoothing | Opt::Cosmetic | Opt::CosmeticValue => {}
         Opt::MaxRows | Opt::Json | Opt::ShowTime | Opt::EnumDs => {
             unreachable!("xport option in the graph table")
         }
