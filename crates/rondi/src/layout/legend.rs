@@ -100,6 +100,11 @@ impl Metrics {
         (1.8 * self.size).floor() as i64
     }
 
+    /// How far `\u` moves back up over a line that is not the first.
+    fn up_advance(&self) -> i64 {
+        (1.8 * self.size).ceil() as i64
+    }
+
     // Compatibility: `\s` advances a line less the size rounded up.
     // Provenance: black-box compatibility test (the `\s` probes at legend
     // sizes from 3 to 20 points recorded under GR-66).
@@ -268,23 +273,26 @@ fn line_align(line: &Line) -> Align {
 // Provenance: black-box compatibility test (`COMMENT:\r` and `COMMENT:\c`
 // between two lines, and `TEXTALIGN:right` with no legend text).
 //
-// Compatibility: `\u` after a line with items moves the next line one pixel
-// up (not at all after the first line); after an empty line it moves a whole
-// line up.
+// Compatibility: `\u` moves back up over the line with items it ends or
+// follows: by ceil(1.8·size) when that line is not the first, otherwise,
+// and after an empty line, by floor(1.8·size). A line with items that ends
+// in `\u` first advances as usual, so the next line is 0 or 1 px higher.
 // Provenance: black-box compatibility test (legend-005 and the `\u` probes
-// recorded under GR-66).
-fn advance(line: &Line, index: usize, metrics: &Metrics) -> i64 {
+// at legend sizes 5 to 20 recorded under GR-66).
+fn advance(lines: &[Line], index: usize, metrics: &Metrics) -> i64 {
+    let line = &lines[index];
     let filled = !line.items.is_empty();
+    let up_over = |line: usize| {
+        if line > 0 && !lines[line].items.is_empty() {
+            metrics.up_advance()
+        } else {
+            metrics.line_advance()
+        }
+    };
     match line.end {
         End::Space => metrics.short_advance(),
-        End::Up if filled => {
-            if index == 0 {
-                0
-            } else {
-                -1
-            }
-        }
-        End::Up => -metrics.line_advance(),
+        End::Up if filled => metrics.line_advance() - up_over(index),
+        End::Up => -index.checked_sub(1).map_or(metrics.line_advance(), up_over),
         _ if filled || matches!(line_align(line), Align::Right | Align::Center) => {
             metrics.line_advance()
         }
@@ -296,7 +304,8 @@ fn advance(line: &Line, index: usize, metrics: &Metrics) -> i64 {
 #[derive(Clone, Debug, Default)]
 pub struct Laid {
     pub placed: Vec<Placed>,
-    /// Total vertical advance of all lines, not below zero.
+    /// Total vertical advance of all lines; negative when `\\u` moves
+    /// back above the first line.
     pub height: i64,
     /// Width of the widest line (legends beside the graph).
     pub width: f64,
@@ -384,7 +393,7 @@ pub fn place(
             _ => false,
         };
         if !takes_no_room {
-            cursor += advance(line, index, metrics);
+            cursor += advance(&lines, index, metrics);
         }
     }
     // Mirrored within the lines of the flipped items, so the space between
@@ -417,7 +426,7 @@ pub fn place(
     placed.sort_by_key(|item| item.element);
     Ok(Laid {
         placed,
-        height: (cursor - first_bottom).max(0),
+        height: cursor - first_bottom,
         width,
     })
 }
@@ -497,6 +506,35 @@ mod tests {
         assert_eq!(lefts(&["left\\l", "\\u", "right\\r"])[1], (430.0, 148.0));
         assert_eq!(lefts(&["a\\l", "b\\u", "c\\l"])[2], (16.0, 161.0));
         assert_eq!(lefts(&["\\l", "\\l", "x"])[0], (16.0, 148.0));
+        // An empty `\\u` after a line that is not the first moves up by
+        // ceil(1.8·size); after the first line by floor(1.8·size).
+        assert_eq!(lefts(&["a\\l", "b\\l", "\\u", "c\\l"])[2], (16.0, 161.0));
+        assert_eq!(lefts(&["a\\l", "\\u", "b\\l"])[1], (16.0, 148.0));
+        // When 1.8·size is whole, both are the same.
+        let size_10 = Metrics {
+            size: 10.0,
+            ..METRICS
+        };
+        let laid = place(
+            &entries(&["a\\l", "b\\u", "c\\l"]),
+            &size_10,
+            Some((16.0, 465.0)),
+            16.0,
+            148,
+            Order::TopDown,
+        )
+        .unwrap();
+        assert_eq!(laid.placed[2].bottom, 166.0);
+        // The height may be negative.
+        let up = place(
+            &entries(&["\\u"]),
+            &METRICS,
+            Some((16.0, 465.0)),
+            16.0,
+            148,
+            Order::TopDown,
+        );
+        assert_eq!(up.unwrap().height, -14);
     }
 
     #[test]

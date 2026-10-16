@@ -1029,6 +1029,27 @@ def range_cases() -> None:
                  ['-u', '1e308', '-l', '-1e308'],
                  ['-u', '1e308', '-l', '-1e308', '-r']]:
         run('range', *GV, 'LINE1:x#ff0000:a', *opts)
+    # --alt-autoscale with ranges narrower than the magnitude's floor.
+    for opts in [['-A'], ['-A', '-b', '1024'], ['-J'], ['-M']]:
+        for low, high in [('0.1', '0.2'), ('5', '5.001'), ('1000', '1001'),
+                          ('0.0001', '0.0002'), ('-0.001', '0.001'),
+                          ('1', '1.0199'), ('-0.2', '-0.1')]:
+            run('range', *GV, f'CDEF:c=x,10,LT,{low},{high},IF',
+                'LINE1:c#ff0000', *opts)
+
+
+def up_cases() -> None:
+    """`\\u` lines after and between other lines (GR-66)."""
+    lines = {
+        'a': 'COMMENT:a\\l', 'b': 'COMMENT:b\\l', 'c': 'COMMENT:c\\l',
+        'u': 'COMMENT:\\u', 'bu': 'COMMENT:b\\u',
+    }
+    for size in ['6', '8', '10', '11']:
+        for names in [['a', 'b', 'u'], ['a', 'b', 'u', 'u'], ['a', 'u'],
+                      ['u', 'a'], ['a', 'b', 'u', 'c'], ['a', 'bu'],
+                      ['u', 'a', 'b']]:
+            run('up', *GV, LINE, '-n', f'LEGEND:{size}',
+                *[lines[name] for name in names])
 
 
 def scale_cases() -> None:
@@ -1475,6 +1496,7 @@ def all_cases() -> list[dict]:
     legend_cases()
     fit_cases()
     range_cases()
+    up_cases()
     scale_cases()
     data_cases()
     xport_cases()
