@@ -143,6 +143,7 @@ directory as `<dir>`.
 | `fit` | the fitted legend and frame rules of GR-60 to GR-66 at several font sizes, and random combinations from a fixed seed |
 | `range` | the value range rules of GR-70 to GR-73 found by black-box probes |
 | `up` | `\u` lines after and between other lines at several legend sizes (GR-66) |
+| `prep` | data preparation: fetch steps, reduction, CDEF windows, the export grid, VDEF windows and SHIFT (GR-47 to GR-49) |
 | `data` | `--imgformat` XML, XMLENUM, JSON, JSONTIME, CSV, TSV, SSV |
 | `xport` | `xport` options, elements and output |
 | `out` | output files, `-`, `graphv -`, `--imginfo` output, `--lazy` |
@@ -659,10 +660,55 @@ is missing fails with `ERROR: No positional VNAME`, or for `PRINT`,
 (`def-001` to `-076`.)
 
 **GR-44** (doc, bb; compat). Each DEF keeps its own window and step
-(`start=`, `end=`, `step=`); the data preparation, consolidation and the
-values of PRINT/GPRINT follow the rules already pinned by
-`graph_data_differential.rs` and rpn.md. A CDEF over DEFs with different
-windows or steps works on their common window (`def-070`, `-071`).
+(`start=`, `end=`, `step=`); the data preparation is GR-47 to GR-49 and
+the CDEF arithmetic rpn.md. A CDEF over DEFs with different windows or
+steps works on their common window (`def-070`, `-071`, GR-48).
+
+**GR-47** (bb; compat). Fetch and reduction of a DEF. The wanted step
+of a DEF is its `step=`, or else the image step: the larger of `--step`
+and (end − start) / width for `graph` (the width in pixels) and
+(end − start) / `--maxrows` for `xport`. The DEF reads its file for its
+window and wanted step the way `rrdtool fetch` does (the CF's best
+archive; rows stamped at the end of their interval). When the archive
+step *a* is smaller than the wanted step, rows are combined:
+
+- the new step is f·*a* with f = ceil(wanted / *a*) (`step=1000` over a
+  300 s archive gives 1200, `prep-007`);
+- buckets end at multiples of the new step since the epoch, and each
+  holds the f archive rows that end in it;
+- a bucket that reaches before the first or after the last fetched row
+  is unknown (`prep-005`, last row);
+- otherwise it is the reduce CF (`reduce=`, by default the DEF's CF) of
+  the bucket's known values: their average, maximum, minimum or last
+  value; unknown when none is known (`prep-017` to `-024`).
+
+When the window holds less than one new step, the DEF fails with
+`ERROR: SANITY CHECK: <n> rows cannot be reduced by <f> ` (with a
+trailing space and an empty line), where *n* is
+(floor(*e*/new step) − ceil(*s*/new step))·new step / *a* for the
+fetched start *s* and end *e*, printed as an unsigned 64-bit number
+(`prep-015`, `-016`; GR-32).
+
+**GR-48** (bb; compat). Series on a common grid. A CDEF's step is the
+greatest common divisor of the steps of the series it names, and its
+window runs from the latest start to the earliest end among them. Each
+row at time *t* takes from each series the row whose interval contains
+*t*; a series has no value outside its window (`prep-042` to `-059`).
+The exported series of `xport` and of the data formats share one grid:
+its step is the greatest common divisor of their steps, it starts at the
+image start rounded down to that step and ends at the image end rounded
+up to it, and its rows are stamped at the end of each step (`<start>` is
+the first stamp, GR-31). A series reads as unknown outside its own
+window. The data formats of `graph` use the width for the image step
+(`prep-080` to `-082`).
+
+**GR-49** (bb; compat). A VDEF and the deprecated `PRINT`/`GPRINT` with a
+CF read every row their DEF or CDEF holds, including rows outside the
+image window, so a DEF with its own `start=`/`end=` or `step=` gives
+values and times over that window (`prep-060` to `-062`). `SHIFT`
+(GR-55) moves the series by its offset truncated toward zero to whole
+steps of that series: with a 300 s step, 150 and -150 do not move it and
+450 moves it by 300 (`prep-063` to `-079`).
 
 ## 6. CDEF and VDEF
 

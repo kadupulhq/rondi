@@ -1038,6 +1038,56 @@ def range_cases() -> None:
                 'LINE1:c#ff0000', *opts)
 
 
+def prep_cases() -> None:
+    """Data preparation: fetch steps, reduction, windows of CDEFs and
+    VDEFs, SHIFT and the export grid (GR-44, GR-47 to GR-49)."""
+    window = ['--start', '1000003600', '--end', '1000021600']
+    odd = ['--start', '1000003700', '--end', '1000021500']
+    xp = ['xport'] + window
+    da = 'DEF:a=d.rrd:x:AVERAGE'
+    for opts in ['', ':step=600', ':step=900', ':step=1000', ':step=1800',
+                 ':step=3600', ':step=7200', ':step=86400',
+                 ':step=900:reduce=MAX', ':step=900:reduce=MIN',
+                 ':step=900:reduce=LAST', ':step=900:reduce=AVERAGE']:
+        run('prep', *xp, da + opts, 'XPORT:a')
+        run('prep', 'xport', *odd, da + opts, 'XPORT:a')
+    for cf in ['MAX', 'MIN', 'LAST']:
+        for step in ['', ':step=600', ':step=1800', ':step=5400']:
+            run('prep', *xp, f'DEF:a=d.rrd:x:{cf}{step}', 'XPORT:a')
+    for opts in [['--step', '900'], ['--step', '1000'], ['-m', '10'],
+                 ['-m', '25'], ['--step', '7200']]:
+        run('prep', *xp, *opts, da, 'XPORT:a')
+    # Windows and steps of DEFs combined in a CDEF and exported together.
+    for second in [':step=1800', ':step=900', ':step=600:start=1000007200',
+                   ':end=1000014400', ':start=1000000000:end=1000043200',
+                   ':start=1000007500:end=1000014500:step=900']:
+        b = 'DEF:b=d.rrd:x:AVERAGE' + second
+        run('prep', *xp, da, b, 'CDEF:c=a,b,+', 'XPORT:c')
+        run('prep', *xp, da, b, 'XPORT:a', 'XPORT:b')
+        run('prep', *xp, b, 'XPORT:b')
+    # VDEF and PRINT read the whole series of their DEF.
+    for b in ['DEF:b=d.rrd:x:AVERAGE:start=1000010000:end=1000012000',
+              'DEF:b=d.rrd:x:AVERAGE:step=1800',
+              'DEF:b=d.rrd:x:AVERAGE:start=1000000000:end=1000086400']:
+        run('prep', 'graph', '/dev/null', *window, b, 'VDEF:v=b,AVERAGE',
+            'VDEF:w=b,MAXIMUM', 'VDEF:f=b,FIRST', 'VDEF:l=b,LAST',
+            'PRINT:v:%.6lf', 'PRINT:w:%.6lf', 'PRINT:w:%s:strftime',
+            'PRINT:f:%s:strftime', 'PRINT:l:%s:strftime',
+            'PRINT:b:AVERAGE:%.6lf', 'PRINT:b:MAX:%.6lf',
+            'PRINT:b:LAST:%.6lf')
+    # SHIFT by offsets that are and are not whole steps.
+    for offset in ['30', '150', '300', '-300', '450', '-450', '1800',
+                   '-1800']:
+        run('prep', *xp, da, f'SHIFT:a:{offset}', 'XPORT:a')
+        run('prep', *xp, da + ':step=900', f'SHIFT:a:{offset}', 'XPORT:a')
+    run('prep', *xp, da, 'DEF:b=d.rrd:x:AVERAGE', 'SHIFT:a:600',
+        'CDEF:c=a,b,-', 'XPORT:c', 'XPORT:a')
+    # Data exports of a graph follow its width.
+    for width in ['20', '60', '100']:
+        run('prep', 'graph', '-', *window, '-w', width, '-a', 'CSV', da,
+            'LINE1:a#f00:a')
+
+
 def up_cases() -> None:
     """`\\u` lines after and between other lines (GR-66)."""
     lines = {
@@ -1497,6 +1547,7 @@ def all_cases() -> list[dict]:
     fit_cases()
     range_cases()
     up_cases()
+    prep_cases()
     scale_cases()
     data_cases()
     xport_cases()
