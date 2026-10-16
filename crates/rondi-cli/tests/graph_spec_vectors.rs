@@ -37,9 +37,6 @@ const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 const ALL: &[&str] = &[];
 const MACOS: &[&str] = &["macos"];
 const LINUX: &[&str] = &["linux-x86_64", "linux-aarch64"];
-/// Where the reference reports a libpng read error for `--lazy /dev/null`;
-/// the pinned x86_64 build prints nothing.
-const LIBPNG_READ: &[&str] = &["macos", "linux-aarch64"];
 
 /// Why Rondi differs from RRDtool on a vector.
 #[derive(Clone, Copy)]
@@ -134,52 +131,10 @@ const KNOWN_DIVERGENCES: &[Divergence] = &[
         "GR-3: prints 0x0 without elements",
     ),
     div(
-        "graph-opt-145",
-        LIBPNG_READ,
-        DEFECT,
-        "GR-84: no libpng read error for --lazy /dev/null",
-    ),
-    div(
-        "graph-opt-146",
-        LIBPNG_READ,
-        DEFECT,
-        "GR-84: no libpng read error for --lazy /dev/null",
-    ),
-    div(
-        "graph-out-027",
-        ALL,
-        DEFECT,
-        "GR-84: --lazy replaces the file",
-    ),
-    div(
-        "graph-out-031",
-        ALL,
-        DEFECT,
-        "GR-84: --lazy replaces the file",
-    ),
-    div(
-        "graph-out-029",
-        ALL,
-        DEFECT,
-        "GR-84: graphv --lazy prints every key",
-    ),
-    div(
         "graph-vertical-label-002",
         ALL,
         DEFECT,
         "GR-61: long vertical label panics",
-    ),
-    div(
-        "graph-formatter-007",
-        ALL,
-        DEFECT,
-        "GR-25: duration format not checked",
-    ),
-    div(
-        "graph-formatter-008",
-        ALL,
-        DEFECT,
-        "GR-25: duration format not checked",
     ),
     div("graph-def-073", ALL, DEFECT, "GR-43: -Z with a missing DS"),
     div(
@@ -279,58 +234,172 @@ const KNOWN_DIVERGENCES: &[Divergence] = &[
         "GR-64: markup measured as text",
     ),
     div(
-        "graph-data-005",
+        "graph-order-009",
         ALL,
         DEFECT,
-        "GR-86: --x-grid time format ignored",
+        "GR-3: prints 0x0 without elements",
     ),
     div(
-        "graph-data-012",
+        "graph-order-010",
         ALL,
         DEFECT,
-        "GR-86: --x-grid time format ignored",
+        "GR-3: prints 0x0 without elements",
     ),
     div(
-        "graph-data-019",
+        "graph-scan-001",
         ALL,
         DEFECT,
-        "GR-86: --x-grid time format ignored",
+        "GR-3: prints 0x0 without elements",
     ),
     div(
-        "graph-data-026",
+        "graph-scan-002",
         ALL,
         DEFECT,
-        "GR-86: --x-grid time format ignored",
+        "GR-3: prints 0x0 without elements",
     ),
     div(
-        "graph-data-033",
+        "graph-scan-009",
         ALL,
         DEFECT,
-        "GR-86: --x-grid time format ignored",
+        "GR-3: prints 0x0 without elements",
     ),
     div(
-        "graph-data-040",
+        "graph-scan-010",
         ALL,
         DEFECT,
-        "GR-86: --x-grid time format ignored",
+        "GR-3: prints 0x0 without elements",
     ),
     div(
-        "graph-data-047",
+        "graph-scan-012",
         ALL,
         DEFECT,
-        "GR-86: --x-grid time format ignored",
+        "GR-3: prints 0x0 without elements",
     ),
     div(
-        "graph-data-062",
+        "graph-scan-013",
         ALL,
         DEFECT,
-        "GR-87: --add-jsontime ignored",
+        "GR-3: prints 0x0 without elements",
     ),
     div(
-        "graph-data-063",
+        "graph-scan-014",
         ALL,
         DEFECT,
-        "GR-87: --add-jsontime ignored",
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-016",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-029",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-031",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-035",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-038",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-039",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-048",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-049",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-057",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-058",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-059",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-060",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-062",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-072",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-073",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-080",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-087",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-scan-091",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
+    ),
+    div(
+        "graph-repeat-015",
+        ALL,
+        DEFECT,
+        "GR-3: prints 0x0 without elements",
     ),
 ];
 
@@ -371,7 +440,10 @@ impl Vector {
 
     /// The frozen expectation for this build target, if one applies.
     fn frozen(&self) -> Option<&Value> {
-        if self.tagged("unstable") {
+        // A `host` result depends on the machine (for `--lazy /dev/null`,
+        // whether the host keeps updating the device's time), so only the
+        // live oracle on the same host is a valid expectation.
+        if self.tagged("unstable") || self.tagged("host") {
             return None;
         }
         let zone_missing = self

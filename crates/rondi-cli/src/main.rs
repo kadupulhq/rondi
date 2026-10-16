@@ -4,11 +4,10 @@ mod cparse;
 /// The `rrdtool` front end: command selection, option scanning, error
 /// reporting, pipe mode and the single-command programs.
 mod frontend;
-/// Option parsing for `graph`, `graphv` and `xport`, ported from
-/// `rrd_graph_options` (rrd_graph.c:5042) and `rrd_xport` (rrd_xport.c:76).
-/// Options that only affect Cairo/Pango rendering are validated exactly as
-/// upstream validates them and then left unused.
-mod graph_options;
+/// The command lines of `graph`, `graphv` and `xport`, written from
+/// docs/compatibility/graph.md. Options that only change pixels are
+/// checked and then left unused.
+mod graph_args;
 /// Text of graph PRINT and GPRINT items, written from
 /// docs/compatibility/format-strings.md.
 mod print_format;
@@ -821,59 +820,40 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
-    let options = graph_options::rrd_graph_options(args, now)?;
-    let Some((filename, elements)) = options.positionals.split_first() else {
-        return Err("missing filename".into());
-    };
-    let format = options.imgformat;
+    let options = graph_args::parse_graph(args, now)?;
+    let filename = options.output.as_str();
+    if let graph_args::ImageFormat::Vector(name) = options.format {
+        return Err(format!("RRDtool graph format {name} is unsupported").into());
+    }
     let image_width = options.width;
     let image_height = options.height;
-    let graph_title = options.title;
-    let vertical_label = options.vertical_label;
+    let graph_title = options.title.clone();
+    let vertical_label = options.vertical_label.clone();
     let vertical_label_angle = options.vertical_label_angle;
-    let imginfo = options.imginfo;
+    let imginfo = options.imginfo.clone();
     let zoom = options.zoom;
-    let lower_limit = options.lower_limit;
-    let upper_limit = options.upper_limit;
-    let no_legend = options.no_legend;
-    let rigid_scale = options.rigid;
-    let allow_shrink = options.allow_shrink;
-    let alt_autoscale = options.alt_autoscale;
-    let alt_autoscale_min = options.alt_autoscale_min;
-    let alt_autoscale_max = options.alt_autoscale_max;
-    let only_graph = options.only_graph;
-    let full_size_mode = options.full_size_mode;
-    let force_rules_legend = options.force_rules_legend;
-    let legend_direction = options.legend_direction;
-    let graph_colors = options.colors;
-    let grid_dash = options.grid_dash;
-    let border_width = options.border;
     let si_base = options.base;
     let force_utc = options.utc;
-    let daemon_address = options.daemon;
-    let requested_step = i64::from(options.step.unwrap_or(0));
-    if !matches!(
-        format.as_str(),
-        "XML" | "JSON" | "XMLENUM" | "JSONTIME" | "CSV" | "TSV" | "SSV" | "PNG"
-    ) {
-        return Err(format!("RRDtool graph format {format} is unsupported").into());
-    }
+    let only_graph = options.only_graph;
+    let graph_colors = graph_colors(&options.colors);
+    let grid_dash = vec![options.grid_dash.0, options.grid_dash.1];
+    let border_width = u32::try_from(options.border).unwrap_or(0);
     let (mut im, _) = prepare_graph_image(GraphImageRequest {
         start: options.start,
         end: options.end,
-        step: requested_step,
-        xsize: i64::from(image_width),
-        daemon: daemon_address,
-        elements,
+        step: options.step,
+        xsize: image_width,
+        daemon: options.daemon.clone(),
+        elements: &options.elements,
     })?;
-    options.layout.apply(&mut im);
+    configure_graph_image(&mut im, &options);
+    let png_output = options.format == graph_args::ImageFormat::Png;
     // The renderer enforces the same limit on the final canvas, but only after
     // data_proc has allocated per-pixel buffers sized by --width. Print-only
     // graphs draw nothing and keep the unbounded behavior of rrdtool.
-    if format == "PNG"
-        && (10..).contains(&image_width)
-        && (10..).contains(&image_height)
-        && !png_within_limit(image_width, image_height)
+    let side = |size: i64| u32::try_from(size).unwrap_or(u32::MAX);
+    if png_output
+        && !png_within_limit(side(image_width), side(image_height))
         && im.gdes.iter().any(|element| {
             use rondi::graph::Gf;
             matches!(
@@ -884,20 +864,23 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     {
         return Err(PNG_DIMENSION_LIMIT_MESSAGE.into());
     }
+    let time_format = options.x_label_format.as_deref();
     // rrd_graph_v: graph_paint, then image_info and the image itself.
     let mut info = GraphInfo::default();
     let to_memory = filename == "-";
     let mut image = None::<Vec<u8>>;
     let mut save_error = None::<String>;
-    if format != "PNG" {
-        let xport_format = match format.as_str() {
-            "XML" => XportFormat::Xml { flags: 2 },
-            "XMLENUM" => XportFormat::Xml { flags: 6 },
-            "JSON" => XportFormat::Xml { flags: 1 },
-            "JSONTIME" => XportFormat::Xml { flags: 3 },
-            "CSV" => XportFormat::Separated(','),
-            "TSV" => XportFormat::Separated('\t'),
-            _ => XportFormat::Separated(';'),
+    let mut duration_error = false;
+    if let graph_args::ImageFormat::Data(data_format) = options.format {
+        use graph_args::DataFormat;
+        let xport_format = match data_format {
+            DataFormat::Xml => XportFormat::Xml { flags: 2 },
+            DataFormat::XmlEnum => XportFormat::Xml { flags: 6 },
+            DataFormat::Json => XportFormat::Xml { flags: 1 },
+            DataFormat::JsonTime => XportFormat::Xml { flags: 3 },
+            DataFormat::Csv => XportFormat::Separated(','),
+            DataFormat::Tsv => XportFormat::Separated('\t'),
+            DataFormat::Ssv => XportFormat::Separated(';'),
         };
         flush_and_prepare_data(&mut im)?;
         let data = im.xport(true)?;
@@ -906,9 +889,11 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         info.push("graph_step", InfoValue::Count(data.step as i64));
         let (output, error) = match xport_format {
             XportFormat::Xml { flags } => {
-                format_xport_xmljson(flags, &mut im, &data, si_base, to_memory)
+                format_xport_xmljson(flags, &mut im, &data, si_base, to_memory, time_format)
             }
-            XportFormat::Separated(separator) => (format_xport_sv(separator, &data), None),
+            XportFormat::Separated(separator) => {
+                (format_xport_sv(separator, &data, time_format), None)
+            }
         };
         // rrd_graph_xport only streams to the file when rrd_fopen worked;
         // otherwise the buffered data is returned like the "-" image.
@@ -940,38 +925,9 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             };
         // Nothing more is done when no element draws.
         if graph_elements {
-            use rondi::graph_layout::{
-                ALTAUTOSCALE, ALTAUTOSCALE_MAX, ALTAUTOSCALE_MIN, FORCE_RULES_LEGEND,
-                FULL_SIZE_MODE, NOLEGEND, ONLY_GRAPH, TEXT_PROP_LEGEND, text_height,
-            };
-            if image_width < 10 {
-                return Err("width below 10 pixels".into());
-            }
-            if image_height < 10 {
-                return Err("height below 10 pixels".into());
-            }
-            im.xsize = i64::from(image_width);
-            im.ysize = i64::from(image_height);
-            im.title.clone_from(&graph_title);
-            im.ylegend.clone_from(&vertical_label);
-            im.minval = lower_limit.unwrap_or_else(rrd_nan);
-            im.maxval = upper_limit.unwrap_or_else(rrd_nan);
-            im.rigid = rigid_scale;
-            im.allow_shrink = allow_shrink;
-            im.base = i64::from(si_base);
-            im.legenddirection = legend_direction;
-            for (set, flag) in [
-                (alt_autoscale, ALTAUTOSCALE),
-                (alt_autoscale_min, ALTAUTOSCALE_MIN),
-                (alt_autoscale_max, ALTAUTOSCALE_MAX),
-                (no_legend, NOLEGEND),
-                (only_graph, ONLY_GRAPH),
-                (force_rules_legend, FORCE_RULES_LEGEND),
-                (full_size_mode, FULL_SIZE_MODE),
-            ] {
-                if set {
-                    im.extra_flags |= flag;
-                }
+            use rondi::graph_layout::{TEXT_PROP_LEGEND, text_height};
+            if options.xy_graph {
+                return Err("XY diagram not implemented".into());
             }
             // graph_paint_timestring.
             im.graph_size_location(true)?;
@@ -987,115 +943,121 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             ] {
                 info.push(key, InfoValue::Count(value));
             }
-            im.data_proc()?;
-            if !im.logarithmic {
-                im.si_unit();
-            }
-            if (!im.rigid || im.allow_shrink) && !im.logarithmic {
-                im.expand_range();
-            }
-            info.push("value_min", InfoValue::Val(im.minval));
-            info.push("value_max", InfoValue::Val(im.maxval));
-            // calc_horizontal_grid gives up on a NaN scaled range (an
-            // infinite limit) without setting an error, so rrd_graph_v
-            // returns nothing: no file, no output and a zero exit status.
-            if ((im.maxval - im.minval) / im.magfact).is_nan() {
-                return Ok(());
-            }
-            let legend_size = im.text_prop[TEXT_PROP_LEGEND];
-            let mut legends = Vec::new();
-            for (index, x0, y0) in im.legend_origins() {
-                let legend = im.gdes[index].legend.clone();
-                let width = im.legend_text_width(&legend);
-                let height = text_height(legend_size);
-                let count = legends.len();
-                info.push(format!("legend[{count}]"), InfoValue::Str(legend.clone()));
-                info.push(
-                    format!("coords[{count}]"),
-                    InfoValue::Str(format!(
-                        "{},{},{},{}",
-                        c_printf_double("%.0f", x0),
-                        c_printf_double("%.0f", y0 - height),
-                        c_printf_double("%.0f", x0 + width),
-                        c_printf_double("%.0f", y0)
-                    )),
-                );
-                legends.push(GraphLegend {
-                    x: x0,
-                    y: y0,
-                    text: legend,
-                    gdes_index: index,
-                });
-            }
-            // graph_cairo_setup sizes the surface as int(ximg * zoom). cairo
-            // refuses a negative or oversized surface and a zero-sized one
-            // cannot be written; graph_cairo_finish then fails the save
-            // while rrd_graph_v still reports image_info.
-            let save_failed = format!(
-                "Could not save png to '{}'",
-                if to_memory { "memory" } else { filename }
-            );
-            let surface = |size: i64| c_double_to_int(size as f64 * zoom);
-            let (surface_width, surface_height) = (surface(im.ximg), surface(im.yimg));
-            let surface_valid = |size: i32| (0..=CAIRO_MAX_IMAGE_SIZE).contains(&size);
-            if !surface_valid(surface_width) || !surface_valid(surface_height) {
-                eprintln!(
-                    "OOPS: Cairo has issues it can't even die: invalid value (typically too big) for the size of the input (surface, pattern, etc.)"
-                );
-                save_error = Some(save_failed);
-            } else if surface_width == 0 || surface_height == 0 {
-                // rrd_strtodbl accepts "nan", which cairo_scale rejects.
-                if zoom.is_nan() {
-                    eprintln!(
-                        "OOPS: Cairo has issues it can't even die: invalid matrix (not invertible)"
+            let kept = options.lazy
+                && !to_memory
+                && lazy_output_is_current(filename, im.end - im.start, image_width, now);
+            if !kept {
+                im.data_proc()?;
+                if !im.logarithmic {
+                    im.si_unit();
+                }
+                if (!im.rigid || im.allow_shrink) && !im.logarithmic {
+                    im.expand_range();
+                }
+                info.push("value_min", InfoValue::Val(im.minval));
+                info.push("value_max", InfoValue::Val(im.maxval));
+                // calc_horizontal_grid gives up on a NaN scaled range (an
+                // infinite limit) without setting an error, so rrd_graph_v
+                // returns nothing: no file, no output and a zero exit status.
+                if ((im.maxval - im.minval) / im.magfact).is_nan() {
+                    return Ok(());
+                }
+                duration_error = options.unusable_duration_format();
+                let legend_size = im.text_prop[TEXT_PROP_LEGEND];
+                let mut legends = Vec::new();
+                for (index, x0, y0) in im.legend_origins() {
+                    let legend = im.gdes[index].legend.clone();
+                    let width = im.legend_text_width(&legend);
+                    let height = text_height(legend_size);
+                    let count = legends.len();
+                    info.push(format!("legend[{count}]"), InfoValue::Str(legend.clone()));
+                    info.push(
+                        format!("coords[{count}]"),
+                        InfoValue::Str(format!(
+                            "{},{},{},{}",
+                            c_printf_double("%.0f", x0),
+                            c_printf_double("%.0f", y0 - height),
+                            c_printf_double("%.0f", x0 + width),
+                            c_printf_double("%.0f", y0)
+                        )),
                     );
+                    legends.push(GraphLegend {
+                        x: x0,
+                        y: y0,
+                        text: legend,
+                        gdes_index: index,
+                    });
                 }
-                if !to_memory
-                    && let Err(OutputError::Refused(message)) = write_output_file(filename, &[])
-                {
-                    return Err(message.into());
-                }
-                save_error = Some(save_failed);
-            } else {
-                // A negative --units-length moves the graph origin left of
-                // the image; cairo clips whatever falls outside the surface.
-                let clamp = |value: i64| u32::try_from(value.max(0));
-                let (rendered, series) = graph_render_input(&im);
-                let png = render_graph_png(
-                    &rendered,
-                    &series,
-                    GraphPngOptions {
-                        canvas: GraphCanvas {
-                            width: clamp(im.ximg)?,
-                            height: clamp(im.yimg)?,
-                            surface_width: surface_width.unsigned_abs(),
-                            surface_height: surface_height.unsigned_abs(),
-                            left: clamp(im.xorigin)?,
-                            top: clamp(im.yorigin - im.ysize)?,
-                            plot_width: clamp(im.xsize)?,
-                            plot_height: clamp(im.ysize)?,
-                            minimum: im.minval,
-                            maximum: im.maxval,
-                        },
-                        legends: &legends,
-                        title: graph_title.as_deref(),
-                        vertical_label: vertical_label.as_deref(),
-                        vertical_label_angle,
-                        only_graph,
-                        colors: graph_colors,
-                        grid_dash,
-                        border_width,
-                    },
-                )?;
-                if to_memory {
-                    image = Some(png);
+                // graph_cairo_setup sizes the surface as int(ximg * zoom). cairo
+                // refuses a negative or oversized surface and a zero-sized one
+                // cannot be written; graph_cairo_finish then fails the save
+                // while rrd_graph_v still reports image_info.
+                let save_failed = format!(
+                    "Could not save png to '{}'",
+                    if to_memory { "memory" } else { filename }
+                );
+                let surface = |size: i64| c_double_to_int(size as f64 * zoom);
+                let (surface_width, surface_height) = (surface(im.ximg), surface(im.yimg));
+                let surface_valid = |size: i32| (0..=CAIRO_MAX_IMAGE_SIZE).contains(&size);
+                if !surface_valid(surface_width) || !surface_valid(surface_height) {
+                    eprintln!(
+                        "OOPS: Cairo has issues it can't even die: invalid value (typically too big) for the size of the input (surface, pattern, etc.)"
+                    );
+                    save_error = Some(save_failed);
+                } else if surface_width == 0 || surface_height == 0 {
+                    // rrd_strtodbl accepts "nan", which cairo_scale rejects.
+                    if zoom.is_nan() {
+                        eprintln!(
+                            "OOPS: Cairo has issues it can't even die: invalid matrix (not invertible)"
+                        );
+                    }
+                    if !to_memory
+                        && let Err(OutputError::Refused(message)) = write_output_file(filename, &[])
+                    {
+                        return Err(message.into());
+                    }
+                    save_error = Some(save_failed);
                 } else {
-                    // rrd_graph_v keeps building the result after a failed
-                    // save and rrdtool reports the error once it has printed it.
-                    match write_output_file(filename, &png) {
-                        Ok(()) => {}
-                        Err(OutputError::Refused(message)) => return Err(message.into()),
-                        Err(_) => save_error = Some(save_failed),
+                    // A negative --units-length moves the graph origin left of
+                    // the image; cairo clips whatever falls outside the surface.
+                    let clamp = |value: i64| u32::try_from(value.max(0));
+                    let (rendered, series) = graph_render_input(&im);
+                    let png = render_graph_png(
+                        &rendered,
+                        &series,
+                        GraphPngOptions {
+                            canvas: GraphCanvas {
+                                width: clamp(im.ximg)?,
+                                height: clamp(im.yimg)?,
+                                surface_width: surface_width.unsigned_abs(),
+                                surface_height: surface_height.unsigned_abs(),
+                                left: clamp(im.xorigin)?,
+                                top: clamp(im.yorigin - im.ysize)?,
+                                plot_width: clamp(im.xsize)?,
+                                plot_height: clamp(im.ysize)?,
+                                minimum: im.minval,
+                                maximum: im.maxval,
+                            },
+                            legends: &legends,
+                            title: graph_title.as_deref(),
+                            vertical_label: vertical_label.as_deref(),
+                            vertical_label_angle,
+                            only_graph,
+                            colors: graph_colors,
+                            grid_dash,
+                            border_width,
+                        },
+                    )?;
+                    if to_memory {
+                        image = Some(png);
+                    } else {
+                        // rrd_graph_v keeps building the result after a failed
+                        // save and rrdtool reports the error once it has printed it.
+                        match write_output_file(filename, &png) {
+                            Ok(()) => {}
+                            Err(OutputError::Refused(message)) => return Err(message.into()),
+                            Err(_) => save_error = Some(save_failed),
+                        }
                     }
                 }
             }
@@ -1126,6 +1088,11 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     if let Some(image) = image {
         info.push("image", InfoValue::Blob(image));
     }
+    let export_error = if options.add_jsontime {
+        export_jsontime(&mut im, &mut info, filename, si_base, time_format)?
+    } else {
+        None
+    };
     let mut stdout = std::io::stdout().lock();
     if verbose {
         info.print(&mut stdout)?;
@@ -1137,9 +1104,223 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             .any(|argument| argument == "--imginfo" || argument == "-f");
         info.print_graph(&mut stdout, to_memory, imginfo_flag)?;
     }
-    match save_error {
-        Some(message) => Err(message.into()),
-        None => pending_error(&im),
+    if let Some(message) = save_error.or(export_error) {
+        return Err(message.into());
+    }
+    if duration_error {
+        // Compatibility: the image is complete; the axis labels' format
+        // failure is reported afterwards (GR-25).
+        // Provenance: black-box compatibility test (duration group).
+        return Err("Wrong duration format".into());
+    }
+    pending_error(&im)
+}
+
+/// GR-87: the JSONTIME export `--add-jsontime` writes to the output after
+/// the graph. Returns the error to report once the keys are printed.
+fn export_jsontime(
+    im: &mut rondi::graph::GraphImage,
+    info: &mut GraphInfo,
+    filename: &str,
+    si_base: u32,
+    time_format: Option<&str>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    let to_memory = filename == "-";
+    let data = match im.xport(true) {
+        Ok(data) => data,
+        Err(error) => {
+            // Compatibility: the file is opened, and so truncated, before
+            // the export finds nothing to write.
+            // Provenance: black-box compatibility test (jsontime-009).
+            if !to_memory
+                && let Err(OutputError::Refused(message)) = write_output_file(filename, &[])
+            {
+                return Err(message.into());
+            }
+            info.push("datapoints", InfoValue::Blob(Vec::new()));
+            return Ok(Some(error.to_string()));
+        }
+    };
+    info.push("graph_start", InfoValue::Count(data.start));
+    info.push("graph_end", InfoValue::Count(data.end));
+    info.push("graph_step", InfoValue::Count(data.step as i64));
+    let (output, error) = format_xport_xmljson(3, im, &data, si_base, to_memory, time_format);
+    let mut blob = Vec::new();
+    if to_memory {
+        blob = output.into_bytes();
+    } else {
+        match write_output_file(filename, output.as_bytes()) {
+            Err(OutputError::Refused(message)) => return Err(message.into()),
+            Err(OutputError::Open(_)) => blob = output.into_bytes(),
+            Ok(()) | Err(OutputError::Write(_)) => {}
+        }
+    }
+    info.push("datapoints", InfoValue::Blob(blob));
+    Ok(error)
+}
+
+/// GR-84: whether `--lazy` keeps the existing output file. A file is kept
+/// when it was modified within the time one pixel covers and starts with
+/// a readable PNG header; otherwise the libpng text is printed and the
+/// graph is drawn again.
+fn lazy_output_is_current(filename: &str, range: i64, width: i64, now: i64) -> bool {
+    let Ok(metadata) = std::fs::metadata(filename) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    let modified = match modified.duration_since(std::time::UNIX_EPOCH) {
+        Ok(elapsed) => i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX),
+        Err(before) => -i64::try_from(before.duration().as_secs()).unwrap_or(i64::MAX),
+    };
+    let pixel = range / width.max(1);
+    if now.saturating_sub(modified) > pixel {
+        return false;
+    }
+    match png_header_status(filename) {
+        Ok(()) => true,
+        Err(message) => {
+            eprintln!("libpng error: {message}");
+            false
+        }
+    }
+}
+
+/// Reads the PNG signature and the chunks before the first `IDAT`, as far
+/// as a reader needs them to learn the image size. The error is the
+/// libpng text RRDtool prints.
+fn png_header_status(filename: &str) -> Result<(), &'static str> {
+    use std::io::Read as _;
+    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    // No header a graph writes comes near this; a larger one is treated
+    // as unreadable rather than read without bound.
+    const MOST_HEADER_BYTES: u64 = 1 << 20;
+    let mut file = std::fs::File::open(filename).map_err(|_| "Read Error")?;
+    let mut read_exact = |buffer: &mut [u8]| file.read_exact(buffer).map_err(|_| "Read Error");
+    let mut signature = [0_u8; 8];
+    read_exact(&mut signature)?;
+    if signature != SIGNATURE {
+        return Err("Not a PNG file");
+    }
+    let mut consumed = 8_u64;
+    loop {
+        let mut head = [0_u8; 8];
+        read_exact(&mut head)?;
+        if &head[4..] == b"IDAT" {
+            return Ok(());
+        }
+        let length = u64::from(u32::from_be_bytes([head[0], head[1], head[2], head[3]]));
+        consumed += 12 + length;
+        if consumed > MOST_HEADER_BYTES {
+            return Err("Read Error");
+        }
+        let mut body = vec![0_u8; usize::try_from(length + 4).map_err(|_| "Read Error")?];
+        read_exact(&mut body)?;
+    }
+}
+
+/// `--color` values over the renderer's defaults.
+fn graph_colors(colors: &[(graph_args::ColorTag, [u8; 4])]) -> GraphColors {
+    use graph_args::ColorTag;
+    let mut palette = GraphColors::default();
+    for (tag, rgba) in colors {
+        let slot = match tag {
+            ColorTag::Back => &mut palette.back,
+            ColorTag::Canvas => &mut palette.canvas,
+            ColorTag::ShadeA => &mut palette.shade_a,
+            ColorTag::ShadeB => &mut palette.shade_b,
+            ColorTag::Grid => &mut palette.grid,
+            ColorTag::MajorGrid => &mut palette.mgrid,
+            ColorTag::Font => &mut palette.font,
+            ColorTag::Axis => &mut palette.axis,
+            ColorTag::Frame => &mut palette.frame,
+            ColorTag::Arrow => &mut palette.arrow,
+        };
+        *slot = *rgba;
+    }
+    palette
+}
+
+/// Hands the parsed options to the layout of the graph engine.
+fn configure_graph_image(im: &mut rondi::graph::GraphImage, options: &graph_args::GraphArgs) {
+    use graph_args::{LegendOrder, LegendPlacement, YGrid};
+    use rondi::graph_layout::{
+        ALTAUTOSCALE, ALTAUTOSCALE_MAX, ALTAUTOSCALE_MIN, FORCE_RULES_LEGEND, FULL_SIZE_MODE,
+        LegendDirection, LegendPosition, NO_RRDTOOL_TAG, NOLEGEND, ONLY_GRAPH, TEXT_PROP_AXIS,
+        TEXT_PROP_LEGEND, TEXT_PROP_TITLE, TEXT_PROP_UNIT, TEXT_PROP_WATERMARK,
+    };
+    im.xsize = options.width;
+    im.ysize = options.height;
+    im.title.clone_from(&options.title);
+    im.ylegend.clone_from(&options.vertical_label);
+    im.watermark.clone_from(&options.watermark);
+    im.second_axis_legend.clone_from(&options.right_axis_label);
+    if let Some((scale, _)) = options.right_axis {
+        im.second_axis_scale = scale;
+    }
+    im.minval = options.lower_limit.unwrap_or_else(rrd_nan);
+    im.maxval = options.upper_limit.unwrap_or_else(rrd_nan);
+    im.rigid = options.rigid;
+    im.allow_shrink = options.allow_shrink;
+    im.logarithmic = options.logarithmic;
+    im.base = i64::from(options.base);
+    im.allow_missing_ds = options.missing_as_nan;
+    im.draw_x_grid = !options.hide_x_grid;
+    match options.y_grid {
+        Some(YGrid::Hidden) => im.draw_y_grid = false,
+        Some(YGrid::Step { step, factor }) => {
+            im.ygridstep = step;
+            im.ylabfact = factor;
+        }
+        None => {}
+    }
+    if let Some(length) = options.units_length {
+        im.unitslength = length;
+        im.forceleftspace = true;
+    }
+    if let Some(exponent) = options.units_exponent {
+        im.unitsexponent = exponent;
+    }
+    if let Some(width) = options.tab_width {
+        im.tabwidth = width;
+    }
+    let sizes = options.text_sizes;
+    for (slot, size) in [
+        (TEXT_PROP_TITLE, sizes.title),
+        (TEXT_PROP_AXIS, sizes.axis),
+        (TEXT_PROP_UNIT, sizes.unit),
+        (TEXT_PROP_LEGEND, sizes.legend),
+        (TEXT_PROP_WATERMARK, sizes.watermark),
+    ] {
+        if let Some(size) = size {
+            im.text_prop[slot] = size;
+        }
+    }
+    im.legendposition = match options.legend_placement {
+        LegendPlacement::North => LegendPosition::North,
+        LegendPlacement::South => LegendPosition::South,
+        LegendPlacement::East => LegendPosition::East,
+        LegendPlacement::West => LegendPosition::West,
+    };
+    im.legenddirection = match options.legend_order {
+        LegendOrder::TopDown => LegendDirection::TopDown,
+        LegendOrder::BottomUp => LegendDirection::BottomUp,
+        LegendOrder::BottomUpKeepComments => LegendDirection::BottomUp2,
+    };
+    for (set, flag) in [
+        (options.alt_autoscale, ALTAUTOSCALE),
+        (options.alt_autoscale_min, ALTAUTOSCALE_MIN),
+        (options.alt_autoscale_max, ALTAUTOSCALE_MAX),
+        (options.no_legend, NOLEGEND),
+        (options.only_graph, ONLY_GRAPH),
+        (options.force_rules_legend, FORCE_RULES_LEGEND),
+        (options.full_size_mode, FULL_SIZE_MODE),
+        (options.no_rrdtool_tag, NO_RRDTOOL_TAG),
+    ] {
+        if set {
+            im.extra_flags |= flag;
+        }
     }
 }
 
@@ -1373,15 +1554,15 @@ fn render_xport(args: &[String]) -> Result<(String, Option<String>), Box<dyn std
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
-    let xport = graph_options::rrd_xport_options(args, now)?;
-    let (json, show_time, enum_ds) = (xport.json, xport.showtime, xport.enumds);
+    let xport = graph_args::parse_xport(args, now)?;
+    let (json, show_time, enum_ds) = (xport.json, xport.show_time, xport.enum_ds);
     let (mut im, _) = prepare_graph_image(GraphImageRequest {
         start: xport.start,
         end: xport.end,
-        step: i64::from(xport.step),
-        xsize: xport.maxrows,
+        step: xport.step,
+        xsize: xport.max_rows,
         daemon: xport.daemon,
-        elements: &xport.positionals,
+        elements: &xport.elements,
     })?;
     if im.gdes.is_empty() {
         return Err("can't make an xport without contents".into());
@@ -1399,7 +1580,7 @@ fn render_xport(args: &[String]) -> Result<(String, Option<String>), Box<dyn std
     flush_and_prepare_data(&mut im)?;
     let data = im.xport(false)?;
     let flags = u8::from(json) | (u8::from(show_time) << 1) | (u8::from(enum_ds) << 2);
-    let (output, error) = format_xport_xmljson(flags, &mut im, &data, 1000, false);
+    let (output, error) = format_xport_xmljson(flags, &mut im, &data, 1000, false, None);
     Ok((output, error.or_else(|| im.pending_error.clone())))
 }
 
@@ -2706,22 +2887,29 @@ fn format_xport_xmljson(
     data: &rondi::graph::XportData,
     si_base: u32,
     in_memory: bool,
+    time_format: Option<&str>,
 ) -> (String, Option<String>) {
     let json = flags & 1 != 0;
+    let stamp = |time: i64| export_time(time, time_format);
+    // Formatted times are text, which JSON quotes.
+    let meta_stamp = |time: i64| match time_format {
+        Some(_) if json => format!("\"{}\"", stamp(time)),
+        _ => stamp(time),
+    };
     let show_time = flags & 2 != 0;
     let enum_ds = flags & 4 != 0;
     let step = data.step as i64;
     let mut output = String::new();
     if json {
         output.push_str("{ \"about\": \"RRDtool graph JSON output\",\n  \"meta\": {\n");
-        writeln!(output, "    \"start\": {},", data.start + step).unwrap();
-        writeln!(output, "    \"end\": {},", data.end).unwrap();
+        writeln!(output, "    \"start\": {},", meta_stamp(data.start + step)).unwrap();
+        writeln!(output, "    \"end\": {},", meta_stamp(data.end)).unwrap();
         writeln!(output, "    \"step\": {step},").unwrap();
         output.push_str("    \"legend\": [\n");
     } else {
         output.push_str("<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n\n<xport>\n  <meta>\n");
-        writeln!(output, "    <start>{}</start>", data.start + step).unwrap();
-        writeln!(output, "    <end>{}</end>", data.end).unwrap();
+        writeln!(output, "    <start>{}</start>", stamp(data.start + step)).unwrap();
+        writeln!(output, "    <end>{}</end>", stamp(data.end)).unwrap();
         writeln!(output, "    <step>{step}</step>").unwrap();
         writeln!(output, "    <rows>{}</rows>", data.rows.len()).unwrap();
         writeln!(output, "    <columns>{}</columns>", data.legends.len()).unwrap();
@@ -2763,10 +2951,10 @@ fn format_xport_xmljson(
         if json {
             output.push_str("    [ ");
             if show_time {
-                write!(output, "\"{time}\",").unwrap();
+                write!(output, "\"{}\",", stamp(time)).unwrap();
             }
         } else if show_time {
-            write!(output, "    <row><t>{time}</t>").unwrap();
+            write!(output, "    <row><t>{}</t>", stamp(time)).unwrap();
         } else {
             output.push_str("    <row>");
         }
@@ -2811,8 +2999,22 @@ fn format_xport_xmljson(
     (output, None)
 }
 
+/// A data export's time: the number, or with an `--x-grid` label format
+/// that format in the local zone, even under `--utc` (GR-86).
+fn export_time(time: i64, format: Option<&str>) -> String {
+    match format {
+        // The longest label RRDtool's buffer holds; longer text is cut.
+        Some(format) => print_format::strftime_text(format, &local_tm(time), 256),
+        None => time.to_string(),
+    }
+}
+
 /// Port of `rrd_xport_format_sv` for CSV, TSV and SSV.
-fn format_xport_sv(separator: char, data: &rondi::graph::XportData) -> String {
+fn format_xport_sv(
+    separator: char,
+    data: &rondi::graph::XportData,
+    time_format: Option<&str>,
+) -> String {
     let mut output = String::from("\"time\"");
     for legend in &data.legends {
         let entry = legend.trim_start_matches(|ch: char| ch.is_ascii_whitespace());
@@ -2821,7 +3023,8 @@ fn format_xport_sv(separator: char, data: &rondi::graph::XportData) -> String {
     output.push_str("\r\n");
     let step = data.step as i64;
     for (row_index, row) in data.rows.iter().enumerate() {
-        write!(output, "{}", data.start + (row_index as i64 + 1) * step).unwrap();
+        let time = data.start + (row_index as i64 + 1) * step;
+        output.push_str(&export_time(time, time_format));
         for value in row {
             if value.is_nan() {
                 write!(output, "{separator}\"NaN\"").unwrap();
@@ -4933,7 +5136,7 @@ mod xml_output_tests {
             legends: vec!["load & <peak>".to_owned()],
             rows: vec![vec![2.0]],
         };
-        let (xml, error) = format_xport_xmljson(0, &mut im, &data, 1000, false);
+        let (xml, error) = format_xport_xmljson(0, &mut im, &data, 1000, false, None);
 
         assert_eq!(error, None);
         assert!(xml.contains("<entry>load & <peak></entry>"));
