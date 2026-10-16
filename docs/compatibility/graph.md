@@ -142,6 +142,7 @@ directory as `<dir>`.
 | `scale` | `value_min`/`value_max` under autoscale and the scaling options |
 | `fit` | the fitted legend and frame rules of GR-60 to GR-66 at several font sizes, and random combinations from a fixed seed |
 | `range` | the value range rules of GR-70 to GR-73 found by black-box probes |
+| `up` | `\u` lines after and between other lines at several legend sizes (GR-66) |
 | `data` | `--imgformat` XML, XMLENUM, JSON, JSONTIME, CSV, TSV, SSV |
 | `xport` | `xport` options, elements and output |
 | `out` | output files, `-`, `graphv -`, `--imginfo` output, `--lazy` |
@@ -970,10 +971,13 @@ The vectors pin the exact coordinates of each combination.
   Items are not cut.
 - Vertical advance after a line: a line with items advances
   floor(1.8·*g*); `\s` advances floor(1.8·*g*) − ceil(*g*) (6 at the
-  default size); a line ended by `\u` moves the next line 1 px up when it
-  has items (not at all when it is the first line) and a whole line up
-  when it has none (an empty `\u` line on its own is open, `comment-009`).
-  An
+  default size). `\u` moves back up over the line with items that it ends
+  or follows: by ceil(1.8·*g*) when that line is not the first legend line,
+  otherwise (and after an empty line) by floor(1.8·*g*). A line with items
+  that ends in `\u` first advances as usual, so the next line starts 0 or
+  1 px higher (`legend-005`, `up-001` to `-028`). The legend's height is the
+  sum of the advances and may be negative. A legend that starts with empty
+  `\u` lines, or ends with several, is open (RD-024, `comment-009`). An
   empty line advances a whole line only when right-aligned or centered
   (`COMMENT:\r` between two lines). Any element after the last marker,
   even a `DEF`, `CDEF` or an element without a legend, opens one more
@@ -1036,9 +1040,17 @@ range widened by 10 % of its width at each end (after step 2 of GR-70;
 an all-zero range becomes -0.1..1.1). `--alt-autoscale-min` widens only
 the minimum and `--alt-autoscale-max` only the maximum; the other bound is
 the data value, unrounded. This contradicts the manual, which says the
-other bound is 0 (`scale-002` to `-004`, `-182` to `-184`). Tiny ranges
-(data near 1e-3 or 1e-9) give a range that the vectors pin but this rule
-does not explain (`scale-024`, `-079`).
+other bound is 0 (`scale-002` to `-004`, `-182` to `-184`).
+
+`--alt-autoscale` (not `-min` or `-max`) widens a narrow range further.
+Let *m* be the larger magnitude of min and max, and *k* the largest power
+of the base not above *m* (as in GR-70). The floor is
+2·10^(floor(log10(*m*/*k*)) − 2): 0.02 when *m*/*k* is 1 to 9.99, 0.2 for
+10 to 99.9 and 2 for 100 to 999. When max − min is below the floor, each
+bound moves by 0.55·(floor − (max − min)) instead of 10 % of the width.
+Data 0.1..0.2 gives -0.945..1.245, data 1e-9·(1.33..19.33) gives
+-0.11..0.11, and with `--base 1024` data 1000..1001 gives 989.55..1011.45
+(`scale-024`, `-079`, `range-030` to `-057`).
 
 **GR-72** (doc, bb; compat). `--logarithmic` requires positive values: a
 `-l` of 0 or less fails with
@@ -1304,8 +1316,7 @@ their class; the expectation stays RRDtool's. They are summarized here.
 | `grid-dash-011`, `line-044`, `-045`, `hrule-027`, `-028`, `vrule-027`, `-028` | GR-24, GR-50, GR-54 | defect | no Cairo warning for zero or negative dashes |
 | `font-003`, `layout-049` (macOS); `font-019` (Linux) | GR-60 | defect | one font's metrics for every family |
 | `legend-030` | GR-60 | defect | CJK fallback metrics |
-| `comment-009` | GR-66 | defect | an empty `\u` line on its own (rule open) |
-| `scale-024`, `-079` | GR-71 | defect | `--alt-autoscale` with a tiny range (rule open) |
+| `comment-009` | GR-66 | defect | a legend that starts with an empty `\u` line is 1 px off (RD-024) |
 | `layout-026` to `-028` (Linux) | GR-81 | defect | legend `coords` under `--zoom` |
 
 `def-073` is listed as a defect, but the reference value comes from a
@@ -1323,9 +1334,8 @@ provenance.
 1. **Justification with `\g`** is settled by GR-66: the fill counts the
    gap of each later item without `\g`, while drawing puts the gap after
    each item without `\g` (`legend-031` to `-044`).
-2. **Autoscale of tiny ranges with `--alt-autoscale`**: data near 1e-9
-   gives -0.11..0.11 and data near 1e-3 gives -0.0988..0.1194 (`scale-024`,
-   `-079`); neither follows GR-71.
+2. **Autoscale of tiny ranges with `--alt-autoscale`** is settled by
+   GR-71.
 3. **East and west legend widths** are settled by GR-65 (the widest fill
    plus a margin at each side).
 4. **Legend coordinates under `--zoom` on Linux** were reported in #93 to
@@ -1346,11 +1356,13 @@ provenance.
 10. **Message length**: option errors are cut to 47 bytes after `ERROR: `
     (GR-12); whether `invalid option` messages are cut the same way was not
     tested with a long enough name.
-11. **An empty `\u` line.** On its own, `COMMENT:\u` gives an image 13 px
-    lower than without a legend line at the default size and 18 px lower
-    at size 10 (`comment-009`); after two lines it moves the end of the
-    legend 15 px up, not 14. The rule for the end of a legend that a `\u`
-    line closes is open.
+11. **Runs of empty `\u` lines.** GR-66 covers `\u` after other lines.
+    A legend that starts with empty `\u` lines, or ends with several, is
+    1 to 3 px off when 1.8 times the legend size is not a whole number:
+    `COMMENT:\u` alone gives an image 13 px lower than without a legend
+    line at the default size (18 at size 10, `comment-009`), and two
+    leading `\u` lines move the second line after them 15 px down, not 14.
+    The exact values are in RD-024 of docs/COMPATIBILITY_DEFECTS.md.
 12. **Tab stops with a fractional `--tabwidth`** under `--y-grid none` do
     not fall on multiples of the value (`-T 16.5` gives stops at 16, 33,
     50 and 67); only whole tab widths are specified there (GR-64).
