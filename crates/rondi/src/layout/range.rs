@@ -178,7 +178,11 @@ pub fn value_range(scale: &Scale, options: &RangeOptions) -> ValueRange {
     let alt_min = options.alt_autoscale || options.alt_autoscale_min;
     let alt_max = options.alt_autoscale || options.alt_autoscale_max;
     if alt_min || alt_max {
-        let spread = (max - min) * 0.1;
+        let spread = if options.alt_autoscale {
+            alt_spread(min, max, options.base)
+        } else {
+            (max - min) * 0.1
+        };
         return ValueRange {
             min: if alt_min { min - spread } else { min },
             max: if alt_max { max + spread } else { max },
@@ -200,6 +204,27 @@ pub fn value_range(scale: &Scale, options: &RangeOptions) -> ValueRange {
     ValueRange {
         min: round_bound(min, power, false),
         max: round_bound(max, power, true),
+    }
+}
+
+/// How far `--alt-autoscale` moves each bound (GR-71): a tenth of the
+/// range, or more for a range narrower than a floor set by the magnitude.
+//
+// Compatibility: with *m* the larger magnitude and *k* the largest power of
+// the base not above it, the floor is 2·10^(floor(log10(m/k)) − 2) (0.02 for
+// 1 to 9.99, 0.2 for 10 to 99, 2 for 100 to 999, repeating every power of
+// the base); a narrower range moves each bound by 0.55 of what it lacks.
+// Only `--alt-autoscale` does this, not `--alt-autoscale-min` or `-max`.
+// Provenance: black-box compatibility test (two-valued data from 1e-4 to
+// 2001 with -A, -J, -M and --base 1024; scale-024, -079).
+fn alt_spread(min: f64, max: f64, base: f64) -> f64 {
+    let width = max - min;
+    let magnitude = min.abs().max(max.abs());
+    let floor = 2.0 * 10f64.powf((magnitude / power_below(magnitude, base)).log10().floor() - 2.0);
+    if width < floor {
+        (floor - width) * 0.55
+    } else {
+        width * 0.1
     }
 }
 
@@ -407,6 +432,38 @@ mod tests {
         assert_eq!(
             range(&[-70.0, 56.67], |o| o.y_grid = Some((0.5, 4))),
             (-70.0, 58.0)
+        );
+    }
+
+    #[test]
+    fn alternative_autoscale_widens_narrow_ranges() {
+        let alt = |data: &[f64], change: fn(&mut RangeOptions)| {
+            let (min, max) = range(data, change);
+            ((min * 1e6).round() / 1e6, (max * 1e6).round() / 1e6)
+        };
+        assert_eq!(
+            alt(&[0.1, 0.2], |o| o.alt_autoscale = true),
+            (-0.945, 1.245)
+        );
+        assert_eq!(
+            alt(&[5.0, 5.001], |o| o.alt_autoscale = true),
+            (4.98955, 5.01145)
+        );
+        assert_eq!(
+            alt(&[1000.0, 1001.0], |o| o.alt_autoscale = true),
+            (999.9, 1001.1)
+        );
+        assert_eq!(
+            alt(&[1000.0, 1001.0], |o| {
+                o.alt_autoscale = true;
+                o.base = 1024.0;
+            }),
+            (989.55, 1011.45)
+        );
+        // Only the full --alt-autoscale applies the floor.
+        assert_eq!(
+            alt(&[0.1, 0.2], |o| o.alt_autoscale_min = true),
+            (0.09, 0.2)
         );
     }
 

@@ -219,19 +219,7 @@ const KNOWN_DIVERGENCES: &[Divergence] = &[
         "graph-comment-009",
         ALL,
         DEFECT,
-        "GR-66: an empty \\u line alone (unsettled)",
-    ),
-    div(
-        "graph-scale-024",
-        ALL,
-        DEFECT,
-        "GR-72: -A with a tiny range (unsettled)",
-    ),
-    div(
-        "graph-scale-079",
-        ALL,
-        DEFECT,
-        "GR-72: -A with a tiny range (unsettled)",
+        "GR-66: a legend that starts with empty \\u lines (open, COMPATIBILITY_DEFECTS.md)",
     ),
     div(
         "graph-legend-030",
