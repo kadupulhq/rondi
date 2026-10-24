@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   release:
-    uses: kadupulhq/.github/.github/workflows/release.yml@701fd2e1af15ff1dafa1d2225a33ad01e299d1ee # main
+    uses: kadupulhq/.github/.github/workflows/release.yml@7455e0f5836d3a220bf94ace2baa59968efe4545 # main
     with:
       generate-notes: true
     # Turning on tarball or image below also needs packages: write,
