@@ -87,7 +87,7 @@ forms:
 
 ```rust
 // Compatibility: preserve RRDtool behavior for this edge case.
-// Provenance: reference-source-inspection; see docs/compatibility/update.md.
+// Provenance: reference-source-inspection; see docs/compatibility/rpn.md.
 ```
 
 Do not include GPL source excerpts, C line numbers, copied comments, or

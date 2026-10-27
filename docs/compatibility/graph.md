@@ -1358,7 +1358,7 @@ provenance.
     tested with a long enough name.
 11. **Runs of empty `\u` lines.** GR-66 covers `\u` after other lines.
     A legend that starts with empty `\u` lines, or ends with several, is
-    1 to 3 px off when 1.8 times the legend size is not a whole number:
+    1 to 4 px off when 1.8 times the legend size is not a whole number:
     `COMMENT:\u` alone gives an image 13 px lower than without a legend
     line at the default size (18 at size 10, `comment-009`), and two
     leading `\u` lines move the second line after them 15 px down, not 14.

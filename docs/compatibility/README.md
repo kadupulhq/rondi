@@ -1,7 +1,7 @@
 # Behavioral specifications
 
 This directory holds implementation-neutral specifications of RRDtool
-behavior that Rondi reproduces, one file per area (for example `update.md`).
+behavior that Rondi reproduces, one file per area (for example `rpn.md`).
 The specifications are being written.
 
 | Area | Specification | Tests |
