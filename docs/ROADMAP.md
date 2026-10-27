@@ -1,6 +1,6 @@
 # Roadmap: drop-in RRDtool 1.11.0 compatibility
 
-Rondi is not a drop-in replacement today. This page lists what is done, what is left, in what order, and how each step is checked. The individual behavior differences are tracked in [COMPATIBILITY_DEFECTS.md](COMPATIBILITY_DEFECTS.md) (RD-001 to RD-023, plus the intentional differences ID-001 to ID-003). This page does not repeat them. Where a milestone closes a defect, the ID is named.
+Rondi is not a drop-in replacement today. This page lists what is done, what is left, in what order, and how each step is checked. The individual behavior differences are tracked in [COMPATIBILITY_DEFECTS.md](COMPATIBILITY_DEFECTS.md) (RD-001 to RD-024, plus the intentional differences ID-001 to ID-003). This page does not repeat them. Where a milestone closes a defect, the ID is named.
 
 ## Goal and decisions
 
@@ -74,7 +74,7 @@ Each behavior change below merged to `main` with differential tests against RRDt
 ### Gaps
 
 1. Holt-Winters family: create, update, fetch, info, dump, restore, tune (`--alpha`, `--beta`, `--gamma`, `--gamma-deviation`, `--window-length`, `--failure-threshold`, `--deltapos`, `--deltaneg`, `--smoothing-window`, `--aberrant-reset`).
-2. COMPUTE data sources. The RPN engine in `crates/rondi/src/rpn.rs` can be reused.
+2. COMPUTE data sources. The RPN engine in `crates/rondi/src/rpn/` can be reused.
 3. Non-64-bit and big-endian layouts (i386, armhf, ppc64el, s390x). This needs a layout descriptor computed for the build target, not fixed offsets.
 4. `resize` for v5; `create --source` with several sources and mappings (RD-004).
 5. A failed `tune -s`/`-S` does not raise the file to version 0004 (RD-002). EXECUTED (macOS probe).
@@ -164,7 +164,7 @@ Reaching tier 2 requires Cairo and Pango bindings; a pure-Rust rasterizer cannot
 
 SVG, EPS, PDF; PNG pixels and fonts (tier 2); legend `coords` under `--zoom` on Linux (reported in #93); text in fonts other than the default; Cairo strokes and gradients; the 10 million row limit for collected fetches, which needs graph and xport to consume rows as a stream; the PREDICT last-row difference.
 
-The clean-room specification of the graph front end is [compatibility/graph.md](compatibility/graph.md), with 1,796 frozen cases in `crates/rondi-cli/tests/data/graph_spec_vectors.json` replayed against the live oracle by `graph_spec_vectors.rs`. It lists 38 defect cases (some on one platform only) and 21 policy cases against the current `graph.rs`, `graph_layout.rs` and `graph_options.rs` (EXECUTED on macOS arm64 and in the Linux aarch64 and emulated x86_64 oracle images), among them a panic on a long `--vertical-label`, `--lazy` replacing a newer file, `--x-grid` time formats and `--add-jsontime` ignored in data exports, and unchecked duration axis formats. Those three modules are the next clean-room replacement; the specification's unsettled questions (legend justification with `\g`, `--allow-shrink`, `--y-grid` and the east/west legend width) need black-box work first.
+The clean-room specification of the graph front end is [compatibility/graph.md](compatibility/graph.md), with 2,213 frozen cases in `crates/rondi-cli/tests/data/graph_spec_vectors.json` replayed against the live oracle by `graph_spec_vectors.rs`. Its `KNOWN_DIVERGENCES` list holds 49 defect cases (some on one platform only) and 21 policy cases (READ-ONLY: counted in the test source). The option parser was replaced by the clean-room `graph_args.rs` (#125) and the layout by the `layout` module (#128); `graph.rs`, which parses the elements and prepares the data, is the module still to replace. The specification lists its remaining unsettled questions.
 
 ### Effort
 
@@ -182,7 +182,7 @@ RRDtool has 61 named RPN operators plus `+ - * / %` (counted from the `match_op`
 
 What Rondi does:
 
-- `crates/rondi/src/rpn.rs` follows RRDtool 1.11.0, including the per-variable data cursors that mixed-resolution `PREV`, `TREND` and `PREDICT` read; `vdef.rs` implements the 12 VDEF functions with the pinned compilers' FMA contraction (#92). The `rpn_diff` and `rpn_xport` fuzz targets exist.
+- `crates/rondi/src/rpn/` follows RRDtool 1.11.0, including the per-variable data cursors that mixed-resolution `PREV`, `TREND` and `PREDICT` read; `vdef.rs` implements the 12 VDEF functions with the pinned compilers' FMA contraction (#92). The `rpn_diff` and `rpn_xport` fuzz targets exist.
 - RPN is reachable from xport and graph, not from COMPUTE data sources.
 - SORT, MEDIAN, PERCENT and PREDICTPERC call the host `qsort`, whose order with NaN and infinities is not defined by the comparator. Tested on macOS and Linux glibc.
 
@@ -243,7 +243,7 @@ Nothing. No `crate-type` in `crates/*/Cargo.toml`; no FFI, no headers (READ-ONLY
 - Unix and TCP listeners, several `-l` and `-L`, each with the `-m`, `-s` and `-P` given before it; `-U` and `-G` drop privileges after binding (#50). Root container tests run in CI.
 - SIGUSR1, SIGUSR2 and SIGHUP behave as upstream; `-b`, `-P`, `-p` and default logging match (#97).
 - Journal: upstream format and file layout, written only with `-j`, buffered with no sync, replayed in both directions between upstream and Rondi.
-- Never forks and has no socket activation (EXECUTED: no `fork` or `LISTEN_FDS` in `crates/`). `-z` and `-V` are validated but not applied, and `-o` writes Rondi's own log format (RD-007).
+- Never forks and has no socket activation (EXECUTED: no `fork` or `LISTEN_FDS` in `crates/`). `-z` delays queued writes and `-V` sets the standard error level, but `-o` writes Rondi's own log format (RD-007).
 - Pending queue limit of 64 MiB (`DEFAULT_RRDCACHED_QUEUE_BYTES`), FETCH limit of 10 million rows (RD-017), and the safety deviations listed under RD-007.
 
 ### Gaps
@@ -314,7 +314,7 @@ Status: mostly done. Done: TCP and multiple listeners, `-U`/`-G`, journal format
 Status: not started; the license question in the C ABI section is open.
 
 **M5: graph (18 to 26 weeks).** Cairo and Pango renderer crate; all elements, options, formats; `graphv` metadata. Exit: `graphv` output identical for the whole corpus; data formats identical; PNG hash-identical for at least 95 percent of the corpus in the pinned container; SSIM of at least 0.98 elsewhere; Cacti, Munin, and Smokeping graph pages render with unchanged templates.
-Status: data preparation, options and `graphv` layout match for the tested cases (#92, #93); the front end is specified in [compatibility/graph.md](compatibility/graph.md). Open: the clean-room replacement of the graph front end against that specification, the Cairo and Pango renderer, SVG, PDF and EPS, streaming collected fetches past 10 million rows (RD-017), RD-020, and the corpus.
+Status: data preparation, options and `graphv` layout match for the tested cases (#92, #93); the front end is specified in [compatibility/graph.md](compatibility/graph.md). The option parser and layout were replaced from it (#125, #128). Open: the clean-room replacement of the element parser and data preparation in `graph.rs`, the Cairo and Pango renderer, SVG, PDF and EPS, streaming collected fetches past 10 million rows (RD-017), RD-020, and the corpus.
 
 **M6: packaging and release (2 to 3 weeks, partly parallel).** Distro packages with alternatives, man pages, tested rollback. Exit: install, run all suites, uninstall, reinstall upstream, in clean containers for four distributions.
 Status: not started; no release exists.

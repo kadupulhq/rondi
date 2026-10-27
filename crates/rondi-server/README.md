@@ -38,7 +38,7 @@ The example also needs `rondi` and `tokio` (with the `rt-multi-thread` feature) 
 
 ## Compatibility
 
-The `rrdcached` adapter targets the request handlers of RRDtool 1.11.0 and is tested against them for CREATE, UPDATE, FETCH and FETCHBIN, FLUSH, LIST, STATS, TUNE and SUSPEND/RESUME. It never forks, ignores `-z` and `-V`, writes a different `-o` log format, and, as upstream, has no authentication on TCP. Rondi also refuses some configurations upstream allows, such as serving as root without `-B -b`. The [compatibility matrix](https://github.com/kadupulhq/rondi/blob/main/docs/compatibility.md) lists the tested subset and the deliberate differences.
+The `rrdcached` adapter targets the request handlers of RRDtool 1.11.0 and is tested against them for CREATE, UPDATE, FETCH and FETCHBIN, FLUSH, LIST, STATS, TUNE and SUSPEND/RESUME. It never forks, writes a different `-o` log format, and, as upstream, has no authentication on TCP. Rondi also refuses some configurations upstream allows, such as serving as root without `-B -b`. The [compatibility matrix](https://github.com/kadupulhq/rondi/blob/main/docs/compatibility.md) lists the tested subset and the deliberate differences.
 
 ## Stability
 

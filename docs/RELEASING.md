@@ -4,7 +4,7 @@ The three crates (`rondi`, `rondi-server`, `rondi-cli`) share one version and ar
 
 ## What the release workflow does
 
-[`.github/workflows/release.yml`](../.github/workflows/release.yml) runs when a tag matching `v*` is pushed. It calls the organisation's reusable workflow `kadupulhq/.github/.github/workflows/release.yml`, pinned to commit `4c99d3d`, with `generate-notes: true`. That workflow:
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) runs when a tag matching `v*` is pushed. It calls the organisation's reusable workflow `kadupulhq/.github/.github/workflows/release.yml`, pinned to a full commit SHA, with `generate-notes: true`. That workflow:
 
 1. Checks out the tag and rejects it unless the part after `v` is a Semantic Versioning 2.0.0 version. A version containing `-` (for example `0.2.0-rc.1`) is marked as a prerelease.
 2. Runs `gh release create <tag> --title <tag> --generate-notes`, adding `--prerelease` when needed. The notes are generated from merged pull requests and grouped by the labels in [`.github/release.yml`](../.github/release.yml).
