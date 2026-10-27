@@ -90,8 +90,8 @@ translated pseudocode.
 
 - [`docs/compatibility/`](compatibility/README.md): behavioral
   specifications, one per area. These are being written.
-- docs/provenance-audit.md: an audit of code written before this policy,
-  being written separately. Modules whose documentation says they port
+- [`docs/provenance-audit.md`](provenance-audit.md): an audit of code
+  written before this policy. Modules whose documentation says they port
   RRDtool C are flagged there for review, not endorsed.
 - [`docs/compatibility.md`](compatibility.md) and
   [`docs/COMPATIBILITY_DEFECTS.md`](COMPATIBILITY_DEFECTS.md): the current
