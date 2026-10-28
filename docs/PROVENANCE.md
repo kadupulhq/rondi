@@ -78,7 +78,7 @@ code, using one of these two forms:
 
 ```rust
 // Compatibility: preserve RRDtool behavior for this edge case.
-// Provenance: reference-source-inspection; see docs/compatibility/update.md.
+// Provenance: reference-source-inspection; see docs/compatibility/rpn.md.
 ```
 
 The first line states the behavior. The second says how it was established
