@@ -21,7 +21,7 @@ permissions:
 
 jobs:
   review:
-    uses: kadupulhq/.github/.github/workflows/review.yml@19e36d0bd6a3df6ccf610b1f0622e3bea34c3e4c
+    uses: kadupulhq/.github/.github/workflows/review.yml@f1b6366e6c1a18eafb994e88ada44680b9e1b80e
     with:
       pr_number: ${{ inputs.pr_number || '' }}
     secrets:
