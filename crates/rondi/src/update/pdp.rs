@@ -62,8 +62,14 @@ pub(crate) struct Run {
     pub values: Vec<f64>,
 }
 
+/// The step as signed seconds, clamped to `1..=i64::MAX` so that planning
+/// stays total; every valid file step is unchanged.
+fn step_secs(step: u64) -> i64 {
+    i64::try_from(step).unwrap_or(i64::MAX).max(1)
+}
+
 fn step_start(secs: i64, step: i64) -> i64 {
-    secs - secs.rem_euclid(step)
+    secs.saturating_sub(secs.rem_euclid(step))
 }
 
 fn micros(usec: u64) -> f64 {
@@ -72,21 +78,24 @@ fn micros(usec: u64) -> f64 {
 
 /// Work out the interval and the step boundaries between `last` and `new`.
 pub(crate) fn plan(last: Time, new: Time, step: u64) -> StepPlan {
-    let step_secs = i64::try_from(step).expect("step fits in i64");
+    let step_secs = step_secs(step);
 
     // Provenance: specification (docs/compatibility/update.md UP-14).
-    let interval =
-        (new.secs - last.secs) as f64 + (new.usec as f64 - last.usec as f64) / MICROS_PER_SECOND;
+    let interval = new.secs.saturating_sub(last.secs) as f64
+        + (new.usec as f64 - last.usec as f64) / MICROS_PER_SECOND;
 
     let t0 = step_start(last.secs, step_secs);
     let t1 = step_start(new.secs, step_secs);
-    let n = u64::try_from((t1 - t0) / step_secs).unwrap_or(0);
+    let n = u64::try_from(t1.saturating_sub(t0) / step_secs).unwrap_or(0);
     let fraction_at_start = last.usec > 0;
 
     // Provenance: specification (docs/compatibility/update.md UP-20).
-    let lead1 = (t0 + step_secs - last.secs - i64::from(fraction_at_start)) as f64;
-    let tail = (new.secs - t1) as f64 + micros(new.usec);
-    let w = (t1 - last.secs) as f64 - micros(last.usec);
+    let lead1 = t0
+        .saturating_add(step_secs)
+        .saturating_sub(last.secs)
+        .saturating_sub(i64::from(fraction_at_start)) as f64;
+    let tail = new.secs.saturating_sub(t1) as f64 + micros(new.usec);
+    let w = t1.saturating_sub(last.secs) as f64 - micros(last.usec);
     let aligned_start = last.secs.rem_euclid(step_secs) == 0 && !fraction_at_start;
     let split = n >= 2 && lead1 >= 1.0 && !aligned_start;
 
@@ -137,7 +146,8 @@ pub(crate) fn advance(
     // Provenance: specification (docs/compatibility/update.md UP-24).
     let too_unknown = u.saturating_mul(2) > step;
     let step_f = step as f64;
-    let step_secs = i64::try_from(step).expect("step fits in i64");
+    let step_secs = step_secs(step);
+    let span = plan.t1.saturating_sub(plan.t0);
 
     let (completed, rate) = if plan.split {
         // Provenance: specification (docs/compatibility/update.md UP-22).
@@ -147,7 +157,7 @@ pub(crate) fn advance(
                 let vt = rrd_mul_add(q / plan.lead1, plan.lead1, base);
                 let rem = a - q;
                 let r2 = rem / (plan.interval - plan.lead1);
-                let later_span = (plan.t1 - plan.t0 - step_secs) as f64;
+                let later_span = span.saturating_sub(step_secs) as f64;
                 let rest = (r2 * (plan.w - plan.lead1)) / later_span;
                 (vt, u as f64, rest, Some(r2))
             }
@@ -171,7 +181,7 @@ pub(crate) fn advance(
         let value = if too_unknown || plan.interval > heartbeat as f64 {
             rrd_nan()
         } else {
-            vt / (((plan.t1 - plan.t0) as f64 - u as f64) - e)
+            vt / ((span as f64 - u as f64) - e)
         };
         (Completed::Whole(value), rate)
     };
@@ -206,7 +216,7 @@ pub(crate) fn runs(plan: &StepPlan, step: u64, completed: &[Completed]) -> Vec<R
             Completed::Split { rest, .. } => rest,
             _ => unreachable!("every DS of a split update completes a split"),
         };
-        let second_start = plan.t0 + i64::try_from(step).expect("step fits in i64");
+        let second_start = plan.t0.saturating_add(step_secs(step));
         vec![
             Run {
                 start: plan.t0,
@@ -215,7 +225,7 @@ pub(crate) fn runs(plan: &StepPlan, step: u64, completed: &[Completed]) -> Vec<R
             },
             Run {
                 start: second_start,
-                len: plan.n - 1,
+                len: plan.n.saturating_sub(1),
                 values: collect(rest),
             },
         ]
@@ -388,5 +398,114 @@ mod tests {
         );
         assert_eq!(p.interval, 2.0 + (-300000.0 / 1000000.0));
         assert!(p.fraction_at_start);
+    }
+
+    #[test]
+    fn huge_step_and_extreme_times_do_not_panic() {
+        let extremes = [
+            Time {
+                secs: i64::MIN,
+                usec: 0,
+            },
+            Time {
+                secs: i64::MIN,
+                usec: 999_999,
+            },
+            Time { secs: 0, usec: 0 },
+            Time {
+                secs: i64::MAX,
+                usec: 0,
+            },
+            Time {
+                secs: i64::MAX,
+                usec: 999_999,
+            },
+        ];
+        for step in [0, 1, STEP, u64::MAX] {
+            for last in extremes {
+                for new in extremes {
+                    let p = plan(last, new, step);
+                    for amount in [None, Some(1.0)] {
+                        for start in [state(0, rrd_nan()), state(u64::MAX, 1.0)] {
+                            let mut pdp = start;
+                            let done = advance(&mut pdp, amount, &p, step, u64::MAX);
+                            let mut pdp = start;
+                            advance(&mut pdp, amount, &p, step, 0);
+                            let _ = runs(&p, step, &[done]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1e-10 * expected.abs(),
+            "{actual} is not within 1e-10 of {expected}"
+        );
+    }
+
+    #[test]
+    fn fractional_split_matches_reference() {
+        // Provenance: black-box compatibility test (reviewer replay, two GAUGE sources).
+        let readings: [(Time, [Option<f64>; 2]); 3] = [
+            (
+                Time {
+                    secs: 1_000_000_003,
+                    usec: 500_000,
+                },
+                [Some(7.3), None],
+            ),
+            (
+                Time {
+                    secs: 1_000_000_035,
+                    usec: 250_000,
+                },
+                [Some(3.1), Some(2.9)],
+            ),
+            (
+                Time {
+                    secs: 1_000_000_047,
+                    usec: 750_000,
+                },
+                [None, Some(1.7)],
+            ),
+        ];
+        let mut last = at(1_000_000_000);
+        let mut pdps = [state(0, rrd_nan()); 2];
+        let mut all_runs = Vec::new();
+        for (new, xs) in readings {
+            let p = plan(last, new, STEP);
+            let completed: Vec<Completed> = pdps
+                .iter_mut()
+                .zip(xs)
+                .map(|(pdp, x)| {
+                    let amount = x.map(|x| x * p.interval);
+                    advance(pdp, amount, &p, STEP, HEARTBEAT)
+                })
+                .collect();
+            all_runs.extend(runs(&p, STEP, &completed));
+            last = new;
+        }
+
+        let expected = [
+            (1_000_000_000, 1, [4.415, 2.4857142857]),
+            (1_000_000_010, 2, [3.1775, 2.9725]),
+            (1_000_000_030, 1, [3.1, 2.33]),
+        ];
+        assert_eq!(all_runs.len(), expected.len());
+        for (run, (start, len, values)) in all_runs.iter().zip(expected) {
+            assert_eq!((run.start, run.len), (start, len));
+            assert_eq!(run.values.len(), 2);
+            for (&actual, want) in run.values.iter().zip(values) {
+                assert_close(actual, want);
+            }
+        }
+
+        assert_eq!(pdps[0].unknown_seconds, 7);
+        assert!(pdps[0].value.is_nan());
+        assert_eq!(pdps[1].unknown_seconds, 0);
+        assert_close(pdps[1].value, 13.175);
     }
 }
