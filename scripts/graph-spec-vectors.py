@@ -1665,10 +1665,26 @@ def repeat_cases() -> None:
     run('repeat', 'xport', '-d', 'a', '-d', 'b', '-m', '5')
 
 
+def ruleexport_cases() -> None:
+    """HRULE and VRULE entries of the `<rules>` section (GR-99)."""
+    for rules in [['HRULE:5#ff0000'], ['HRULE:5#ff0000:five'],
+                  ['VDEF:v=x,MAXIMUM', 'HRULE:v#ff0000'],
+                  ['VRULE:1000000300#ff0000'],
+                  ['VDEF:v=x,MAXIMUM', 'VRULE:v#ff0000'],
+                  ['HRULE:-2.5#ff0000', 'VRULE:1000000300#ff0000',
+                   'HRULE:1e3#00ff00']]:
+        for opts in [[], ['--json']]:
+            run('ruleexport', 'xport', *RANGE, *opts, DEFX, 'XPORT:x:xx',
+                *rules)
+        for fmt in ['XML', 'JSON']:
+            run('ruleexport', 'graph', '-', *RANGE, DEFX, 'LINE1:x#ff0000:xx',
+                *rules, '-a', fmt)
+
+
 # Groups added after the first capture; --add appends them to the table
 # without regenerating the others.
 LATER_GROUPS = ['order', 'scan', 'lazy', 'jsontime', 'xgridtime', 'duration',
-                'repeat']
+                'repeat', 'ruleexport']
 
 
 def all_cases() -> list[dict]:
@@ -1707,6 +1723,7 @@ def all_cases() -> list[dict]:
     xgridtime_cases()
     duration_cases()
     repeat_cases()
+    ruleexport_cases()
     counters: dict[str, int] = {}
     for entry in CASES:
         n = counters.get(entry['group'], 0) + 1

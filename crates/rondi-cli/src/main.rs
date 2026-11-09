@@ -836,7 +836,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     let graph_colors = graph_colors(&options.colors);
     let grid_dash = vec![options.grid_dash.0, options.grid_dash.1];
     let border_width = u32::try_from(options.border).unwrap_or(0);
-    let (mut im, _) = prepare_graph_image(GraphImageRequest {
+    let mut im = prepare_graph_image(GraphImageRequest {
         start: options.start,
         end: options.end,
         step: options.step,
@@ -1238,7 +1238,7 @@ fn graph_colors(colors: &[(graph_args::ColorTag, [u8; 4])]) -> GraphColors {
     palette
 }
 
-/// Hands the options the legacy graph engine reads to it.
+/// Hands the command-line options the graph module reads to the image.
 fn configure_graph_image(im: &mut rondi::graph::Graph, options: &graph_args::GraphArgs) {
     im.allow_missing_ds = options.missing_as_nan;
 }
@@ -1545,11 +1545,10 @@ struct GraphImageRequest<'a> {
 }
 
 /// The image step and the graph element parser, after the option parser checked
-/// the time range. The flag reports a parser that stopped
-/// without an error, after which RRDtool keeps the elements read so far.
+/// the time range.
 fn prepare_graph_image(
     request: GraphImageRequest<'_>,
-) -> Result<(rondi::graph::Graph, bool), Box<dyn std::error::Error>> {
+) -> Result<rondi::graph::Graph, Box<dyn std::error::Error>> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
@@ -1569,7 +1568,7 @@ fn prepare_graph_image(
     // so it precedes an error in a later element.
     eprint!("{}", std::mem::take(&mut im.debug));
     match parsed {
-        Ok(()) => Ok((im, false)),
+        Ok(()) => Ok(im),
         Err(error) => Err(error.to_string().into()),
     }
 }
@@ -1672,7 +1671,7 @@ fn render_xport(args: &[String]) -> Result<(String, Option<String>), Box<dyn std
         .as_secs() as i64;
     let xport = graph_args::parse_xport(args, now)?;
     let (json, show_time, enum_ds) = (xport.json, xport.show_time, xport.enum_ds);
-    let (mut im, _) = prepare_graph_image(GraphImageRequest {
+    let mut im = prepare_graph_image(GraphImageRequest {
         start: xport.start,
         end: xport.end,
         step: xport.step,
@@ -1749,16 +1748,19 @@ fn graph_render_input(
             dash_offset: element.dash_offset,
         });
     }
-    let used: Vec<usize> = sources.iter().filter_map(|(_, vidx, _)| *vidx).collect();
+    let used: Vec<usize> = sources
+        .iter()
+        .filter_map(|(_, source, _)| *source)
+        .collect();
     let grid = im.grid(&used)?;
     let rows = (0..grid.rows)
         .map(|row| {
             let now = grid.time(row);
             sources
                 .iter()
-                .map(|(_, vidx, yrule)| {
-                    let value = match vidx {
-                        Some(vidx) => im.value_at(*vidx, now),
+                .map(|(_, source, yrule)| {
+                    let value = match source {
+                        Some(source) => im.value_at(*source, now),
                         None => *yrule,
                     };
                     (!value.is_nan()).then_some(value)
@@ -2858,13 +2860,13 @@ fn format_xport_addprints(
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs() as i64);
-    let mut tmvdef = local_tm(now);
+    let mut vdef_time = local_tm(now);
     let (mut prints, mut gprints, mut rules) = (String::new(), String::new(), String::new());
     let mut si_scale = rondi::format_value::UnitScale::new(si_base);
     // Compatibility: a VDEF without a time repeats the text the previous
     // time-formatted entry printed.
     // Provenance: black-box compatibility test (graphv print keys).
-    let mut dbuf = String::new();
+    let mut last_text = String::new();
     let entry = |tag: &str, text: &str| {
         if json {
             format!(",\n        {{ \"{tag}\": \"{text}\" }}")
@@ -2876,23 +2878,23 @@ fn format_xport_addprints(
         let element = &im.elements[i];
         match element.kind {
             Kind::Print | Kind::Gprint => {
-                let source = element.source.map(|vidx| &im.elements[vidx]);
+                let source = element.source.map(|index| &im.elements[index]);
                 if let Some(source) = source.filter(|source| source.kind == Kind::Vdef) {
-                    tmvdef = local_tm(source.vdef.time.unwrap_or(0));
+                    vdef_time = local_tm(source.vdef.time.unwrap_or(0));
                 }
                 let never = source.is_some_and(|source| source.vdef.time.is_none());
-                let printval = im.print_value(i);
+                let value = im.print_value(i);
                 let element = &im.elements[i];
                 if element.strftime {
                     if !never {
-                        dbuf = print_format::strftime_text(&element.format, &tmvdef, 1024);
+                        last_text = print_format::strftime_text(&element.format, &vdef_time, 1024);
                     }
                 } else {
                     // The format is validated before `%S` is rewritten.
                     let original = element.format.clone();
                     let mut format = original.clone();
-                    match print_format::xport_print_text(printval, &mut format, &mut si_scale) {
-                        Ok(text) => dbuf = text,
+                    match print_format::xport_print_text(value, &mut format, &mut si_scale) {
+                        Ok(text) => last_text = text,
                         Err(_) => {
                             return Err(format!("bad format for PRINT in \"{original}'"));
                         }
@@ -2900,9 +2902,9 @@ fn format_xport_addprints(
                     im.elements[i].format = format;
                 }
                 let text = if json {
-                    escape_json(&dbuf)
+                    escape_json(&last_text)
                 } else {
-                    dbuf.clone()
+                    last_text.clone()
                 };
                 let (tag, buffer) = if im.elements[i].kind == Kind::Print {
                     ("print", &mut prints)
@@ -2940,10 +2942,12 @@ fn format_xport_addprints(
                 };
                 gprints.push_str(&entry("align", align));
             }
-            Kind::Hrule => rules.push_str(&entry("hrule", &format_xport_value(element.vdef.value))),
-            Kind::Vrule => {
-                rules.push_str(&entry("vrule", &element.vdef.time.unwrap_or(0).to_string()))
-            }
+            // Compatibility: the rules section lists a horizontal rule as a
+            // zero in the value format and a vertical rule as the integer 0,
+            // whatever position the rule has.
+            // Provenance: black-box compatibility test (graph-ruleexport-001 to -024).
+            Kind::Hrule => rules.push_str(&entry("hrule", &format_xport_value(0.0))),
+            Kind::Vrule => rules.push_str(&entry("vrule", "0")),
             _ => {}
         }
     }

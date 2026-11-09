@@ -154,6 +154,7 @@ directory as `<dir>`.
 | `lazy` | `--lazy` against files the previous step wrote (GR-84) |
 | `jsontime` | `--add-jsontime` with an output file (GR-87) |
 | `xgridtime` | the `--x-grid` label format in data exports (GR-86) |
+| `ruleexport` | `HRULE` and `VRULE` in the `<rules>` section of XML and JSON exports (GR-99) |
 | `duration` | a value format under the `duration` axis formatter (GR-25) |
 | `repeat` | options that may be given once, `--graph-type` and `-I` (GR-18, GR-19) |
 
@@ -1484,6 +1485,12 @@ exported), using the legend as column name (column order: GR-94):
   follows (`xgridtime-001` to `-008`, `-010` to `-012`). `xport` has no
   `--x-grid` and prints numbers (`xgridtime-009`).
 
+**GR-99** (bb; compat). The `<rules>` section of the XML and JSON
+exports of GR-86 and GR-89 lists each `HRULE` and `VRULE` in element
+order. An `HRULE` prints as `0.0000000000e+00` and a `VRULE` as `0`,
+whatever position, VDEF or legend the rule has (`ruleexport-001` to
+`-024`). The section is left out when there is no rule.
+
 **GR-87** (doc, bb; compat). `--add-jsontime` makes `graph` and `graphv`
 export the data a second time, in the JSONTIME format of GR-86, once the
 graph or data export finished:
@@ -1707,5 +1714,6 @@ provenance.
     number (`5`, `1e3`, `+5`, `inf`; for some the quoted text is not
     empty). Rondi gives that error for numbers written with digits, a `-`
     sign and a decimal point only, and exports nothing for the other
-    spellings, which `graph_xport_parity.rs` pins. Which behavior the
-    test should pin is open.
+    spellings, which `graph_xport_parity.rs` pins. For `XPORT:1e3`,
+    `XPORT:+5`, `XPORT:inf` and `XPORT:nan` the reference exits 1 and Rondi
+    exits 0 with output. Which behavior the test should pin is open.
