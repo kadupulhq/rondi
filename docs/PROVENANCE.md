@@ -86,6 +86,19 @@ and, for source inspection, points to the specification. Do not include GPL
 source excerpts, C function bodies, C line numbers, copied comments, or
 translated pseudocode.
 
+## Checks and records
+
+- `scripts/check-provenance.py` runs in CI. It fails on comments that name a C
+  source file or cite a C line number, and on `Provenance:` comments that do
+  not name an accepted source (`black-box ...`,
+  `reference-source-inspection ...` with a `docs/` reference, `specification
+  ...`, or a manual page such as `rrdcached(1)`). Pre-policy modules still
+  awaiting replacement are listed in its `LEGACY` set and only warn; remove an
+  entry when the module is replaced.
+- Each clean-room workstream adds a record to
+  [`docs/provenance/`](provenance/README.md) saying who worked in the
+  investigation and implementation contexts and what each one read.
+
 ## Related documents
 
 - [`docs/compatibility/`](compatibility/README.md): behavioral
