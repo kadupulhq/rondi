@@ -523,8 +523,10 @@ floating point values use `%.10e` (`5.0000000000e-01`) except that NaN is
 `NaN` and infinities are `inf` / `-inf`. `filename` is the path as given.
 
 **CLI-69** (bb; must). `updatev` prints `return_value = 0` and one
-`[<time>]RRA[<cf>][<rows>]DS[<name>] = <value>` line per consolidated
-value written, with `%.10e` values.
+`[<time>]RRA[<cf>][<pdp-per-row>]DS[<name>] = <value>` line per consolidated
+value written, with `%.10e` values. The bracket after the CF is the
+archive's PDPs per row, not its row count. `update.md` UP-31 and UP-32
+give the full format, order and times.
 
 **CLI-70** (doc, bb; must). `list <dir>` prints, one per line and without
 a path prefix, the name of every entry of `<dir>` other than `.` and `..`
