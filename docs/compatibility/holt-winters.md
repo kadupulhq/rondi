@@ -154,7 +154,11 @@ SEASONAL and DEVSEASONAL rows are smoothed:
   smoothed at all. This includes *f* = 0, the value an implicit definition
   (`HWPREDICT` with no dependent archives named) stores, and the
   explicit-definition default 0.05 for *P* < 40.
-- An archive whose rows contain an unknown is left unchanged.
+- When the rows of an archive contain an unknown for any DS, that archive
+  is left unchanged for every DS (the SEASONAL and DEVSEASONAL archives
+  are judged separately). So one DS still in its first season, or reset
+  by `tune --aberrant-reset`, holds back smoothing for all the others, as
+  `rrdtune(1)` says.
 - The smoothed value of row *i* is a running sum divided by 2*h* + 1: the
   sum for row 0 adds rows −*h* … *h* in that order; for each next row *i*
   it subtracts row *i* − *h* − 1 and then adds row *i* + *h*. The sums
