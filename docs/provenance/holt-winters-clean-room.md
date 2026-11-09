@@ -20,10 +20,17 @@
   arm64 and in the Linux aarch64 and x86_64 oracle containers, reading the
   resulting files' raw bytes, `info` and `dump`. It read no RRDtool C
   source. Rondi has no Holt-Winters update code to read.
-- Produced: `docs/compatibility/holt-winters.md` HW-1, HW-2 and HW-10 to
-  HW-21, the `hw` cases in `scripts/gen-create-resize-vectors.py`,
-  `crates/rondi-cli/tests/data/hw/` (76 cases, x86_64 overrides) and
+- Produced: `docs/compatibility/holt-winters.md` HW-1, HW-2, HW-10 to
+  HW-21 and HW-30 to HW-36, the `hw` cases in
+  `scripts/gen-create-resize-vectors.py`,
+  `crates/rondi-cli/tests/data/hw/` (181 cases, x86_64 overrides) and
   `crates/rondi-cli/tests/hw_spec_vectors.rs`.
+
+- Also changed: the `--aberrant-reset` branch of `tune` in
+  `crates/rondi-cli/src/main.rs`, which reported success on files with
+  Holt-Winters archives without resetting anything. It now refuses them
+  (`tune-modify.md` TM-60, `holt-winters.md` HW-36). The change implements
+  no Holt-Winters behavior.
 
 ## Implementation context
 

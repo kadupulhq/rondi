@@ -1,8 +1,9 @@
 # Holt-Winters archives
 
-Status: draft. Stage 1 (create-time state) and stage 2 (`update`,
-sections 2 and 3) are written; stage 3 (`tune`) is not started. Until it is
-done this file is not a complete specification.
+Status: complete for create-time state (section 1), `update` (sections 2
+and 3) and `tune` (section 4). `info`, `dump`, `fetch` and `restore` of
+these archives are covered by the vectors and by the specifications of
+those commands, not restated here.
 
 This specification describes what RRDtool 1.11.0 does with the Holt-Winters
 archives `HWPREDICT`, `MHWPREDICT`, `SEASONAL`, `DEVSEASONAL`, `DEVPREDICT`
@@ -235,6 +236,98 @@ not:
 (vectors `053`, `054`, `072` to `075`; the 43-PDP gaps and the runs before
 any state in the recordings described under "Vectors").
 
+## 4. `tune`
+
+`rrdtune(1)` lists eleven Holt-Winters options. They are header options in
+the sense of `tune-modify.md` TM-4: they run in argument order, before any
+structure change, and an option that fails stops the command with exit
+status 1 after the options before it have been written (`cli.md` CLI-31
+covers a missing argument). Error texts below are the message after
+`ERROR: `.
+
+**HW-30** (black-box; must). Each option writes one parameter
+(`restore.md` RS-53 numbering) of the archive of its type, and nothing
+else unless stated:
+
+| Option | Archive | Parameter |
+|---|---|---|
+| `--alpha`, `-x` | `HWPREDICT` or `MHWPREDICT` | 1 (`hw_alpha`) |
+| `--beta`, `-y` | `HWPREDICT` or `MHWPREDICT` | 2 (`hw_beta`) |
+| `--gamma`, `-z` | `SEASONAL` | 1 (`seasonal_gamma`) |
+| `--gamma-deviation`, `-v` | `DEVSEASONAL` | 1 (`seasonal_gamma`) |
+| `--smoothing-window`, `-s` | `SEASONAL` | 2 (`smoothing_window`) |
+| `--smoothing-window-deviation`, `-S` | `DEVSEASONAL` | 2 (`smoothing_window`) |
+| `--deltapos`, `-p` | `FAILURES` | 1 (`delta_pos`) |
+| `--deltaneg`, `-n` | `FAILURES` | 2 (`delta_neg`) |
+| `--window-length`, `-w` | `FAILURES` | 4 (`window_len`, integer) |
+| `--failure-threshold`, `-f` | `FAILURES` | 5 (`failure_threshold`, integer) |
+
+`--window-length` and `--failure-threshold` also clear the failure history
+of every DS (HW-14) to zero bytes, even when the value is unchanged; the
+other options leave it (vectors `076`, `085`, `094`, `103`, `112` to
+`114`, `118` to `120`, `124`, `125`, `131`, `132`, `138`, `139`, `142`,
+`144` to `146`, `149`, `151` to `155`, `163`, `176`; history: `172` to
+`174`).
+
+**HW-31** (black-box; must). The values of `-x`, `-y`, `-z` and `-v` are
+read as the longest leading decimal number, ignoring leading blanks and
+trailing text (`0.5x` is 0.5). No number at all fails with
+`Unable to parse Holt-Winters parameter`. A number not strictly between
+0 and 1 fails with `Holt-Winters parameter must be between 0 and 1`; this
+includes `inf`. `nan` passes the check and is stored as a NaN whose sign
+is the opposite of the platform's own (`0xfff8000000000000` on arm64 and
+aarch64, `0x7ff8000000000000` on x86_64; defect, reproduce). `-s` and `-S`
+read the same way but accept 0 and 1 (vectors `077` to `084`, `086` to
+`093`, `095` to `102`, `104` to `111`, `115` to `117`, `121` to `123`).
+
+**HW-32** (black-box; must, defect). `-p` and `-n` read a decimal number.
+Trailing text after a number fails with
+`Unable to parse parameter in set_deltaarg`; a number below 0.1 fails with
+`Parameter specified is too small` (checked first, so `0.05x` reports
+that). A value with no number at all (`x`) is accepted and stores 0.0
+(defect, reproduce) (vectors `124` to `137`).
+
+**HW-33** (black-box; must). `-w` and `-f` read the leading integer as C
+`atoi` does (`3.7` is 3, `x` is 0). A value outside 1 to 28 fails with
+`Parameter must be between 1 and 28`. Neither is checked against the
+other, so the threshold may exceed the window (vectors `138` to `151`,
+`155`).
+
+**HW-34** (black-box; must). After its value passes, an option whose
+archive is missing fails: `-x`, `-y`, `-z`, `-v`, `-s` and `-S` with
+`Holt-Winters RRA does not exist in this RRD`, `-p`, `-n`, `-w` and `-f`
+with `Failures RRA does not exist in this RRD`. A file with only some
+Holt-Winters archives fails for the options of the missing ones
+(`--gamma-deviation` on a file created with `HWPREDICT` and an explicit
+`SEASONAL` only). `-s` and `-S` raise the file's version to `0004` before
+looking for the archive, so they leave it changed even when they fail
+(vectors `165`, `166`, `168`, `169`, `177` to `179`; `170` shows that an
+implicit definition has all the archives).
+
+**HW-35** (black-box; must). `--aberrant-reset` (`-b`) names a DS. An
+empty name fails with `invalid argument for aberrant-reset` and an unknown
+one with `unknown data source name '<name>'`. For the named DS only it
+sets to unknown the prediction archive's intercept, last intercept, slope
+and last slope (CDP slots 2 to 5), the SEASONAL and DEVSEASONAL CDP slots
+2 and 3 and every SEASONAL and DEVSEASONAL row, and clears its failure
+history. It does not change the NaN counts, the season counters, the
+prediction, DEVPREDICT or FAILURES rows, or any other DS. Unknowns are the
+platform's NaN (`create.md` CR-74). A file without Holt-Winters archives is
+left unchanged with exit status 0. Each `-b` resets its DS, so `-b x -b y`
+resets both. Afterwards the reset DS starts again from HW-12 case 1, and
+its unknown rows hold back smoothing for every DS until they are filled
+(HW-18) (vectors `156` to `160`, `175`; `167` and `171` change nothing,
+the second because a fresh file has nothing to reset; `180` updates a file
+whose first DS was reset).
+
+**HW-36** (black-box; should). Rondi does not yet implement these options
+on files with Holt-Winters archives (`tune-modify.md` TM-60). Until it
+does it refuses them with an error and leaves the file unchanged; in
+particular `--aberrant-reset` on such a file is refused rather than
+accepted without effect. The value checks that fail before any archive
+is read (HW-31 to HW-33) and the effects on files without Holt-Winters
+archives already match (vectors `164` to `167`).
+
 ## Open questions
 
 - Dependency indexes that name an archive of the wrong type (for example
@@ -265,7 +358,8 @@ matches macOS arm64 in every case. The inputs are fresh files with each
 Holt-Winters archive type and smoothing window, and one file that has
 already been updated. The cases read them (`info`, `dump`, `fetch` of each
 archive) and update them with seasonal, spiking, gapped, irregular,
-multi-source, failure-bound, smoothing and run series.
+multi-source, failure-bound, smoothing and run series, and `tune` them
+with every option, valid and invalid.
 
 Sections 2 and 3 were checked with a black-box model, a script outside the
 repository written from these rules and `update.md` UP-10 and UP-19 to
@@ -281,6 +375,11 @@ exceptions explained elsewhere: the DEVPREDICT and FAILURES rows of the
 The model also matches 37 recordings made one `update` command per
 argument (27 on macOS arm64, 10 on Linux x86_64), of up to 60 updates,
 with one and two data sources, gaps of up to 43 PDPs and runs before any
-state exists. Until Rondi
+state exists, and case `180` (two DSs after a reset) when given the PDP
+values RRDtool converts from its readings (`restore.md` RS-38's digit loop
+is not correctly rounded, so a few three-decimal readings differ from a
+correctly rounded parse in the last bit). Every `tune` case's
+status, error text and changed fields were checked against section 4,
+and the probes behind it were run on all three builds. Until Rondi
 implements these archives, the cases that read or write their state are
 expected to be refused; the `fetch` cases already match.

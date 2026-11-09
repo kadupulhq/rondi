@@ -333,6 +333,38 @@ def build_inputs(rrdtool, tmp):
     hw("hwtie", *explicit("HWPREDICT", 4, 0.5, 0.5, 0.5, 0, "RRA:FAILURES:60:1:1:3"))
     hw("hwsm10", *explicit("HWPREDICT", 10, 0.37, 0.13, 0.21, 0.3))
     hw("mhwsm10", *explicit("MHWPREDICT", 10, 0.37, 0.13, 0.21, 0.4))
+    # Stage 3 inputs (holt-winters.md section 4): two sources with state,
+    # the same file after a reset of one source and more updates, and a
+    # file without Holt-Winters archives.
+    two = ["DS:x:GAUGE:1000:U:U", "DS:y:GAUGE:1000:U:U"]
+    tune_defs = [
+        "RRA:AVERAGE:0.5:1:10",
+        "RRA:HWPREDICT:40:0.37:0.13:6:3",
+        "RRA:SEASONAL:6:0.21:2:smoothing-window=0.5",
+        "RRA:DEVSEASONAL:6:0.29:2:smoothing-window=0.5",
+        "RRA:DEVPREDICT:40:4",
+        "RRA:FAILURES:40:3:5:4",
+    ]
+
+    hw("hwtune", *tune_defs, ds=two, updates=[hw_pair(i) for i in range(20)])
+    make(
+        "hw",
+        "hwreset",
+        [
+            cr("-b", "1000000000", "-s", "10", *two, *tune_defs),
+            up([hw_pair(i) for i in range(20)]),
+            ["tune", "in.rrd", "--aberrant-reset", "x"],
+        ],
+    )
+    hw("hwnone", "RRA:AVERAGE:0.5:1:10", updates=wave(6))
+    spikes = [f"{1000000010 + 10 * i}:500:300" for i in range(20, 23)]
+    hw("hwfail", *tune_defs, ds=two, updates=[hw_pair(i) for i in range(20)] + spikes)
+    hw(
+        "hwpart",
+        "RRA:HWPREDICT:20:0.37:0.13:4:2",
+        "RRA:SEASONAL:4:0.21:1",
+        updates=wave(6),
+    )
     hw(
         "hwruns",
         *explicit("HWPREDICT", 5, 0.37, 0.13, 0.21, 0),
@@ -352,6 +384,13 @@ def build_inputs(rrdtool, tmp):
 #   divergent    a documented divergence (note names it); Rondi still differs
 #   clean-error  RRDtool crashes or hangs; Rondi fails with ERROR: instead
 #   undefined    RRDtool is nondeterministic; Rondi exits 0 or 1
+
+def hw_pair(i):
+    """A reading for the two-source Holt-Winters inputs, step i."""
+    x = 50 + 20 * (i % 6 == 1) + i * 0.37 + (i * 7 % 5) / 3
+    y = 30 + (i * 3 % 7) + 5 * (i % 6 == 4)
+    return f"{1000000010 + 10 * i}:{x:.3f}:{y}"
+
 
 def create_cases():
     c = []
@@ -961,6 +1000,68 @@ def hw_cases():
         for v in ("77.5", "U"):
             arg = f"{1000000150 + 10 * k}:{v}"
             add("update", "hwruns.rrd", *base, arg, inputs=["hwruns"])
+
+    # Stage 3: tune options, their checks and failures.
+    def tune(name, *args, **kwargs):
+        add("tune", f"{name}.rrd", *args, inputs=[name], **kwargs)
+
+    for opt in ("--alpha", "--beta", "--gamma", "--gamma-deviation"):
+        for v in ("0.5", "0", "1", "1.5", "0.999999", "0.5x", "x", "nan", "inf"):
+            tune("hwtune", opt, v)
+    for opt in ("--smoothing-window", "--smoothing-window-deviation"):
+        for v in ("0", "1", "0.25", "1.5", "-0.5", "x"):
+            tune("hwtune", opt, v)
+    for opt in ("--deltapos", "--deltaneg"):
+        for v in ("3.5", "0.1", "0.05", "0", "-1", "x", "1x"):
+            tune("hwtune", opt, v)
+    for opt in ("--window-length", "--failure-threshold"):
+        for v in ("1", "28", "0", "29", "3.7", "x", "9"):
+            tune("hwtune", opt, v)
+    for args in (
+        ["-x", "0.5"],
+        ["-p", "3"],
+        ["--failure-threshold", "3"],
+        ["--failure-threshold", "9", "--window-length", "9"],
+        ["--aberrant-reset", "x"],
+        ["--aberrant-reset", "y"],
+        ["-b", "x", "-b", "y"],
+        ["--aberrant-reset", "zz"],
+        ["--aberrant-reset", ""],
+        ["--alpha", "0.5", "--beta", "2"],
+        ["--window-length", "50", "--alpha", "0.5"],
+        ["--alpha", "0.5", "--alpha", "0.25"],
+    ):
+        tune("hwtune", *args)
+    # The range check fails before any archive is looked at, so Rondi
+    # already matches: the heartbeat is written, then the error.
+    tune("hwtune", "-h", "x:900", "--gamma", "2", expect="same", note="-")
+    for args in (["--alpha", "0.5"], ["-p", "3"], ["--aberrant-reset", "x"]):
+        tune("hwnone", *args, expect="same", note="-")
+    for args in (["-s", "0.5"], ["-S", "0.5"]):
+        tune("hwnone", *args)
+    tune("hwimp", "--gamma-deviation", "0.5")
+    tune("mhwimp", "--aberrant-reset", "x")
+    # A file with a failure history: setting the window or threshold, even
+    # to its current value, clears it; other options and a reset of one
+    # source keep the rest.
+    for args in (
+        ["--failure-threshold", "3"],
+        ["--window-length", "5"],
+        ["--deltapos", "3"],
+        ["--aberrant-reset", "x"],
+    ):
+        tune("hwfail", *args)
+    # Only HWPREDICT and SEASONAL: the DEVSEASONAL and FAILURES options fail.
+    for args in (
+        ["--gamma", "0.5"],
+        ["--gamma-deviation", "0.5"],
+        ["-S", "0.5"],
+        ["-p", "3"],
+    ):
+        tune("hwpart", *args)
+    # A reset source holds back smoothing for the other source.
+    later = [hw_pair(i) for i in range(20, 45)]
+    add("update", "hwreset.rrd", *later, inputs=["hwreset"])
     return c
 
 
