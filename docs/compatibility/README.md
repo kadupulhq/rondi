@@ -9,6 +9,7 @@ The specifications are being written.
 | RPN expressions in CDEF, VDEF and xport | [rpn.md](rpn.md) | `crates/rondi-cli/tests/rpn_spec_vectors.rs` |
 | `rrdtool tune` data source and archive changes | [tune-modify.md](tune-modify.md) | `crates/rondi-cli/tests/tune_modify_spec.rs` |
 | `rrdtool restore` from an XML dump | [restore.md](restore.md) | `crates/rondi-cli/tests/restore_spec_vectors.rs` |
+| Decimal number conversion and its readers | [numbers.md](numbers.md) | `crates/rondi-cli/tests/numbers_spec_vectors.rs` |
 | `rrdtool create` definitions, layout and output file | [create.md](create.md) | `crates/rondi-cli/tests/create_spec_vectors.rs` |
 | `rrdtool resize` row changes and `resize.rrd` | [resize.md](resize.md) | `crates/rondi-cli/tests/resize_spec_vectors.rs` |
 | `COMPUTE` data sources: grammar, storage, update, info/dump and restore | [compute.md](compute.md) | `crates/rondi-cli/tests/compute_spec_vectors.rs`, `create_spec_vectors.rs`, `restore_spec_vectors.rs` |
