@@ -26,7 +26,7 @@ pub(crate) fn list_local(recursive: bool, path: &OsStr) -> Result<Vec<u8>, libc:
         }
         return list_pattern(path);
     }
-    if is_rrd_name(path) {
+    if is_list_rrd_name(path) {
         return list_rrd_path(path);
     }
     let mut output = Vec::new();
@@ -40,7 +40,7 @@ pub(crate) fn list_local(recursive: bool, path: &OsStr) -> Result<Vec<u8>, libc:
             let Ok(metadata) = std::fs::metadata(child(path, name)) else {
                 continue;
             };
-            if metadata.is_dir() || is_rrd_name(name) {
+            if metadata.is_dir() || is_list_rrd_name(name) {
                 push_line(&mut output, name);
             }
         }
@@ -56,7 +56,7 @@ pub(crate) fn list_local(recursive: bool, path: &OsStr) -> Result<Vec<u8>, libc:
 // Compatibility: only the first occurrence of `.rrd` counts, so `a.rrd.rrd`
 // is not an RRD name.
 // Provenance: black-box compatibility test (cli_list_and_aliases list_matches_reference, CLI-79).
-pub(crate) fn is_rrd_name(name: &[u8]) -> bool {
+fn is_list_rrd_name(name: &[u8]) -> bool {
     name.windows(SUFFIX.len())
         .position(|window| window == SUFFIX)
         .is_some_and(|at| at + SUFFIX.len() == name.len())
@@ -83,7 +83,7 @@ fn list_tree(base: &[u8], relative: &[u8], entries: std::fs::ReadDir, output: &m
             if let Ok(inner) = std::fs::read_dir(&full) {
                 list_tree(full.as_os_str().as_bytes(), &shown, inner, output);
             }
-        } else if is_rrd_name(name) {
+        } else if is_list_rrd_name(name) {
             push_line(output, &shown);
         }
     }
@@ -164,6 +164,7 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 fn errno(error: std::io::Error) -> libc::c_int {
+    // Unreachable from argv: arguments cannot carry NUL, so errors always have an OS code.
     error.raw_os_error().unwrap_or(libc::EINVAL)
 }
 
@@ -171,10 +172,7 @@ fn errno(error: std::io::Error) -> libc::c_int {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::symlink;
-    use std::path::Path;
 
     fn mkfifo(path: &Path) {
         let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
@@ -208,7 +206,7 @@ mod tests {
             "c.Rrd.rrd",
             "a rrd.rrd",
         ] {
-            assert!(is_rrd_name(yes.as_bytes()), "{yes}");
+            assert!(is_list_rrd_name(yes.as_bytes()), "{yes}");
         }
         for no in [
             "a.rrd.rrd",
@@ -219,7 +217,7 @@ mod tests {
             "rrd",
             "",
         ] {
-            assert!(!is_rrd_name(no.as_bytes()), "{no}");
+            assert!(!is_list_rrd_name(no.as_bytes()), "{no}");
         }
     }
 

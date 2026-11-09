@@ -153,6 +153,7 @@ fn list_matches_reference() {
         (&["list", "d2/*.rrd"], &[]),
         (&["list", "--recursive", "d2/*.rrd"], &[]),
         (&["list", "d2/*.none"], &[]),
+        (&["list", "d2/dangling.rrd"], &[]),
         (&["list", "d2"], &[("RRDCACHED_ADDRESS", "")]),
         (&["list", "--daemon", "", "d2"], &[]),
         (&["list", "."], &[]),
