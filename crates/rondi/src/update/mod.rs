@@ -13,13 +13,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use amount::{DsKind, amount, stored_text};
 use arguments::{Argument, ArgumentError, parse_argument, template_order};
-use consolidate::{ArchiveKind, RowWrite, consolidate_all};
+use consolidate::{ArchiveKind, RowRange, consolidate_all};
 use pdp::{Completed, PdpState, StepPlan, Time, advance, plan, runs};
 
 use crate::rpn::ComputeProgram;
 use crate::rrd_binary::{
-    CDP_PREP_LEN, DS_DEF_LEN, PDP_PREP_LEN, RRA_DEF_LEN, RRA_PTR_LEN, RrdFileLock, RrdInfo,
-    STAT_HEAD_LEN, VALUE_LEN, divides_by_zero, open_rrd_write, read_info, rrd_nan, rrd_strerror,
+    CDP_PREP_LEN, DS_DEF_LEN, PDP_PREP_LEN, RRA_DEF_LEN, RRA_PTR_LEN, RrdArchiveInfo, RrdFileLock,
+    RrdInfo, STAT_HEAD_LEN, VALUE_LEN, divides_by_zero, open_rrd_write, read_info, rrd_nan,
+    rrd_strerror,
 };
 use crate::storage::StoreError;
 
@@ -70,7 +71,7 @@ pub fn update_rrd_text_file(
         arguments,
     };
     let mut summaries = Vec::new();
-    let result = apply(file, path, &input, skip_past_updates, &mut summaries);
+    let result = apply(file, path, &input, skip_past_updates, Some(&mut summaries));
     (summaries, result)
 }
 
@@ -98,7 +99,7 @@ pub fn update_rrd_raw_batch_file(
         path,
         &Input::Raw(updates),
         skip_past_updates,
-        &mut summaries,
+        Some(&mut summaries),
     )?;
     Ok(summaries)
 }
@@ -126,6 +127,7 @@ pub fn update_rrd_file_precise(
         timestamp,
         timestamp_usec,
         &[Some(reading.as_str())],
+        false,
     )
     .map(drop)
 }
@@ -136,7 +138,9 @@ pub fn update_rrd_values(
     timestamp: i64,
     values: &[Option<f64>],
 ) -> Result<(), StoreError> {
-    update_rrd_values_verbose(path, timestamp, values).map(drop)
+    let readings: Vec<String> = values.iter().copied().map(numeric_reading).collect();
+    let readings: Vec<Option<&str>> = readings.iter().map(|text| Some(text.as_str())).collect();
+    run_raw(path.as_ref(), timestamp, 0, &readings, false).map(drop)
 }
 
 /// Updates every data source with one reading each.
@@ -145,7 +149,7 @@ pub fn update_rrd_raw_values(
     timestamp: i64,
     values: &[Option<&str>],
 ) -> Result<(), StoreError> {
-    run_raw(path.as_ref(), timestamp, 0, values).map(drop)
+    run_raw(path.as_ref(), timestamp, 0, values, false).map(drop)
 }
 
 /// [`update_rrd_raw_values`] at a time with microseconds.
@@ -155,7 +159,7 @@ pub fn update_rrd_raw_values_precise(
     timestamp_usec: u64,
     values: &[Option<&str>],
 ) -> Result<(), StoreError> {
-    run_raw(path.as_ref(), timestamp, timestamp_usec, values).map(drop)
+    run_raw(path.as_ref(), timestamp, timestamp_usec, values, false).map(drop)
 }
 
 /// [`update_rrd_values`], returning the rows written.
@@ -166,7 +170,7 @@ pub fn update_rrd_values_verbose(
 ) -> Result<Vec<RrdUpdateSummary>, StoreError> {
     let readings: Vec<String> = values.iter().copied().map(numeric_reading).collect();
     let readings: Vec<Option<&str>> = readings.iter().map(|text| Some(text.as_str())).collect();
-    run_raw(path.as_ref(), timestamp, 0, &readings)
+    run_raw(path.as_ref(), timestamp, 0, &readings, true)
 }
 
 /// [`update_rrd_raw_values`], returning the rows written.
@@ -175,7 +179,7 @@ pub fn update_rrd_raw_values_verbose(
     timestamp: i64,
     values: &[Option<&str>],
 ) -> Result<Vec<RrdUpdateSummary>, StoreError> {
-    run_raw(path.as_ref(), timestamp, 0, values)
+    run_raw(path.as_ref(), timestamp, 0, values, true)
 }
 
 /// [`update_rrd_raw_values_precise`], returning the rows written.
@@ -185,21 +189,32 @@ pub fn update_rrd_raw_values_precise_verbose(
     timestamp_usec: u64,
     values: &[Option<&str>],
 ) -> Result<Vec<RrdUpdateSummary>, StoreError> {
-    run_raw(path.as_ref(), timestamp, timestamp_usec, values)
+    run_raw(path.as_ref(), timestamp, timestamp_usec, values, true)
 }
 
+/// Applies one raw update. Only a `verbose` call builds the summaries; the
+/// others return an empty list.
 fn run_raw(
     path: &Path,
     timestamp: i64,
     timestamp_usec: u64,
     values: &[Option<&str>],
+    verbose: bool,
 ) -> Result<Vec<RrdUpdateSummary>, StoreError> {
     let update = RrdRawUpdate {
         timestamp,
         timestamp_usec,
         values: values.to_vec(),
     };
-    update_rrd_raw_batch(path, std::slice::from_ref(&update), false)
+    let mut summaries = Vec::new();
+    apply(
+        open_rrd_write(path)?,
+        path,
+        &Input::Raw(std::slice::from_ref(&update)),
+        false,
+        verbose.then_some(&mut summaries),
+    )?;
+    Ok(summaries)
 }
 
 /// The reading text for a numeric value.
@@ -209,7 +224,17 @@ fn numeric_reading(value: Option<f64>) -> String {
         Some(x) if x.is_nan() => "U".to_string(),
         Some(x) if x == f64::INFINITY => "inf".to_string(),
         Some(x) if x == f64::NEG_INFINITY => "-inf".to_string(),
-        Some(x) => format!("{x}"),
+        Some(x) => {
+            // A reading longer than the 29 characters a stored reading
+            // keeps (UP-14) is given in exponent form, which keeps every
+            // digit of the shortest round-trip text.
+            let plain = format!("{x}");
+            if plain.len() <= 29 {
+                plain
+            } else {
+                format!("{x:e}")
+            }
+        }
     }
 }
 
@@ -377,15 +402,50 @@ fn evaluate_computed(
     Ok(())
 }
 
+/// The most bytes [`write_range`] writes at once.
+const WRITE_CHUNK: usize = 1 << 20;
+
+/// Stores a range of rows, wrapping to row 0 at the archive's row count
+/// (UP-30), in writes of at most [`WRITE_CHUNK`] bytes.
+fn write_range(
+    file: &mut File,
+    archive: &RrdArchiveInfo,
+    range: &RowRange,
+) -> Result<(), StoreError> {
+    let row: Vec<u8> = range
+        .values
+        .iter()
+        .flat_map(|value| value.to_bits().to_le_bytes())
+        .collect();
+    let row_len = row.len() as u64;
+    let chunk_rows = (WRITE_CHUNK / row.len()).max(1) as u64;
+    let chunk = row.repeat(chunk_rows.min(range.count) as usize);
+    let mut next = range.first_row;
+    let mut remaining = range.count;
+    while remaining > 0 {
+        let rows = remaining.min(archive.rows - next).min(chunk_rows);
+        // Every queued row lies inside the file (`rows_in_file`), so this
+        // offset cannot overflow.
+        let offset = archive.data_offset + next * row_len;
+        write_at(file, offset, &chunk[..(rows * row_len) as usize])?;
+        next += rows;
+        if next == archive.rows {
+            next = 0;
+        }
+        remaining -= rows;
+    }
+    Ok(())
+}
+
 /// Opens the file's state and applies every argument in turn, each
 /// completely before the next is examined (UP-3, UP-34). Rows of applied
-/// arguments are appended to `summaries`.
+/// arguments are appended to `summaries`, when the caller asked for them.
 fn apply(
     file: File,
     path: &Path,
     input: &Input<'_, '_>,
     skip_past_updates: bool,
-    summaries: &mut Vec<RrdUpdateSummary>,
+    mut summaries: Option<&mut Vec<RrdUpdateSummary>>,
 ) -> Result<(), StoreError> {
     let mut file = RrdFileLock::exclusive(file)?;
     file.seek(SeekFrom::Start(0))?;
@@ -555,7 +615,7 @@ fn apply(
 
         // Provenance: specification (docs/compatibility/update.md UP-23,
         // UP-28 to UP-32).
-        let mut rows: Vec<RowWrite> = Vec::new();
+        let mut rows: Vec<RowRange> = Vec::new();
         let mut written = Vec::new();
         let mut past_end = false;
         for (position, run) in runs(&plan, step, &completed).iter().enumerate() {
@@ -568,13 +628,13 @@ fn apply(
                 early_first_row,
                 &rows_in_file,
                 &mut rows,
-                &mut written,
+                summaries.is_some().then_some(&mut written),
             );
             if consolidated.is_err() {
                 past_end = true;
-                // Provenance: specification (docs/compatibility/update.md
-                // UP-38): a split update failing in its first run keeps the
-                // PDP state UP-25 gives for a tail of 0.
+                // Compatibility: a split update failing in its first run
+                // keeps the PDP state UP-25 gives for a tail of 0.
+                // Provenance: specification (docs/compatibility/update.md UP-38).
                 if position == 0 && plan.split {
                     let at_boundary = StepPlan { tail: 0.0, ..plan };
                     for (ds, source) in info.data_sources.iter().enumerate() {
@@ -631,20 +691,13 @@ fn apply(
             layout.live as u64,
             &header[layout.live..layout.end],
         )?;
-        let mut bytes = Vec::with_capacity(source_count * VALUE_LEN);
-        for row in &rows {
-            bytes.clear();
-            for value in &row.values {
-                bytes.extend_from_slice(&value.to_bits().to_le_bytes());
-            }
-            // Every queued row lies inside the file (`rows_in_file`), so this
-            // offset cannot overflow.
-            let offset = info.archives[row.archive].data_offset
-                + row.row * (source_count * VALUE_LEN) as u64;
-            write_at(&mut file, offset, &bytes)?;
+        for range in &rows {
+            write_range(&mut file, &info.archives[range.archive], range)?;
         }
         if past_end {
-            summaries.append(&mut written);
+            if let Some(summaries) = summaries.as_deref_mut() {
+                summaries.append(&mut written);
+            }
             let unwritten = std::io::Error::from_raw_os_error(0);
             return Err(StoreError::RrdExpression(format!(
                 "writing rrd: {}",
@@ -654,7 +707,9 @@ fn apply(
 
         info.last_update = argument.time.secs;
         info.last_update_usec = argument.time.usec;
-        summaries.append(&mut written);
+        if let Some(summaries) = summaries.as_deref_mut() {
+            summaries.append(&mut written);
+        }
     }
     Ok(())
 }
@@ -757,5 +812,170 @@ mod tests {
         // The starting row 0 advances once per PDP (UP-30).
         assert_eq!(info.archives[0].current_row, steps);
         assert_eq!(info.last_update, timestamp);
+    }
+
+    /// The stored values of an archive's rows, one `Vec` per row.
+    fn stored_rows(path: &Path, archive: usize) -> Vec<Vec<f64>> {
+        let info = crate::inspect_rrd_file(path).unwrap();
+        let bytes = std::fs::read(path).unwrap();
+        let sources = info.data_sources.len();
+        let archive = &info.archives[archive];
+        let start = archive.data_offset as usize;
+        bytes[start..start + archive.rows as usize * sources * VALUE_LEN]
+            .chunks(sources * VALUE_LEN)
+            .map(|row| {
+                row.chunks(VALUE_LEN)
+                    .map(|value| f64::from_le_bytes(value.try_into().unwrap()))
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn long_gap_fills_every_row_in_bounded_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("long.rrd");
+        let rows = 2_000_000u64;
+        crate::create_rrd_file(
+            &path,
+            1_000_000_000,
+            1,
+            &["DS:a:GAUGE:10000000:U:U".to_string()],
+            &[format!("RRA:AVERAGE:0.5:1:{rows}")],
+            false,
+        )
+        .unwrap();
+        update_rrd_values(&path, 1_000_000_001, &[Some(1.0)]).unwrap();
+        let before = crate::inspect_rrd_file(&path).unwrap().archives[0].current_row;
+
+        update_rrd_values(&path, 1_003_000_001, &[Some(5.0)]).unwrap();
+
+        let info = crate::inspect_rrd_file(&path).unwrap();
+        // Three million rows into two million: UP-29 writes each row once,
+        // so the current row comes back to where it was.
+        assert_eq!(info.archives[0].current_row, before);
+        let stored = stored_rows(&path, 0);
+        for row in [
+            0,
+            1,
+            524_287,
+            524_288,
+            1_000_000,
+            before as usize,
+            1_999_999,
+        ] {
+            assert_eq!(stored[row], vec![5.0], "row {row}");
+        }
+        assert!(stored.iter().all(|row| row == &[5.0]));
+    }
+
+    #[test]
+    fn non_verbose_updates_store_what_verbose_ones_do() {
+        let temp = tempfile::tempdir().unwrap();
+        let quiet = temp.path().join("quiet.rrd");
+        let loud = temp.path().join("loud.rrd");
+        create(&quiet);
+        std::fs::copy(&quiet, &loud).unwrap();
+        let updates = [
+            RrdRawUpdate {
+                timestamp: 1_000_000_010,
+                timestamp_usec: 0,
+                values: vec![Some("1"), Some("2")],
+            },
+            RrdRawUpdate {
+                timestamp: 1_000_000_095,
+                timestamp_usec: 250_000,
+                values: vec![Some("300"), None],
+            },
+        ];
+        let rows = update_rrd_raw_batch(&loud, &updates, false).unwrap();
+        assert_eq!(rows.len(), 9);
+        apply(
+            open_rrd_write(&quiet).unwrap(),
+            &quiet,
+            &Input::Raw(&updates),
+            false,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(&quiet).unwrap(),
+            std::fs::read(&loud).unwrap()
+        );
+    }
+
+    #[test]
+    fn long_numeric_readings_keep_their_digits() {
+        for x in [
+            1e30,
+            1e30 + 1e16,
+            1.234_567_890_123_456_7e-15,
+            -1.5e300,
+            0.1,
+            42.0,
+        ] {
+            let text = numeric_reading(Some(x));
+            assert!(text.len() <= 29, "{text}");
+            assert_eq!(
+                text.parse::<f64>().unwrap().to_bits(),
+                x.to_bits(),
+                "{text}"
+            );
+        }
+        assert_eq!(numeric_reading(Some(42.0)), "42");
+        assert_eq!(numeric_reading(None), "U");
+        assert_eq!(numeric_reading(Some(f64::NAN)), "U");
+        assert_eq!(numeric_reading(Some(f64::INFINITY)), "inf");
+        assert_eq!(numeric_reading(Some(f64::NEG_INFINITY)), "-inf");
+
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("dderive.rrd");
+        crate::create_rrd_file(
+            &path,
+            1_000_000_000,
+            10,
+            &["DS:a:DDERIVE:600:U:U".to_string()],
+            &["RRA:LAST:0.5:1:5".to_string()],
+            false,
+        )
+        .unwrap();
+        update_rrd_values(&path, 1_000_000_010, &[Some(1e30)]).unwrap();
+        let rows = update_rrd_values_verbose(&path, 1_000_000_020, &[Some(1e30 + 1e16)]).unwrap();
+        assert_eq!(rows.len(), 1);
+        // 1e16 over 10 s; the difference of the two readings is exact to
+        // within a unit in the last place of 1e30.
+        let rate = rows[0].values[0];
+        assert!((rate - 1e15).abs() < 2e13, "{rate}");
+    }
+
+    #[test]
+    fn undecodable_compute_program_is_unknown() {
+        // Rondi's own fallback for a damaged program. RRDtool 1.11.0 does
+        // not decode such files this way; flagged for provenance review.
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("compute.rrd");
+        crate::create_rrd_file(
+            &path,
+            1_000_000_000,
+            10,
+            &[
+                "DS:a:GAUGE:600:U:U".to_string(),
+                "DS:y:COMPUTE:a,2,*".to_string(),
+            ],
+            &["RRA:LAST:0.5:1:5".to_string()],
+            false,
+        )
+        .unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        // The first node of the second definition's program gets a code
+        // no node has.
+        bytes[STAT_HEAD_LEN + DS_DEF_LEN + 40] = 250;
+        std::fs::write(&path, bytes).unwrap();
+
+        let (rows, result) = update_rrd_text(&path, None, &["1000000010:3"], false);
+        result.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].values[0], 3.0);
+        assert!(rows[0].values[1].is_nan());
     }
 }

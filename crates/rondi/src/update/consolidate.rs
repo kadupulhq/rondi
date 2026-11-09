@@ -58,11 +58,14 @@ impl ArchiveKind {
     }
 }
 
-/// One archive row to store: one value per DS, in DS order.
+/// Consecutive archive rows that store the same values, one per DS in DS
+/// order: rows `first_row`, `first_row + 1`, ... wrapping to 0 at the
+/// archive's row count (UP-30). `first_row` is below the row count.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RowWrite {
+pub(crate) struct RowRange {
     pub archive: usize,
-    pub row: u64,
+    pub first_row: u64,
+    pub count: u64,
     pub values: Vec<f64>,
 }
 
@@ -151,54 +154,55 @@ fn place(run: &Run, step: u64, pdp_per_row: u64) -> Placement {
 // Compatibility: the times are computed in wrapping 64-bit arithmetic, so a
 // run ending near the largest time prints wrapped, negative times.
 struct PrintedTimes {
-    /// End of the last slot the run completes.
-    last_slot_end: i128,
-    /// Slot length (*D*).
-    slot: i128,
+    /// End of the last slot the run completes (*G*).
+    last_slot_end: i64,
+    /// Slot length (*D*), wrapped modulo 2^64.
+    slot: i64,
     /// Rows written (*K*).
     written: u64,
     /// The time of an opening row completed by the first run of a split
-    /// update whose last update has a microsecond part.
-    early_opening: Option<i128>,
+    /// update that prints it one slot early.
+    early_opening: Option<i64>,
 }
 
 impl PrintedTimes {
     fn new(run: &Run, step: u64, pdp_per_row: u64, written: u64, early: bool) -> Self {
-        let step = i128::from(step.max(1));
-        let slot = step.saturating_mul(i128::from(pdp_per_row));
-        let end = i128::from(run.end);
-        let start = i128::from(run.start);
+        let slot = step.wrapping_mul(pdp_per_row);
+        let end = run.end;
+        let last_slot_end = if slot == 0 {
+            end
+        } else {
+            end.wrapping_sub(i128::from(end).rem_euclid(i128::from(slot)) as i64)
+        };
+        let slot = slot as i64;
         PrintedTimes {
-            last_slot_end: end - end.rem_euclid(slot),
+            last_slot_end,
             slot,
             written,
-            early_opening: early.then(|| start.wrapping_add(step).wrapping_sub(slot)),
+            early_opening: early.then(|| {
+                run.start
+                    .wrapping_add(step.max(1) as i64)
+                    .wrapping_sub(slot)
+            }),
         }
     }
 
     /// The time of the row `back` rows before the last slot's row.
-    fn before_last(&self, back: u64) -> i128 {
+    fn before_last(&self, back: u64) -> i64 {
         self.last_slot_end
-            .wrapping_sub(i128::from(back).wrapping_mul(self.slot))
+            .wrapping_sub((back as i64).wrapping_mul(self.slot))
     }
 
     fn opening(&self) -> i64 {
-        let time = self
-            .early_opening
-            .unwrap_or_else(|| self.before_last(self.written.saturating_sub(1)));
-        wrap_time(time)
+        self.early_opening
+            .unwrap_or_else(|| self.before_last(self.written.saturating_sub(1)))
     }
 
     /// The time of the `j`-th row after the opening row.
     fn following(&self, j: u64) -> i64 {
         let back = self.written.saturating_sub(1).saturating_sub(j);
-        wrap_time(self.before_last(back).wrapping_add(self.slot))
+        self.before_last(back).wrapping_add(self.slot)
     }
-}
-
-/// Truncates to 64 bits, as the reference's time arithmetic wraps.
-fn wrap_time(time: i128) -> i64 {
-    time as i64
 }
 
 /// A row would be written past the end of the file. The archive's current
@@ -207,46 +211,78 @@ fn wrap_time(time: i128) -> i64 {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RowPastEnd;
 
-// Provenance: specification (docs/compatibility/update.md UP-30, UP-38).
+/// The row UP-30 writes after `current` in an archive of `rows` rows.
+fn next_row(current: u64, rows: u64) -> u64 {
+    let next = current.wrapping_add(1);
+    if next >= rows { 0 } else { next }
+}
+
+/// Queues `count` rows of `values` after the archive's current row and
+/// advances it (UP-30). With `summaries`, the row at position `i` of the
+/// range is reported at `time_of(i)`.
+///
+/// Rows at or past `rows_in_file` lie outside the file: the rows before
+/// the first such row are queued, the current row advances to it, and only
+/// its first value is reported.
 // Compatibility: a row past the end of a damaged file (row count larger
 // than the file holds) stops the update at that row.
+// Provenance: specification (docs/compatibility/update.md UP-38).
 #[allow(clippy::too_many_arguments)]
-fn write_row(
+fn write_rows(
     index: usize,
     archive: &mut RrdArchiveInfo,
     rows_in_file: u64,
-    values: Vec<f64>,
-    timestamp: i64,
-    rows_out: &mut Vec<RowWrite>,
-    summaries: &mut Vec<RrdUpdateSummary>,
+    values: &[f64],
+    count: u64,
+    time_of: impl Fn(u64) -> i64,
+    rows_out: &mut Vec<RowRange>,
+    summaries: Option<&mut Vec<RrdUpdateSummary>>,
 ) -> Result<(), RowPastEnd> {
-    // Compatibility: the next row wraps to 0 once it reaches the row count,
-    // so a current row stored past the end restarts at row 0, and the
-    // largest value wraps to 0 as well.
-    let next = archive.current_row.wrapping_add(1);
-    archive.current_row = if next >= archive.rows { 0 } else { next };
-    if archive.current_row >= rows_in_file {
-        // Provenance: specification (docs/compatibility/update.md UP-38).
-        summaries.push(RrdUpdateSummary {
-            timestamp,
-            consolidation: archive.consolidation.clone(),
-            pdp_per_row: archive.pdp_per_row,
-            values: values.into_iter().take(1).collect(),
-        });
-        return Err(RowPastEnd);
+    if count == 0 {
+        return Ok(());
     }
-    summaries.push(RrdUpdateSummary {
+    let first_row = next_row(archive.current_row, archive.rows);
+    // first_row < rows; when the file holds fewer rows than that, the rows
+    // from first_row up to rows_in_file - 1 come before the first row
+    // outside the file, with no wrap in between.
+    let fitting = if rows_in_file >= archive.rows {
+        count
+    } else {
+        rows_in_file.saturating_sub(first_row).min(count)
+    };
+    let summary = |archive: &RrdArchiveInfo, timestamp, values: Vec<f64>| RrdUpdateSummary {
         timestamp,
         consolidation: archive.consolidation.clone(),
         pdp_per_row: archive.pdp_per_row,
-        values: values.clone(),
-    });
-    rows_out.push(RowWrite {
-        archive: index,
-        row: archive.current_row,
         values,
-    });
-    Ok(())
+    };
+    let mut summaries = summaries;
+    if fitting > 0 {
+        rows_out.push(RowRange {
+            archive: index,
+            first_row,
+            count: fitting,
+            values: values.to_vec(),
+        });
+        if let Some(summaries) = summaries.as_deref_mut() {
+            for i in 0..fitting {
+                summaries.push(summary(archive, time_of(i), values.to_vec()));
+            }
+        }
+        archive.current_row = advance_rows(archive.current_row, archive.rows, fitting);
+    }
+    if fitting == count {
+        return Ok(());
+    }
+    archive.current_row = next_row(archive.current_row, archive.rows);
+    if let Some(summaries) = summaries {
+        summaries.push(summary(
+            archive,
+            time_of(fitting),
+            values.iter().copied().take(1).collect(),
+        ));
+    }
+    Err(RowPastEnd)
 }
 
 /// The current row after `count` row writes from `current` in an archive
@@ -280,8 +316,8 @@ pub(crate) fn consolidate_run(
     step: u64,
     early_first_row: bool,
     rows_in_file: u64,
-    rows_out: &mut Vec<RowWrite>,
-    summaries: &mut Vec<RrdUpdateSummary>,
+    rows_out: &mut Vec<RowRange>,
+    mut summaries: Option<&mut Vec<RrdUpdateSummary>>,
 ) -> Result<(), RowPastEnd> {
     let ArchiveKind::Classic(cf) = kind;
     if archive.rows == 0 || run.len == 0 {
@@ -331,27 +367,27 @@ pub(crate) fn consolidate_run(
         .collect();
 
     let times = PrintedTimes::new(run, step, pdp_per_row, written, early_first_row);
-    write_row(
+    write_rows(
         index,
         archive,
         rows_in_file,
-        opening,
-        times.opening(),
+        &opening,
+        1,
+        |_| times.opening(),
+        rows_out,
+        summaries.as_deref_mut(),
+    )?;
+    // The K - 1 rows after the opening row all store the run's PDPs.
+    write_rows(
+        index,
+        archive,
+        rows_in_file,
+        &run.values,
+        written - 1,
+        |i| times.following(i + 1),
         rows_out,
         summaries,
-    )?;
-    for j in 1..written {
-        write_row(
-            index,
-            archive,
-            rows_in_file,
-            run.values.clone(),
-            times.following(j),
-            rows_out,
-            summaries,
-        )?;
-    }
-    Ok(())
+    )
 }
 
 /// Consolidates one run into every archive, in archive order (UP-28). This
@@ -368,8 +404,8 @@ pub(crate) fn consolidate_all(
     step: u64,
     early_first_row: bool,
     rows_in_file: &[u64],
-    rows_out: &mut Vec<RowWrite>,
-    summaries: &mut Vec<RrdUpdateSummary>,
+    rows_out: &mut Vec<RowRange>,
+    mut summaries: Option<&mut Vec<RrdUpdateSummary>>,
 ) -> Result<(), RowPastEnd> {
     // Provenance: specification (docs/compatibility/update.md UP-38). Every
     // archive's CDP state changes for the run, but rows are written archive
@@ -389,18 +425,21 @@ pub(crate) fn consolidate_all(
                 early_first_row,
                 fit,
                 rows_out,
-                summaries,
+                summaries.as_deref_mut(),
             ),
         };
         if result.is_err() && stopped.is_none() {
-            stopped = Some((index, rows_out.len(), summaries.len()));
+            let reported = summaries.as_deref().map_or(0, Vec::len);
+            stopped = Some((index, rows_out.len(), reported));
         }
     }
     let Some((failed, rows_len, summaries_len)) = stopped else {
         return Ok(());
     };
     rows_out.truncate(rows_len);
-    summaries.truncate(summaries_len);
+    if let Some(summaries) = summaries {
+        summaries.truncate(summaries_len);
+    }
     for (archive, &current_row) in archives.iter_mut().zip(&current_rows).skip(failed + 1) {
         archive.current_row = current_row;
     }
@@ -412,6 +451,31 @@ mod tests {
     use super::*;
     use crate::rrd_binary::{RrdCdpPrepInfo, rrd_nan};
     use std::time::{Duration, Instant};
+
+    /// One stored row, as a range expands to.
+    #[derive(Clone, Debug, PartialEq)]
+    struct RowWrite {
+        archive: usize,
+        row: u64,
+        values: Vec<f64>,
+    }
+
+    /// Expands ranges into rows; `rows_of` gives each archive's row count.
+    fn expand(ranges: &[RowRange], rows_of: impl Fn(usize) -> u64) -> Vec<RowWrite> {
+        let mut rows = Vec::new();
+        for range in ranges {
+            let mut row = range.first_row;
+            for _ in 0..range.count {
+                rows.push(RowWrite {
+                    archive: range.archive,
+                    row,
+                    values: range.values.clone(),
+                });
+                row = next_row(row, rows_of(range.archive));
+            }
+        }
+        rows
+    }
 
     const STEP: u64 = 10;
 
@@ -467,11 +531,12 @@ mod tests {
                 false,
                 u64::MAX,
                 &mut rows,
-                &mut summaries,
+                Some(&mut summaries),
             )
             .unwrap();
         }
-        (rows, summaries)
+        let count = archive.rows;
+        (expand(&rows, |_| count), summaries)
     }
 
     fn row_values(rows: &[RowWrite]) -> Vec<f64> {
@@ -684,11 +749,11 @@ mod tests {
             true,
             u64::MAX,
             &mut rows,
-            &mut summaries,
+            Some(&mut summaries),
         )
         .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].row, 0);
+        assert_eq!((rows[0].first_row, rows[0].count), (0, 1));
 
         let mut rra = archive("LAST", 1, 3, 0.5);
         let (rows, summaries) = feed(&mut rra, &[run(i64::MAX, u64::MAX, 1.0)]);
@@ -733,11 +798,74 @@ mod tests {
             true,
             u64::MAX,
             &mut rows,
-            &mut summaries,
+            Some(&mut summaries),
         )
         .unwrap();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].timestamp, 100);
+    }
+
+    #[test]
+    fn range_stops_at_the_first_row_outside_the_file() {
+        let mut rra = archive("LAST", 1, 10, 0.5);
+        rra.current_row = 2;
+        let kind = kind(&rra);
+        let mut rows = Vec::new();
+        let mut summaries = Vec::new();
+        let result = consolidate_run(
+            0,
+            &mut rra,
+            kind,
+            &run(100, 8, 4.0),
+            STEP,
+            false,
+            6,
+            &mut rows,
+            Some(&mut summaries),
+        );
+        assert_eq!(result, Err(RowPastEnd));
+        assert_eq!(
+            expand(&rows, |_| 10)
+                .iter()
+                .map(|row| row.row)
+                .collect::<Vec<_>>(),
+            vec![3, 4, 5]
+        );
+        assert_eq!(rra.current_row, 6);
+        assert_eq!(summaries.len(), 4);
+        assert_eq!(summaries[3].values, vec![4.0]);
+
+        // Without summaries the same rows are queued.
+        let mut quiet = archive("LAST", 1, 10, 0.5);
+        quiet.current_row = 2;
+        let mut quiet_rows = Vec::new();
+        let result = consolidate_run(
+            0,
+            &mut quiet,
+            kind,
+            &run(100, 8, 4.0),
+            STEP,
+            false,
+            6,
+            &mut quiet_rows,
+            None,
+        );
+        assert_eq!(result, Err(RowPastEnd));
+        assert_eq!(quiet_rows, rows);
+        assert_eq!(quiet.current_row, 6);
+    }
+
+    #[test]
+    fn range_wraps_at_the_archive_end() {
+        let mut rra = archive("LAST", 1, 5, 0.5);
+        rra.current_row = 2;
+        let (rows, summaries) = feed(&mut rra, &[run(100, 4, 1.0)]);
+        assert_eq!(
+            rows.iter().map(|row| row.row).collect::<Vec<_>>(),
+            vec![3, 4, 0, 1]
+        );
+        assert_eq!(summaries.len(), 4);
+        assert_eq!(rra.current_row, 1);
     }
 
     #[test]
@@ -754,9 +882,10 @@ mod tests {
             false,
             &[],
             &mut rows,
-            &mut summaries,
+            Some(&mut summaries),
         )
         .unwrap();
+        let rows = expand(&rows, |index| archives[index].rows);
         assert_eq!(
             rows.iter()
                 .map(|row| (row.archive, row.row))
