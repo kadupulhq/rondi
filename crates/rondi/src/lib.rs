@@ -21,6 +21,7 @@ pub mod safe_fs;
 pub(crate) mod storage;
 pub mod time;
 mod tune_modify;
+mod update;
 pub mod vdef;
 mod xml_reader;
 
