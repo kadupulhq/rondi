@@ -18,7 +18,7 @@ use crate::rrd_binary::{
     rrd_strerror,
 };
 use crate::rrd_definitions::{
-    ArchiveDef, DataSourceDef, DefinitionError, is_holt_winters, stored_archive_shape, stored_cf,
+    ArchiveDef, DefinitionError, SourceDef, is_holt_winters, stored_archive_shape, stored_cf,
     stored_ds_name,
 };
 use crate::storage::StoreError;
@@ -81,15 +81,24 @@ impl NewRrd {
         let mut double_counters = false;
         for word in words {
             if let Some(spec) = word.strip_prefix("DS:") {
-                let def = DataSourceDef::parse(spec)?;
+                // CP-1: an expression names sources defined before it,
+                // template sources included.
+                let def = SourceDef::parse(spec, |name| {
+                    sources
+                        .iter()
+                        .position(|record| stored_ds_name(record) == name.as_bytes())
+                })?;
                 // CR-16: the stored name, before any `=` mapping, must be new.
                 if sources
                     .iter()
-                    .any(|record| stored_ds_name(record) == def.name.as_bytes())
+                    .any(|record| stored_ds_name(record) == def.name().as_bytes())
                 {
-                    return Err(StoreError::Rrd(format!("Duplicate DS name: {}", def.name)));
+                    return Err(StoreError::Rrd(format!(
+                        "Duplicate DS name: {}",
+                        def.name()
+                    )));
                 }
-                double_counters |= def.kind.needs_version_5();
+                double_counters |= def.needs_version_5();
                 sources.push(def.to_bytes());
             } else if let Some(spec) = word.strip_prefix("RRA:") {
                 archives.push(ArchiveDef::parse(spec, step)?.to_bytes());

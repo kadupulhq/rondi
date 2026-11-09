@@ -53,3 +53,4 @@
 051-s-1000000000-e-1000000040-step-10-def-x-	same	-	cpsumu	xport	-s	1000000000	-e	1000000040	--step	10	DEF:x=cpsumu.rrd:c:AVERAGE	DEF:y=cpsumu.rrd:a:AVERAGE	XPORT:x	XPORT:y
 052-cpsumu-rrd-0-grow-2	same	-	cpsumu	resize	cpsumu.rrd	0	GROW	2
 053-cpchain-rrd-1-shrink-1	same	-	cpchain	resize	cpchain.rrd	1	SHRINK	1
+054-cpsum-rrd-t-a-b-c-1000000010-1-2-abc-100	same	-	cpsum	update	cpsum.rrd	-t	a:b:c	1000000010:1:2:abc	1000000020:3:4:12345678901234567890123456789012345

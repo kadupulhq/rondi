@@ -659,7 +659,7 @@ def walk_cases():
                                r=rra(prep=b"<cdp_prep>" + b"<ds><value>1</value></ds>" * 2 + b"</cdp_prep>",
                                      db=b"<database><row><v>1</v><v>2</v></row></database>")),
     }
-    # More COMPUTE definitions (docs/compatibility/compute.md CP-21, CP-22).
+    # More COMPUTE definitions (docs/compatibility/compute.md CP-19).
     two = b"<cdp_prep>" + b"<ds><value>1</value></ds>" * 2 + b"</cdp_prep>"
     row2 = b"<database><row><v>1</v><v>2</v></row></database>"
     for name, body in [
@@ -677,10 +677,15 @@ def walk_cases():
         ("cdef-with-heartbeat", b"<minimal_heartbeat>20</minimal_heartbeat><cdef>a,2,*</cdef>"),
         ("cdef-self", b"<cdef>c,2,*</cdef>"),
         ("cdef-on-gauge", None),
+        ("cdef-then-heartbeat", b"<cdef>a,2,*</cdef><minimal_heartbeat>20</minimal_heartbeat>"
+                                b"<max>5</max>"),
+        ("cdef-before-name", b""),
     ]:
         if body is None:
             d = ds.replace(b"</type>", b"</type><cdef>a,2,*</cdef>") + \
                 b"<ds><name>b</name><type>GAUGE</type></ds>"
+        elif name == "cdef-before-name":
+            d = ds + b"<ds><cdef>c,2,*</cdef><name>c</name><type>COMPUTE</type></ds>"
         else:
             d = ds + b"<ds><name>c</name><type>COMPUTE</type>" + body + b"</ds>"
         probes[name] = doc(d=d, r=rra(prep=two, db=row2))

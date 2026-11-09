@@ -210,6 +210,19 @@ pub struct RrdDataSourceInfo {
     pub raw_last_value: Vec<u8>,
     pub pdp_value: f64,
     pub unknown_seconds: u64,
+    /// For a `COMPUTE` source, its expression as `info` and `dump` show it
+    /// (CP-8); `None` for every other type.
+    pub cdef: Option<Vec<u8>>,
+    /// The compiled expression of a `COMPUTE` source, when its stored
+    /// nodes decode.
+    pub(crate) program: Option<crate::rpn::ComputeProgram>,
+}
+
+impl RrdDataSourceInfo {
+    /// Whether this is a computed source (CP-5).
+    pub(crate) fn is_computed(&self) -> bool {
+        self.raw_kind == b"COMPUTE"
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -650,7 +663,7 @@ fn apply_update(
         || info.data_sources.iter().any(|ds| {
             !matches!(
                 ds.kind.as_str(),
-                "GAUGE" | "COUNTER" | "DERIVE" | "ABSOLUTE" | "DCOUNTER" | "DDERIVE"
+                "GAUGE" | "COUNTER" | "DERIVE" | "ABSOLUTE" | "DCOUNTER" | "DDERIVE" | "COMPUTE"
             )
         })
         || info.archives.is_empty()
@@ -728,12 +741,18 @@ fn apply_update(
     let mut pdp_new = Vec::with_capacity(ds_count);
     let mut last_ds_bytes: Vec<[u8; 30]> = Vec::with_capacity(ds_count);
     for (index, (source, value)) in info.data_sources.iter().zip(values).enumerate() {
-        let amount = match update_pdp_new(
-            source,
-            *value,
-            raw_values.and_then(|raw| raw[index]),
-            interval,
-        ) {
+        let raw_value = raw_values.and_then(|raw| raw[index]);
+        // Compatibility: a value given for a computed source is kept as its
+        // last value but never converted; its PDP state advances as for an
+        // unknown sample.
+        // Provenance: black-box compatibility test; see
+        // docs/compatibility/compute.md (CP-11, CP-15).
+        let sample = if source.is_computed() {
+            Ok(rrd_nan())
+        } else {
+            update_pdp_new(source, *value, raw_value, interval)
+        };
+        let amount = match sample {
             Ok(amount) => amount,
             Err(error) => {
                 // RRDtool edits last_ds in the mapped header as it goes, so
@@ -749,11 +768,7 @@ fn apply_update(
         pdp_new.push(amount);
         let last_ds = value.map_or_else(
             || "U".to_owned(),
-            |v| {
-                raw_values
-                    .and_then(|raw| raw[index])
-                    .map_or_else(|| v.to_string(), str::to_owned)
-            },
+            |v| raw_value.map_or_else(|| v.to_string(), str::to_owned),
         );
         // strncpy(last_ds, ..., LAST_DS_LEN - 1) cuts at a byte count, which
         // can split a multibyte character.
@@ -817,7 +832,7 @@ fn apply_update(
                         }
                     })
                     .collect::<Vec<_>>();
-                let pdp_temp = process_pdp_steps(
+                let pdp_temp = match process_pdp_steps(
                     info,
                     &mut pdp_prep,
                     open_seconds as f64,
@@ -825,7 +840,20 @@ fn apply_update(
                     0.0,
                     1,
                     &open_new,
-                );
+                ) {
+                    Ok(pdp_temp) => pdp_temp,
+                    Err(error) => {
+                        *state_cache = None;
+                        return Err(abandon_computed_update(
+                            file,
+                            info,
+                            pdp_start,
+                            &pdp_prep,
+                            &last_ds_bytes,
+                            error,
+                        ));
+                    }
+                };
                 let row_counts =
                     update_cdp_preps(info, &mut cdp_prep, 1, proc_pdp_count, &pdp_temp);
                 let open_close_time = last_update
@@ -850,7 +878,7 @@ fn apply_update(
         // A failed write in the open-PDP pass returns from process_arg
         // before the remaining PDPs touch the prep areas.
         if !ends_past(&row_writes, file_len) {
-            let pdp_temp = process_pdp_steps(
+            let pdp_temp = match process_pdp_steps(
                 info,
                 &mut pdp_prep,
                 interval,
@@ -858,7 +886,20 @@ fn apply_update(
                 post_interval,
                 elapsed,
                 &pdp_new,
-            );
+            ) {
+                Ok(pdp_temp) => pdp_temp,
+                Err(error) => {
+                    *state_cache = None;
+                    return Err(abandon_computed_update(
+                        file,
+                        info,
+                        pdp_start,
+                        &pdp_prep,
+                        &last_ds_bytes,
+                        error,
+                    ));
+                }
+            };
             let row_counts =
                 update_cdp_preps(info, &mut cdp_prep, elapsed, proc_pdp_count, &pdp_temp);
             write_rra_rows(
@@ -1052,7 +1093,10 @@ fn update_text_arguments(
     // parse_template: slot 0 is the time; each
     // further slot names the data source it fills.
     let slots = match template {
-        None => (0..ds_count).collect::<Vec<_>>(),
+        // CP-10: without a template, values fill the input sources only.
+        None => (0..ds_count)
+            .filter(|index| !info.data_sources[*index].is_computed())
+            .collect::<Vec<_>>(),
         Some(template) => {
             let mut slots = Vec::new();
             for name in template.split(':') {
@@ -1341,8 +1385,69 @@ fn update_pdp_new(
     Ok(amount)
 }
 
+/// The end of an update whose computed sources failed to evaluate (CP-16):
+/// the input sources' last values and PDP state are written as if it had
+/// succeeded; the computed sources' PDP state, the CDP state, the rows,
+/// the row pointers and the last update time keep their old values.
+// Compatibility: a failed evaluation leaves the file in this partly
+// updated state.
+// Provenance: black-box compatibility test; see
+// docs/compatibility/compute.md (CP-16).
+fn abandon_computed_update(
+    file: &mut File,
+    info: &RrdInfo,
+    pdp_start: usize,
+    pdp_prep: &[(u64, f64)],
+    last_ds_bytes: &[[u8; 30]],
+    error: StoreError,
+) -> StoreError {
+    let written = info
+        .data_sources
+        .iter()
+        .zip(pdp_prep.iter().zip(last_ds_bytes))
+        .enumerate()
+        .filter(|(_, (source, _))| !source.is_computed())
+        .try_for_each(|(index, (_, ((unknown, value), last_ds)))| {
+            let mut prep = [0_u8; 48];
+            prep[..30].copy_from_slice(last_ds);
+            put_u64(&mut prep, 32, *unknown);
+            put_f64(&mut prep, 40, *value);
+            // Bytes 30 and 31 are padding; keep what the file holds.
+            let offset = (pdp_start + index * PDP_PREP_LEN) as u64;
+            file.seek(SeekFrom::Start(offset))?;
+            file.write_all(&prep[..30])?;
+            file.seek(SeekFrom::Start(offset + 32))?;
+            file.write_all(&prep[32..])
+        });
+    match written {
+        Ok(()) => error,
+        Err(io) => io.into(),
+    }
+}
+
+/// The PDP of each computed source for a completed step: its expression
+/// over the PDPs of the same step, in definition order, so a computed
+/// source sees those of earlier computed sources (CP-12, CP-13).
+fn compute_pdps(info: &RrdInfo, pdp_temp: &mut [f64]) -> Result<(), StoreError> {
+    for (index, source) in info.data_sources.iter().enumerate() {
+        if !source.is_computed() {
+            continue;
+        }
+        let program = source
+            .program
+            .as_ref()
+            .ok_or_else(|| rrd_error("COMPUTE data source has an unreadable expression"))?;
+        pdp_temp[index] = program
+            .evaluate(pdp_temp)
+            .map_err(|error| StoreError::Rrd(error.to_string()))?;
+    }
+    Ok(())
+}
+
 /// RRDtool process_pdp_st for every data source. Returns the rate for
 /// each completed PDP and leaves the PDP prep area ready for the next update.
+/// Computed sources then take their expression's value (CP-12); an
+/// evaluation failure is returned after the prep area has moved on.
 fn process_pdp_steps(
     info: &RrdInfo,
     pdp_prep: &mut [(u64, f64)],
@@ -1351,9 +1456,10 @@ fn process_pdp_steps(
     post_interval: f64,
     elapsed: u64,
     pdp_new: &[f64],
-) -> Vec<f64> {
+) -> Result<Vec<f64>, StoreError> {
     let elapsed_seconds = elapsed.wrapping_mul(info.step);
-    info.data_sources
+    let mut pdp_temp: Vec<f64> = info
+        .data_sources
         .iter()
         .zip(pdp_prep.iter_mut())
         .zip(pdp_new)
@@ -1384,7 +1490,9 @@ fn process_pdp_steps(
             }
             rate
         })
-        .collect()
+        .collect();
+    compute_pdps(info, &mut pdp_temp)?;
+    Ok(pdp_temp)
 }
 
 /// RRDtool update_all_cdp_prep for the basic consolidation functions.
@@ -2073,16 +2181,14 @@ pub fn dump_rrd_open_file_bytes(
     let info = read_info(&mut file, path)?;
     // RRDtool dumps a DS or RRA whose name the type or consolidation function check
     // rejects like a plain one; the caller reports the conversion error.
-    if info.data_sources.iter().any(|ds| ds.kind == "COMPUTE")
-        || info.archives.iter().any(|archive| {
-            !matches!(
-                archive.consolidation.as_str(),
-                "AVERAGE" | "MIN" | "MAX" | "LAST"
-            ) && cf_conv_error(&archive.raw_consolidation).is_none()
-        })
-    {
+    if info.archives.iter().any(|archive| {
+        !matches!(
+            archive.consolidation.as_str(),
+            "AVERAGE" | "MIN" | "MAX" | "LAST"
+        ) && cf_conv_error(&archive.raw_consolidation).is_none()
+    }) {
         return Err(StoreError::RrdUnsupported(
-            "rrdtool dump currently supports GAUGE/COUNTER/DERIVE/ABSOLUTE/DCOUNTER/DDERIVE and AVERAGE/MIN/MAX/LAST only".into(),
+            "rrdtool dump currently supports AVERAGE/MIN/MAX/LAST archives only".into(),
         ));
     }
     let mut out = Vec::new();
@@ -2113,24 +2219,32 @@ pub fn dump_rrd_open_file_bytes(
         out.extend_from_slice(b" </name>\n\t\t<type> ");
         out.extend_from_slice(&source.raw_kind);
         out.extend_from_slice(b" </type>\n");
-        writeln!(
-            out,
-            "\t\t<minimal_heartbeat>{}</minimal_heartbeat>",
-            source.heartbeat
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "\t\t<min>{}</min>",
-            format_rrd_optional(source.minimum)
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "\t\t<max>{}</max>",
-            format_rrd_optional(source.maximum)
-        )
-        .unwrap();
+        if let Some(cdef) = &source.cdef {
+            // CP-9: a computed source shows its expression instead of the
+            // heartbeat and bounds.
+            out.extend_from_slice(b"\t\t<cdef> ");
+            out.extend_from_slice(cdef);
+            out.extend_from_slice(b" </cdef>\n");
+        } else {
+            writeln!(
+                out,
+                "\t\t<minimal_heartbeat>{}</minimal_heartbeat>",
+                source.heartbeat
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "\t\t<min>{}</min>",
+                format_rrd_optional(source.minimum)
+            )
+            .unwrap();
+            writeln!(
+                out,
+                "\t\t<max>{}</max>",
+                format_rrd_optional(source.maximum)
+            )
+            .unwrap();
+        }
         out.extend_from_slice(b"\n\t\t<!-- PDP Status -->\n");
         out.extend_from_slice(b"\t\t<last_ds>");
         out.extend_from_slice(&source.raw_last_value);
@@ -2479,6 +2593,15 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
             checked_add(pdp_start, checked_mul(index, PDP_PREP_LEN)?)?,
             30,
         )?;
+        let program = if raw_kind == b"COMPUTE" {
+            let start = checked_add(start, 40)?;
+            require(bytes, start, crate::rpn::COMPUTE_PROGRAM_LEN)?;
+            crate::rpn::ComputeProgram::from_bytes(
+                &bytes[start..start + crate::rpn::COMPUTE_PROGRAM_LEN],
+            )
+        } else {
+            None
+        };
         data_sources.push(RrdDataSourceInfo {
             name: String::from_utf8_lossy(&raw_name).into_owned(),
             kind: String::from_utf8_lossy(&raw_kind).into_owned(),
@@ -2503,7 +2626,21 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
                     32,
                 )?,
             )?,
+            cdef: None,
+            program,
         });
+    }
+    // CP-8: variables are shown by name, so every name must be known first.
+    let names: Vec<Vec<u8>> = data_sources
+        .iter()
+        .map(|source| source.raw_name.clone())
+        .collect();
+    for source in &mut data_sources {
+        if source.is_computed() {
+            source.cdef = Some(source.program.as_ref().map_or_else(Vec::new, |program| {
+                program.render(|index| names.get(index).map(Vec::as_slice))
+            }));
+        }
     }
 
     let mut archives = Vec::with_capacity(rra_count);

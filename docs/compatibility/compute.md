@@ -151,8 +151,10 @@ many with `<file>: found extra data on update argument: <value>`, where *n*
 counts input sources only.
 
 **CP-11** (black-box; must). A template may name a computed source. The
-value given for it is read and ignored; input sources the template leaves
-out are unknown as usual.
+value given for it is never converted, so any text is accepted, and does
+not affect the update, but it is stored as the source's last value
+(`last_ds`, cut to 29 bytes as for input sources). Input sources the
+template leaves out are unknown as usual.
 
 **CP-12** (documentation, black-box; must). The input sources are updated
 as without computed sources. Each time a step completes, every computed
@@ -198,8 +200,16 @@ the update, so its results are not pinned by vectors.
 **CP-18** (black-box; must). `resize` keeps computed definitions unchanged.
 
 **CP-19** (black-box; must). `restore` reads `<cdef>` and compiles it under
-CP-1 to CP-3, with the computed source's own name and later sources
-unresolvable as at create. A `<cdef>` that does not compile, a missing or
+CP-1 to CP-4 against the sources read so far, with later sources
+unresolvable as at create. Unlike create, the source being read is among
+them under the name it has when `<cdef>` is read: after its `<name>`, its
+own name refers to itself (`walk-cdef-self`); before it, the name does not
+resolve (`walk-cdef-before-name`). `<minimal_heartbeat>`, `<min>`, `<max>`
+and `<cdef>` share the 80 parameter bytes whatever the type: the first
+three write bytes 0–7, 8–15 and 16–23 and `<cdef>` writes all 80 (CP-5),
+in document order, so a later element overwrites an earlier one where they
+overlap (`walk-cdef-with-heartbeat`, `walk-cdef-then-heartbeat`,
+`walk-cdef-on-gauge`). A `<cdef>` that does not compile, a missing or
 empty `<cdef>`, and the other errors are pinned by the restore vectors
 (`walk-cdef-*`, `seed-compute`, `type-compute`). Elements such as
 `<minimal_heartbeat>` given for a computed source and a `<cdef>` given for
@@ -208,6 +218,17 @@ an input source are handled as the vectors show. Restore otherwise follows
 
 **CP-20** (black-box; must). `tune` is out of scope for this document;
 `tune` cases with computed sources stay as in `tune-modify.md`.
+
+**CP-21** (black-box; must). Definition grammar, continued (CP-1). As in
+`rpn.md`, one trailing comma is accepted and leaves no node: `a,b,+,` is
+stored and shown as `a,b,+`, and `a,1,` is accepted because its number is
+not the last token. Two trailing commas (`a,b,+,,`) fail with
+`failed to parse computed data source`.
+
+**CP-22** (black-box; defect). An expression made only of `PREV(<name>)`
+nodes, such as `PREV(a)`, is accepted and shows as empty (CP-8); RRDtool
+1.11.0 `info` then dies from a signal on macOS. This is not pinned by a
+vector; a replacement prints the empty expression.
 
 ## Platform notes
 

@@ -598,6 +598,9 @@ def create_cases():
     mk("DS:a:GAUGE:20:U:U", "DS:c:COMPUTE:a,b,+", "DS:b:GAUGE:20:U:U", RRA)
     mk(*two, "DS:c:COMPUTE:a,b,+", "RRA:AVERAGE:0.5:1:5", "RRA:MAX:0.5:2:5",
        "RRA:LAST:0.5:1:3", "RRA:MIN:0.5:3:2")
+    # One trailing comma is accepted and not stored; two are not (CP-21).
+    for expr in ["a,b,+,", "a,1,", "a,b,+,,"]:
+        mk(*two, f"DS:c:COMPUTE:{expr}", RRA)
     return c
 
 
@@ -730,6 +733,9 @@ def compute_cases():
         inputs=["cpsumu"])
     add("resize", "cpsumu.rrd", "0", "GROW", "2", inputs=["cpsumu"])
     add("resize", "cpchain.rrd", "1", "SHRINK", "1", inputs=["cpchain"])
+    # A template value for a computed source is kept as its text (CP-11).
+    upd("cpsum", "-t", "a:b:c", "1000000010:1:2:abc",
+        "1000000020:3:4:12345678901234567890123456789012345")
     return c
 
 

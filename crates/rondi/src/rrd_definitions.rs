@@ -8,6 +8,7 @@
 
 use std::fmt;
 
+use crate::rpn::{COMPUTE_PROGRAM_LEN, CompileError, ComputeProgram};
 use crate::rrd_binary::{DS_DEF_LEN, RRA_DEF_LEN, rrd_nan, rrd_scaled_duration};
 use crate::rrd_number::rrd_strtodbl;
 use crate::storage::StoreError;
@@ -44,6 +45,8 @@ pub(crate) enum DefinitionError {
     /// A minimum or maximum that does not convert; the text already
     /// carries its `parsing min val - ` or `parsing max val - ` context.
     DsBound(String),
+    /// A `COMPUTE` expression that does not compile (CP-1 to CP-4).
+    Compute(CompileError),
     ComputeRefused,
     UnknownCf(String),
     HoltWintersRefused(String),
@@ -72,8 +75,10 @@ impl fmt::Display for DefinitionError {
                 write!(f, "failed to parse data source {arguments}: {reason}")
             }
             Self::DsBound(message) => f.write_str(message),
+            Self::Compute(error) => error.fmt(f),
             // Compatibility: RRDtool accepts COMPUTE and Holt-Winters
-            // definitions; Rondi refuses them (CR-80, TM-60).
+            // definitions; Rondi refuses Holt-Winters archives (CR-80) and
+            // COMPUTE definitions added by tune (TM-60, CP-20).
             // Provenance: black-box compatibility test.
             Self::ComputeRefused => f.write_str("COMPUTE data sources are not supported by Rondi"),
             Self::UnknownCf(run) => write!(f, "Unrecognized consolidation function {run}"),
@@ -108,7 +113,7 @@ impl From<DefinitionError> for StoreError {
     }
 }
 
-/// The data source types Rondi stores (CR-19, without `COMPUTE`).
+/// The input data source types (CR-19; `COMPUTE` is [`ComputedSourceDef`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DsKind {
     Gauge,
@@ -275,6 +280,72 @@ impl DataSourceDef {
         record[MIN_OFFSET..MIN_OFFSET + 8].copy_from_slice(&self.minimum.to_le_bytes());
         record[MAX_OFFSET..MAX_OFFSET + 8].copy_from_slice(&self.maximum.to_le_bytes());
         record
+    }
+}
+
+/// A parsed `DS:<name>:COMPUTE:<expression>` word (CP-1, CP-5).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ComputedSourceDef {
+    pub(crate) name: String,
+    program: ComputeProgram,
+}
+
+impl ComputedSourceDef {
+    /// The 120-byte definition record: name, type, then the compiled
+    /// expression where input sources keep their heartbeat and bounds.
+    pub(crate) fn to_bytes(&self) -> [u8; DS_DEF_LEN] {
+        let mut record = [0_u8; DS_DEF_LEN];
+        put_text(&mut record, 0, self.name.as_bytes());
+        put_text(&mut record, TYPE_OFFSET, b"COMPUTE");
+        record[HEARTBEAT_OFFSET..HEARTBEAT_OFFSET + COMPUTE_PROGRAM_LEN]
+            .copy_from_slice(&self.program.to_bytes());
+        record
+    }
+}
+
+/// Any `DS:` word `create` accepts.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum SourceDef {
+    Input(DataSourceDef),
+    Computed(ComputedSourceDef),
+}
+
+impl SourceDef {
+    /// Parses the text after `DS:`. `earlier` resolves the name of a data
+    /// source defined before this one to its index (CP-1 item 1).
+    pub(crate) fn parse(
+        spec: &str,
+        earlier: impl Fn(&str) -> Option<usize>,
+    ) -> Result<Self, DefinitionError> {
+        let word = split_ds_word(spec).ok_or(DefinitionError::DsFormat)?;
+        if word.kind != "COMPUTE" {
+            return DataSourceDef::parse(spec).map(Self::Input);
+        }
+        let program =
+            ComputeProgram::compile(word.arguments, earlier).map_err(DefinitionError::Compute)?;
+        Ok(Self::Computed(ComputedSourceDef {
+            name: word.name.to_owned(),
+            program,
+        }))
+    }
+
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Input(def) => &def.name,
+            Self::Computed(def) => &def.name,
+        }
+    }
+
+    /// Computed sources need no newer file version (CR-37).
+    pub(crate) fn needs_version_5(&self) -> bool {
+        matches!(self, Self::Input(def) if def.kind.needs_version_5())
+    }
+
+    pub(crate) fn to_bytes(&self) -> [u8; DS_DEF_LEN] {
+        match self {
+            Self::Input(def) => def.to_bytes(),
+            Self::Computed(def) => def.to_bytes(),
+        }
     }
 }
 

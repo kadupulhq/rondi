@@ -354,6 +354,10 @@ walk-cdef-self	walk-cdef-self	file	out.rrd	none	same
 walk-cdef-self@stdin	walk-cdef-self	stdin	out.rrd	none	same
 walk-cdef-on-gauge	walk-cdef-on-gauge	file	out.rrd	none	same
 walk-cdef-on-gauge@stdin	walk-cdef-on-gauge	stdin	out.rrd	none	same
+walk-cdef-then-heartbeat	walk-cdef-then-heartbeat	file	out.rrd	none	same
+walk-cdef-then-heartbeat@stdin	walk-cdef-then-heartbeat	stdin	out.rrd	none	same
+walk-cdef-before-name	walk-cdef-before-name	file	out.rrd	none	same
+walk-cdef-before-name@stdin	walk-cdef-before-name	stdin	out.rrd	none	same
 int-step-empty	int-step-empty	file	out.rrd	none	same
 int-step-empty@stdin	int-step-empty	stdin	out.rrd	none	same
 int-step-blank	int-step-blank	file	out.rrd	none	same

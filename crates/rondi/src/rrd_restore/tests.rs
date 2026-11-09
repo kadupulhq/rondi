@@ -487,11 +487,55 @@ fn errno_carries_from_the_previous_conversion() {
 }
 
 #[test]
-fn computed_sources_are_refused() {
-    let ds = "<ds><name>a</name><type>COMPUTE</type></ds>";
-    assert!(message(&doc(HEAD, ds, "")).contains("not supported by Rondi"));
-    let cdef = "<ds><name>a</name><cdef>a,2,*</cdef></ds>";
-    assert!(message(&doc(HEAD, cdef, "")).contains("not supported by Rondi"));
+fn computed_sources_compile_their_cdef_into_the_parameter_slots() {
+    let restored = |ds: &str| {
+        let xml = doc(
+            HEAD,
+            ds,
+            &RRA.replace("<v>1</v>", "<v>1</v><v>1</v>")
+                .replace("<row><v>2</v>", "<row><v>2</v><v>2</v>")
+                .replace(
+                    "<ds><value>1</value></ds>",
+                    "<ds><value>1</value></ds><ds><value>1</value></ds>",
+                ),
+        );
+        let restored = run(&xml);
+        (
+            restored.bytes,
+            restored.message.map(|error| error.to_string()),
+        )
+    };
+    let params = |bytes: &[u8]| bytes[128 + 120 + 40..128 + 240].to_vec();
+    // CP-19: the source being read resolves under the name it has so far.
+    let (bytes, message) = restored(&format!(
+        "{DS}<ds><name>c</name><type>COMPUTE</type><cdef>c,2,*</cdef></ds>"
+    ));
+    assert_eq!(message, None);
+    assert_eq!(
+        &params(&bytes.unwrap())[..16],
+        &[1, 0, 1, 0, 0, 0, 2, 0, 11, 0, 0, 0, 32, 0, 0, 0]
+    );
+    // A later heartbeat or bound overwrites its slot of the compiled nodes.
+    let (bytes, _) = restored(&format!(
+        "{DS}<ds><name>c</name><type>COMPUTE</type><cdef>a,2,*</cdef>\
+         <minimal_heartbeat>20</minimal_heartbeat></ds>"
+    ));
+    let slots = params(&bytes.unwrap());
+    assert_eq!(word(&slots, 0), 20);
+    assert_eq!(&slots[8..16], &[11, 0, 0, 0, 32, 0, 0, 0]);
+    // A cdef read before the name cannot name its own source.
+    let (bytes, message) = restored(&format!(
+        "{DS}<ds><cdef>c,2,*</cdef><name>c</name><type>COMPUTE</type></ds>"
+    ));
+    assert!(bytes.is_none());
+    assert_eq!(
+        message.as_deref(),
+        Some("failed to parse computed data source")
+    );
+    let (_, message) = restored(&format!(
+        "{DS}<ds><name>c</name><type>COMPUTE</type><cdef>a,TIME,+</cdef></ds>"
+    ));
+    assert!(message.unwrap().starts_with("operators TIME LTIME"));
 }
 
 #[test]

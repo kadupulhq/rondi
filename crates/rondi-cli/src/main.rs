@@ -3768,18 +3768,13 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let info = inspect_rrd(&filename)?;
     // info prints a DS or RRA whose name the type or consolidation function check
     // rejects through its default branch and reports the error afterwards.
-    if info.data_sources.iter().any(|ds| ds.kind == "COMPUTE")
-        || info.archives.iter().any(|archive| {
-            !matches!(
-                archive.consolidation.as_str(),
-                "AVERAGE" | "MIN" | "MAX" | "LAST"
-            ) && rondi::cf_conv_error(&archive.raw_consolidation).is_none()
-        })
-    {
-        return Err(
-            "rrdtool info output for this data-source or consolidation type is not implemented"
-                .into(),
-        );
+    if info.archives.iter().any(|archive| {
+        !matches!(
+            archive.consolidation.as_str(),
+            "AVERAGE" | "MIN" | "MAX" | "LAST"
+        ) && rondi::cf_conv_error(&archive.raw_consolidation).is_none()
+    }) {
+        return Err("rrdtool info output for this consolidation type is not implemented".into());
     }
     // RRDtool's info output writes names and strings with %s, byte for byte.
     let mut out = Vec::new();
@@ -3805,12 +3800,18 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         key(&mut out, "index");
         writeln!(out, "{index}")?;
         quoted(&mut out, "type", &source.raw_kind);
-        key(&mut out, "minimal_heartbeat");
-        writeln!(out, "{}", source.heartbeat)?;
-        key(&mut out, "min");
-        writeln!(out, "{}", format_info_value(source.minimum))?;
-        key(&mut out, "max");
-        writeln!(out, "{}", format_info_value(source.maximum))?;
+        if let Some(cdef) = &source.cdef {
+            // CP-9: a computed source shows its expression instead of the
+            // heartbeat and bounds.
+            quoted(&mut out, "cdef", cdef);
+        } else {
+            key(&mut out, "minimal_heartbeat");
+            writeln!(out, "{}", source.heartbeat)?;
+            key(&mut out, "min");
+            writeln!(out, "{}", format_info_value(source.minimum))?;
+            key(&mut out, "max");
+            writeln!(out, "{}", format_info_value(source.maximum))?;
+        }
         quoted(&mut out, "last_ds", &source.raw_last_value);
         key(&mut out, "value");
         writeln!(out, "{}", format_info_float(source.pdp_value))?;

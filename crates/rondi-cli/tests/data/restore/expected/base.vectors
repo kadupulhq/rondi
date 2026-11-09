@@ -3773,6 +3773,48 @@ da1818671ec1fe789622
 da1818671ec1fe789622
 @@ walk-cdef-on-gauge@stdin flags 0
 
+@@ walk-cdef-then-heartbeat status 1
+0
+@@ walk-cdef-then-heartbeat stdout 0
+
+@@ walk-cdef-then-heartbeat stderr 0
+
+@@ walk-cdef-then-heartbeat file 20
+c4f095f109ebc9645f42
+@@ walk-cdef-then-heartbeat flags 0
+
+@@ walk-cdef-then-heartbeat@stdin status 1
+0
+@@ walk-cdef-then-heartbeat@stdin stdout 0
+
+@@ walk-cdef-then-heartbeat@stdin stderr 0
+
+@@ walk-cdef-then-heartbeat@stdin file 20
+c4f095f109ebc9645f42
+@@ walk-cdef-then-heartbeat@stdin flags 0
+
+@@ walk-cdef-before-name status 1
+1
+@@ walk-cdef-before-name stdout 0
+
+@@ walk-cdef-before-name stderr 44
+ERROR: failed to parse computed data source
+
+@@ walk-cdef-before-name file 4
+none
+@@ walk-cdef-before-name flags 0
+
+@@ walk-cdef-before-name@stdin status 1
+1
+@@ walk-cdef-before-name@stdin stdout 0
+
+@@ walk-cdef-before-name@stdin stderr 44
+ERROR: failed to parse computed data source
+
+@@ walk-cdef-before-name@stdin file 4
+none
+@@ walk-cdef-before-name@stdin flags 0
+
 @@ int-step-empty status 1
 1
 @@ int-step-empty stdout 0

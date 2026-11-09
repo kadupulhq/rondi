@@ -65,7 +65,7 @@ Each behavior change below merged to `main` with differential tests against RRDt
 
 - Opens versions 0001 to 0005 wherever `rrd_open` accepts them, including the 0001/0002 `time_t` live head (READ-ONLY: `rrd_binary.rs` and RD-001).
 - Requires a 64-bit little-endian target (`rrd_binary.rs`, `target_pointer_width` and `target_endian` check). READ-ONLY.
-- Supports GAUGE, COUNTER, DERIVE, ABSOLUTE, DCOUNTER, DDERIVE with AVERAGE, MIN, MAX, LAST. COMPUTE and Holt-Winters still fail. EXECUTED (macOS probe): Rondi `create` refuses `DS:b:COMPUTE:a,2,*` and `RRA:HWPREDICT:100:0.1:0.0035:10`; on files upstream created with them, `update` and `info` fail.
+- Supports GAUGE, COUNTER, DERIVE, ABSOLUTE, DCOUNTER, DDERIVE and COMPUTE (docs/compatibility/compute.md) with AVERAGE, MIN, MAX, LAST. Holt-Winters still fails; `tune` still refuses COMPUTE. COMPUTE is pinned by the `compute`, `create` and `restore` vectors.
 - Updates no longer sync each write (EXECUTED: no `sync` call in `rrd_binary.rs`). `update --locking` and `RRD_LOCKING` are accepted (EXECUTED: `update --locking none` succeeds).
 - `tune` performs the structure operations (#91). `resize` accepts v3 and v4 only (READ-ONLY).
 - Damaged headers open as upstream does; three cases that would need undefined behavior are refused on purpose (ID-001 to ID-003).
