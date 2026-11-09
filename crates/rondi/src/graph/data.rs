@@ -406,8 +406,12 @@ fn shift(graph: &mut Graph, index: usize) {
     };
     let seconds = match offset {
         Offset::Seconds(seconds) => seconds,
-        // An unknown value shifts by nothing; `as` saturates the rest.
-        Offset::Vdef(vdef) => graph.elements[vdef].vdef.value as i64,
+        // Compatibility: the VDEF value converts as a C cast does on the
+        // target, so an unknown or out-of-range value shifts by nothing on
+        // aarch64 but by the most negative time on x86_64.
+        // Provenance: black-box compatibility test (shift-035 on the pinned
+        // macOS and Linux x86_64 oracles).
+        Offset::Vdef(vdef) => crate::numeric_cast::c_long(graph.elements[vdef].vdef.value),
     };
     let target = &mut graph.elements[source];
     let step = i64::try_from(target.series.step.max(1)).unwrap_or(i64::MAX);

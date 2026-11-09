@@ -1049,8 +1049,10 @@ to `-034`, `data-059`). Offsets and repeated SHIFTs: GR-38.
   value the series had at *t* − offset; a negative offset moves it
   earlier (`shift-036`, `-039`).
 - A VDEF offset uses the VDEF's value, never its time, also for `FIRST`
-  and `LAST` (`shift-037`); a VDEF whose value is unknown shifts by 0
-  (`shift-035`). The VDEF must be defined before the SHIFT (GR-41): a
+  and `LAST` (`shift-037`). The value converts to seconds as a C cast
+  does on the target: on macOS and Linux aarch64 a VDEF whose value is
+  unknown shifts by 0, while on Linux x86_64 it shifts by the most
+  negative time, so every row is unknown (`shift-035`). The VDEF must be defined before the SHIFT (GR-41): a
   name defined later fails with `error parsing number <name>`.
 - A SHIFT replaces the offset an earlier SHIFT gave the same series; it
   does not add to it. `SHIFT:a:3600` then `SHIFT:a:1800` shifts by 1800,
