@@ -43,7 +43,7 @@ Each behavior change below merged to `main` with differential tests against RRDt
 - #95: rrdcached request handlers (CREATE, FETCH/FETCHBIN, HELP, SUSPEND/RESUME, LIST, TUNE, empty names, NUL separators) match RRDtool 1.11.0; the half-close race is recorded as RD-015.
 - #96: `--daemon` addresses parse as RRDtool 1.11.0 does (bare hosts use port 42217), `tune` re-parses its permuted argv, and `rrdtool fetch` streams past 10 million rows (the collected paths keep the limit as RD-017).
 - #97: rrdcached `-b`, `-P`, `-p`, default logging, and SIGUSR1, SIGUSR2 and SIGHUP match RRDtool 1.11.0.
-- #98: restore reads XML through a port of libxml2 2.9.14's `xmlTextReader`, so integer field errors, a byte order mark, trailing content and libxml2 error text match (RD-018 lists what is not modeled).
+- #98: restore matches RRDtool 1.11.0 for integer field errors, a byte order mark, trailing content and libxml2 error text (RD-018 lists what does not match). #98 did this with a port of libxml2 2.9.14's `xmlTextReader`; that module has since been replaced by a clean-room reader (see [provenance-audit.md](provenance-audit.md)).
 
 - #100: Rondi is licensed `MIT OR Apache-2.0`; no behavior change.
 
