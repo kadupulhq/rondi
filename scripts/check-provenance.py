@@ -33,9 +33,7 @@ from pathlib import Path
 
 # Pre-policy files flagged High or Review in docs/provenance-audit.md that
 # still name C files or lines. Remove an entry when its module is replaced.
-LEGACY = {
-    "crates/rondi/src/graph.rs",
-}
+LEGACY: set[str] = set()
 
 C_FILE = re.compile(r"\b[A-Za-z0-9_]+\.[ch]\b(?![A-Za-z0-9_])")
 C_LINE = re.compile(
