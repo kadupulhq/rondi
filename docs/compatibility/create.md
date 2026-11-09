@@ -243,10 +243,9 @@ TRENDNAN PREDICT PREDICTSIGMA PREDICTPERC`. Observed errors:
 self-reference, text after another `:`) and
 `operators TIME LTIME STEPWIDTH PREV NEW* COUNT TREND TRENDNAN PREDICT PREDICTSIGMA PREDICTPERC are not supported with DS COMPUTE`.
 `DS:y:COMPUTE` and `DS:y:COMPUTE:` fail with `invalid DS format` (CR-17).
-The compiled expression is stored in the definition's parameter area; its
-bytes are pinned by the vectors but not specified here. A replacement that
-does not implement `COMPUTE` must refuse every valid `COMPUTE` definition
-with an `ERROR:` line and exit 1 without writing (CR-80).
+The compiled expression is stored in the definition's parameter area. The
+grammar, the check order and the stored bytes are specified in
+[`compute.md`](compute.md) (CP-1 to CP-6, CP-21), which Rondi implements.
 
 **CR-22** (black-box; must). DS names are stored exactly as given, in
 argument order. The mapped source name and index are not stored.
@@ -631,15 +630,14 @@ stored value.
 
 ## 18. Refused features
 
-**CR-80** (black-box; must for Rondi). RRDtool accepts `COMPUTE` data
-sources and all Holt-Winters archives. Rondi does not implement them: a
-create with a definition word whose type is `COMPUTE` or whose CF is a
-Holt-Winters CF fails with an `ERROR:` line naming the feature
-(`... not supported by Rondi`), exit status 1, and writes nothing. Rondi
-refuses such a word before reporting errors in other words and also when
-the word itself is malformed, so its message differs from RRDtool's there
-(`RRA:HWPREDICT:20:0:0.01:5`, `RRA:... DS:y:COMPUTE:2,3,+ foo`); the
-vectors accept either, as `unsupported`. Templates holding such archives
+**CR-80** (black-box; must for Rondi). RRDtool accepts all Holt-Winters
+archives. Rondi does not implement them: a create with a definition word
+whose CF is a Holt-Winters CF fails with an `ERROR:` line naming the
+feature (`... not supported by Rondi`), exit status 1, and writes nothing.
+Rondi refuses such a word before reporting errors in other words and also
+when the word itself is malformed, so its message differs from RRDtool's
+there (`RRA:HWPREDICT:20:0:0.01:5`); the vectors accept either, as
+`unsupported`. `COMPUTE` data sources are implemented (compute.md). Templates holding such archives
 are a known divergence (CR-div-template-hw).
 
 ## 19. Behavior other commands depend on
@@ -701,7 +699,7 @@ Current Rondi against RRDtool 1.11.0, as of this specification:
   source with the same definitions and last update, and in that case it
   copies data through the text dump, losing precision (vector `371`).
   Other source cases are `unsupported`.
-- CR-80: `COMPUTE` and Holt-Winters definitions are refused (expectation
+- CR-80: Holt-Winters definitions are refused (expectation
   `unsupported`).
 
 ## Tests

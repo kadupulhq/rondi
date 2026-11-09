@@ -1046,7 +1046,7 @@ fn in_place_update_matches_irregular_unknown_and_heartbeat_semantics() {
 }
 
 #[test]
-fn unsupported_in_place_update_is_rejected_without_mutating_the_rrd() {
+fn in_place_update_fills_computed_sources_like_rrdtool() {
     let version = Command::new("rrdtool").arg("--version").output();
     let Ok(version) = version else {
         oracle_skip!("skipping RRDtool update probe: rrdtool is not installed");
@@ -1054,7 +1054,8 @@ fn unsupported_in_place_update_is_rejected_without_mutating_the_rrd() {
     };
     assert!(version.status.success());
     let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("unsupported.rrd");
+    let path = temp.path().join("computed.rrd");
+    let oracle_path = temp.path().join("computed-oracle.rrd");
     let create = Command::new("rrdtool")
         .args([
             "create",
@@ -1070,12 +1071,27 @@ fn unsupported_in_place_update_is_rejected_without_mutating_the_rrd() {
         .output()
         .unwrap();
     assert!(create.status.success());
-    let before = std::fs::read(&path).unwrap();
-    assert!(matches!(
-        rondi::update_rrd_values(&path, 1_000_000_030, &[Some(3.0), Some(6.0)]),
-        Err(StoreError::RrdUnsupported(_))
-    ));
-    assert_eq!(std::fs::read(&path).unwrap(), before);
+    std::fs::copy(&path, &oracle_path).unwrap();
+    // CP-11: a value passed for the computed source is not used.
+    rondi::update_rrd_values(&path, 1_000_000_010, &[Some(3.0), Some(99.0)]).unwrap();
+    rondi::update_rrd_values(&path, 1_000_000_020, &[Some(6.0), None]).unwrap();
+    let update = Command::new("rrdtool")
+        .args([
+            "update",
+            oracle_path.to_str().unwrap(),
+            "1000000010:3",
+            "1000000020:6",
+        ])
+        .output()
+        .unwrap();
+    assert!(update.status.success());
+    let ours = std::fs::read(&path).unwrap();
+    let theirs = std::fs::read(&oracle_path).unwrap();
+    // The last value given for the computed source was unknown, so its
+    // last_ds reads `U`, as in the file RRDtool updated.
+    let last_ds = 128 + 2 * 120 + 120 + 16 + 112;
+    assert_eq!(&ours[last_ds..last_ds + 2], b"U\0");
+    assert_eq!(ours, theirs);
 }
 
 #[test]

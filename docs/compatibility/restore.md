@@ -658,13 +658,12 @@ exit is required.
 
 ## 7. Unsupported inputs
 
-**RS-70** (black-box; should). A `COMPUTE` data source carries a `<cdef>`
-element with an RPN expression over the other data sources. RRDtool
-compiles it into the definition's parameter slots in its internal RPN
-encoding and restores the file; a `<cdef>` that does not compile fails with
-`failed to parse computed data source`. Rondi does not implement this and
-fails with its own `... not supported by Rondi` message, writing nothing.
-The vectors mark these cases `unsupported`.
+**RS-70** (black-box; must). A `COMPUTE` data source carries a `<cdef>`
+element with an RPN expression over the other data sources. It is compiled
+into the definition's parameter slots and the file is restored; a `<cdef>`
+that does not compile fails with the create-time message and writes
+nothing. The rules are CP-19 in [`compute.md`](compute.md); the vectors
+(`seed-compute`, `type-compute`, `walk-cdef-*`) expect RRDtool's result.
 
 **RS-71** (black-box; must). Holt-Winters archives (`HWPREDICT`,
 `MHWPREDICT`, `SEASONAL`, `DEVSEASONAL`, `DEVPREDICT`, `FAILURES`) restore
@@ -685,11 +684,11 @@ exits 0. A 2000-row archive (`tiny-many-rows`) is within the vectors.
 
 Must reproduce exactly: RS-1 to RS-3, RS-5, RS-6, RS-8 to RS-15, RS-16 to
 RS-26, RS-29 to
-RS-39, RS-39a, RS-50 to RS-54, RS-57 to RS-60, RS-71. Where these touch file
+RS-39, RS-39a, RS-50 to RS-54, RS-57 to RS-60, RS-70, RS-71. Where these touch file
 bytes the vectors compare normal forms.
 
 Should reproduce: RS-4, RS-7, RS-40 to RS-44 (library text and line
-numbers), RS-55, RS-61, RS-70 and RS-72.
+numbers), RS-55, RS-61 and RS-72.
 
 Reference defects: RS-15a (endless retry; a replacement fails cleanly),
 RS-27 and RS-28 (pinned for now), RS-56 (replacement
@@ -716,8 +715,8 @@ requires.
 Current Rondi against RRDtool 1.11.0, after the clean-room reimplementation
 of the restore path:
 
-- **RS-81** COMPUTE data sources are refused (RS-70; vectors `seed-compute`,
-  `type-compute`, `walk-cdef-*`, expectation `unsupported`).
+- **RS-81** is resolved: COMPUTE data sources are restored (RS-70), and
+  their vectors are held to `same`.
 - **RS-82** and **RS-83** are resolved: UTF-16 with a byte order mark,
   Latin-1 transcoding, invalid UTF-8 and entities from an internal subset
   now behave as RRDtool does, and their vectors are held to `same` (or

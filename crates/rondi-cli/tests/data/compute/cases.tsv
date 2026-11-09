@@ -1,0 +1,56 @@
+# id	expect	note	inputs	args... (tab separated)
+000-cpsum-rrd-1000000010-1	same	-	cpsum	update	cpsum.rrd	1000000010:1
+001-cpsum-rrd-1000000010-1-2	same	-	cpsum	update	cpsum.rrd	1000000010:1:2
+002-cpsum-rrd-1000000010-1-2-3	same	-	cpsum	update	cpsum.rrd	1000000010:1:2:3
+003-cpsum-rrd-t-a-c-1000000010-1-2	same	-	cpsum	update	cpsum.rrd	-t	a:c	1000000010:1:2
+004-cpsum-rrd-t-c-1000000010-1	same	-	cpsum	update	cpsum.rrd	-t	c	1000000010:1
+005-cpsum-rrd-t-b-a-1000000010-5-6	same	-	cpsum	update	cpsum.rrd	-t	b:a	1000000010:5:6
+006-cpsum-rrd-t-a-1000000010-5	same	-	cpsum	update	cpsum.rrd	-t	a	1000000010:5
+007-cpsum-rrd-t-a-b-c-1000000010-1-2-99	same	-	cpsum	update	cpsum.rrd	-t	a:b:c	1000000010:1:2:99
+008-cpsum-rrd-t-c-a-b-1000000010-99-1-2	same	-	cpsum	update	cpsum.rrd	-t	c:a:b	1000000010:99:1:2
+009-cpsum-rrd-t-a-b-d-1000000010-1-2-3	same	-	cpsum	update	cpsum.rrd	-t	a:b:d	1000000010:1:2:3
+010-cpsum-rrd-1000000010-1-2-1000000020-3-4-	same	-	cpsum	update	cpsum.rrd	1000000010:1:2	1000000020:3:4	1000000025:U:6	1000000030:5:200	1000000040:7:8	1000000045:2:2	1000000050:1:1
+011-cpsum-rrd-1000000010-1-2-1000000055-3-4	same	-	cpsum	update	cpsum.rrd	1000000010:1:2	1000000055:3:4
+012-cpsum-rrd-1000000010-1-2-1000000045-3-4	same	-	cpsum	update	cpsum.rrd	1000000010:1:2	1000000045:3:4
+013-cpsum-rrd-1000000004-1-2-1000000017-3-4-	same	-	cpsum	update	cpsum.rrd	1000000004:1:2	1000000017:3:4	1000000033:5:6
+014-cpsumu-rrd-1000000050-1-1-1000000060-2-2	same	-	cpsumu	update	cpsumu.rrd	1000000050:1:1	1000000060:2:2	1000000070:3:3
+015-cpsum-rrd-1000000010-1-2-1000000020-3-4	same	-	cpsum	updatev	cpsum.rrd	1000000010:1:2	1000000020:3:4
+016-cpchain-rrd-1000000010-3-4-1000000020-5-	same	-	cpchain	update	cpchain.rrd	1000000010:3:4	1000000020:5:6	1000000030:U:1
+017-cpif-rrd-1000000010-u-2-1000000020-3-4-1	same	-	cpif	update	cpif.rrd	1000000010:U:2	1000000020:3:4	1000000030:-5:1
+018-cpdiv-rrd-1000000010-4-0-1000000020-0-0-	same	-	cpdiv	update	cpdiv.rrd	1000000010:-4:0	1000000020:0:0	1000000030:3:0	1000000040:6:3
+019-cpset-rrd-1000000010-1-2-1000000020-9-4	same	-	cpset	update	cpset.rrd	1000000010:1:2	1000000020:9:4
+020-cprate-rrd-1000000010-100-500-1000000020	same	-	cprate	update	cprate.rrd	1000000010:100:500	1000000020:150:1000	1000000030:150:1000	1000000040:10:20
+021-cpstack-rrd-1000000005-1-2	same	-	cpstack	update	cpstack.rrd	1000000005:1:2
+022-cpstack-rrd-1000000012-1-2	same	-	cpstack	update	cpstack.rrd	1000000012:1:2
+023-cpstack-rrd-1000000005-1-2-1000000012-1-	same	-	cpstack	update	cpstack.rrd	1000000005:1:2	1000000012:1:2	1000000025:1:2
+024-cpunder-rrd-1000000005-1-2	same	-	cpunder	update	cpunder.rrd	1000000005:1:2
+025-cpunder-rrd-1000000012-1-2	same	-	cpunder	update	cpunder.rrd	1000000012:1:2
+026-cpunder-rrd-1000000005-1-2-1000000012-1-	same	-	cpunder	update	cpunder.rrd	1000000005:1:2	1000000012:1:2	1000000025:1:2
+027-cpprev-rrd-1000000005-1-2	same	-	cpprev	update	cpprev.rrd	1000000005:1:2
+028-cpprev-rrd-1000000012-1-2	same	-	cpprev	update	cpprev.rrd	1000000012:1:2
+029-cpprev-rrd-1000000005-1-2-1000000012-1-2	same	-	cpprev	update	cpprev.rrd	1000000005:1:2	1000000012:1:2	1000000025:1:2
+030-cpsum-rrd	same	-	cpsum	info	cpsum.rrd
+031-cpsum-rrd	same	-	cpsum	dump	cpsum.rrd
+032-cpsumu-rrd	same	-	cpsumu	info	cpsumu.rrd
+033-cpsumu-rrd	same	-	cpsumu	dump	cpsumu.rrd
+034-cpchain-rrd	same	-	cpchain	info	cpchain.rrd
+035-cpchain-rrd	same	-	cpchain	dump	cpchain.rrd
+036-cpif-rrd	same	-	cpif	info	cpif.rrd
+037-cpif-rrd	same	-	cpif	dump	cpif.rrd
+038-cprate-rrd	same	-	cprate	info	cprate.rrd
+039-cprate-rrd	same	-	cprate	dump	cprate.rrd
+040-cpprev-rrd	same	-	cpprev	info	cpprev.rrd
+041-cpprev-rrd	same	-	cpprev	dump	cpprev.rrd
+042-cpset-rrd	same	-	cpset	info	cpset.rrd
+043-cpset-rrd	same	-	cpset	dump	cpset.rrd
+044-cpsumu-rrd	same	-	cpsumu	lastupdate	cpsumu.rrd
+045-cpsumu-rrd	same	-	cpsumu	last	cpsumu.rrd
+046-cpsumu-rrd	same	-	cpsumu	first	cpsumu.rrd
+047-cpsumu-rrd-average-s-1000000000-e-100000	same	-	cpsumu	fetch	cpsumu.rrd	AVERAGE	-s	1000000000	-e	1000000050	-r	10
+048-cpsumu-rrd-max-s-1000000000-e-1000000050	same	-	cpsumu	fetch	cpsumu.rrd	MAX	-s	1000000000	-e	1000000050	-r	20
+049-cpsumu-rrd-last-s-1000000000-e-100000005	same	-	cpsumu	fetch	cpsumu.rrd	LAST	-s	1000000000	-e	1000000050	-r	10
+050-cpsumu-rrd-min-s-1000000000-e-1000000050	same	-	cpsumu	fetch	cpsumu.rrd	MIN	-s	1000000000	-e	1000000050	-r	30
+051-s-1000000000-e-1000000040-step-10-def-x-	same	-	cpsumu	xport	-s	1000000000	-e	1000000040	--step	10	DEF:x=cpsumu.rrd:c:AVERAGE	DEF:y=cpsumu.rrd:a:AVERAGE	XPORT:x	XPORT:y
+052-cpsumu-rrd-0-grow-2	same	-	cpsumu	resize	cpsumu.rrd	0	GROW	2
+053-cpchain-rrd-1-shrink-1	same	-	cpchain	resize	cpchain.rrd	1	SHRINK	1
+054-cpsum-rrd-t-a-b-c-1000000010-1-2-abc-100	same	-	cpsum	update	cpsum.rrd	-t	a:b:c	1000000010:1:2:abc	1000000020:3:4:12345678901234567890123456789012345

@@ -11,10 +11,12 @@
 //! `crates/rondi-cli/tests/data/rpn_vectors.json`.
 
 mod calendar;
+mod compute;
 mod eval;
 mod ordering;
 mod parse;
 
+pub(crate) use compute::{CompileError, ComputeProgram, PROGRAM_LEN as COMPUTE_PROGRAM_LEN};
 pub(crate) use eval::{Evaluator, Row, Source};
 
 /// A failure while parsing or evaluating an expression. `Display` gives the

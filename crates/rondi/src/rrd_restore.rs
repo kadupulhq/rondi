@@ -17,6 +17,7 @@ use std::fmt;
 use std::io::Write;
 use std::path::Path;
 
+use crate::rpn::ComputeProgram;
 use crate::rrd_binary::{
     CDP_PREP_LEN, DS_DEF_LEN, FLOAT_COOKIE, LIVE_HEAD_LEN, PDP_PREP_LEN, RRA_DEF_LEN, RRA_PTR_LEN,
     STAT_HEAD_LEN, VALUE_LEN, rrd_nan,
@@ -107,6 +108,8 @@ pub enum RestoreError {
     },
     /// An archive whose `<database>` held no rows (RS-63).
     EmptyDatabase,
+    /// A `<cdef>` that does not compile (CP-19), with RRDtool's text.
+    ComputedSource(String),
     /// A feature Rondi does not implement.
     Unsupported(&'static str),
     /// The restored file would not fit in memory or a file offset.
@@ -222,6 +225,7 @@ impl fmt::Display for RestoreError {
                 f.write_str("restore of an RRA without rows is not supported")
             }
             RestoreError::EmptyDatabase => f.write_str("parse_tag_rra: malloc failed."),
+            RestoreError::ComputedSource(message) => f.write_str(message),
             RestoreError::Unsupported(what) => write!(f, "{what} not supported by Rondi"),
             RestoreError::TooLarge => f.write_str("the restored RRD is too large"),
             RestoreError::Create { name, reason } => write!(f, "creating '{name}': {reason}"),
@@ -254,16 +258,35 @@ fn library_text(message: &str) -> String {
 /// slots mix doubles and unsigned integers and `<history>` writes bytes.
 type Slots = [u8; 80];
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 struct DataSource {
     name: Vec<u8>,
     kind: Vec<u8>,
-    heartbeat: u64,
-    min: f64,
-    max: f64,
+    /// The definition's parameter slots: heartbeat, minimum and maximum
+    /// in slots 0 to 2, or a compiled `<cdef>` over all of them. Fields
+    /// write their slots in document order, so a later one overwrites an
+    /// earlier one where they overlap.
+    // Compatibility: `<cdef>` and the heartbeat and bounds share the slots,
+    // whatever the type.
+    // Provenance: black-box compatibility test; see
+    // docs/compatibility/compute.md (CP-19).
+    params: Slots,
     last_ds: Vec<u8>,
     pdp_value: f64,
     unknown_sec: u64,
+}
+
+impl Default for DataSource {
+    fn default() -> Self {
+        Self {
+            name: Vec::new(),
+            kind: Vec::new(),
+            params: [0; 80],
+            last_ds: Vec::new(),
+            pdp_value: 0.0,
+            unknown_sec: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -289,6 +312,12 @@ struct Dump {
 
 fn set_f64(slots: &mut Slots, slot: usize, value: f64) {
     slots[slot * 8..slot * 8 + 8].copy_from_slice(&value.to_le_bytes());
+}
+
+fn slot_f64(slots: &Slots, slot: usize) -> f64 {
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&slots[slot * 8..slot * 8 + 8]);
+    f64::from_le_bytes(bytes)
 }
 
 fn set_u64(slots: &mut Slots, slot: usize, value: u64) {
@@ -434,8 +463,6 @@ const CF_NAMES: [&str; 10] = [
     "DEVPREDICT",
     "FAILURES",
 ];
-
-const COMPUTE: &str = "COMPUTE data sources are";
 
 // ---------------------------------------------------------------------------
 // The walk (section 3 of the specification).
@@ -745,24 +772,48 @@ impl Walk<'_, '_> {
                     if !DS_TYPES.contains(&text.as_str()) {
                         return self.fatal(RestoreError::UnknownType(text));
                     }
-                    if text == "COMPUTE" {
-                        return self.fatal(RestoreError::Unsupported(COMPUTE));
-                    }
                     source.kind = kind;
                 }
-                "minimal_heartbeat" => source.heartbeat = self.field(name, Self::read_unsigned)?,
-                "min" => source.min = self.field(name, Self::read_double)?,
-                "max" => source.max = self.field(name, Self::read_double)?,
+                "minimal_heartbeat" => {
+                    let heartbeat = self.field(name, Self::read_unsigned)?;
+                    set_u64(&mut source.params, 0, heartbeat);
+                }
+                "min" => {
+                    let min = self.field(name, Self::read_double)?;
+                    set_f64(&mut source.params, 1, min);
+                }
+                "max" => {
+                    let max = self.field(name, Self::read_double)?;
+                    set_f64(&mut source.params, 2, max);
+                }
                 "value" => source.pdp_value = self.field(name, Self::read_double)?,
                 "last_ds" => source.last_ds = self.field(name, |walk| walk.read_string(30))?,
                 "unknown_sec" => source.unknown_sec = self.field(name, Self::read_unsigned)?,
-                // RS-70: computed data sources are not implemented.
-                "cdef" => return self.fatal(RestoreError::Unsupported(COMPUTE)),
+                "cdef" => {
+                    let text = self.field(name, Self::read_value)?;
+                    source.params = self.compile_cdef(&text, &source)?;
+                }
                 _ => return self.unknown(RestoreScope::Ds, &tag),
             }
         }
         self.dump.sources.push(source);
         Ok(())
+    }
+
+    /// CP-19: a `<cdef>` compiles as at create, against the sources read
+    /// so far, the one being read included under the name it has so far.
+    fn compile_cdef(&mut self, text: &str, current: &DataSource) -> Step<Slots> {
+        let sources = &self.dump.sources;
+        let program = ComputeProgram::compile(text, |name| {
+            sources
+                .iter()
+                .chain(std::iter::once(current))
+                .position(|source| source.name == name.as_bytes())
+        });
+        match program {
+            Ok(program) => Ok(program.to_bytes()),
+            Err(error) => self.fatal(RestoreError::ComputedSource(error.to_string())),
+        }
     }
 
     fn archive(&mut self) -> Step {
@@ -988,9 +1039,10 @@ impl Walk<'_, '_> {
             let mut value = self.read_double().map_err(|()| Stop::Fatal)?;
             if self.range_check {
                 let source = &self.dump.sources[index];
+                let (min, max) = (slot_f64(&source.params, 1), slot_f64(&source.params, 2));
                 // RS-23: inclusive bounds; a NaN bound is not checked.
-                let below = !source.min.is_nan() && value < source.min;
-                let above = !source.max.is_nan() && value > source.max;
+                let below = !min.is_nan() && value < min;
+                let above = !max.is_nan() && value > max;
                 if below || above {
                     value = rrd_nan();
                 }
@@ -1074,11 +1126,7 @@ fn serialize(dump: &Dump, input_len: usize) -> Result<Vec<u8>, RestoreError> {
     for source in &dump.sources {
         put_string(&mut out, &source.name, 20);
         put_string(&mut out, &source.kind, 20);
-        let mut slots: Slots = [0; 80];
-        set_u64(&mut slots, 0, source.heartbeat);
-        set_f64(&mut slots, 1, source.min);
-        set_f64(&mut slots, 2, source.max);
-        out.extend_from_slice(&slots);
+        out.extend_from_slice(&source.params);
     }
     for archive in &dump.archives {
         put_string(&mut out, &archive.cf, 20);

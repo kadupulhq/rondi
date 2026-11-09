@@ -3481,6 +3481,340 @@ ERROR: failed to parse computed data source
 none
 @@ walk-cdef-unknown-ds@stdin flags 0
 
+@@ walk-cdef-long status 1
+1
+@@ walk-cdef-long stdout 0
+
+@@ walk-cdef-long stderr 68
+ERROR: Maximum 19 RPN nodes permitted. Got 20 RPN nodes at present.
+
+@@ walk-cdef-long file 4
+none
+@@ walk-cdef-long flags 0
+
+@@ walk-cdef-long@stdin status 1
+1
+@@ walk-cdef-long@stdin stdout 0
+
+@@ walk-cdef-long@stdin stderr 68
+ERROR: Maximum 19 RPN nodes permitted. Got 20 RPN nodes at present.
+
+@@ walk-cdef-long@stdin file 4
+none
+@@ walk-cdef-long@stdin flags 0
+
+@@ walk-cdef-19 status 1
+0
+@@ walk-cdef-19 stdout 0
+
+@@ walk-cdef-19 stderr 0
+
+@@ walk-cdef-19 file 20
+93f5e08144057d31f501
+@@ walk-cdef-19 flags 0
+
+@@ walk-cdef-19@stdin status 1
+0
+@@ walk-cdef-19@stdin stdout 0
+
+@@ walk-cdef-19@stdin stderr 0
+
+@@ walk-cdef-19@stdin file 20
+93f5e08144057d31f501
+@@ walk-cdef-19@stdin flags 0
+
+@@ walk-cdef-const status 1
+1
+@@ walk-cdef-const stdout 0
+
+@@ walk-cdef-const stderr 66
+ERROR: constants must be integers in the interval (-32768, 32767)
+
+@@ walk-cdef-const file 4
+none
+@@ walk-cdef-const flags 0
+
+@@ walk-cdef-const@stdin status 1
+1
+@@ walk-cdef-const@stdin stdout 0
+
+@@ walk-cdef-const@stdin stderr 66
+ERROR: constants must be integers in the interval (-32768, 32767)
+
+@@ walk-cdef-const@stdin file 4
+none
+@@ walk-cdef-const@stdin flags 0
+
+@@ walk-cdef-frac status 1
+1
+@@ walk-cdef-frac stdout 0
+
+@@ walk-cdef-frac stderr 66
+ERROR: constants must be integers in the interval (-32768, 32767)
+
+@@ walk-cdef-frac file 4
+none
+@@ walk-cdef-frac flags 0
+
+@@ walk-cdef-frac@stdin status 1
+1
+@@ walk-cdef-frac@stdin stdout 0
+
+@@ walk-cdef-frac@stdin stderr 66
+ERROR: constants must be integers in the interval (-32768, 32767)
+
+@@ walk-cdef-frac@stdin file 4
+none
+@@ walk-cdef-frac@stdin flags 0
+
+@@ walk-cdef-time status 1
+1
+@@ walk-cdef-time stdout 0
+
+@@ walk-cdef-time stderr 136
+ERROR: operators TIME LTIME STEPWIDTH PREV NEW* COUNT TREND TRENDNAN PREDICT PREDICTSIGMA PREDICTPERC are not supported with DS COMPUTE
+
+@@ walk-cdef-time file 4
+none
+@@ walk-cdef-time flags 0
+
+@@ walk-cdef-time@stdin status 1
+1
+@@ walk-cdef-time@stdin stdout 0
+
+@@ walk-cdef-time@stdin stderr 136
+ERROR: operators TIME LTIME STEPWIDTH PREV NEW* COUNT TREND TRENDNAN PREDICT PREDICTSIGMA PREDICTPERC are not supported with DS COMPUTE
+
+@@ walk-cdef-time@stdin file 4
+none
+@@ walk-cdef-time@stdin flags 0
+
+@@ walk-cdef-prev status 1
+0
+@@ walk-cdef-prev stdout 0
+
+@@ walk-cdef-prev stderr 0
+
+@@ walk-cdef-prev file 20
+3dcfbbaeb96494db6156
+@@ walk-cdef-prev flags 0
+
+@@ walk-cdef-prev@stdin status 1
+0
+@@ walk-cdef-prev@stdin stdout 0
+
+@@ walk-cdef-prev@stdin stderr 0
+
+@@ walk-cdef-prev@stdin file 20
+3dcfbbaeb96494db6156
+@@ walk-cdef-prev@stdin flags 0
+
+@@ walk-cdef-trailing-number status 1
+1
+@@ walk-cdef-trailing-number stdout 0
+
+@@ walk-cdef-trailing-number stderr 44
+ERROR: failed to parse computed data source
+
+@@ walk-cdef-trailing-number file 4
+none
+@@ walk-cdef-trailing-number flags 0
+
+@@ walk-cdef-trailing-number@stdin status 1
+1
+@@ walk-cdef-trailing-number@stdin stdout 0
+
+@@ walk-cdef-trailing-number@stdin stderr 44
+ERROR: failed to parse computed data source
+
+@@ walk-cdef-trailing-number@stdin file 4
+none
+@@ walk-cdef-trailing-number@stdin flags 0
+
+@@ walk-cdef-spaced status 1
+0
+@@ walk-cdef-spaced stdout 0
+
+@@ walk-cdef-spaced stderr 0
+
+@@ walk-cdef-spaced file 20
+222124d2497cf8ee84f9
+@@ walk-cdef-spaced flags 0
+
+@@ walk-cdef-spaced@stdin status 1
+0
+@@ walk-cdef-spaced@stdin stdout 0
+
+@@ walk-cdef-spaced@stdin stderr 0
+
+@@ walk-cdef-spaced@stdin file 20
+222124d2497cf8ee84f9
+@@ walk-cdef-spaced@stdin flags 0
+
+@@ walk-cdef-empty status 1
+1
+@@ walk-cdef-empty stdout 0
+
+@@ walk-cdef-empty stderr 44
+ERROR: failed to parse computed data source
+
+@@ walk-cdef-empty file 4
+none
+@@ walk-cdef-empty flags 0
+
+@@ walk-cdef-empty@stdin status 1
+1
+@@ walk-cdef-empty@stdin stdout 0
+
+@@ walk-cdef-empty@stdin stderr 44
+ERROR: failed to parse computed data source
+
+@@ walk-cdef-empty@stdin file 4
+none
+@@ walk-cdef-empty@stdin flags 0
+
+@@ walk-cdef-missing status 1
+0
+@@ walk-cdef-missing stdout 0
+
+@@ walk-cdef-missing stderr 0
+
+@@ walk-cdef-missing file 20
+e80839f8b2442fb99f00
+@@ walk-cdef-missing flags 0
+
+@@ walk-cdef-missing@stdin status 1
+0
+@@ walk-cdef-missing@stdin stdout 0
+
+@@ walk-cdef-missing@stdin stderr 0
+
+@@ walk-cdef-missing@stdin file 20
+e80839f8b2442fb99f00
+@@ walk-cdef-missing@stdin flags 0
+
+@@ walk-cdef-twice status 1
+0
+@@ walk-cdef-twice stdout 0
+
+@@ walk-cdef-twice stderr 0
+
+@@ walk-cdef-twice file 20
+8b7f1d130f948aaa642f
+@@ walk-cdef-twice flags 0
+
+@@ walk-cdef-twice@stdin status 1
+0
+@@ walk-cdef-twice@stdin stdout 0
+
+@@ walk-cdef-twice@stdin stderr 0
+
+@@ walk-cdef-twice@stdin file 20
+8b7f1d130f948aaa642f
+@@ walk-cdef-twice@stdin flags 0
+
+@@ walk-cdef-with-heartbeat status 1
+0
+@@ walk-cdef-with-heartbeat stdout 0
+
+@@ walk-cdef-with-heartbeat stderr 0
+
+@@ walk-cdef-with-heartbeat file 20
+222124d2497cf8ee84f9
+@@ walk-cdef-with-heartbeat flags 0
+
+@@ walk-cdef-with-heartbeat@stdin status 1
+0
+@@ walk-cdef-with-heartbeat@stdin stdout 0
+
+@@ walk-cdef-with-heartbeat@stdin stderr 0
+
+@@ walk-cdef-with-heartbeat@stdin file 20
+222124d2497cf8ee84f9
+@@ walk-cdef-with-heartbeat@stdin flags 0
+
+@@ walk-cdef-self status 1
+0
+@@ walk-cdef-self stdout 0
+
+@@ walk-cdef-self stderr 0
+
+@@ walk-cdef-self file 20
+8c73803be0b262889a72
+@@ walk-cdef-self flags 0
+
+@@ walk-cdef-self@stdin status 1
+0
+@@ walk-cdef-self@stdin stdout 0
+
+@@ walk-cdef-self@stdin stderr 0
+
+@@ walk-cdef-self@stdin file 20
+8c73803be0b262889a72
+@@ walk-cdef-self@stdin flags 0
+
+@@ walk-cdef-on-gauge status 1
+0
+@@ walk-cdef-on-gauge stdout 0
+
+@@ walk-cdef-on-gauge stderr 0
+
+@@ walk-cdef-on-gauge file 20
+da1818671ec1fe789622
+@@ walk-cdef-on-gauge flags 0
+
+@@ walk-cdef-on-gauge@stdin status 1
+0
+@@ walk-cdef-on-gauge@stdin stdout 0
+
+@@ walk-cdef-on-gauge@stdin stderr 0
+
+@@ walk-cdef-on-gauge@stdin file 20
+da1818671ec1fe789622
+@@ walk-cdef-on-gauge@stdin flags 0
+
+@@ walk-cdef-then-heartbeat status 1
+0
+@@ walk-cdef-then-heartbeat stdout 0
+
+@@ walk-cdef-then-heartbeat stderr 0
+
+@@ walk-cdef-then-heartbeat file 20
+c4f095f109ebc9645f42
+@@ walk-cdef-then-heartbeat flags 0
+
+@@ walk-cdef-then-heartbeat@stdin status 1
+0
+@@ walk-cdef-then-heartbeat@stdin stdout 0
+
+@@ walk-cdef-then-heartbeat@stdin stderr 0
+
+@@ walk-cdef-then-heartbeat@stdin file 20
+c4f095f109ebc9645f42
+@@ walk-cdef-then-heartbeat@stdin flags 0
+
+@@ walk-cdef-before-name status 1
+1
+@@ walk-cdef-before-name stdout 0
+
+@@ walk-cdef-before-name stderr 44
+ERROR: failed to parse computed data source
+
+@@ walk-cdef-before-name file 4
+none
+@@ walk-cdef-before-name flags 0
+
+@@ walk-cdef-before-name@stdin status 1
+1
+@@ walk-cdef-before-name@stdin stdout 0
+
+@@ walk-cdef-before-name@stdin stderr 44
+ERROR: failed to parse computed data source
+
+@@ walk-cdef-before-name@stdin file 4
+none
+@@ walk-cdef-before-name@stdin flags 0
+
 @@ int-step-empty status 1
 1
 @@ int-step-empty stdout 0
