@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use rondi::graph::{GraphImage, XportData};
+use rondi::graph::{Export, Graph};
 use rondi::{create_rrd_file, fetch_rrd_file, update_rrd_values};
 use std::{hint::black_box, path::PathBuf, time::Duration};
 
@@ -57,13 +57,13 @@ impl Fixture {
 
     /// Runs the graph engine's script parsing, data_fetch, data_calc and
     /// xport steps, as `rrdtool xport` does after option parsing.
-    fn calculate(&self, script: &[String]) -> (GraphImage, XportData) {
-        let mut image = GraphImage::new(self.start, self.end, 1);
+    fn calculate(&self, script: &[String]) -> (Graph, Export) {
+        let mut image = Graph::new(self.start, self.end, 1);
         let resolve = |_: Option<&str>, _: Option<&str>, start: i64, end: i64| Ok((start, end));
-        image.graph_script(script, &resolve).unwrap();
-        image.data_fetch(&mut |_, _| Ok(None)).unwrap();
-        image.data_calc().unwrap();
-        let data = image.xport(false).unwrap();
+        image.parse_elements(script, &resolve).unwrap();
+        image.fetch(&mut |_, _| Ok(None)).unwrap();
+        image.compute().unwrap();
+        let data = image.export(false).unwrap();
         (image, data)
     }
 }
@@ -115,11 +115,11 @@ fn rrd_queries(criterion: &mut Criterion) {
             let (image, data) = fixture.calculate(&script);
             assert_eq!(data.rows.len() as u64, fixture.rows);
             let maximum = image
-                .gdes
+                .elements
                 .iter()
-                .find(|element| element.vname == "maximum")
+                .find(|element| element.name.as_deref() == Some("maximum"))
                 .unwrap();
-            assert!(maximum.vf.val.is_finite());
+            assert!(maximum.vdef.value.is_finite());
             graphs.bench_with_input(
                 BenchmarkId::new(name, fixture.rows),
                 fixture,

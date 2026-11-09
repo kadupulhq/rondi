@@ -12,7 +12,7 @@ use rondi::format_value::{
     DurationError, NumberSpec, PrintFormat, Printer, UnitScale, format_duration, host_number,
     missing_time_text, printf_number,
 };
-use rondi::graph::{Gf, GraphImage, ValueFormatter};
+use rondi::graph::{Graph, Kind, ValueFormatter};
 
 // `super`, not `crate`: the fuzz crate includes the CLI as a submodule.
 use super::{GraphInfo, InfoValue};
@@ -58,7 +58,7 @@ const DEFAULT_TIMESTAMP_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 /// PRINT text as `print[n]` info entries, stores GPRINT text as the item's
 /// legend and gives HRULE/VRULE items their VDEF value or time.
 pub(crate) fn format_print_items(
-    im: &mut GraphImage,
+    im: &mut Graph,
     si_base: u32,
     force_utc: bool,
     info: &mut GraphInfo,
@@ -76,30 +76,30 @@ pub(crate) fn format_print_items(
     let mut shown_time = broken_down_time(now, force_utc);
     let mut print_count = 0_usize;
     let mut draws = false;
-    for index in 0..im.gdes.len() {
-        let gf = im.gdes[index].gf;
-        let vdef = im.gdes[index]
-            .vidx
-            .map(|vidx| &im.gdes[vidx])
-            .filter(|source| source.gf == Gf::Vdef)
-            .map(|source| source.vf);
-        match gf {
-            Gf::Print | Gf::Gprint => {
+    for index in 0..im.elements.len() {
+        let kind = im.elements[index].kind;
+        let vdef = im.elements[index]
+            .source
+            .map(|vidx| &im.elements[vidx])
+            .filter(|source| source.kind == Kind::Vdef)
+            .map(|source| source.vdef);
+        match kind {
+            Kind::Print | Kind::Gprint => {
                 if let Some(vdef) = vdef {
-                    shown_time = broken_down_time(vdef.when, force_utc);
+                    shown_time = broken_down_time(vdef.time.unwrap_or(0), force_utc);
                 }
                 let value = im.print_value(index);
-                let element = &im.gdes[index];
-                let text = if element.strftm {
-                    if vdef.is_some_and(|vdef| vdef.never) {
+                let element = &im.elements[index];
+                let text = if element.strftime {
+                    if vdef.is_some_and(|vdef| vdef.time.is_none()) {
                         missing_time_text(&element.format)
                     } else {
                         strftime_bytes(&element.format, &shown_time, STRFTIME_CAPACITY)
                     }
                 } else {
-                    match element.vformatter {
+                    match element.formatter {
                         ValueFormatter::Timestamp => {
-                            let limit = if gf == Gf::Print {
+                            let limit = if kind == Kind::Print {
                                 MOST_PRINT_BYTES
                             } else {
                                 MOST_GPRINT_DIGITS
@@ -119,34 +119,34 @@ pub(crate) fn format_print_items(
                                 decimal_point: &decimal_point,
                             };
                             let field = format.render(value, &mut scale, printer).field;
-                            im.gdes[index].format = format.field().to_owned();
-                            numeric_text(gf, &field, format.field())?
+                            im.elements[index].format = format.field().to_owned();
+                            numeric_text(kind, &field, format.field())?
                         }
                     }
                 };
                 let text = String::from_utf8_lossy(&text).into_owned();
-                if gf == Gf::Print {
+                if kind == Kind::Print {
                     info.push(format!("print[{print_count}]"), InfoValue::Str(text));
                     print_count += 1;
                 } else {
-                    im.gdes[index].legend = text;
+                    im.elements[index].legend = text;
                 }
             }
-            Gf::Hrule => {
+            Kind::Hrule => {
                 if let Some(vdef) = vdef {
-                    im.gdes[index].yrule = vdef.val;
+                    im.elements[index].value = vdef.value;
                 }
             }
-            Gf::Vrule => {
+            Kind::Vrule => {
                 if let Some(vdef) = vdef {
-                    im.gdes[index].xrule = vdef.when;
+                    im.elements[index].time = vdef.time.unwrap_or(0);
                 }
             }
             _ => {}
         }
         draws |= matches!(
-            gf,
-            Gf::Gprint | Gf::Line | Gf::Area | Gf::Tick | Gf::Hrule | Gf::Vrule | Gf::Stack
+            kind,
+            Kind::Gprint | Kind::Line | Kind::Area | Kind::Tick | Kind::Hrule | Kind::Vrule
         );
     }
     Ok(PrintOutcome::Finished { draws })
@@ -154,12 +154,12 @@ pub(crate) fn format_print_items(
 
 /// The bytes a numeric PRINT or GPRINT item shows.
 fn numeric_text(
-    gf: Gf,
+    kind: Kind,
     field: &rondi::format_value::Field,
     format: &str,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut text = Vec::new();
-    if gf == Gf::Print {
+    if kind == Kind::Print {
         if field.len() > MOST_PRINT_BYTES {
             return Err(format!(
                 "PRINT format '{format}' produces more than {MOST_PRINT_BYTES} bytes"
