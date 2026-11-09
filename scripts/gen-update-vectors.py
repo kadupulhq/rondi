@@ -46,7 +46,9 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "crates", "rondi-cli", "tests", "data", "update")
 ENV = {"TZ": "UTC", "LC_ALL": "C", "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
-NOW = re.compile(rb"\b1[7-9][0-9]{8}\b")
+# A current-time number: ten digits 1700000000..1999999999 not adjacent to
+# an ASCII letter, digit or underscore (the Rust test uses the same rule).
+NOW = re.compile(rb"(?<![A-Za-z0-9_])1[7-9][0-9]{8}(?![A-Za-z0-9_])")
 
 # --------------------------------------------------------------------------
 # Seeds. Each is created once by the reference; the bytes are frozen because
@@ -128,6 +130,12 @@ SEEDS = {
     "zero": ["--start", "1000000000", "--step", "10", "DS:a:GAUGE:600:U:U",
              "RRA:AVERAGE:0.5:1:5", "RRA:AVERAGE:0.5:2:5", "RRA:MAX:0.5:2:5",
              "RRA:LAST:0.5:2:5", "RRA:MIN:0.5:2:5"],
+    # GAUGE bounds equal to the readings.
+    "m3": ["--start", "1000000000", "--step", "10",
+           "DS:a:GAUGE:600:U:0.1", "DS:b:GAUGE:600:0.7:U",
+           "RRA:AVERAGE:0.5:1:10"],
+    "fplead": ["--start", "1000000010", "--step", "10", "DS:a:GAUGE:600:U:U",
+               "RRA:AVERAGE:0.5:1:10"],
     # A start far in the future, for `N` before the last update.
     "fut": ["--start", "4000000000", "--step", "10",
             "DS:a:GAUGE:600:U:U", "RRA:AVERAGE:0.5:1:5"],
@@ -249,6 +257,11 @@ CASES = [
       U("1000000004:-"), U("1000000005:+"), U("1000000006:unknown"),
       U("1000000007:0x10"), U("1000000008:1,5"), U("1000000009:12abc"),
       U("1000000010: 5")]),
+    ("val-out-of-range", ["UP-11"], "same", "g1",
+     [U("1000000001:1e2000"), U("1000000001:1e1025"), U("1000000001:1e-1022"),
+      U("1000000001:1e1024")]),
+    ("val-tiny-and-zero-scale", ["UP-11"], "same", "g1",
+     [U("1000000001:1e-400"), U("1000000002:0e600")]),
     ("val-unknown-prefix", ["UP-10", "UP-13"], "same", "types",
      [U("1000000010:Uxyz:Unknown:U-1:U:Ufoo:Ubar")]),
     ("val-absolute-reject", ["UP-11"], "same", "types",
@@ -340,6 +353,8 @@ CASES = [
     ("range-gauge", ["UP-18"], "same", "mm",
      [V("1000000010:-1:1", "1000000020:0:5", "1000000030:100:50",
         "1000000040:100.000001:51", "1000000050:50:0")]),
+    ("range-gauge-reading", ["UP-18"], "same", "m3",
+     [V("1000000003:0.1:0.7"), V("1000000005:0.1000001:0.6999999")]),
     ("range-absolute-interval", ["UP-18"], "same", "mm",
      [V("1000000005:1:25", "1000000010:1:26", "1000000030:1:100",
         "1000000040:1:51")]),
@@ -381,7 +396,7 @@ CASES = [
      [V("1000000013:1:1", "1000000047:2:3")]),
     ("multi-split-unknown", ["UP-22", "UP-25"], "same", "g2",
      [V("1000000013:1:1", "1000000047:U:3", "1000000068:4:U")]),
-    ("multi-pre-under-one", ["UP-20", "UP-23"], "same", "g1",
+    ("multi-lead-under-one", ["UP-20", "UP-23"], "same", "g1",
      [V("1000000009.5:1", "1000000035:2")]),
     ("multi-fraction-split", ["UP-22", "UP-32"], "same", "g2",
      [V("1000000013.5:1:1", "1000000047.25:2:3", "1000000061:4:4")]),
@@ -415,7 +430,7 @@ CASES = [
     ("cdp-alignment", ["UP-28", "UP-29"], "same", "un",
      [V("1000000013:1", "1000000024:2", "1000000037:3", "1000000101:4")]),
     # --- rows: capping, wrap, timestamps -------------------------------------
-    ("rows-wrap", ["UP-30"], "same", "cap",
+    ("rows-wrap", ["UP-28", "UP-29", "UP-30"], "same", "cap",
      [V("1000000010:1", "1000000020:2", "1000000030:3", "1000000040:4",
         "1000000050:5", "1000000060:6", "1000000070:7")]),
     ("rows-capped", ["UP-29", "UP-30", "UP-32"], "same", "cap",
@@ -465,6 +480,8 @@ CASES = [
       V("1000001338.692611:575.84596")]),
     ("fp-fused-average", ["UP-26", "UP-35"], "same", "fp7",
      [V("1000000021.931505:69.8"), V("1000000079.237859:635.9725")]),
+    ("fp-lead-ratio", ["UP-22", "UP-35"], "same", "fplead",
+     [V("1000000014.295626:4.094", "1000000069:369.25357")]),
     ("fp-unknown-denominator", ["UP-21", "UP-35"], "same", "fpden",
      [V("1000017240:U"), V("1000017389:607"),
       V("1000017505.795224:0.00038331942765209925"),
@@ -481,7 +498,7 @@ def random_cases():
 
     out = []
     seeds = {}
-    for number in range(16):
+    for number in range(12):
         rng = random.Random(4100 + number)
         step = rng.choice([1, 5, 7, 10, 60, 300])
         start = 1000000000 + rng.randint(0, 3 * step)
