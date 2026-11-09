@@ -62,10 +62,12 @@ Out of scope: Holt-Winters archives (Rondi refuses them at create time,
   double, possibly unknown).
 - The *CDP state* of an archive and DS (`create.md` CR-43, CR-45) holds the
   *accumulator* *cv* (word 0, a double), the *unknown-PDP count* *cu*
-  (word 1, an integer) and two further doubles RRDtool maintains, *word 8*
-  and *word 9* (bytes 64 and 72 of the 80-byte state). An archive has a
+  (word 1, an integer) and two further doubles, *primary_value* (word 8,
+  bytes 64 to 71) and *secondary_value* (word 9, bytes 72 to 79), named as
+  in `dump`'s `<cdp_prep>` output. An archive has a
   consolidation function (CF), *p* PDPs per row, *rows* rows and xff *x*.
-  Its *slot length* is *L* = *p*·*S*.
+  Its *slot length* is *D* = *p*·*S*. (*D* is used instead of `create.md`'s
+  *L*, which there means the last update time.)
 - *fma(a, b, c)* is *a*·*b* + *c* computed with a single rounding;
   UP-35 says where the reference computes it with two roundings instead.
   All other arithmetic is IEEE binary64 with round-to-nearest, evaluated
@@ -195,12 +197,15 @@ positive or negative infinity; the rest of the text is ignored (`nanx`,
 text is converted by `restore.md` RS-38. Failures read
 `<file>: Function update_pdp_prep, case DST_<TYPE> - Cannot convert
 '<reading>' to float` when no number starts the text (`+inf`, `e5`, `.`,
-`-`, `+`, the empty reading, `unknown`, `xnan`), and `<file>: Function
+`-`, `+`, the empty reading, `unknown`, `xnan`) and also when the exponent
+is out of range (RS-38 step 6: `1e2000`, `1e1025`, `1e-1022`), and `<file>: Function
 update_pdp_prep, case DST_<TYPE> - Converted '<reading>' to <value>, but
 cannot convert '<rest>'` when text follows the number, where *value* is
 printed with six decimals (`0.000000` for `0x10`, `12.000000` for
-`12abc`). `1e`, `1e+`, `.5`, `5.`, `+5`, ` 5` and `1e400` (infinity) are
-accepted; `1e-400` is 0 and `0e600` is NaN, as RS-38 states (vectors
+`12abc`). `1e`, `1e+`, `.5`, `5.`, `+5`, ` 5`, `1e400` and `1e1024`
+(infinity) are accepted; `1e-400` is 0, and `0e600` is NaN and so an
+unknown amount, as RS-38 states (vectors `val-out-of-range`,
+`val-tiny-and-zero-scale`,
 `val-gauge-forms`, `val-gauge-specials`, `val-gauge-nan-text`,
 `val-gauge-reject`, `val-absolute-reject`, `count-empty-values`,
 `time-before-value`, `skip-past-bad-value`).
@@ -280,18 +285,25 @@ downward-counting mode (documentation conflict; reproduce the reference)
 `val-dcounter-bad-new`, `rate-dcounter`, `rate-dcounter-down`,
 `rate-dcounter-fraction`, `rate-all-types`).
 
-**UP-18** (black-box; must). When the amount *a* is known, the rate
-*a* / *i* is compared with the DS's minimum and maximum (bounds stored as
-NaN are not checked): a rate below the minimum or above the maximum makes
-the amount unknown. For `ABSOLUTE` the rate depends on the interval, so
-the same reading passes or fails with the interval length (vectors
-`range-gauge`, `range-absolute-interval`, `rate-counter-range`).
+**UP-18** (black-box; must). When the amount *a* is known, a *rate* is
+compared with the DS's minimum and maximum (bounds stored as NaN are not
+checked): a rate below the minimum or above the maximum makes the amount
+unknown. For `GAUGE` the rate is the converted reading *x* itself, not
+*a* / *i*: with a maximum of 0.1, the reading `0.1` over a 3-second
+interval stays known although (0.1 × 3) / 3 rounds above 0.1. For
+`ABSOLUTE`, `COUNTER`, `DERIVE`, `DCOUNTER` and `DDERIVE` the rate is
+*a* / *i* (an `ABSOLUTE` reading of 10 over 10 seconds passes a maximum of
+1 and 15 over 10 seconds fails it; a `COUNTER` difference of 5 over
+10 seconds passes a maximum of 1 and fails a minimum of 0.6). For
+`ABSOLUTE` the same reading therefore passes or fails with the interval
+length (vectors `range-gauge`, `range-gauge-reading`,
+`range-absolute-interval`, `rate-counter-range`).
 
 ## 6. Primary data points
 
-Let *proc* = *s0* − (*s0* mod *S*) and *occu* = *s1* − (*s1* mod *S*), the
-starts of the steps holding the last update and the new time, and
-*n* = (*occu* − *proc*) / *S*, the number of step boundaries crossed.
+Let *T0* = *s0* − (*s0* mod *S*) and *T1* = *s1* − (*s1* mod *S*), the
+start times of the steps that hold the last update and the new time, and
+*n* = (*T1* − *T0*) / *S*, the number of step boundaries crossed.
 UP-19 to UP-25 apply per DS, with that DS's *u*, *v*, heartbeat and amount
 *a*.
 
@@ -303,18 +315,19 @@ UP-19 to UP-25 apply per DS, with that DS's *u*, *v*, heartbeat and amount
 
 **UP-20** (black-box; must). If *n* ≥ 1, define
 
-- *pre* = double(*proc* + *S* − *s0*) − double(*µ0*) / 1000000.0, the time
-  from the last update to the first boundary;
-- *pre1* = floor(*pre*), that is *proc* + *S* − *s0*, minus 1 when *µ0* > 0;
-- *post* = double(*s1* − *occu*) + double(*µ1*) / 1000000.0, the time after
-  the last boundary;
-- *W* = double(*occu* − *s0*) − double(*µ0*) / 1000000.0, the time from the
+- *lead* = double(*T0* + *S* − *s0*) − double(*µ0*) / 1000000.0, the time
+  from the last update to the first boundary crossed;
+- *lead1* = floor(*lead*), the whole seconds of *lead*: *T0* + *S* − *s0*,
+  minus 1 when *µ0* > 0;
+- *tail* = double(*s1* − *T1*) + double(*µ1*) / 1000000.0, the time from
+  the last boundary crossed to the new time;
+- *W* = double(*T1* − *s0*) − double(*µ0*) / 1000000.0, the time from the
   last update to the last boundary.
 
-The update is *split* when *n* ≥ 2, *pre1* ≥ 1, and not both
+The update is *split* when *n* ≥ 2, *lead1* ≥ 1, and not both
 *s0* mod *S* = 0 and *µ0* = 0. Otherwise it is *whole* (vectors
 `one-step`, `one-step-fraction`, `multi-aligned`, `multi-split`,
-`multi-pre-under-one`).
+`multi-lead-under-one`).
 
 **UP-21** (black-box; must). A whole update yields one value *V* for all
 *n* PDPs. Let *b* be +0 when *v* is unknown and *v* otherwise.
@@ -334,44 +347,49 @@ first and *e* second; a zero divisor gives the IEEE result. Subtracting
 and *n* − 1 further PDPs of one value *R*. Let *b* be +0 when *v* is
 unknown and *v* otherwise.
 
-- When *a* is known: *pp* = (*a* × *pre1*) / *i*;
-  *vt* = fma(*pp* / *pre1*, *pre1*, *b*); *ut* = *u*;
-  *rem* = *a* − *pp*; *r2* = *rem* / (*i* − *pre1*);
-  *R* = (*r2* × (*W* − *pre1*)) / double((*n* − 1)·*S*).
-- When *a* is unknown: *vt* = *v* (possibly unknown); *ut* = *u* + *pre1*;
+- When *a* is known: *q* = (*a* × *lead1*) / *i* (the amount's share for
+  *lead1* seconds);
+  *vt* = fma(*q* / *lead1*, *lead1*, *b*); *ut* = *u*;
+  *rem* = *a* − *q*; *r2* = *rem* / (*i* − *lead1*);
+  *R* = (*r2* × (*W* − *lead1*)) / double((*n* − 1)·*S*).
+- When *a* is unknown: *vt* = *v* (possibly unknown); *ut* = *u* + *lead1*;
   *R* is unknown.
 
-*F* is unknown when 2·*u* > *S* or *pre1* is greater than the heartbeat;
-otherwise *F* = *vt* / (double(*S*) − *ut*). Only the whole seconds *pre1*
-go to *F*; when *µ0* > 0 the fraction *pre* − *pre1* is counted twice,
-once in *rem* and again because *W* − *pre1* exceeds (*n* − 1)·*S* by it,
+The order matters in the last bits: fma(*q* / *lead1*, *lead1*, *b*) is
+not fma(*a* / *i*, *lead1*, *b*) (vector `fp-lead-ratio`) nor *q* + *b*
+(vector `fp-fused-first`).
+*F* is unknown when 2·*u* > *S* or *lead1* is greater than the heartbeat;
+otherwise *F* = *vt* / (double(*S*) − *ut*). Only the whole seconds *lead1*
+go to *F*; when *µ0* > 0 the fraction *lead* − *lead1* is counted twice,
+once in *rem* and again because *W* − *lead1* exceeds (*n* − 1)·*S* by it,
 so *R* is slightly too large (defect; reproduce). `rrd_pdpcalc(7)`'s worked
 example computes the intermediate PDPs differently and does not match
 1.11.0 (vectors `multi-split`, `multi-split-unknown`,
 `multi-fraction-split`, `multi-start-unknown`, `multi-s7`,
-`hb-split-subinterval`, `hb-split-known-part`, `zero-split`, `fp-fused-first`).
+`hb-split-subinterval`, `hb-split-known-part`, `zero-split`, `fp-fused-first`,
+`fp-lead-ratio`).
 
 **UP-23** (black-box; must). The PDPs an update completes, in time order,
 are consolidated (section 7) as *runs* of equal values: for a split update
-a run of one *F* starting at *proc*, then a run of *n* − 1 *R* starting at
-*proc* + *S*; for a whole update with *n* = 1 a run of one *V* starting at
-*proc*; for a whole update with *n* ≥ 2 one run of *n* *V* starting at
-*proc*. A PDP *starts* at the beginning of its step (vectors
-`multi-aligned`, `multi-pre-under-one`, `multi-s7-aligned`).
+a run of one *F* starting at *T0*, then a run of *n* − 1 *R* starting at
+*T0* + *S*; for a whole update with *n* = 1 a run of one *V* starting at
+*T0*; for a whole update with *n* ≥ 2 one run of *n* *V* starting at
+*T0*. A PDP *starts* at the beginning of its step (vectors
+`multi-aligned`, `multi-lead-under-one`, `multi-s7-aligned`).
 
 **UP-24** (black-box; must). The unknown-seconds limit tests the *u*
 stored before the update (2·*u* > *S*, so exactly half the step unknown
 still gives a value), not the seconds the update itself adds. The
-heartbeat test of a split update uses *pre1*, of a whole update *i*; an
-unknown amount with *pre1* within the heartbeat therefore still gives a
+heartbeat test of a split update uses *lead1*, of a whole update *i*; an
+unknown amount with *lead1* within the heartbeat therefore still gives a
 known *F* from the earlier known part of the step (vectors `hb-long-gap`,
 `hb-split-subinterval`, `hb-split-known-part`, `one-step-unknown`, `one-step-half-unknown`,
 `one-step-start-unknown`, `multi-start-unknown`).
 
 **UP-25** (black-box; must). After an update with *n* ≥ 1, the PDP state
-starts the step *occu*: when *a* is unknown, *v* is unknown and
-*u* = trunc(*post*); otherwise *u* = 0 and *v* = *r* × *post* for a whole
-update or *r2* × *post* for a split one (vectors `one-step`,
+starts the step *T1*: when *a* is unknown, *v* is unknown and
+*u* = trunc(*tail*); otherwise *u* = 0 and *v* = *r* × *tail* for a whole
+update or *r2* × *tail* for a split one (vectors `one-step`,
 `one-step-unknown`, `one-step-fraction`, `multi-split-unknown`).
 
 ## 7. Consolidation
@@ -400,21 +418,27 @@ time *B* is consolidated into each archive in archive order, and within it
 for each DS. Let *c* = (*B* / *S*) mod *p*, the run's first position in its
 row, and *N* = (*c* + *m*) div *p*, the number of rows the run completes.
 If *N* = 0, *m* copies of *z* are folded (UP-26) and nothing else changes.
-A run of one PDP that completes a row (*c* = *p* − 1) folds it, writes the
-finished value (for *p* = 1, the PDP itself) as one row (UP-30), and sets
-word 8 to the written value; for *p* > 1 it also resets the accumulator
-and sets word 9 to *z* (vectors `one-step`, `multi-split`, `cf-basic`,
-`cdp-alignment`).
+A run of one PDP that completes a row (*c* = *p* − 1) writes one row
+(UP-30) and sets *primary_value* to the written value: for *p* > 1 it
+folds the PDP, writes the finished value, resets the accumulator and sets
+*secondary_value* to *z*; for *p* = 1 it writes the PDP itself.
+
+For *p* = 1 every run completes *m* rows and nothing is ever folded: the
+accumulator and the unknown-PDP count of a one-PDP-per-row archive keep
+their created values (unknown and 0) through known, unknown and long runs.
+Only its rows, *primary_value* and *secondary_value* change (vectors
+`one-step`, `multi-split`, `cf-basic`, `cdp-alignment`, `rows-wrap`).
 
 **UP-29** (black-box; must). A run with *N* ≥ 1 writes
-*K* = min(*N*, *rows*) rows. The first, the *primary*, is the accumulator
+*K* = min(*N*, *rows*) rows. The first, the *opening row*, is the accumulator
 with *p* − *c* copies of *z* folded and finished (for *p* = 1, *z*). Each of
 the other *K* − 1 rows is *z* itself, whatever the CF and *p*. When *N*
-exceeds *rows*, the primary is still written first, followed by
+exceeds *rows*, the opening row is still written first, followed by
 *rows* − 1 copies of *z*. Then, for *p* > 1, the accumulator is reset and
-(*c* + *m*) mod *p* copies of *z* are folded into it. Word 8 becomes the
-primary for *p* > 1, and the value written last for *p* = 1; word 9
-becomes *z* when *p* > 1 or *N* > 1 and is unchanged otherwise (vectors
+(*c* + *m*) mod *p* copies of *z* are folded into it. *primary_value*
+becomes the opening row's value for *p* > 1, and the value written last
+for *p* = 1; *secondary_value* becomes *z* when *p* > 1 or *N* > 1 and is
+unchanged otherwise (vectors
 `multi-aligned`, `multi-split`, `multi-s7`, `multi-s7-aligned`, `cf-bulk`,
 `cf-bulk-unknown`, `xff-bulk`, `cdp-alignment`, `rows-capped`,
 `rows-capped-split`, `rows-capped-long`).
@@ -432,7 +456,7 @@ success and `return_value = -1` on any failure after the argument count
 (UP-3), then one line per value written, for every argument applied
 before a failure as well:
 `[<time>]RRA[<cf>][<p>]DS[<name>] = <value>`. The bracket after the CF is
-the archive's PDPs per row (`cli.md` CLI-69 calls it rows). The value is
+the archive's PDPs per row (`cli.md` CLI-69). The value is
 printed as C `%.10e` (`-0.0000000000e+00` for −0,
 `1.2345678901e+300`), `NaN` for unknown, `inf` and `-inf`. Lines come per
 argument, per run in UP-23 order, per archive in archive order, per row
@@ -447,14 +471,14 @@ arguments skipped by UP-9 print nothing. `update` prints nothing (vectors
 **UP-32** (black-box; defect). The printed times differ from the slot ends
 in three cases, which a replacement reproduces in `updatev` output only
 (the file is not affected). Let *E* be the end of the slot the run
-completes first, (*B* − (*B* mod *L*)) + *L*.
+completes first, (*B* − (*B* mod *D*)) + *D*.
 
-- The primary of UP-29 is printed at *E* + (*N* − *K*)·*L*, so when rows
-  are capped the primary (the oldest data) carries a recent time.
+- The opening row of UP-29 is printed at *E* + (*N* − *K*)·*D*, so when
+  rows are capped the opening row (the oldest data) carries a recent time.
 - The *j*-th following row (*j* = 1 … *K* − 1) is printed at
-  *E* + (*N* − *K* + *j*)·*L* + *L*, one slot late.
+  *E* + (*N* − *K* + *j*)·*D* + *D*, one slot late.
 - In a split update with *µ0* > 0, a row completed by the first run (*F*)
-  is printed at *proc* + *S* − *L*, one slot early.
+  is printed at *T0* + *S* − *D*, one slot early.
 
 (vectors `rows-secondary-times`, `rows-capped`, `rows-capped-split`,
 `multi-fraction-split`, `multi-fraction-one`).
@@ -467,7 +491,8 @@ DS, the stored text (30 bytes), *u* (bytes 32 to 39) and *v* (bytes 40 to
 47) of the PDP state; for each archive and DS, the CDP words 0, 1, 8 and 9
 where section 7 changes them; the current-row words; and the rows written.
 No other byte changes, and an argument that fails or is skipped changes
-nothing except UP-13's stored texts. The layout is the same for version
+nothing except UP-13's stored texts (and, for a failed `COMPUTE`
+evaluation, the input sources' PDP state as `compute.md` CP-16 states). The layout is the same for version
 `0003` and `0005` files (`create.md` CR-37; the `types` seed is `0005`).
 Version `0004` files need Holt-Winters archives, which are out of scope,
 and version `0001` files cannot be produced by RRDtool 1.11.0
@@ -479,36 +504,45 @@ other, each completely before the next is checked. When one fails, the
 command stops with its error and exit status 1, the arguments before it
 remain applied (and printed by `updatev`), and within the failing argument
 the DSs before the failing reading keep their new stored text (UP-13)
-while nothing else of that argument is written (vectors `multi-arg-fail`,
+while nothing else of that argument is written. A failed `COMPUTE`
+evaluation follows `compute.md` CP-16 instead (vectors `multi-arg-fail`,
 `multi-arg-fail-order`, `multi-arg-fail-count`, `multi-arg-ok`,
 `val-partial-last-ds`, `val-partial-counter`).
 
 ## 10. Platforms
 
-**UP-35** (black-box; must, platform specific). On macOS arm64 and Linux
-aarch64, every fma in this document and the multiply-add of `restore.md`
-RS-38's digit loop (used by UP-8, UP-11, UP-16 and UP-17) use one rounding;
-the two platforms gave identical results in every vector. On Linux x86_64,
-each of them is a rounded multiplication followed by a rounded addition:
-*fma(a, b, c)* is (*a* × *b*) + *c*, and UP-26's `AVERAGE` fold is
-*cv* + (*z* × *k*). The x86_64 results differ in the last bits;
+**UP-35** (black-box; must, platform specific). In the macOS arm64
+build and the Linux aarch64 build of the reference, every fma in this
+document and the multiply-add of `restore.md` RS-38's digit loop (used by
+UP-8, UP-11, UP-16 and UP-17) use one rounding; the two builds gave
+identical results in every vector. In the Linux x86_64 build (Debian,
+compiled without contracting multiply-adds), each of them is a rounded
+multiplication followed by a rounded addition: *fma(a, b, c)* is
+(*a* × *b*) + *c*, and UP-26's `AVERAGE` fold is *cv* + (*z* × *k*). This
+is a property of how the reference was compiled for each platform, not of
+the CPU: an x86_64 CPU can fuse, and an arm64 build could be compiled not
+to. A replacement reproduces the build it is compared with; the vectors
+pin these three builds. The x86_64 results differ in the last bits;
 `expected/update.linux-x86_64.vectors` holds the cases that differ there,
 and the independent model reproduces them with this arithmetic. Unknowns
 are written as each platform's NaN pattern (Terms); the tests fold the
 x86_64 pattern into the arm64 one. `updatev` prints `NaN` on every
 platform. The fp-* vectors were chosen so that the alternative orders
 named in UP-14, UP-21, UP-22 and UP-26 give different bytes (vectors
-`fp-interval`, `fp-fused-first`, `fp-fused-average`,
-`fp-unknown-denominator`, `rnd-00` to `rnd-15`).
+`fp-interval`, `fp-fused-first`, `fp-lead-ratio`, `fp-fused-average`,
+`fp-unknown-denominator`, `rnd-00` to `rnd-11`).
 
 ## 11. Computed sources
 
 **UP-36** (black-box; must). `COMPUTE` data sources follow `compute.md`
-CP-12 to CP-16, which are normative for update, including CP-16's
-ordering when an evaluation fails. As observed here: readings are given
-only for the non-computed DSs (a file with `a` and two computed sources
-expects one reading), and a template may name a computed source (vectors
-`compute-basic`, `compute-template`).
+CP-10 to CP-16, which are normative for update: readings are given only
+for input sources (CP-10), a template may name a computed source and its
+reading is stored but never converted (CP-11), a computed source's PDP is
+evaluated each time a step completes (CP-12, CP-13), consolidated like
+any other (CP-14), kept as unknown between boundaries (CP-15), and a
+failed evaluation stops the update with CP-16's partial write. The two
+vectors here agree with those rules (`d = a/0` gives `inf`; a template
+naming `c` is accepted) (vectors `compute-basic`, `compute-template`).
 
 ## 12. Floating-point order summary
 
@@ -519,7 +553,9 @@ that fail when they are done differently:
 |---|---|---|
 | UP-14 | interval from integer differences | `fp-interval` |
 | UP-21 | (*n*·*S* − *u*) − *e*, not *n*·*S* − (*u* + *e*) | `fp-unknown-denominator` |
-| UP-22 | fma(*pp*/*pre1*, *pre1*, *b*), not *pp* + *b* or a separate multiply-add | `fp-fused-first` |
+| UP-22 | fma(*q*/*lead1*, *lead1*, *b*), not *q* + *b* or a separate multiply-add | `fp-fused-first` |
+| UP-22 | fma(*q*/*lead1*, *lead1*, *b*), not fma(*a*/*i*, *lead1*, *b*) (stores 186.385413875, not 186.38541387500004) | `fp-lead-ratio` |
+| UP-18 | `GAUGE` compares the reading, not *a*/*i* | `range-gauge-reading` |
 | UP-26 | fma(*z*, *k*, *cv*), not *k* additions | `fp-fused-average` |
 | UP-35 | fused on arm64 and aarch64, unfused on x86_64 | x86_64 overrides |
 
@@ -547,13 +583,9 @@ times) and UP-34 (partial stored texts).
 
 ## Known divergences
 
-Current Rondi against RRDtool 1.11.0, as of this specification:
-
-- UP-36 (`compute-basic`, `compute-template`): Rondi expects a reading for
-  every DS including `COMPUTE` ones, so updates fail with UP-7's count
-  error, and it refuses templates and multi-reading updates on such files
-  with `unsupported RRD operation: in-place update requires one value per
-  supported data source and basic archives (AVERAGE, MIN, MAX, LAST)`.
+None. Rondi matches RRDtool 1.11.0 in every vector on macOS arm64, Linux
+aarch64 and Linux x86_64. (Before `COMPUTE` support was merged,
+`compute-basic` and `compute-template` diverged; they now match.)
 
 ## Tests
 
