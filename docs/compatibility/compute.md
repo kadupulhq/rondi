@@ -209,7 +209,7 @@ and `<cdef>` share the 80 parameter bytes whatever the type: the first
 three write bytes 0–7, 8–15 and 16–23 and `<cdef>` writes all 80 (CP-5),
 in document order, so a later element overwrites an earlier one where they
 overlap (`walk-cdef-with-heartbeat`, `walk-cdef-then-heartbeat`,
-`walk-cdef-on-gauge`). A `<cdef>` that does not compile, a missing or
+`walk-cdef-on-gauge`). With `-r`, a computed source's values are checked against bytes 8–15 and 16–23 read as the minimum and maximum, as for an input source, so the check depends on the stored program (`walk-cdef-range-*`). A `<cdef>` that does not compile, a missing or
 empty `<cdef>`, and the other errors are pinned by the restore vectors
 (`walk-cdef-*`, `seed-compute`, `type-compute`). Elements such as
 `<minimal_heartbeat>` given for a computed source and a `<cdef>` given for
