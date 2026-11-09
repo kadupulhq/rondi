@@ -560,9 +560,9 @@ does not change the output.
 directory, an empty string, or a directory with nothing to list writes only
 the system error text, with no `ERROR: ` prefix and no newline, to
 standard error and exits 0. The same applies to every error of CLI-79,
-whose error numbers are named there by their POSIX symbol. For an empty directory the text is the
-platform's message for error number 0 (macOS `Undefined error: 0`, glibc
-`Success`).
+whose error numbers are named there by their POSIX symbol. For an empty
+directory the text is the platform's message for error number 0 (macOS
+`Undefined error: 0`, glibc `Success`).
 
 **CLI-75** (bb; should). Entries appear in the order the operating
 system enumerates the directory, which differs between file systems
