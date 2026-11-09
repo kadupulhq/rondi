@@ -1,0 +1,2920 @@
+@@ 000-hwimp-rrd status 1
+0
+@@ 000-hwimp-rrd stdout 1315
+filename = "hwimp.rrd"
+rrd_version = "0003"
+step = 10
+last_update = 1000000000
+header_size = 1624
+ds[x].index = 0
+ds[x].type = "GAUGE"
+ds[x].minimal_heartbeat = 20
+ds[x].min = NaN
+ds[x].max = NaN
+ds[x].last_ds = "U"
+ds[x].value = NaN
+ds[x].unknown_sec = 0
+rra[0].cf = "AVERAGE"
+rra[0].rows = 10
+rra[0].cur_row = 5
+rra[0].pdp_per_row = 1
+rra[0].xff = 5.0000000000e-01
+rra[0].cdp_prep[0].value = NaN
+rra[0].cdp_prep[0].unknown_datapoints = 0
+rra[1].cf = "HWPREDICT"
+rra[1].rows = 12
+rra[1].cur_row = 3
+rra[1].pdp_per_row = 1
+rra[1].alpha = 1.0000000000e-01
+rra[1].beta = 1.0000000000e-02
+rra[1].cdp_prep[0].intercept = NaN
+rra[1].cdp_prep[0].slope = NaN
+rra[1].cdp_prep[0].NaN_count = 1
+rra[2].cf = "SEASONAL"
+rra[2].rows = 4
+rra[2].cur_row = 3
+rra[2].pdp_per_row = 1
+rra[2].gamma = 1.0000000000e-01
+rra[2].cdp_prep[0].seasonal = NaN
+rra[3].cf = "DEVSEASONAL"
+rra[3].rows = 4
+rra[3].cur_row = 2
+rra[3].pdp_per_row = 1
+rra[3].gamma = 1.0000000000e-01
+rra[3].cdp_prep[0].deviation = NaN
+rra[4].cf = "DEVPREDICT"
+rra[4].rows = 12
+rra[4].cur_row = 0
+rra[4].pdp_per_row = 1
+rra[5].cf = "FAILURES"
+rra[5].rows = 4
+rra[5].cur_row = 1
+rra[5].pdp_per_row = 1
+rra[5].delta_pos = 2.0000000000e+00
+rra[5].delta_neg = 2.0000000000e+00
+rra[5].failure_threshold = 7
+rra[5].window_length = 9
+rra[5].cdp_prep[0].history = "000000000"
+
+@@ 000-hwimp-rrd stderr 0
+
+@@ 000-hwimp-rrd same:hwimp.rrd 0
+
+@@ 001-hwimp-rrd status 1
+0
+@@ 001-hwimp-rrd stdout 6751
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE rrd SYSTEM "https://oss.oetiker.ch/rrdtool/rrdtool.dtd">
+<!-- Round Robin Database Dump -->
+<rrd>
+	<version>0003</version>
+	<step>10</step> <!-- Seconds -->
+	<lastupdate>1000000000</lastupdate> <!-- 2001-09-09 01:46:40 +0000 -->
+
+	<ds>
+		<name> x </name>
+		<type> GAUGE </type>
+		<minimal_heartbeat>20</minimal_heartbeat>
+		<min>NaN</min>
+		<max>NaN</max>
+
+		<!-- PDP Status -->
+		<last_ds>U</last_ds>
+		<value>NaN</value>
+		<unknown_sec> 0 </unknown_sec>
+	</ds>
+
+	<!-- Round Robin Archives -->
+	<rra>
+		<cf>AVERAGE</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<value>NaN</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>HWPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<hw_alpha>1.0000000000e-01</hw_alpha>
+		<hw_beta>1.0000000000e-02</hw_beta>
+		<dependent_rra_idx>2</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<intercept>NaN</intercept>
+			<last_intercept>NaN</last_intercept>
+			<slope>NaN</slope>
+			<last_slope>NaN</last_slope>
+			<nan_count>1</nan_count>
+			<last_nan_count>1</last_nan_count>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>SEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>2</seasonal_smooth_idx>
+		<dependent_rra_idx>1</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>NaN</seasonal>
+			<last_seasonal>NaN</last_seasonal>
+			<init_flag>1</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVSEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>2</seasonal_smooth_idx>
+		<dependent_rra_idx>1</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>NaN</seasonal>
+			<last_seasonal>NaN</last_seasonal>
+			<init_flag>1</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<dependent_rra_idx>3</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>FAILURES</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<delta_pos>2.0000000000e+00</delta_pos>
+		<delta_neg>2.0000000000e+00</delta_neg>
+		<window_len>9</window_len>
+		<failure_threshold>7</failure_threshold>
+		<dependent_rra_idx>3</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<history>000000000</history>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+</rrd>
+
+@@ 001-hwimp-rrd stderr 0
+
+@@ 001-hwimp-rrd same:hwimp.rrd 0
+
+@@ 002-mhwimp-rrd status 1
+0
+@@ 002-mhwimp-rrd stdout 1403
+filename = "mhwimp.rrd"
+rrd_version = "0004"
+step = 10
+last_update = 1000000000
+header_size = 1624
+ds[x].index = 0
+ds[x].type = "GAUGE"
+ds[x].minimal_heartbeat = 20
+ds[x].min = NaN
+ds[x].max = NaN
+ds[x].last_ds = "U"
+ds[x].value = NaN
+ds[x].unknown_sec = 0
+rra[0].cf = "AVERAGE"
+rra[0].rows = 10
+rra[0].cur_row = 2
+rra[0].pdp_per_row = 1
+rra[0].xff = 5.0000000000e-01
+rra[0].cdp_prep[0].value = NaN
+rra[0].cdp_prep[0].unknown_datapoints = 0
+rra[1].cf = "MHWPREDICT"
+rra[1].rows = 12
+rra[1].cur_row = 2
+rra[1].pdp_per_row = 1
+rra[1].alpha = 1.0000000000e-01
+rra[1].beta = 1.0000000000e-02
+rra[1].cdp_prep[0].intercept = NaN
+rra[1].cdp_prep[0].slope = NaN
+rra[1].cdp_prep[0].NaN_count = 1
+rra[2].cf = "SEASONAL"
+rra[2].rows = 4
+rra[2].cur_row = 1
+rra[2].pdp_per_row = 1
+rra[2].gamma = 1.0000000000e-01
+rra[2].smoothing_window = 0.0000000000e+00
+rra[2].cdp_prep[0].seasonal = NaN
+rra[3].cf = "DEVSEASONAL"
+rra[3].rows = 4
+rra[3].cur_row = 3
+rra[3].pdp_per_row = 1
+rra[3].gamma = 1.0000000000e-01
+rra[3].smoothing_window = 0.0000000000e+00
+rra[3].cdp_prep[0].deviation = NaN
+rra[4].cf = "DEVPREDICT"
+rra[4].rows = 12
+rra[4].cur_row = 4
+rra[4].pdp_per_row = 1
+rra[5].cf = "FAILURES"
+rra[5].rows = 4
+rra[5].cur_row = 1
+rra[5].pdp_per_row = 1
+rra[5].delta_pos = 2.0000000000e+00
+rra[5].delta_neg = 2.0000000000e+00
+rra[5].failure_threshold = 7
+rra[5].window_length = 9
+rra[5].cdp_prep[0].history = "000000000"
+
+@@ 002-mhwimp-rrd stderr 0
+
+@@ 002-mhwimp-rrd same:mhwimp.rrd 0
+
+@@ 003-mhwimp-rrd status 1
+0
+@@ 003-mhwimp-rrd stdout 6864
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE rrd SYSTEM "https://oss.oetiker.ch/rrdtool/rrdtool.dtd">
+<!-- Round Robin Database Dump -->
+<rrd>
+	<version>0004</version>
+	<step>10</step> <!-- Seconds -->
+	<lastupdate>1000000000</lastupdate> <!-- 2001-09-09 01:46:40 +0000 -->
+
+	<ds>
+		<name> x </name>
+		<type> GAUGE </type>
+		<minimal_heartbeat>20</minimal_heartbeat>
+		<min>NaN</min>
+		<max>NaN</max>
+
+		<!-- PDP Status -->
+		<last_ds>U</last_ds>
+		<value>NaN</value>
+		<unknown_sec> 0 </unknown_sec>
+	</ds>
+
+	<!-- Round Robin Archives -->
+	<rra>
+		<cf>AVERAGE</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<value>NaN</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>MHWPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<hw_alpha>1.0000000000e-01</hw_alpha>
+		<hw_beta>1.0000000000e-02</hw_beta>
+		<dependent_rra_idx>2</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<intercept>NaN</intercept>
+			<last_intercept>NaN</last_intercept>
+			<slope>NaN</slope>
+			<last_slope>NaN</last_slope>
+			<nan_count>1</nan_count>
+			<last_nan_count>1</last_nan_count>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>SEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>2</seasonal_smooth_idx>
+		<smoothing_window>0.0000000000e+00</smoothing_window>
+		<dependent_rra_idx>1</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>NaN</seasonal>
+			<last_seasonal>NaN</last_seasonal>
+			<init_flag>1</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVSEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>2</seasonal_smooth_idx>
+		<smoothing_window>0.0000000000e+00</smoothing_window>
+		<dependent_rra_idx>1</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>NaN</seasonal>
+			<last_seasonal>NaN</last_seasonal>
+			<init_flag>1</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<dependent_rra_idx>3</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>FAILURES</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<delta_pos>2.0000000000e+00</delta_pos>
+		<delta_neg>2.0000000000e+00</delta_neg>
+		<window_len>9</window_len>
+		<failure_threshold>7</failure_threshold>
+		<dependent_rra_idx>3</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<history>000000000</history>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+</rrd>
+
+@@ 003-mhwimp-rrd stderr 0
+
+@@ 003-mhwimp-rrd same:mhwimp.rrd 0
+
+@@ 004-hwexp-rrd status 1
+0
+@@ 004-hwexp-rrd stdout 1313
+filename = "hwexp.rrd"
+rrd_version = "0003"
+step = 10
+last_update = 1000000000
+header_size = 1624
+ds[x].index = 0
+ds[x].type = "GAUGE"
+ds[x].minimal_heartbeat = 20
+ds[x].min = NaN
+ds[x].max = NaN
+ds[x].last_ds = "U"
+ds[x].value = NaN
+ds[x].unknown_sec = 0
+rra[0].cf = "AVERAGE"
+rra[0].rows = 10
+rra[0].cur_row = 3
+rra[0].pdp_per_row = 1
+rra[0].xff = 5.0000000000e-01
+rra[0].cdp_prep[0].value = NaN
+rra[0].cdp_prep[0].unknown_datapoints = 0
+rra[1].cf = "HWPREDICT"
+rra[1].rows = 12
+rra[1].cur_row = 10
+rra[1].pdp_per_row = 1
+rra[1].alpha = 2.0000000000e-01
+rra[1].beta = 5.0000000000e-02
+rra[1].cdp_prep[0].intercept = NaN
+rra[1].cdp_prep[0].slope = NaN
+rra[1].cdp_prep[0].NaN_count = 1
+rra[2].cf = "SEASONAL"
+rra[2].rows = 4
+rra[2].cur_row = 2
+rra[2].pdp_per_row = 1
+rra[2].gamma = 3.0000000000e-01
+rra[2].cdp_prep[0].seasonal = NaN
+rra[3].cf = "DEVSEASONAL"
+rra[3].rows = 4
+rra[3].cur_row = 1
+rra[3].pdp_per_row = 1
+rra[3].gamma = 4.0000000000e-01
+rra[3].cdp_prep[0].deviation = NaN
+rra[4].cf = "DEVPREDICT"
+rra[4].rows = 12
+rra[4].cur_row = 1
+rra[4].pdp_per_row = 1
+rra[5].cf = "FAILURES"
+rra[5].rows = 12
+rra[5].cur_row = 4
+rra[5].pdp_per_row = 1
+rra[5].delta_pos = 2.0000000000e+00
+rra[5].delta_neg = 2.0000000000e+00
+rra[5].failure_threshold = 3
+rra[5].window_length = 5
+rra[5].cdp_prep[0].history = "00000"
+
+@@ 004-hwexp-rrd stderr 0
+
+@@ 004-hwexp-rrd same:hwexp.rrd 0
+
+@@ 005-hwexp-rrd status 1
+0
+@@ 005-hwexp-rrd stdout 7323
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE rrd SYSTEM "https://oss.oetiker.ch/rrdtool/rrdtool.dtd">
+<!-- Round Robin Database Dump -->
+<rrd>
+	<version>0003</version>
+	<step>10</step> <!-- Seconds -->
+	<lastupdate>1000000000</lastupdate> <!-- 2001-09-09 01:46:40 +0000 -->
+
+	<ds>
+		<name> x </name>
+		<type> GAUGE </type>
+		<minimal_heartbeat>20</minimal_heartbeat>
+		<min>NaN</min>
+		<max>NaN</max>
+
+		<!-- PDP Status -->
+		<last_ds>U</last_ds>
+		<value>NaN</value>
+		<unknown_sec> 0 </unknown_sec>
+	</ds>
+
+	<!-- Round Robin Archives -->
+	<rra>
+		<cf>AVERAGE</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<value>NaN</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>HWPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<hw_alpha>2.0000000000e-01</hw_alpha>
+		<hw_beta>5.0000000000e-02</hw_beta>
+		<dependent_rra_idx>2</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<intercept>NaN</intercept>
+			<last_intercept>NaN</last_intercept>
+			<slope>NaN</slope>
+			<last_slope>NaN</last_slope>
+			<nan_count>1</nan_count>
+			<last_nan_count>1</last_nan_count>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>SEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>3.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>2</seasonal_smooth_idx>
+		<dependent_rra_idx>1</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>NaN</seasonal>
+			<last_seasonal>NaN</last_seasonal>
+			<init_flag>1</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVSEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>4.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>2</seasonal_smooth_idx>
+		<dependent_rra_idx>1</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>NaN</seasonal>
+			<last_seasonal>NaN</last_seasonal>
+			<init_flag>1</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<dependent_rra_idx>3</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>FAILURES</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<delta_pos>2.0000000000e+00</delta_pos>
+		<delta_neg>2.0000000000e+00</delta_neg>
+		<window_len>5</window_len>
+		<failure_threshold>3</failure_threshold>
+		<dependent_rra_idx>3</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<history>00000</history>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+</rrd>
+
+@@ 005-hwexp-rrd stderr 0
+
+@@ 005-hwexp-rrd same:hwexp.rrd 0
+
+@@ 006-hwsw0-rrd status 1
+0
+@@ 006-hwsw0-rrd stdout 1218
+filename = "hwsw0.rrd"
+rrd_version = "0004"
+step = 10
+last_update = 1000000000
+header_size = 1416
+ds[x].index = 0
+ds[x].type = "GAUGE"
+ds[x].minimal_heartbeat = 20
+ds[x].min = NaN
+ds[x].max = NaN
+ds[x].last_ds = "U"
+ds[x].value = NaN
+ds[x].unknown_sec = 0
+rra[0].cf = "HWPREDICT"
+rra[0].rows = 12
+rra[0].cur_row = 4
+rra[0].pdp_per_row = 1
+rra[0].alpha = 1.0000000000e-01
+rra[0].beta = 1.0000000000e-02
+rra[0].cdp_prep[0].intercept = NaN
+rra[0].cdp_prep[0].slope = NaN
+rra[0].cdp_prep[0].NaN_count = 1
+rra[1].cf = "SEASONAL"
+rra[1].rows = 4
+rra[1].cur_row = 3
+rra[1].pdp_per_row = 1
+rra[1].gamma = 1.0000000000e-01
+rra[1].smoothing_window = 0.0000000000e+00
+rra[1].cdp_prep[0].seasonal = NaN
+rra[2].cf = "DEVSEASONAL"
+rra[2].rows = 4
+rra[2].cur_row = 2
+rra[2].pdp_per_row = 1
+rra[2].gamma = 1.0000000000e-01
+rra[2].smoothing_window = 0.0000000000e+00
+rra[2].cdp_prep[0].deviation = NaN
+rra[3].cf = "DEVPREDICT"
+rra[3].rows = 12
+rra[3].cur_row = 5
+rra[3].pdp_per_row = 1
+rra[4].cf = "FAILURES"
+rra[4].rows = 12
+rra[4].cur_row = 7
+rra[4].pdp_per_row = 1
+rra[4].delta_pos = 2.0000000000e+00
+rra[4].delta_neg = 2.0000000000e+00
+rra[4].failure_threshold = 7
+rra[4].window_length = 9
+rra[4].cdp_prep[0].history = "000000000"
+
+@@ 006-hwsw0-rrd stderr 0
+
+@@ 006-hwsw0-rrd same:hwsw0.rrd 0
+
+@@ 007-hwsw0-rrd status 1
+0
+@@ 007-hwsw0-rrd stdout 6334
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE rrd SYSTEM "https://oss.oetiker.ch/rrdtool/rrdtool.dtd">
+<!-- Round Robin Database Dump -->
+<rrd>
+	<version>0004</version>
+	<step>10</step> <!-- Seconds -->
+	<lastupdate>1000000000</lastupdate> <!-- 2001-09-09 01:46:40 +0000 -->
+
+	<ds>
+		<name> x </name>
+		<type> GAUGE </type>
+		<minimal_heartbeat>20</minimal_heartbeat>
+		<min>NaN</min>
+		<max>NaN</max>
+
+		<!-- PDP Status -->
+		<last_ds>U</last_ds>
+		<value>NaN</value>
+		<unknown_sec> 0 </unknown_sec>
+	</ds>
+
+	<!-- Round Robin Archives -->
+	<rra>
+		<cf>HWPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<hw_alpha>1.0000000000e-01</hw_alpha>
+		<hw_beta>1.0000000000e-02</hw_beta>
+		<dependent_rra_idx>1</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<intercept>NaN</intercept>
+			<last_intercept>NaN</last_intercept>
+			<slope>NaN</slope>
+			<last_slope>NaN</last_slope>
+			<nan_count>1</nan_count>
+			<last_nan_count>1</last_nan_count>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>SEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>2</seasonal_smooth_idx>
+		<smoothing_window>0.0000000000e+00</smoothing_window>
+		<dependent_rra_idx>0</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>NaN</seasonal>
+			<last_seasonal>NaN</last_seasonal>
+			<init_flag>1</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVSEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>2</seasonal_smooth_idx>
+		<smoothing_window>0.0000000000e+00</smoothing_window>
+		<dependent_rra_idx>0</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>NaN</seasonal>
+			<last_seasonal>NaN</last_seasonal>
+			<init_flag>1</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<dependent_rra_idx>3</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>FAILURES</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<delta_pos>2.0000000000e+00</delta_pos>
+		<delta_neg>2.0000000000e+00</delta_neg>
+		<window_len>9</window_len>
+		<failure_threshold>7</failure_threshold>
+		<dependent_rra_idx>3</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<history>000000000</history>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+</rrd>
+
+@@ 007-hwsw0-rrd stderr 0
+
+@@ 007-hwsw0-rrd same:hwsw0.rrd 0
+
+@@ 008-hwsw5-rrd status 1
+0
+@@ 008-hwsw5-rrd stdout 1221
+filename = "hwsw5.rrd"
+rrd_version = "0004"
+step = 10
+last_update = 1000000000
+header_size = 1416
+ds[x].index = 0
+ds[x].type = "GAUGE"
+ds[x].minimal_heartbeat = 20
+ds[x].min = NaN
+ds[x].max = NaN
+ds[x].last_ds = "U"
+ds[x].value = NaN
+ds[x].unknown_sec = 0
+rra[0].cf = "HWPREDICT"
+rra[0].rows = 24
+rra[0].cur_row = 21
+rra[0].pdp_per_row = 1
+rra[0].alpha = 1.0000000000e-01
+rra[0].beta = 1.0000000000e-02
+rra[0].cdp_prep[0].intercept = NaN
+rra[0].cdp_prep[0].slope = NaN
+rra[0].cdp_prep[0].NaN_count = 1
+rra[1].cf = "SEASONAL"
+rra[1].rows = 8
+rra[1].cur_row = 5
+rra[1].pdp_per_row = 1
+rra[1].gamma = 1.0000000000e-01
+rra[1].smoothing_window = 5.0000000000e-01
+rra[1].cdp_prep[0].seasonal = NaN
+rra[2].cf = "DEVSEASONAL"
+rra[2].rows = 8
+rra[2].cur_row = 0
+rra[2].pdp_per_row = 1
+rra[2].gamma = 1.0000000000e-01
+rra[2].smoothing_window = 5.0000000000e-01
+rra[2].cdp_prep[0].deviation = NaN
+rra[3].cf = "DEVPREDICT"
+rra[3].rows = 24
+rra[3].cur_row = 17
+rra[3].pdp_per_row = 1
+rra[4].cf = "FAILURES"
+rra[4].rows = 24
+rra[4].cur_row = 20
+rra[4].pdp_per_row = 1
+rra[4].delta_pos = 2.0000000000e+00
+rra[4].delta_neg = 2.0000000000e+00
+rra[4].failure_threshold = 7
+rra[4].window_length = 9
+rra[4].cdp_prep[0].history = "000000000"
+
+@@ 008-hwsw5-rrd stderr 0
+
+@@ 008-hwsw5-rrd same:hwsw5.rrd 0
+
+@@ 009-hwsw5-rrd status 1
+0
+@@ 009-hwsw5-rrd stdout 9502
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE rrd SYSTEM "https://oss.oetiker.ch/rrdtool/rrdtool.dtd">
+<!-- Round Robin Database Dump -->
+<rrd>
+	<version>0004</version>
+	<step>10</step> <!-- Seconds -->
+	<lastupdate>1000000000</lastupdate> <!-- 2001-09-09 01:46:40 +0000 -->
+
+	<ds>
+		<name> x </name>
+		<type> GAUGE </type>
+		<minimal_heartbeat>20</minimal_heartbeat>
+		<min>NaN</min>
+		<max>NaN</max>
+
+		<!-- PDP Status -->
+		<last_ds>U</last_ds>
+		<value>NaN</value>
+		<unknown_sec> 0 </unknown_sec>
+	</ds>
+
+	<!-- Round Robin Archives -->
+	<rra>
+		<cf>HWPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<hw_alpha>1.0000000000e-01</hw_alpha>
+		<hw_beta>1.0000000000e-02</hw_beta>
+		<dependent_rra_idx>1</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<intercept>NaN</intercept>
+			<last_intercept>NaN</last_intercept>
+			<slope>NaN</slope>
+			<last_slope>NaN</last_slope>
+			<nan_count>1</nan_count>
+			<last_nan_count>1</last_nan_count>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:42:50 +0000 / 999999770 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:00 +0000 / 999999780 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:10 +0000 / 999999790 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:20 +0000 / 999999800 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:30 +0000 / 999999810 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:40 +0000 / 999999820 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:50 +0000 / 999999830 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:00 +0000 / 999999840 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:10 +0000 / 999999850 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:20 +0000 / 999999860 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:30 +0000 / 999999870 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:40 +0000 / 999999880 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>SEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>6</seasonal_smooth_idx>
+		<smoothing_window>5.0000000000e-01</smoothing_window>
+		<dependent_rra_idx>0</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>NaN</seasonal>
+			<last_seasonal>NaN</last_seasonal>
+			<init_flag>1</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVSEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>6</seasonal_smooth_idx>
+		<smoothing_window>5.0000000000e-01</smoothing_window>
+		<dependent_rra_idx>0</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>NaN</seasonal>
+			<last_seasonal>NaN</last_seasonal>
+			<init_flag>1</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<dependent_rra_idx>3</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:42:50 +0000 / 999999770 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:00 +0000 / 999999780 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:10 +0000 / 999999790 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:20 +0000 / 999999800 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:30 +0000 / 999999810 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:40 +0000 / 999999820 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:50 +0000 / 999999830 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:00 +0000 / 999999840 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:10 +0000 / 999999850 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:20 +0000 / 999999860 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:30 +0000 / 999999870 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:40 +0000 / 999999880 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>FAILURES</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<delta_pos>2.0000000000e+00</delta_pos>
+		<delta_neg>2.0000000000e+00</delta_neg>
+		<window_len>9</window_len>
+		<failure_threshold>7</failure_threshold>
+		<dependent_rra_idx>3</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<history>000000000</history>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:42:50 +0000 / 999999770 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:00 +0000 / 999999780 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:10 +0000 / 999999790 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:20 +0000 / 999999800 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:30 +0000 / 999999810 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:40 +0000 / 999999820 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:50 +0000 / 999999830 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:00 +0000 / 999999840 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:10 +0000 / 999999850 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:20 +0000 / 999999860 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:30 +0000 / 999999870 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:40 +0000 / 999999880 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+</rrd>
+
+@@ 009-hwsw5-rrd stderr 0
+
+@@ 009-hwsw5-rrd same:hwsw5.rrd 0
+
+@@ 010-hwpdp3-rrd status 1
+0
+@@ 010-hwpdp3-rrd stdout 1318
+filename = "hwpdp3.rrd"
+rrd_version = "0003"
+step = 10
+last_update = 1000000000
+header_size = 1624
+ds[x].index = 0
+ds[x].type = "GAUGE"
+ds[x].minimal_heartbeat = 20
+ds[x].min = NaN
+ds[x].max = NaN
+ds[x].last_ds = "U"
+ds[x].value = NaN
+ds[x].unknown_sec = 0
+rra[0].cf = "AVERAGE"
+rra[0].rows = 10
+rra[0].cur_row = 1
+rra[0].pdp_per_row = 3
+rra[0].xff = 5.0000000000e-01
+rra[0].cdp_prep[0].value = NaN
+rra[0].cdp_prep[0].unknown_datapoints = 1
+rra[1].cf = "HWPREDICT"
+rra[1].rows = 12
+rra[1].cur_row = 3
+rra[1].pdp_per_row = 1
+rra[1].alpha = 1.0000000000e-01
+rra[1].beta = 1.0000000000e-02
+rra[1].cdp_prep[0].intercept = NaN
+rra[1].cdp_prep[0].slope = NaN
+rra[1].cdp_prep[0].NaN_count = 1
+rra[2].cf = "SEASONAL"
+rra[2].rows = 4
+rra[2].cur_row = 2
+rra[2].pdp_per_row = 1
+rra[2].gamma = 1.0000000000e-01
+rra[2].cdp_prep[0].seasonal = NaN
+rra[3].cf = "DEVSEASONAL"
+rra[3].rows = 4
+rra[3].cur_row = 0
+rra[3].pdp_per_row = 1
+rra[3].gamma = 1.0000000000e-01
+rra[3].cdp_prep[0].deviation = NaN
+rra[4].cf = "DEVPREDICT"
+rra[4].rows = 12
+rra[4].cur_row = 10
+rra[4].pdp_per_row = 1
+rra[5].cf = "FAILURES"
+rra[5].rows = 12
+rra[5].cur_row = 3
+rra[5].pdp_per_row = 1
+rra[5].delta_pos = 2.0000000000e+00
+rra[5].delta_neg = 2.0000000000e+00
+rra[5].failure_threshold = 7
+rra[5].window_length = 9
+rra[5].cdp_prep[0].history = "000000000"
+
+@@ 010-hwpdp3-rrd stderr 0
+
+@@ 010-hwpdp3-rrd same:hwpdp3.rrd 0
+
+@@ 011-hwpdp3-rrd status 1
+0
+@@ 011-hwpdp3-rrd stdout 7326
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE rrd SYSTEM "https://oss.oetiker.ch/rrdtool/rrdtool.dtd">
+<!-- Round Robin Database Dump -->
+<rrd>
+	<version>0003</version>
+	<step>10</step> <!-- Seconds -->
+	<lastupdate>1000000000</lastupdate> <!-- 2001-09-09 01:46:40 +0000 -->
+
+	<ds>
+		<name> x </name>
+		<type> GAUGE </type>
+		<minimal_heartbeat>20</minimal_heartbeat>
+		<min>NaN</min>
+		<max>NaN</max>
+
+		<!-- PDP Status -->
+		<last_ds>U</last_ds>
+		<value>NaN</value>
+		<unknown_sec> 0 </unknown_sec>
+	</ds>
+
+	<!-- Round Robin Archives -->
+	<rra>
+		<cf>AVERAGE</cf>
+		<pdp_per_row>3</pdp_per_row> <!-- 30 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<value>NaN</value>
+			<unknown_datapoints>1</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:42:00 +0000 / 999999720 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:42:30 +0000 / 999999750 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:00 +0000 / 999999780 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:43:30 +0000 / 999999810 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:00 +0000 / 999999840 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:44:30 +0000 / 999999870 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>HWPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<hw_alpha>1.0000000000e-01</hw_alpha>
+		<hw_beta>1.0000000000e-02</hw_beta>
+		<dependent_rra_idx>2</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<intercept>NaN</intercept>
+			<last_intercept>NaN</last_intercept>
+			<slope>NaN</slope>
+			<last_slope>NaN</last_slope>
+			<nan_count>1</nan_count>
+			<last_nan_count>1</last_nan_count>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>SEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>2</seasonal_smooth_idx>
+		<dependent_rra_idx>1</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>NaN</seasonal>
+			<last_seasonal>NaN</last_seasonal>
+			<init_flag>1</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVSEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>2</seasonal_smooth_idx>
+		<dependent_rra_idx>1</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>NaN</seasonal>
+			<last_seasonal>NaN</last_seasonal>
+			<init_flag>1</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<dependent_rra_idx>3</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>FAILURES</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<delta_pos>2.0000000000e+00</delta_pos>
+		<delta_neg>2.0000000000e+00</delta_neg>
+		<window_len>9</window_len>
+		<failure_threshold>7</failure_threshold>
+		<dependent_rra_idx>3</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<history>000000000</history>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v></row>
+		</database>
+	</rra>
+</rrd>
+
+@@ 011-hwpdp3-rrd stderr 0
+
+@@ 011-hwpdp3-rrd same:hwpdp3.rrd 0
+
+@@ 012-hw2ds-rrd status 1
+0
+@@ 012-hw2ds-rrd stdout 1500
+filename = "hw2ds.rrd"
+rrd_version = "0003"
+step = 10
+last_update = 1000000000
+header_size = 2048
+ds[x].index = 0
+ds[x].type = "GAUGE"
+ds[x].minimal_heartbeat = 20
+ds[x].min = NaN
+ds[x].max = NaN
+ds[x].last_ds = "U"
+ds[x].value = NaN
+ds[x].unknown_sec = 0
+ds[y].index = 1
+ds[y].type = "COUNTER"
+ds[y].minimal_heartbeat = 20
+ds[y].min = NaN
+ds[y].max = NaN
+ds[y].last_ds = "U"
+ds[y].value = NaN
+ds[y].unknown_sec = 0
+rra[0].cf = "HWPREDICT"
+rra[0].rows = 12
+rra[0].cur_row = 9
+rra[0].pdp_per_row = 1
+rra[0].alpha = 1.0000000000e-01
+rra[0].beta = 1.0000000000e-02
+rra[0].cdp_prep[0].intercept = NaN
+rra[0].cdp_prep[0].slope = NaN
+rra[0].cdp_prep[0].NaN_count = 1
+rra[0].cdp_prep[1].intercept = NaN
+rra[0].cdp_prep[1].slope = NaN
+rra[0].cdp_prep[1].NaN_count = 1
+rra[1].cf = "SEASONAL"
+rra[1].rows = 4
+rra[1].cur_row = 3
+rra[1].pdp_per_row = 1
+rra[1].gamma = 1.0000000000e-01
+rra[1].cdp_prep[0].seasonal = NaN
+rra[1].cdp_prep[1].seasonal = NaN
+rra[2].cf = "DEVSEASONAL"
+rra[2].rows = 4
+rra[2].cur_row = 0
+rra[2].pdp_per_row = 1
+rra[2].gamma = 1.0000000000e-01
+rra[2].cdp_prep[0].deviation = NaN
+rra[2].cdp_prep[1].deviation = NaN
+rra[3].cf = "DEVPREDICT"
+rra[3].rows = 12
+rra[3].cur_row = 1
+rra[3].pdp_per_row = 1
+rra[4].cf = "FAILURES"
+rra[4].rows = 4
+rra[4].cur_row = 1
+rra[4].pdp_per_row = 1
+rra[4].delta_pos = 2.0000000000e+00
+rra[4].delta_neg = 2.0000000000e+00
+rra[4].failure_threshold = 7
+rra[4].window_length = 9
+rra[4].cdp_prep[0].history = "000000000"
+rra[4].cdp_prep[1].history = "000000000"
+
+@@ 012-hw2ds-rrd stderr 0
+
+@@ 012-hw2ds-rrd same:hw2ds.rrd 0
+
+@@ 013-hw2ds-rrd status 1
+0
+@@ 013-hw2ds-rrd stdout 7267
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE rrd SYSTEM "https://oss.oetiker.ch/rrdtool/rrdtool.dtd">
+<!-- Round Robin Database Dump -->
+<rrd>
+	<version>0003</version>
+	<step>10</step> <!-- Seconds -->
+	<lastupdate>1000000000</lastupdate> <!-- 2001-09-09 01:46:40 +0000 -->
+
+	<ds>
+		<name> x </name>
+		<type> GAUGE </type>
+		<minimal_heartbeat>20</minimal_heartbeat>
+		<min>NaN</min>
+		<max>NaN</max>
+
+		<!-- PDP Status -->
+		<last_ds>U</last_ds>
+		<value>NaN</value>
+		<unknown_sec> 0 </unknown_sec>
+	</ds>
+
+	<ds>
+		<name> y </name>
+		<type> COUNTER </type>
+		<minimal_heartbeat>20</minimal_heartbeat>
+		<min>NaN</min>
+		<max>NaN</max>
+
+		<!-- PDP Status -->
+		<last_ds>U</last_ds>
+		<value>NaN</value>
+		<unknown_sec> 0 </unknown_sec>
+	</ds>
+
+	<!-- Round Robin Archives -->
+	<rra>
+		<cf>HWPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<hw_alpha>1.0000000000e-01</hw_alpha>
+		<hw_beta>1.0000000000e-02</hw_beta>
+		<dependent_rra_idx>1</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<intercept>NaN</intercept>
+			<last_intercept>NaN</last_intercept>
+			<slope>NaN</slope>
+			<last_slope>NaN</last_slope>
+			<nan_count>1</nan_count>
+			<last_nan_count>1</last_nan_count>
+			</ds>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<intercept>NaN</intercept>
+			<last_intercept>NaN</last_intercept>
+			<slope>NaN</slope>
+			<last_slope>NaN</last_slope>
+			<nan_count>1</nan_count>
+			<last_nan_count>1</last_nan_count>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>SEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>2</seasonal_smooth_idx>
+		<dependent_rra_idx>0</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>NaN</seasonal>
+			<last_seasonal>NaN</last_seasonal>
+			<init_flag>1</init_flag>
+			</ds>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>NaN</seasonal>
+			<last_seasonal>NaN</last_seasonal>
+			<init_flag>1</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVSEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>2</seasonal_smooth_idx>
+		<dependent_rra_idx>0</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>NaN</seasonal>
+			<last_seasonal>NaN</last_seasonal>
+			<init_flag>1</init_flag>
+			</ds>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>NaN</seasonal>
+			<last_seasonal>NaN</last_seasonal>
+			<init_flag>1</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<dependent_rra_idx>2</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			</ds>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:44:50 +0000 / 999999890 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:00 +0000 / 999999900 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:10 +0000 / 999999910 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:20 +0000 / 999999920 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:30 +0000 / 999999930 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:40 +0000 / 999999940 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:45:50 +0000 / 999999950 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:00 +0000 / 999999960 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v><v>NaN</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>FAILURES</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<delta_pos>2.0000000000e+00</delta_pos>
+		<delta_neg>2.0000000000e+00</delta_neg>
+		<window_len>9</window_len>
+		<failure_threshold>7</failure_threshold>
+		<dependent_rra_idx>2</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<history>000000000</history>
+			</ds>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<history>000000000</history>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:46:10 +0000 / 999999970 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:20 +0000 / 999999980 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:30 +0000 / 999999990 --> <row><v>NaN</v><v>NaN</v></row>
+			<!-- 2001-09-09 01:46:40 +0000 / 1000000000 --> <row><v>NaN</v><v>NaN</v></row>
+		</database>
+	</rra>
+</rrd>
+
+@@ 013-hw2ds-rrd stderr 0
+
+@@ 013-hw2ds-rrd same:hw2ds.rrd 0
+
+@@ 014-hwrun-rrd status 1
+0
+@@ 014-hwrun-rrd stdout 1381
+filename = "hwrun.rrd"
+rrd_version = "0003"
+step = 10
+last_update = 1000000300
+header_size = 1624
+ds[x].index = 0
+ds[x].type = "GAUGE"
+ds[x].minimal_heartbeat = 20
+ds[x].min = NaN
+ds[x].max = NaN
+ds[x].last_ds = "27"
+ds[x].value = 0.0000000000e+00
+ds[x].unknown_sec = 0
+rra[0].cf = "AVERAGE"
+rra[0].rows = 10
+rra[0].cur_row = 4
+rra[0].pdp_per_row = 1
+rra[0].xff = 5.0000000000e-01
+rra[0].cdp_prep[0].value = NaN
+rra[0].cdp_prep[0].unknown_datapoints = 0
+rra[1].cf = "HWPREDICT"
+rra[1].rows = 12
+rra[1].cur_row = 7
+rra[1].pdp_per_row = 1
+rra[1].alpha = 1.0000000000e-01
+rra[1].beta = 1.0000000000e-02
+rra[1].cdp_prep[0].intercept = 1.4484406767e+01
+rra[1].cdp_prep[0].slope = 4.0344066720e-02
+rra[1].cdp_prep[0].NaN_count = 1
+rra[2].cf = "SEASONAL"
+rra[2].rows = 4
+rra[2].cur_row = 0
+rra[2].pdp_per_row = 1
+rra[2].gamma = 1.0000000000e-01
+rra[2].cdp_prep[0].seasonal = 3.0779109102e+01
+rra[3].cf = "DEVSEASONAL"
+rra[3].rows = 4
+rra[3].cur_row = 0
+rra[3].pdp_per_row = 1
+rra[3].gamma = 1.0000000000e-01
+rra[3].cdp_prep[0].deviation = 1.1284868010e+00
+rra[4].cf = "DEVPREDICT"
+rra[4].rows = 12
+rra[4].cur_row = 4
+rra[4].pdp_per_row = 1
+rra[5].cf = "FAILURES"
+rra[5].rows = 4
+rra[5].cur_row = 2
+rra[5].pdp_per_row = 1
+rra[5].delta_pos = 2.0000000000e+00
+rra[5].delta_neg = 2.0000000000e+00
+rra[5].failure_threshold = 7
+rra[5].window_length = 9
+rra[5].cdp_prep[0].history = "000000000"
+
+@@ 014-hwrun-rrd stderr 0
+
+@@ 014-hwrun-rrd same:hwrun.rrd 0
+
+@@ 015-hwrun-rrd status 1
+0
+@@ 015-hwrun-rrd stdout 7507
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE rrd SYSTEM "https://oss.oetiker.ch/rrdtool/rrdtool.dtd">
+<!-- Round Robin Database Dump -->
+<rrd>
+	<version>0003</version>
+	<step>10</step> <!-- Seconds -->
+	<lastupdate>1000000300</lastupdate> <!-- 2001-09-09 01:51:40 +0000 -->
+
+	<ds>
+		<name> x </name>
+		<type> GAUGE </type>
+		<minimal_heartbeat>20</minimal_heartbeat>
+		<min>NaN</min>
+		<max>NaN</max>
+
+		<!-- PDP Status -->
+		<last_ds>27</last_ds>
+		<value>0.0000000000e+00</value>
+		<unknown_sec> 0 </unknown_sec>
+	</ds>
+
+	<!-- Round Robin Archives -->
+	<rra>
+		<cf>AVERAGE</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<xff>5.0000000000e-01</xff>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>2.7000000000e+01</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<value>NaN</value>
+			<unknown_datapoints>0</unknown_datapoints>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:50:10 +0000 / 1000000210 --> <row><v>1.5000000000e+01</v></row>
+			<!-- 2001-09-09 01:50:20 +0000 / 1000000220 --> <row><v>2.5000000000e+01</v></row>
+			<!-- 2001-09-09 01:50:30 +0000 / 1000000230 --> <row><v>4.5000000000e+01</v></row>
+			<!-- 2001-09-09 01:50:40 +0000 / 1000000240 --> <row><v>2.5000000000e+01</v></row>
+			<!-- 2001-09-09 01:50:50 +0000 / 1000000250 --> <row><v>1.6000000000e+01</v></row>
+			<!-- 2001-09-09 01:51:00 +0000 / 1000000260 --> <row><v>2.6000000000e+01</v></row>
+			<!-- 2001-09-09 01:51:10 +0000 / 1000000270 --> <row><v>4.6000000000e+01</v></row>
+			<!-- 2001-09-09 01:51:20 +0000 / 1000000280 --> <row><v>2.6000000000e+01</v></row>
+			<!-- 2001-09-09 01:51:30 +0000 / 1000000290 --> <row><v>1.7000000000e+01</v></row>
+			<!-- 2001-09-09 01:51:40 +0000 / 1000000300 --> <row><v>2.7000000000e+01</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>HWPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<hw_alpha>1.0000000000e-01</hw_alpha>
+		<hw_beta>1.0000000000e-02</hw_beta>
+		<dependent_rra_idx>2</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>2.5157898819e+01</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<intercept>1.4484406767e+01</intercept>
+			<last_intercept>1.4261694683e+01</last_intercept>
+			<slope>4.0344066720e-02</slope>
+			<last_slope>3.8501965538e-02</last_slope>
+			<nan_count>1</nan_count>
+			<last_nan_count>1</last_nan_count>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:49:50 +0000 / 1000000190 --> <row><v>4.2351938358e+01</v></row>
+			<!-- 2001-09-09 01:50:00 +0000 / 1000000200 --> <row><v>2.2505272121e+01</v></row>
+			<!-- 2001-09-09 01:50:10 +0000 / 1000000210 --> <row><v>1.2961730094e+01</v></row>
+			<!-- 2001-09-09 01:50:20 +0000 / 1000000220 --> <row><v>2.3135419442e+01</v></row>
+			<!-- 2001-09-09 01:50:30 +0000 / 1000000230 --> <row><v>4.3297974027e+01</v></row>
+			<!-- 2001-09-09 01:50:40 +0000 / 1000000240 --> <row><v>2.3450003789e+01</v></row>
+			<!-- 2001-09-09 01:50:50 +0000 / 1000000250 --> <row><v>1.3968062250e+01</v></row>
+			<!-- 2001-09-09 01:51:00 +0000 / 1000000260 --> <row><v>2.4132634882e+01</v></row>
+			<!-- 2001-09-09 01:51:10 +0000 / 1000000270 --> <row><v>4.4287989335e+01</v></row>
+			<!-- 2001-09-09 01:51:20 +0000 / 1000000280 --> <row><v>2.4434496197e+01</v></row>
+			<!-- 2001-09-09 01:51:30 +0000 / 1000000290 --> <row><v>1.5004656973e+01</v></row>
+			<!-- 2001-09-09 01:51:40 +0000 / 1000000300 --> <row><v>2.5157898819e+01</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>SEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>2</seasonal_smooth_idx>
+		<dependent_rra_idx>1</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>1.1023491276e+01</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>3.0779109102e+01</seasonal>
+			<last_seasonal>1.0857702170e+01</last_seasonal>
+			<init_flag>4</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:51:10 +0000 / 1000000270 --> <row><v>3.0779109102e+01</v></row>
+			<!-- 2001-09-09 01:51:20 +0000 / 1000000280 --> <row><v>1.0706288162e+01</v></row>
+			<!-- 2001-09-09 01:51:30 +0000 / 1000000290 --> <row><v>1.1220774647e+00</v></row>
+			<!-- 2001-09-09 01:51:40 +0000 / 1000000300 --> <row><v>1.1023491276e+01</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVSEASONAL</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<seasonal_gamma>1.0000000000e-01</seasonal_gamma>
+		<seasonal_smooth_idx>2</seasonal_smooth_idx>
+		<dependent_rra_idx>1</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>1.3064905273e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<seasonal>1.1284868010e+00</seasonal>
+			<last_seasonal>1.2469782324e+00</last_seasonal>
+			<init_flag>4</init_flag>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:51:10 +0000 / 1000000270 --> <row><v>1.1284868010e+00</v></row>
+			<!-- 2001-09-09 01:51:20 +0000 / 1000000280 --> <row><v>1.0194343065e+00</v></row>
+			<!-- 2001-09-09 01:51:30 +0000 / 1000000290 --> <row><v>1.4376683111e+00</v></row>
+			<!-- 2001-09-09 01:51:40 +0000 / 1000000300 --> <row><v>1.3064905273e+00</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>DEVPREDICT</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<dependent_rra_idx>3</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>1.2469782324e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:49:50 +0000 / 1000000190 --> <row><v>9.1990453227e-01</v></row>
+			<!-- 2001-09-09 01:50:00 +0000 / 1000000200 --> <row><v>8.2621578750e-01</v></row>
+			<!-- 2001-09-09 01:50:10 +0000 / 1000000210 --> <row><v>1.2210696138e+00</v></row>
+			<!-- 2001-09-09 01:50:20 +0000 / 1000000220 --> <row><v>1.1017647783e+00</v></row>
+			<!-- 2001-09-09 01:50:30 +0000 / 1000000230 --> <row><v>9.9272024319e-01</v></row>
+			<!-- 2001-09-09 01:50:40 +0000 / 1000000240 --> <row><v>8.9306699661e-01</v></row>
+			<!-- 2001-09-09 01:50:50 +0000 / 1000000250 --> <row><v>1.3027896431e+00</v></row>
+			<!-- 2001-09-09 01:51:00 +0000 / 1000000260 --> <row><v>1.1780463562e+00</v></row>
+			<!-- 2001-09-09 01:51:10 +0000 / 1000000270 --> <row><v>1.0636508162e+00</v></row>
+			<!-- 2001-09-09 01:51:20 +0000 / 1000000280 --> <row><v>9.5875991806e-01</v></row>
+			<!-- 2001-09-09 01:51:30 +0000 / 1000000290 --> <row><v>1.3757044538e+00</v></row>
+			<!-- 2001-09-09 01:51:40 +0000 / 1000000300 --> <row><v>1.2469782324e+00</v></row>
+		</database>
+	</rra>
+	<rra>
+		<cf>FAILURES</cf>
+		<pdp_per_row>1</pdp_per_row> <!-- 10 seconds -->
+
+		<params>
+		<delta_pos>2.0000000000e+00</delta_pos>
+		<delta_neg>2.0000000000e+00</delta_neg>
+		<window_len>9</window_len>
+		<failure_threshold>7</failure_threshold>
+		<dependent_rra_idx>3</dependent_rra_idx>
+		</params>
+		<cdp_prep>
+			<ds>
+			<primary_value>0.0000000000e+00</primary_value>
+			<secondary_value>0.0000000000e+00</secondary_value>
+			<history>000000000</history>
+			</ds>
+		</cdp_prep>
+		<database>
+			<!-- 2001-09-09 01:51:10 +0000 / 1000000270 --> <row><v>0.0000000000e+00</v></row>
+			<!-- 2001-09-09 01:51:20 +0000 / 1000000280 --> <row><v>0.0000000000e+00</v></row>
+			<!-- 2001-09-09 01:51:30 +0000 / 1000000290 --> <row><v>0.0000000000e+00</v></row>
+			<!-- 2001-09-09 01:51:40 +0000 / 1000000300 --> <row><v>0.0000000000e+00</v></row>
+		</database>
+	</rra>
+</rrd>
+
+@@ 015-hwrun-rrd stderr 0
+
+@@ 015-hwrun-rrd same:hwrun.rrd 0
+
+@@ 016-hwrun-rrd-hwpredict-s-1000000000-e-10000 status 1
+0
+@@ 016-hwrun-rrd-hwpredict-s-1000000000-e-10000 stdout 685
+                              x
+
+1000000010: nan
+1000000020: nan
+1000000030: nan
+1000000040: nan
+1000000050: nan
+1000000060: nan
+1000000070: nan
+1000000080: nan
+1000000090: nan
+1000000100: nan
+1000000110: nan
+1000000120: nan
+1000000130: nan
+1000000140: nan
+1000000150: nan
+1000000160: nan
+1000000170: nan
+1000000180: nan
+1000000190: 4.2351938358e+01
+1000000200: 2.2505272121e+01
+1000000210: 1.2961730094e+01
+1000000220: 2.3135419442e+01
+1000000230: 4.3297974027e+01
+1000000240: 2.3450003789e+01
+1000000250: 1.3968062250e+01
+1000000260: 2.4132634882e+01
+1000000270: 4.4287989335e+01
+1000000280: 2.4434496197e+01
+1000000290: 1.5004656973e+01
+1000000300: 2.5157898819e+01
+1000000310: nan
+
+@@ 016-hwrun-rrd-hwpredict-s-1000000000-e-10000 stderr 0
+
+@@ 016-hwrun-rrd-hwpredict-s-1000000000-e-10000 same:hwrun.rrd 0
+
+@@ 017-hwrun-rrd-seasonal-s-1000000000-e-100000 status 1
+0
+@@ 017-hwrun-rrd-seasonal-s-1000000000-e-100000 stdout 581
+                              x
+
+1000000010: nan
+1000000020: nan
+1000000030: nan
+1000000040: nan
+1000000050: nan
+1000000060: nan
+1000000070: nan
+1000000080: nan
+1000000090: nan
+1000000100: nan
+1000000110: nan
+1000000120: nan
+1000000130: nan
+1000000140: nan
+1000000150: nan
+1000000160: nan
+1000000170: nan
+1000000180: nan
+1000000190: nan
+1000000200: nan
+1000000210: nan
+1000000220: nan
+1000000230: nan
+1000000240: nan
+1000000250: nan
+1000000260: nan
+1000000270: 3.0779109102e+01
+1000000280: 1.0706288162e+01
+1000000290: 1.1220774647e+00
+1000000300: 1.1023491276e+01
+1000000310: nan
+
+@@ 017-hwrun-rrd-seasonal-s-1000000000-e-100000 stderr 0
+
+@@ 017-hwrun-rrd-seasonal-s-1000000000-e-100000 same:hwrun.rrd 0
+
+@@ 018-hwrun-rrd-devseasonal-s-1000000000-e-100 status 1
+0
+@@ 018-hwrun-rrd-devseasonal-s-1000000000-e-100 stdout 581
+                              x
+
+1000000010: nan
+1000000020: nan
+1000000030: nan
+1000000040: nan
+1000000050: nan
+1000000060: nan
+1000000070: nan
+1000000080: nan
+1000000090: nan
+1000000100: nan
+1000000110: nan
+1000000120: nan
+1000000130: nan
+1000000140: nan
+1000000150: nan
+1000000160: nan
+1000000170: nan
+1000000180: nan
+1000000190: nan
+1000000200: nan
+1000000210: nan
+1000000220: nan
+1000000230: nan
+1000000240: nan
+1000000250: nan
+1000000260: nan
+1000000270: 1.1284868010e+00
+1000000280: 1.0194343065e+00
+1000000290: 1.4376683111e+00
+1000000300: 1.3064905273e+00
+1000000310: nan
+
+@@ 018-hwrun-rrd-devseasonal-s-1000000000-e-100 stderr 0
+
+@@ 018-hwrun-rrd-devseasonal-s-1000000000-e-100 same:hwrun.rrd 0
+
+@@ 019-hwrun-rrd-devpredict-s-1000000000-e-1000 status 1
+0
+@@ 019-hwrun-rrd-devpredict-s-1000000000-e-1000 stdout 685
+                              x
+
+1000000010: nan
+1000000020: nan
+1000000030: nan
+1000000040: nan
+1000000050: nan
+1000000060: nan
+1000000070: nan
+1000000080: nan
+1000000090: nan
+1000000100: nan
+1000000110: nan
+1000000120: nan
+1000000130: nan
+1000000140: nan
+1000000150: nan
+1000000160: nan
+1000000170: nan
+1000000180: nan
+1000000190: 9.1990453227e-01
+1000000200: 8.2621578750e-01
+1000000210: 1.2210696138e+00
+1000000220: 1.1017647783e+00
+1000000230: 9.9272024319e-01
+1000000240: 8.9306699661e-01
+1000000250: 1.3027896431e+00
+1000000260: 1.1780463562e+00
+1000000270: 1.0636508162e+00
+1000000280: 9.5875991806e-01
+1000000290: 1.3757044538e+00
+1000000300: 1.2469782324e+00
+1000000310: nan
+
+@@ 019-hwrun-rrd-devpredict-s-1000000000-e-1000 stderr 0
+
+@@ 019-hwrun-rrd-devpredict-s-1000000000-e-1000 same:hwrun.rrd 0
+
+@@ 020-hwrun-rrd-failures-s-1000000000-e-100000 status 1
+0
+@@ 020-hwrun-rrd-failures-s-1000000000-e-100000 stdout 581
+                              x
+
+1000000010: nan
+1000000020: nan
+1000000030: nan
+1000000040: nan
+1000000050: nan
+1000000060: nan
+1000000070: nan
+1000000080: nan
+1000000090: nan
+1000000100: nan
+1000000110: nan
+1000000120: nan
+1000000130: nan
+1000000140: nan
+1000000150: nan
+1000000160: nan
+1000000170: nan
+1000000180: nan
+1000000190: nan
+1000000200: nan
+1000000210: nan
+1000000220: nan
+1000000230: nan
+1000000240: nan
+1000000250: nan
+1000000260: nan
+1000000270: 0.0000000000e+00
+1000000280: 0.0000000000e+00
+1000000290: 0.0000000000e+00
+1000000300: 0.0000000000e+00
+1000000310: nan
+
+@@ 020-hwrun-rrd-failures-s-1000000000-e-100000 stderr 0
+
+@@ 020-hwrun-rrd-failures-s-1000000000-e-100000 same:hwrun.rrd 0
+
+@@ 021-hwrun-rrd-average-s-1000000000-e-1000000 status 1
+0
+@@ 021-hwrun-rrd-average-s-1000000000-e-1000000 stdout 659
+                              x
+
+1000000010: nan
+1000000020: nan
+1000000030: nan
+1000000040: nan
+1000000050: nan
+1000000060: nan
+1000000070: nan
+1000000080: nan
+1000000090: nan
+1000000100: nan
+1000000110: nan
+1000000120: nan
+1000000130: nan
+1000000140: nan
+1000000150: nan
+1000000160: nan
+1000000170: nan
+1000000180: nan
+1000000190: nan
+1000000200: nan
+1000000210: 1.5000000000e+01
+1000000220: 2.5000000000e+01
+1000000230: 4.5000000000e+01
+1000000240: 2.5000000000e+01
+1000000250: 1.6000000000e+01
+1000000260: 2.6000000000e+01
+1000000270: 4.6000000000e+01
+1000000280: 2.6000000000e+01
+1000000290: 1.7000000000e+01
+1000000300: 2.7000000000e+01
+1000000310: nan
+
+@@ 021-hwrun-rrd-average-s-1000000000-e-1000000 stderr 0
+
+@@ 021-hwrun-rrd-average-s-1000000000-e-1000000 same:hwrun.rrd 0
+
+@@ 022-hwimp-rrd-1000000010-10 status 1
+0
+@@ 022-hwimp-rrd-1000000010-10 stdout 0
+
+@@ 022-hwimp-rrd-1000000010-10 stderr 0
+
+@@ 022-hwimp-rrd-1000000010-10 file:hwimp.rrd 1992
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              
+ ö;            10                                                                                                                    ¯                                                              $@                              $@      $@                                    ¯                              ¯      ¯                                                                     ¯      ¯                                     ¯              ¯                                                              ¯                                                                                                                                         ¯      ¯      ¯      ¯      ¯      ¯      $@      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯              ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯              ¯
+@@ 023-hwimp-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 023-hwimp-rrd-1000000010-10-1000000020-20-10 stdout 0
+
+@@ 023-hwimp-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 023-hwimp-rrd-1000000010-10-1000000020-20-10 file:hwimp.rrd 1992
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              2 ö;            11                                                                                                                    ¯                                                              &@                        333333$@      $@Ï©Ò“MbP?                            $@                              $@                                       ◊£p=
+∑?                              ¯      ¯                                     ?              ¯                                                              ¯                                                                                                                                          &@      ¯      ¯      ¯      ¯      ¯      $@      4@      D@      4@      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      $@      ¯      ¯      ¯◊£p=
+∑?      $@      >@      $@      ¯      ¯      ¯      ?      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯                                
+@@ 024-hwimp-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 024-hwimp-rrd-1000000010-10-1000000020-20-10 stdout 0
+
+@@ 024-hwimp-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 024-hwimp-rrd-1000000010-10-1000000020-20-10 file:hwimp.rrd 1992
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            29                                                                                                                    ¯                                                              =@                        6˜°C©0@Alµ∫ut0@f¸kÓV≠?¢ﬁµë¨?              ñÎáãÕ~;@                        *Ω©Cu˜? %Ï¯%@                               …—ËÕs=&@                        `M≈_p¯?û]ÈÒ?                               à≠kÊÜÚ?              ¯                                                        û]ÈÒ?                                                                                                                                        H@      <@      3@      =@     ÄH@      =@     ÄG@      ;@      2@      <@fq¨ÆÃ0@n®Aè2:@—˝jQ◊*G@™øƒw:@¶ê1@TiúG£?;@JéÀ›ØG@ñÎáãÕ~;@Mgfb.@Ê˙ïl(9@ˆ˝„·‰¶F@∆îWTq9@*Ω©Cu˜?H <πØ&@î≤f]:?@…—ËÕs=&@NÖb©ÌSˆ?Ék¸ÆN\Ù?à≠kÊÜÚ?`M≈_p¯?•uÉ]Í+Ò?g[ªXWœ˜?zgtÒ±ı?—çlªÛ?û]ÈÒ?Pa¨‚ˆ?ªprüÛÛ?úŒ-HÚ?Œ‚ÔXöO?h≠|∞ ˜?K}uúbÁÙ?z@EÔ ˆÚ?                                
+@@ 025-hwimp-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 025-hwimp-rrd-1000000010-10-1000000020-20-10 stdout 0
+
+@@ 025-hwimp-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 025-hwimp-rrd-1000000010-10-1000000020-20-10 file:hwimp.rrd 1992
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            29                                                                                                                    ¯                                                              =@                        9Kô˚M@™{⁄T.ªN@Éjª◊Bô—?ª‡Ä)Ê”?              «Uk7˙;P@                        Õ‘Ì°ΩÏ8@7‚í⁄üO	@                               üˆQ´Ô	≤ø                        »R·Iq¸W@nB¯jEzO@                               ãÊÙÑp N@              ¯                                                        nB¯jEzO@                                                                                                                                       H@      <@      3@      =@     ÄH@      =@     ÄG@      ;@      2@      <@Í≥è¶=Me@‚d@¸‘ü$Ù^@h”◊8+§X@˙EõcÑ]@∏b EE\@¶Åà®àU@«Uk7˙;P@a9ª"Bp@\N]„Ÿm@+0p∂íg@$∆s~Éc@Õ‘Ì°ΩÏ8@P˛ºg#@@–j ”û1@üˆQ´Ô	≤øfLo.ˆT@ÁÛ¶259P@ãÊÙÑp N@»R·Iq¸W@≈£
+O@m‚ZúãÛW@@ºçWÜÙT@ô)ö˛P@nB¯jEzO@R®öR@\å#”ÙÕO@2üÃjM@∂ÿ·Û(UK@E~a3ˇ`V@	Bk>uõS@9◊**‡∆P@                                
+@@ 026-hwimp-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 026-hwimp-rrd-1000000010-10-1000000020-20-10 stdout 0
+
+@@ 026-hwimp-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 026-hwimp-rrd-1000000010-10-1000000020-20-10 file:hwimp.rrd 1992
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            29                                                                                                                    ¯                                                              =@                        „¨Ô‹ñ0@d.I˚Ô_0@Dy·µ¨≠?ƒcÖûb›¨?              Æ;ak;@                        ÊÆ"ª(	ˆ?ŸyFie˘%@                               Ø6–ÆHB&@                        R)Üc’Q˙?∑á·ubÛÛ?                               º„Qõâ|Ù?              ¯                                                        ∑á·ubÛÛ?                                                                                                                                        H@      <@      3@      =@     ÄH@      =@     ÄG@      ;@      2@      <@@ÕÜ{/@8≥#!:@‘˛ÇÛ◊G@ÕC·ST:@BŒFCÊ0@bW|3]>;@xÜ<üG•G@Æ;ak;@√M√öî-@>/∏é˘8@$Â⁄÷ÖF@ØW{qπ59@ÊÆ"ª(	ˆ?áπc1€&@˜ñ∑]º=?@Ø6–ÆHB&@∞&Vø,r¯?ŒˆÒîòëˆ?º„Qõâ|Ù?R)Üc’Q˙?h æê2Û?ÏÒ!Ç˘?8Yæ,
+¯?s∑é·	ˆ?∑á·ubÛÛ?Dkiùä•ˆ?Æ≤ox,bˆ?ÖÃ&Q©&Ù?8ôäÄÍ%Ú?Ó;‹πS¯?¢ö™b˜?8´≈?OCı?                                
+@@ 027-mhwimp-rrd-1000000010-10 status 1
+0
+@@ 027-mhwimp-rrd-1000000010-10 stdout 0
+
+@@ 027-mhwimp-rrd-1000000010-10 stderr 0
+
+@@ 027-mhwimp-rrd-1000000010-10 file:mhwimp.rrd 1992
+RRD 0004        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        MHWPREDICT                                    öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              
+ ö;            10                                                                                                                    ¯                                                              $@                              $@      $@                                    ¯                              ¯      ¯                                     ?                              ¯      ¯                                     ¯              ¯                                                              ¯                                                                                                                                         ¯      ¯      ¯      $@      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ?      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯              ¯
+@@ 028-mhwimp-rrd-1000000010-10-1000000020-20-1 status 1
+0
+@@ 028-mhwimp-rrd-1000000010-10-1000000020-20-1 stdout 0
+
+@@ 028-mhwimp-rrd-1000000010-10-1000000020-20-1 stderr 0
+
+@@ 028-mhwimp-rrd-1000000010-10-1000000020-20-1 file:mhwimp.rrd 1992
+RRD 0004        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        MHWPREDICT                                    öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              2 ö;            11                                                                                                                    ¯                                                              &@                        333333$@      $@Ï©Ò“MbP?                            $@                               @      ?                               "Âø$?                              ¯      ¯                                     ?              ¯                                                              ¯                                                                                                                     	                    ¯      ¯      ¯      $@      4@      D@      4@      &@      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      $@      ¯      ¯      ¯      ¯      @       @"Âø$?       @      ?      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯                                
+@@ 029-mhwimp-rrd-1000000010-10-1000000020-20-1 status 1
+0
+@@ 029-mhwimp-rrd-1000000010-10-1000000020-20-1 stdout 0
+
+@@ 029-mhwimp-rrd-1000000010-10-1000000020-20-1 stderr 0
+
+@@ 029-mhwimp-rrd-1000000010-10-1000000020-20-1 file:mhwimp.rrd 1992
+RRD 0004        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        MHWPREDICT                                    öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            29                                                                                                                    ¯                                                              =@                        ˝:Õ*˚*@∞ﬂ7èûœ*@,fá∞nû?ävØæ‹ù?              ¢ãóÿ;@                        Ú◊•6ƒÛ?ÄúCb‰î @                               ≥&ˇô®§ @                        »?$çπ@o¸é√qIÔ?                               *±CŒœŸÔ?              ¯                                                        o¸é√qIÔ?                                                                                                                                      =@     ÄH@      =@     ÄG@      ;@      2@      <@      H@      <@      3@üwr√e“:@b¸–c{ºI@°1°ÆÄÃ:@ˇgM∏Qa.@&+É◊„;@PÜ\ |J@¢ãóÿ;@Ô=œ÷+@DÃp•Àø9@ˇÏJÀªÛH@ïÓ-éõ¿9@ª∏7÷Æ,@˝«¡¬)@≥&ˇô®§ @Ú◊•6ƒÛ?G…[ÜcÆ @»?$çπ@€_H˝?¶#òé±˜?*±CŒœŸÔ?O»qÌ?úürt2º˝?T¸îß ∞?Å2m}rÓ?»M~Ó?àëÉ¡N @¥#Çƒ]Á?'Ø„‹AÛ?o¸é√qIÔ?ÙÀ≈Ù†€˙?÷ÿﬂ√jQ?]ÜjÅÁ?                                
+@@ 030-mhwimp-rrd-1000000010-10-1000000020-20-1 status 1
+0
+@@ 030-mhwimp-rrd-1000000010-10-1000000020-20-1 stdout 0
+
+@@ 030-mhwimp-rrd-1000000010-10-1000000020-20-1 stderr 0
+
+@@ 030-mhwimp-rrd-1000000010-10-1000000020-20-1 file:mhwimp.rrd 1992
+RRD 0004        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        MHWPREDICT                                    öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            29                                                                                                                    ¯                                                              =@                        /—˚ÙyE@‚8R¬ÂdF@S+˝ûÏß…??çr7"]Õ?              ¿_¿UT@                        R‰OO÷j˘?D¬‘Ë¸?                               Ür˙¶¿˚?                        Œ´ºÇÍV@	?õ‚V»P@                               äÂÆ3ÆiP@              ¯                                                        	?õ‚V»P@                                                                                                                                       =@     ÄH@      =@     ÄG@      ;@      2@      <@      H@      <@      3@⁄A¥“¿e@[…<`=\l@8µ∞›P]@iS‘µûX@•`ÍªYÉ\@E±©lc@¿_¿UT@H"üÍÃ–k@ÄØÖµ)p@E∞ñ IÖu@ 0ä«©f@íe»÷b@πä‡1õ$@Ür˙¶¿˚?R‰OO÷j˘?»´£˘™` @Œ´ºÇÍV@1aç&T@±ãcV‹X@äÂÆ3ÆiP@& (è°K@Ô2Ï-÷fV@î{<€HWR@CZﬁ[SpV@YNµ∆+P@¡€äÑ∏PW@1Iß"ËT@µ¨∫≤Ω™X@	?õ‚V»P@¯çá.S@-íÕå ‰K@›%”;¨P@                                
+@@ 031-mhwimp-rrd-1000000010-10-1000000020-20-1 status 1
+0
+@@ 031-mhwimp-rrd-1000000010-10-1000000020-20-1 stdout 0
+
+@@ 031-mhwimp-rrd-1000000010-10-1000000020-20-1 stderr 0
+
+@@ 031-mhwimp-rrd-1000000010-10-1000000020-20-1 file:mhwimp.rrd 1992
+RRD 0004        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        MHWPREDICT                                    öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            29                                                                                                                    ¯                                                              =@                        ¡œ2Ë*@˛ó«`∆ª*@œÇô,›û?´ªç2Hû?              (´˝·—;@                        o{∆ñ@ºÚ?>L!8	ù @                               Â) ã4≠ @                        
+õ?@ŒùbÚ?                               —Z+ÁÖ)Ú?              ¯                                                        ŒùbÚ?                                                                                                                                     =@     ÄH@      =@     ÄG@      ;@      2@      <@      H@      <@      3@j˚¥	„Ÿ:@Û˝ôz4”I@?Uú´7¥:@Ÿ—áª-@•xÄJM˛;@˝¥¬öÈ¢J@(´˝·—;@qõﬂq*@3¬Æâ=§9@xÑπº=ÌH@˘dë)ä9@ #‰ËR„+@ë˘⁄e@Â) ã4≠ @o{∆ñ@ºÚ?ÛYñ‹w≈ @
+õ?@ŒFêÊúÛ?ÄÖ¬∂rr˜?—Z+ÁÖ)Ú?x]uƒª*Ò?wf≠◊¨˝?;ôÖ‰çÛ?7wë:	Ï?˜òªà…Ò?Oìô?ô @^/h‚oÛ?
+üïœtÚ?ŒùbÚ?"£A„˘? ›OÛ?Æ´yúmÂ?                                
+@@ 032-hwexp-rrd-1000000010-10 status 1
+0
+@@ 032-hwexp-rrd-1000000010-10 stdout 0
+
+@@ 032-hwexp-rrd-1000000010-10 stderr 0
+
+@@ 032-hwexp-rrd-1000000010-10 file:hwexp.rrd 2056
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôô…?öôôôôô©?             @                                        SEASONAL                                      333333”?öôôôôô©?                                                      DEVSEASONAL                                   öôôôôôŸ?öôôôôô©?                                                      DEVPREDICT                                                                                                           FAILURES                                             @       @                                                     
+ ö;            10                                                                                                                    ¯                                                              $@                              $@      $@                                    ¯                              ¯      ¯                                                                     ¯      ¯                                     ¯              ¯                                                              ¯                                                                                                                                        ¯      ¯      ¯      ¯      $@      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯              ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯              ¯      ¯      ¯      ¯      ¯      ¯
+@@ 033-hwexp-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 033-hwexp-rrd-1000000010-10-1000000020-20-10 stdout 0
+
+@@ 033-hwexp-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 033-hwexp-rrd-1000000010-10-1000000020-20-10 file:hwexp.rrd 2056
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôô…?öôôôôô©?             @                                        SEASONAL                                      333333”?öôôôôô©?                                                      DEVSEASONAL                                   öôôôôôŸ?öôôôôô©?                                                      DEVPREDICT                                                                                                           FAILURES                                             @       @                                                     2 ö;            11                                                                                                                    ¯                                                              &@                        ffffff$@      $@gÆG·zÑ?                            $@                              $@                                       ¿ÖÎQ∏Œ?                              ¯      ¯                                     ?              ¯                                                              ¯                                                                                                                           	             ¯      ¯      ¯      ¯      $@      4@      D@      4@      &@      ¯      ¯      ¯      ¯      $@      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      $@      >@      $@¿ÖÎQ∏Œ?      ¯      ¯      ?      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯                                              ¯      ¯
+@@ 034-hwexp-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 034-hwexp-rrd-1000000010-10-1000000020-20-10 stdout 0
+
+@@ 034-hwexp-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 034-hwexp-rrd-1000000010-10-1000000020-20-10 file:hwexp.rrd 2056
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôô…?öôôôôô©?             @                                        SEASONAL                                      333333”?öôôôôô©?                                                      DEVSEASONAL                                   öôôôôôŸ?öôôôôô©?                                                      DEVPREDICT                                                                                                           FAILURES                                             @       @                                                     êÀö;            29                                                                                                                    ¯                                                              =@                        CRCÅ„	2@&á@9iÕ1@r∏wjÁ˚»?ö’'µ»?              ∆ñ)ùØ»<@                        _Ìâa*¯?ÈU_∏ì%@                               ˙tì[EÆ%@                        §9ﬂıÒ€?Œµ4	y‘?                               Øø√Á´–—?              ¯                                                        Œµ4	y‘?                                                                                                                                        3@      =@     ÄH@      =@     ÄG@      ;@      2@      <@      H@      <@rﬁ¸kæ∂<@~mFBg_H@∆ñ)ùØ»<@‡∆ø{‚ä0@JcK;âñ:@+ƒè‘:RG@¬ªéL,¥:@Ç	)0∑ü1@∞W◊x®;@ÿ/WŸG@§åV'ø;@MÆ"¨∞2@6A·Ùªé&@ôxì™?@˙tì[EÆ%@_Ìâa*¯?§üœã’?Øø√Á´–—?§9ﬂıÒ€?ø√~¬Úÿ?[ç’ ⁄‹?≠üƒùBP◊?s6:O≠‡?Èß— _›?⁄5ã!pŸ?Œµ4	y‘?•&I1Á?§
+2¨À„?æ}ñtÃj‡? Uº—7⁄?ñ%wzr≈„?Ì—ß¿ä&·?                                                                                                
+@@ 035-hwexp-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 035-hwexp-rrd-1000000010-10-1000000020-20-10 stdout 0
+
+@@ 035-hwexp-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 035-hwexp-rrd-1000000010-10-1000000020-20-10 file:hwexp.rrd 2056
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôô…?öôôôôô©?             @                                        SEASONAL                                      333333”?öôôôôô©?                                                      DEVSEASONAL                                   öôôôôôŸ?öôôôôô©?                                                      DEVPREDICT                                                                                                           FAILURES                                             @       @                                                     êÀö;            29                                                                                                                    ¯                                                              =@                        €Yê≤H‰B@1KêA@ùê¯«∏¿4ô∑&Ç”¿              }≈¯Eè@                        ‹hKMÙÔ@ôç¶2◊”=¿                               ô1®®É7¿                        €\ÌQèK`@0¿ﬁ2ΩÏU@                               ≤ˆü„íO@              ¯                                                        0¿ﬁ2ΩÏU@                                                                                                                                        3@      =@     ÄH@      =@     ÄG@      ;@      2@      <@      H@      <@Æ•
+[®P@¢àQMoi$@}≈¯Eè@Üïâ{¶1w@ÈB&8£ q@©=>_Ãﬁ\@ojΩ\„V@’éÖ2∫a@Äyñw¸€]@≠¨Å¡õk9@:.–2@b–ø—”ÀP@‰C¨é∑3@)p˝ç”f¿ô1®®É7¿‹hKMÙÔ@Æ~∫y√]T@≤ˆü„íO@€\ÌQèK`@Ôd±ñDxX@bWPKe@ówΩ{âqa@ˆˇ†B®$g@8"≤$pAa@1I®fdz[@0¿ﬁ2ΩÏU@}D¢GΩîa@⁄Ï[jÖ[@k˛&f9Rm@Åƒm‰p±g@∂†¡ˆ@l@àLº#e@      ?                                                                      ?      ?      ?
+@@ 036-hwexp-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 036-hwexp-rrd-1000000010-10-1000000020-20-10 stdout 0
+
+@@ 036-hwexp-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 036-hwexp-rrd-1000000010-10-1000000020-20-10 file:hwexp.rrd 2056
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôô…?öôôôôô©?             @                                        SEASONAL                                      333333”?öôôôôô©?                                                      DEVSEASONAL                                   öôôôôôŸ?öôôôôô©?                                                      DEVPREDICT                                                                                                           FAILURES                                             @       @                                                     êÀö;            29                                                                                                                    ¯                                                              =@                        $û±&è2@Å©ºÄä⁄1@]èOÈø ?i´Bç ?              ‹Á›Vmÿ<@                        JCÆ˘ˆ?L–ˇ£êë%@                               ÜLï[è§%@                        S-iã‚?;üb÷?                               mç˚œ2—?              ¯                                                        ;üb÷?                                                                                                                                        3@      =@     ÄH@      =@     ÄG@      ;@      2@      <@      H@      <@~ÃçL⁄<@Ì≠ππiH@‹Á›Vmÿ<@Z»>&5i0@8±:Ø§«:@»±[à~[G@3√µ¬:@∞∞
+ë1@xÊO±Â”;@ß#L◊„G@ÃÒhV˙œ;@∫Äã%4™2@Òe∫˘_ú&@ß®¢ﬁ¥?@ÜLï[è§%@JCÆ˘ˆ?pH‚’?mç˚œ2—?S-iã‚?;≥;\ê”?´+»(‚?Ø1Ê≈‹?>Ô@–@˙Ê?ºá≤R⁄?fyÊµak€?;üb÷?zÍUâäÌÒ?  ÙhÌºÈ?»î¬\%-Ë?˝ÇÅﬁ‚?HàóÌ?‡o‚∏B‚?                                                                                                
+@@ 037-hwsw0-rrd-1000000010-10 status 1
+0
+@@ 037-hwsw0-rrd-1000000010-10 stdout 0
+
+@@ 037-hwsw0-rrd-1000000010-10 stderr 0
+
+@@ 037-hwsw0-rrd-1000000010-10 file:hwsw0.rrd 1768
+RRD 0004        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                               DEVSEASONAL                                   öôôôôôπ?                                                               DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              
+ ö;            10                                                                                                                                    $@      $@                                    ¯                              ¯      ¯                                                                     ¯      ¯                                     ¯              ¯                                                                                                                                              $@                                                  ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯              ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯              ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      $@      ¯      ¯      ¯
+@@ 038-hwsw0-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 038-hwsw0-rrd-1000000010-10-1000000020-20-10 stdout 0
+
+@@ 038-hwsw0-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 038-hwsw0-rrd-1000000010-10-1000000020-20-10 file:hwsw0.rrd 1768
+RRD 0004        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                               DEVSEASONAL                                   öôôôôôπ?                                                               DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              2 ö;            11                                                                                                                              333333$@      $@Ï©Ò“MbP?                            $@                              $@                                       ◊£p=
+∑?                              ¯      ¯                                     ?              ¯                                                                                                                                              &@        	                      
+                     ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      $@      ¯      ¯◊£p=
+∑?      $@      >@      $@      ¯      ¯      ¯      ?      ¯      ¯      ¯      ¯      ¯      ¯                                              ¯      &@      ¯      ¯      ¯      ¯      ¯      ¯      ¯      $@      4@      D@      4@
+@@ 039-hwsw0-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 039-hwsw0-rrd-1000000010-10-1000000020-20-10 stdout 0
+
+@@ 039-hwsw0-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 039-hwsw0-rrd-1000000010-10-1000000020-20-10 file:hwsw0.rrd 1768
+RRD 0004        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                               DEVSEASONAL                                   öôôôôôπ?                                                               DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            29                                                                                                                              6˜°C©0@Alµ∫ut0@f¸kÓV≠?¢ﬁµë¨?              ñÎáãÕ~;@                        *Ω©Cu˜? %Ï¯%@                               …—ËÕs=&@                        `M≈_p¯?û]ÈÒ?                               à≠kÊÜÚ?              ¯                                                                                                                                              =@                             	              ∆îWTq9@fq¨ÆÃ0@n®Aè2:@—˝jQ◊*G@™øƒw:@¶ê1@TiúG£?;@JéÀ›ØG@ñÎáãÕ~;@Mgfb.@Ê˙ïl(9@ˆ˝„·‰¶F@*Ω©Cu˜?H <πØ&@î≤f]:?@…—ËÕs=&@NÖb©ÌSˆ?Ék¸ÆN\Ù?à≠kÊÜÚ?`M≈_p¯?                                                                                                      1@      ;@     ÄG@      ;@      2@      <@      H@      <@      3@      =@     ÄH@      =@
+@@ 040-hwsw0-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 040-hwsw0-rrd-1000000010-10-1000000020-20-10 stdout 0
+
+@@ 040-hwsw0-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 040-hwsw0-rrd-1000000010-10-1000000020-20-10 file:hwsw0.rrd 1768
+RRD 0004        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                               DEVSEASONAL                                   öôôôôôπ?                                                               DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            29                                                                                                                              9Kô˚M@™{⁄T.ªN@Éjª◊Bô—?ª‡Ä)Ê”?              «Uk7˙;P@                        Õ‘Ì°ΩÏ8@7‚í⁄üO	@                               üˆQ´Ô	≤ø                        »R·Iq¸W@nB¯jEzO@                               ãÊÙÑp N@              ¯                                                                                                                                              =@                             	              $∆s~Éc@Í≥è¶=Me@‚d@¸‘ü$Ù^@h”◊8+§X@˙EõcÑ]@∏b EE\@¶Åà®àU@«Uk7˙;P@a9ª"Bp@\N]„Ÿm@+0p∂íg@Õ‘Ì°ΩÏ8@P˛ºg#@@–j ”û1@üˆQ´Ô	≤øfLo.ˆT@ÁÛ¶259P@ãÊÙÑp N@»R·Iq¸W@                                                                                                      1@      ;@     ÄG@      ;@      2@      <@      H@      <@      3@      =@     ÄH@      =@
+@@ 041-hwsw0-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 041-hwsw0-rrd-1000000010-10-1000000020-20-10 stdout 0
+
+@@ 041-hwsw0-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 041-hwsw0-rrd-1000000010-10-1000000020-20-10 file:hwsw0.rrd 1768
+RRD 0004        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                               DEVSEASONAL                                   öôôôôôπ?                                                               DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            29                                                                                                                              „¨Ô‹ñ0@d.I˚Ô_0@Dy·µ¨≠?ƒcÖûb›¨?              Æ;ak;@                        ÊÆ"ª(	ˆ?ŸyFie˘%@                               Ø6–ÆHB&@                        R)Üc’Q˙?∑á·ubÛÛ?                               º„Qõâ|Ù?              ¯                                                                                                                                              =@                             	              ØW{qπ59@@ÕÜ{/@8≥#!:@‘˛ÇÛ◊G@ÕC·ST:@BŒFCÊ0@bW|3]>;@xÜ<üG•G@Æ;ak;@√M√öî-@>/∏é˘8@$Â⁄÷ÖF@ÊÆ"ª(	ˆ?áπc1€&@˜ñ∑]º=?@Ø6–ÆHB&@∞&Vø,r¯?ŒˆÒîòëˆ?º„Qõâ|Ù?R)Üc’Q˙?                                                                                                      1@      ;@     ÄG@      ;@      2@      <@      H@      <@      3@      =@     ÄH@      =@
+@@ 042-hwsw5-rrd-1000000010-10 status 1
+0
+@@ 042-hwsw5-rrd-1000000010-10 stdout 0
+
+@@ 042-hwsw5-rrd-1000000010-10 stderr 0
+
+@@ 042-hwsw5-rrd-1000000010-10 file:hwsw5.rrd 2120
+RRD 0004        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?              @                                        SEASONAL                                      öôôôôôπ?      ‡?                                                       DEVSEASONAL                                   öôôôôôπ?      ‡?                                                       DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              
+ ö;            10                                                                                                                                    $@      $@                                    ¯                              ¯      ¯                                                                     ¯      ¯                                     ¯              ¯                                                                                                                                              $@                                                 ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯              ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯              ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      $@      ¯      ¯
+@@ 043-hwsw5-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 043-hwsw5-rrd-1000000010-10-1000000020-20-10 stdout 0
+
+@@ 043-hwsw5-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 043-hwsw5-rrd-1000000010-10-1000000020-20-10 file:hwsw5.rrd 2120
+RRD 0004        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?              @                                        SEASONAL                                      öôôôôôπ?      ‡?                                                       DEVSEASONAL                                   öôôôôôπ?      ‡?                                                       DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              2 ö;            11                                                                                                                                    $@      $@                                    ¯                              ¯      ¯                                     ?                              ¯      ¯                                     ¯              ¯                                                                                                                                              &@                                                 ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      >@      $@      ?      ¯      ¯      ¯              $@      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯                                              ¯      4@      &@      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      $@      4@      D@
+@@ 044-hwsw5-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 044-hwsw5-rrd-1000000010-10-1000000020-20-10 stdout 0
+
+@@ 044-hwsw5-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 044-hwsw5-rrd-1000000010-10-1000000020-20-10 file:hwsw5.rrd 2120
+RRD 0004        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?              @                                        SEASONAL                                      öôôôôôπ?      ‡?                                                       DEVSEASONAL                                   öôôôôôπ?      ‡?                                                       DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            29                                                                                                                              zn.Ã5>@ì˚˝nçb0@2B¢- /≠?¡tÕ&ã¨?              Æ%ºø;@                        Úp	›ŸÏ?ıÅ€”ù&@                               Ë2Ráy◊&@                        #¯–ÿSu@‘{€»3uÔ?                               l¿3\(?              ¯                                                                                                                                              =@                              	              ∆≈B∞·E@ Íf¸7@Î%m	b.@÷!ÀJãa9@∫ÇëÎ#«F@ß5¥yÅ∑9@∞}yŸL∑.@™‡ﬂ{ö9@÷y~ÍF@ JArN
+:@˚≠‡D∏<1@ª•‘ûk;@Æ6~≈úÀG@Æ%ºø;@ƒÚ7”D∫&@$ï¡ßÜü5@¢´ê 'ÓD@™z”dÛ6@3¸ TΩç*@ƒEìuu7@∆ú,	–E@Ùvv
+«7@Å¸N[Ö*@[åkóÖ7@Ù¨%ø.ö¿êHË–a‚ø|>˙cmu@ÄÙßæ…ã”ø§NìK„¿†»©H$n⁄øÏÊSl@¿√7≈ÉÁø≤GæŸp6¯?⁄A0úÃ˘?`∂úëí?˚?”veQí¸?f∞H©˘?≤í‡9¥ ˜?öèô≤ìÙ?”fDÃyˆ?                                                                                                                                                                                                      :@      1@      ;@     ÄG@      ;@      2@      <@      H@      <@      3@      =@     ÄH@      =@      ,@      8@      F@      8@      .@      9@     ÄF@      9@      0@      :@      G@
+@@ 045-hwsw5-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 045-hwsw5-rrd-1000000010-10-1000000020-20-10 stdout 0
+
+@@ 045-hwsw5-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 045-hwsw5-rrd-1000000010-10-1000000020-20-10 file:hwsw5.rrd 2120
+RRD 0004        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?              @                                        SEASONAL                                      öôôôôôπ?      ‡?                                                       DEVSEASONAL                                   öôôôôôπ?      ‡?                                                       DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            29                                                                                                                              `“¸¿w∫S@é?òLŸ:Q@ÓÃ6êz”?≥í∑õ’◊?              è◊T~AX@                        
+j‚ø3z0@∑5åÊ?ª;@                               ò˜˝õ5@                        J.:‰^F@≈áRGH@                               {(—I@              ¯                                                                                                                                              =@                              	              ì€(g˜q@Ims?m@÷cÆ≥Òo@ë’x4ÉÏl@T-†Rl@hﬁ¬„ÊÜg@Yêäd@¶õêëc@~#e8xÓ\@€ΩËﬁV@Ìãëáä]@¿°S8Ëˆ\@"@1_@è◊T~AX@ƒÚ7”D∫&@$ï¡ßÜü5@¢´ê 'ÓD@™z”dÛ6@3¸ TΩç*@HuÖgR@&˙∫ÔÌa@ Ç9§è9c@ä≤^Ωlf@öﬁ)	:Ïk@F˚[óM¿T_Eó…¿Ã›RﬂÊè¿@ ?ÆMÀÔ?àÃŸ˚?Z@$Ÿ¿ ∑!@‹xR>@≈@L˚?å])¿J˝â‹≤I@K^ÍŸ¿úE@B=ê3÷B@—¨»ΩÒD@ÄïÃ‘πF@O«)ÒN:H@û ªAh_J@ØŒN|;L@                                                                                                                                                                                                      :@      1@      ;@     ÄG@      ;@      2@      <@      H@      <@      3@      =@     ÄH@      =@      ,@      8@      F@      8@     @@     @@     @@     @@     @@     @@      G@
+@@ 046-hwsw5-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 046-hwsw5-rrd-1000000010-10-1000000020-20-10 stdout 0
+
+@@ 046-hwsw5-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 046-hwsw5-rrd-1000000010-10-1000000020-20-10 file:hwsw5.rrd 2120
+RRD 0004        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?              @                                        SEASONAL                                      öôôôôôπ?      ‡?                                                       DEVSEASONAL                                   öôôôôôπ?      ‡?                                                       DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            29                                                                                                                              ‹;Âk!>@VtñïL0@–IR–h≠?`‹õ˘∑¨?              t¸à≈®;@                        d%idnaË?;4IfZõ&@                               Z…∫BCŸ&@                        ƒ·•‹€@ûK–∂• ˝?                               Ó|Ç}@¸?              ¯                                                                                                                                              =@                              	              àñ&?º™E@ç§fö7@{˝ÈÈ/≤-@⁄tí£9@,“Zﬁ§F@uø˛Úy9@í^gË˚-@˙?CÏHë9@∫ÉÃÿ\’F@ü≤ŸvÂ9@^%aÒZ1@n¿K˝«M;@R™ÚìMæG@t¸à≈®;@8ŸÓ@-%@≈ÌÒí4@Ä6-íaD@¿N&)∆5@ùkQ,Õ(@Ô‘zMH≠6@ö∑√|¿vE@…¯b’'7@ØÁ“√)@a8ˇO47@xﬁg2ëú¿†l-Dà·ø¯eÅÈ{@††öôb”ø„k0JE¿†¨–+î⁄øxYë…^h@Ä‚ß»éÁøã∆Z¡v @∆5◊Íï€@GXΩõ @ÄnøˇõH@^óRbúE@g	=%4@å˚yìg¸@±â-ƒ@                                                                                                                                                                                                      :@      1@      ;@     ÄG@      ;@      2@      <@      H@      <@      3@      =@     ÄH@      =@      ¯      8@      F@      8@      .@      9@     ÄF@      9@      0@      :@      G@
+@@ 047-hwpdp3-rrd-1000000010-10 status 1
+0
+@@ 047-hwpdp3-rrd-1000000010-10 stdout 0
+
+@@ 047-hwpdp3-rrd-1000000010-10 stderr 0
+
+@@ 047-hwpdp3-rrd-1000000010-10 file:hwpdp3.rrd 2056
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?öôôôôô©?                                                      DEVSEASONAL                                   öôôôôôπ?öôôôôô©?                                                      DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              
+ ö;            10                                                                                                                    $@                                                                                             $@      $@                                    ¯                              ¯      ¯                                                                     ¯      ¯                                     ¯              ¯                                                              ¯                                                                                                                                        ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯              ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯              ¯      ¯      ¯      ¯      ¯      ¯      ¯
+@@ 048-hwpdp3-rrd-1000000010-10-1000000020-20-1 status 1
+0
+@@ 048-hwpdp3-rrd-1000000010-10-1000000020-20-1 stdout 0
+
+@@ 048-hwpdp3-rrd-1000000010-10-1000000020-20-1 stderr 0
+
+@@ 048-hwpdp3-rrd-1000000010-10-1000000020-20-1 file:hwpdp3.rrd 2056
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?öôôôôô©?                                                      DEVSEASONAL                                   öôôôôôπ?öôôôôô©?                                                      DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              2 ö;            11                                                                                                                                                                              ´™™™™™7@      &@                333333$@      $@Ï©Ò“MbP?                            $@                              $@                                       ◊£p=
+∑?                              ¯      ¯                                     ?              ¯                                                              ¯                                                                                                                                        ¯      ¯      .@´™™™™™7@      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      $@      ¯      ¯      ¯      $@      >@      $@◊£p=
+∑?      ¯      ?      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯                                              ¯      ¯      ¯
+@@ 049-hwpdp3-rrd-1000000010-10-1000000020-20-1 status 1
+0
+@@ 049-hwpdp3-rrd-1000000010-10-1000000020-20-1 stdout 0
+
+@@ 049-hwpdp3-rrd-1000000010-10-1000000020-20-1 stderr 0
+
+@@ 049-hwpdp3-rrd-1000000010-10-1000000020-20-1 file:hwpdp3.rrd 2056
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?öôôôôô©?                                                      DEVSEASONAL                                   öôôôôôπ?öôôôôô©?                                                      DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            29                                                                                                                   ÄS@                                                        UUUUUU9@      =@                6˜°C©0@Alµ∫ut0@f¸kÓV≠?¢ﬁµë¨?              ñÎáãÕ~;@                        *Ω©Cu˜? %Ï¯%@                               …—ËÕs=&@                        `M≈_p¯?û]ÈÒ?                               à≠kÊÜÚ?              ¯                                                        û]ÈÒ?                                                                                                                                   UUUUUU6@´™™™™™=@UUUUU’@@UUUUUU?@UUUUUU9@UUUUUU9@UUUUUU3@´™™™™™:@´™™™™™>@UUUUUU<@fq¨ÆÃ0@n®Aè2:@—˝jQ◊*G@™øƒw:@¶ê1@TiúG£?;@JéÀ›ØG@ñÎáãÕ~;@Mgfb.@Ê˙ïl(9@ˆ˝„·‰¶F@∆îWTq9@H <πØ&@î≤f]:?@…—ËÕs=&@*Ω©Cu˜?à≠kÊÜÚ?`M≈_p¯?NÖb©ÌSˆ?Ék¸ÆN\Ù?zgtÒ±ı?—çlªÛ?û]ÈÒ?Pa¨‚ˆ?ªprüÛÛ?úŒ-HÚ?Œ‚ÔXöO?h≠|∞ ˜?K}uúbÁÙ?z@EÔ ˆÚ?•uÉ]Í+Ò?g[ªXWœ˜?                                                                                                
+@@ 050-hwpdp3-rrd-1000000010-10-1000000020-20-1 status 1
+0
+@@ 050-hwpdp3-rrd-1000000010-10-1000000020-20-1 stdout 0
+
+@@ 050-hwpdp3-rrd-1000000010-10-1000000020-20-1 stderr 0
+
+@@ 050-hwpdp3-rrd-1000000010-10-1000000020-20-1 file:hwpdp3.rrd 2056
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?öôôôôô©?                                                      DEVSEASONAL                                   öôôôôôπ?öôôôôô©?                                                      DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            29                                                                                                                   ÄS@                                                        UUUUUU9@      =@                9Kô˚M@™{⁄T.ªN@Éjª◊Bô—?ª‡Ä)Ê”?              «Uk7˙;P@                        Õ‘Ì°ΩÏ8@7‚í⁄üO	@                               üˆQ´Ô	≤ø                        »R·Iq¸W@nB¯jEzO@                               ãÊÙÑp N@              ¯                                                        nB¯jEzO@                                                                                                                                       @@´™™™™™=@UUUUU’@@UUUUUU?@UUUUUU9@UUUUUU9@UUUUUU3@´™™™™™:@´™™™™™>@     @@Í≥è¶=Me@‚d@¸‘ü$Ù^@h”◊8+§X@˙EõcÑ]@∏b EE\@¶Åà®àU@«Uk7˙;P@a9ª"Bp@\N]„Ÿm@+0p∂íg@$∆s~Éc@P˛ºg#@@–j ”û1@üˆQ´Ô	≤øÕ‘Ì°ΩÏ8@ãÊÙÑp N@»R·Iq¸W@fLo.ˆT@ÁÛ¶259P@@ºçWÜÙT@ô)ö˛P@nB¯jEzO@R®öR@\å#”ÙÕO@2üÃjM@∂ÿ·Û(UK@E~a3ˇ`V@	Bk>uõS@9◊**‡∆P@≈£
+O@m‚ZúãÛW@      ?      ?                                                      ?      ?      ?      ?
+@@ 051-hwpdp3-rrd-1000000010-10-1000000020-20-1 status 1
+0
+@@ 051-hwpdp3-rrd-1000000010-10-1000000020-20-1 stdout 0
+
+@@ 051-hwpdp3-rrd-1000000010-10-1000000020-20-1 stderr 0
+
+@@ 051-hwpdp3-rrd-1000000010-10-1000000020-20-1 file:hwpdp3.rrd 2056
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?öôôôôô©?                                                      DEVSEASONAL                                   öôôôôôπ?öôôôôô©?                                                      DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            29                                                                                                                   ÄS@                                                        UUUUUU9@      =@                „¨Ô‹ñ0@d.I˚Ô_0@Dy·µ¨≠?ƒcÖûb›¨?              Æ;ak;@                        ÊÆ"ª(	ˆ?ŸyFie˘%@                               Ø6–ÆHB&@                        R)Üc’Q˙?∑á·ubÛÛ?                               º„Qõâ|Ù?              ¯                                                        ∑á·ubÛÛ?                                                                                                                                   UUUUUU6@´™™™™™=@UUUUU’@@UUUUUU?@UUUUUU9@      1@      ¯      ¯´™™™™™>@UUUUUU<@@ÕÜ{/@8≥#!:@‘˛ÇÛ◊G@ÕC·ST:@BŒFCÊ0@bW|3]>;@xÜ<üG•G@Æ;ak;@√M√öî-@>/∏é˘8@$Â⁄÷ÖF@ØW{qπ59@áπc1€&@˜ñ∑]º=?@Ø6–ÆHB&@ÊÆ"ª(	ˆ?º„Qõâ|Ù?R)Üc’Q˙?∞&Vø,r¯?ŒˆÒîòëˆ?8Yæ,
+¯?s∑é·	ˆ?∑á·ubÛÛ?Dkiùä•ˆ?Æ≤ox,bˆ?ÖÃ&Q©&Ù?8ôäÄÍ%Ú?Ó;‹πS¯?¢ö™b˜?8´≈?OCı?h æê2Û?ÏÒ!Ç˘?                                                                                                
+@@ 052-hwimp-rrd-1000000010-10-1000000035-20-10 status 1
+0
+@@ 052-hwimp-rrd-1000000010-10-1000000035-20-10 stdout 0
+
+@@ 052-hwimp-rrd-1000000010-10-1000000035-20-10 stderr 0
+
+@@ 052-hwimp-rrd-1000000010-10-1000000035-20-10 file:hwimp.rrd 1992
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              Àö;            22                                           ¯                                                                      ¯                                                              ¯      ¯                      $@      $@                                    ¯      ¯                      ¯      ¯                                     ¯      ¯                      ¯      ¯                                     ¯      ¯      ¯                                                              ¯      ¯                                                                                                                                ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      $@      $@      ¯      ¯      $@      ¯      ¯      ¯      ¯      $@      $@      ¯      ¯              ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯                                
+@@ 053-hwimp-rrd-1000000010-10-1000000045-20-10 status 1
+0
+@@ 053-hwimp-rrd-1000000010-10-1000000045-20-10 stdout 0
+
+@@ 053-hwimp-rrd-1000000010-10-1000000045-20-10 stderr 0
+
+@@ 053-hwimp-rrd-1000000010-10-1000000045-20-10 file:hwimp.rrd 1992
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              ãÀö;            22                                           ¯                                                                      ¯                                                              ¯      ¯                      $@      $@                $       !             ¯      ¯                      ¯      ¯                                                                     ¯      ¯                                     ¯              ¯                                                              ¯      ¯                                                                                                                                 ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      $@      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯              ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯                                
+@@ 054-hwimp-rrd-1000000010-5-1000000200-6-1000 status 1
+0
+@@ 054-hwimp-rrd-1000000010-5-1000000200-6-1000 stdout 0
+
+@@ 054-hwimp-rrd-1000000010-5-1000000200-6-1000 stderr 0
+
+@@ 054-hwimp-rrd-1000000010-5-1000000200-6-1000 file:hwimp.rrd 1992
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              “ ö;            7                                                                                                                     ¯                                                              @      ¯                ÕÃÃÃÃÃ@      @ ™Ò“Mb`?                            @      ¯                      ¯                                       
+◊£p=
+«?                              ¯      ¯                                      @              ¯                                                              ¯      ¯                                                                                                                                 ¯      ¯      ¯      ¯      ¯      ¯      ¯      @      ¯      ¯      ¯      ¯      ¯      ¯      ¯      @      ¯      ¯      ¯      ¯      ¯      ¯        
+◊£p=
+«?      ¯      ¯       @      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯                                
+@@ 055-hwimp-rrd-1000000010-0-1000000020-1-1000 status 1
+0
+@@ 055-hwimp-rrd-1000000010-0-1000000020-1-1000 stdout 0
+
+@@ 055-hwimp-rrd-1000000010-0-1000000020-1-1000 stderr 0
+
+@@ 055-hwimp-rrd-1000000010-0-1000000020-1-1000 file:hwimp.rrd 1992
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            0                                                                                                                     ¯                                                                                        òˇCî—∆?>uòú3h–?òiãôS?˜ﬁ≥⁄Dà`?              πTÜb¢È?                        8w(%´‹?;f_¿]·?                               –VEgEﬁ?                        ·"	À{Ô?yT∂•SX?                               π”∆¸Ô?              ¯                                                        yT∂•SX?                                                                                                                                        ?       @              ?       @                      ?       @        zcTG`‚?ºæﬁ<É Ù?µ#cÎaµ¯?â…Ω~⁄·?
+û´˚¡Í?o=ı˘ÖÒ?>j r¯?πTÜb¢È?XAò⁄Hû‡?˚¢ ÃÒ?î‹©;"˝?’¨ˇ.6Ÿﬂ?8w(%´‹?C⁄/Î?+†µL≈vı?–VEgEﬁ?M°OD†È?‡Q¥RÁˆ?π”∆¸Ô?·"	À{Ô?úu‰h‰1Ô?`kâì…?vﬁZº;Ï?«<‘¥õê¯?yT∂•SX?b qö¶#?’sôªÌêÍ?p4OèŒ˙?ï"ÕI˘o?é2W3æñÓ?<ÈO#	¿Í?txã ¢S˙?                                
+@@ 056-hwimp-rrd-1000000010-0-1000000020-1-1000 status 1
+0
+@@ 056-hwimp-rrd-1000000010-0-1000000020-1-1000 stdout 0
+
+@@ 056-hwimp-rrd-1000000010-0-1000000020-1-1000 stderr 0
+
+@@ 056-hwimp-rrd-1000000010-0-1000000020-1-1000 file:hwimp.rrd 1992
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              » ö;            -19                                            Ä                                                                      ¯                                                              3¿                        YæˆU2Ë"¿˝qÂ)πã!¿´‹˙áµ∂ø~è
+1-µø              ¢2&Ã
+*¿                        7ÒV§p¿◊DW q©¿                               À∂Xu–¿                        “ÓñJÄâ@x_W\p
+@                               xéÚ<î@              ¯                                                        x_W\p
+@                                                                                                                                        ,¿      .¿      0¿      1¿      2¿      3¿      $¿      &¿      (¿      *¿6◊ô∑CJ¸øËR∂¢–ˇ
+¿@Æ4DD∏¿Y‚ps¿¿÷ÙãÛx[¿øÌ„ì– ¿ÈJA#CÆ¿Pjº#¿kû™ª ¿ˇŸÑS~#¿‹˜ﬁ≈–&¿¢2&Ã
+*¿7ÒV§p¿¸	©Œ≤¿3	£_\¿À∂Xu–¿Ê˙™‘†@ŒS>]ƒ@xéÚ<î@“ÓñJÄâ@bºé))@8Ùhã‰@êmk*d@Ä~û≠M@·|_È°~@ÍÒ*@wO';˛\@+21°€o@x_W\p
+@      @¯S„•õƒ@Gç	1ó‘	@                                
+@@ 057-mhwimp-rrd-1000000010-0-1000000020-0-100 status 1
+0
+@@ 057-mhwimp-rrd-1000000010-0-1000000020-0-100 stdout 0
+
+@@ 057-mhwimp-rrd-1000000010-0-1000000020-0-100 stderr 0
+
+@@ 057-mhwimp-rrd-1000000010-0-1000000020-0-100 file:mhwimp.rrd 1992
+RRD 0004        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        MHWPREDICT                                    öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              x ö;            0                                                                                                                     ¯                                                                                                                                            ¯                              ¯      ¯                                     ¯                              ¯      ¯                                     ¯              ¯                                                              ¯                                                                                                                                                                                                                        ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯                                
+@@ 058-hw2ds-rrd-1000000010-0-0-1000000020-7-30 status 1
+0
+@@ 058-hw2ds-rrd-1000000010-0-0-1000000020-7-30 stdout 0
+
+@@ 058-hw2ds-rrd-1000000010-0-0-1000000020-7-30 stderr 0
+
+@@ 058-hw2ds-rrd-1000000010-0-0-1000000020-7-30 file:hw2ds.rrd 2624
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        y                   COUNTER                          ¯      ¯                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                               DEVSEASONAL                                   öôôôôôπ?                                                               DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              êÀö;            9                                                                                                               45630                                                                                                                           @ıÃ´ıÒÃ?ì∆5 t?®ç∆Ôpa?Ÿjf—dø              Ãh;VrB@                        ¬D 0aΩc@PµY˛‰c@â˘ÊHmı?™5øcoÕÙ?              ∫U	¬2ˇg@                        $∞D‹@›£§:@                               »opA@                         ¿ﬁà≥–D@˛á†ìÀ˙B@                               ‰^–$]ºD@                        tﬁ( A@£®Bàõ@                               ≤s:ôUÖ@                        v¨ã'§›:@ΩT	"ô=@                               I°zvä>@              ¯                                                        £®Bàõ@              ¯                                                        ΩT	"ô=@                                                                                                                                                                                                            }˙Qº&@¸;’÷Èﬁf@Ãh;VrB@∫U	¬2ˇg@mX0 Á¸?ÀO€b€_@`(¥yj@Í5=2'«^@0¿…c(@±¡+Dô`@Í⁄gÕ@«ÛWK]…a@™—÷‘È@$Ræ˝Ûb@!†‰j@2Tfåb@Ï…—M≤	@H˘ƒ≠—∏c@√Îµu4@‰ÚÅË·d@ù£°w‘@@˚>_Lf@#'ù›V@*9*Ú±ªe@$∞D‹@ ¿ﬁà≥–D@¸éxÇV@œMøÚóA@åkLÅ√@©ØºlWC@»opA@‰^–$]ºD@≤s:ôUÖ@I°zvä>@tﬁ( A@v¨ã'§›:@9BP@˙”«TB@|jfıÂ@˚„	?Úæ@@Ñô)⁄z@Ô;∞Í[?@⁄m[¸@π‡Áf0r<@%π’¸@~0Eåﬂ¡9@ZÙ}¢@åÑåÇÅ€A@∏¸tQ¬@‹PMuE@@£®Bàõ@ΩT	"ô=@SO:Ñ∫@ı≤ıû7@í$Æ°"@;∆H*Ç@@q#mÆ.ô@ä©+oÌ=@,Ó⁄ 
+∆@µàCl;@»ﬂÜ¢@:‘gÖgw8@ƒ†P–)@Ç]Ñ@A@                                                                
+@@ 059-hwrun-rrd-1000000310-10-1000000320-20-10 status 1
+0
+@@ 059-hwrun-rrd-1000000310-10-1000000320-20-10 stdout 0
+
+@@ 059-hwrun-rrd-1000000310-10-1000000320-20-10 stderr 0
+
+@@ 059-hwrun-rrd-1000000310-10-1000000320-20-10 file:hwrun.rrd 1992
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              ÙÀö;            24                                                                                                                    ¯                                                              8@                        º∫–§n<+@™ﬁ®«x$+@8:#f•ù?~√ı÷uù?              öÉEŸ—7@                        ≠ç|ºL—2@íZOÿ~p$@                               qXˇ~Õx$@                        Vn%r&@Î °˚¯?                               "@^;r≈ˆ?              ¯                                                        Î °˚¯?                                                                                                                                        7@      ,@      8@      F@      8@      E@      6@      *@      7@     ÄE@Æ`@∑;€@@≠o^ˇ5@>|%ÆÆÊ5@öÉEŸ—7@Ês•ö‚’B@ ©6»¡4@Ä9ñ…õc0@‚ñß3âA7@Û]Ωı≤A@™∫‡bD:5@÷hB™3@0Q2#˝c7@qXˇ~Õx$@≠ç|ºL—2@ïHŒ‡Ò&@Ÿt-q¨)@"@^;r≈ˆ?Vn%r&@	.◊n˚Û?ûI[~2&@Î °˚¯?ÆØ8lÒK@©§˛ˇÔ?GÂ¶œó@s‚‘ç÷˚?¬· ﬁ!@‰KV…d?≠€˘†ó£ @äÌ˚?mz-!è$@4º‹ïóÒ?≤ÁÀ6≥¿#@                                
+@@ 060-hwimp-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 060-hwimp-rrd-1000000010-10-1000000020-20-10 stdout 3039
+return_value = 0
+[1000000010]RRA[AVERAGE][1]DS[x] = 1.0000000000e+01
+[1000000010]RRA[HWPREDICT][1]DS[x] = NaN
+[1000000010]RRA[SEASONAL][1]DS[x] = 0.0000000000e+00
+[1000000010]RRA[DEVSEASONAL][1]DS[x] = NaN
+[1000000010]RRA[DEVPREDICT][1]DS[x] = NaN
+[1000000010]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000020]RRA[AVERAGE][1]DS[x] = 2.0000000000e+01
+[1000000020]RRA[HWPREDICT][1]DS[x] = NaN
+[1000000020]RRA[SEASONAL][1]DS[x] = 1.0000000000e+01
+[1000000020]RRA[DEVSEASONAL][1]DS[x] = NaN
+[1000000020]RRA[DEVPREDICT][1]DS[x] = NaN
+[1000000020]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000030]RRA[AVERAGE][1]DS[x] = 4.0000000000e+01
+[1000000030]RRA[HWPREDICT][1]DS[x] = NaN
+[1000000030]RRA[SEASONAL][1]DS[x] = 3.0000000000e+01
+[1000000030]RRA[DEVSEASONAL][1]DS[x] = NaN
+[1000000030]RRA[DEVPREDICT][1]DS[x] = NaN
+[1000000030]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000040]RRA[AVERAGE][1]DS[x] = 2.0000000000e+01
+[1000000040]RRA[HWPREDICT][1]DS[x] = NaN
+[1000000040]RRA[SEASONAL][1]DS[x] = 1.0000000000e+01
+[1000000040]RRA[DEVSEASONAL][1]DS[x] = NaN
+[1000000040]RRA[DEVPREDICT][1]DS[x] = NaN
+[1000000040]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000050]RRA[AVERAGE][1]DS[x] = 1.1000000000e+01
+[1000000050]RRA[HWPREDICT][1]DS[x] = 1.0000000000e+01
+[1000000050]RRA[SEASONAL][1]DS[x] = 9.0000000000e-02
+[1000000050]RRA[DEVSEASONAL][1]DS[x] = 1.0000000000e+00
+[1000000050]RRA[DEVPREDICT][1]DS[x] = NaN
+[1000000050]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000060]RRA[AVERAGE][1]DS[x] = 2.1000000000e+01
+[1000000060]RRA[HWPREDICT][1]DS[x] = 2.0101000000e+01
+[1000000060]RRA[SEASONAL][1]DS[x] = 1.0080910000e+01
+[1000000060]RRA[DEVSEASONAL][1]DS[x] = 8.9900000000e-01
+[1000000060]RRA[DEVPREDICT][1]DS[x] = NaN
+[1000000060]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000070]RRA[AVERAGE][1]DS[x] = 4.1000000000e+01
+[1000000070]RRA[HWPREDICT][1]DS[x] = 4.0192799000e+01
+[1000000070]RRA[SEASONAL][1]DS[x] = 3.0072648090e+01
+[1000000070]RRA[DEVSEASONAL][1]DS[x] = 8.0720100000e-01
+[1000000070]RRA[DEVPREDICT][1]DS[x] = NaN
+[1000000070]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000080]RRA[AVERAGE][1]DS[x] = 2.1000000000e+01
+[1000000080]RRA[HWPREDICT][1]DS[x] = 2.0276225301e+01
+[1000000080]RRA[SEASONAL][1]DS[x] = 1.0065139723e+01
+[1000000080]RRA[DEVSEASONAL][1]DS[x] = 7.2377469900e-01
+[1000000080]RRA[DEVPREDICT][1]DS[x] = NaN
+[1000000080]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000090]RRA[AVERAGE][1]DS[x] = 1.2000000000e+01
+[1000000090]RRA[HWPREDICT][1]DS[x] = 1.0442032747e+01
+[1000000090]RRA[SEASONAL][1]DS[x] = 2.3021705281e-01
+[1000000090]RRA[DEVSEASONAL][1]DS[x] = 1.0557967253e+00
+[1000000090]RRA[DEVPREDICT][1]DS[x] = 1.0000000000e+00
+[1000000090]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000100]RRA[AVERAGE][1]DS[x] = 2.2000000000e+01
+[1000000100]RRA[HWPREDICT][1]DS[x] = 2.0593727415e+01
+[1000000100]RRA[SEASONAL][1]DS[x] = 1.0207474533e+01
+[1000000100]RRA[DEVSEASONAL][1]DS[x] = 9.4972725851e-01
+[1000000100]RRA[DEVPREDICT][1]DS[x] = 8.9900000000e-01
+[1000000100]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+
+@@ 060-hwimp-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 060-hwimp-rrd-1000000010-10-1000000020-20-10 file:hwimp.rrd 1992
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôôπ?{ÆG·zÑ?             @                                        SEASONAL                                      öôôôôôπ?                                                              DEVSEASONAL                                   öôôôôôπ?                                                              DEVPREDICT                                                                                                           FAILURES                                             @       @       	                                              d ö;            22                                                                                                                    ¯                                                              6@                        Z‹LêN%@∆ÿ{9%@nˆﬂ)“0z?tí≠Ω<nt?              ó≤Ö˛ó4@                        ∏™≤ô>@∂÷	m)$@                               õ:j$@                        @ç	1ó‘È? T„•õƒÏ?                               êmk*dÓ?              ¯                                                         T„•õƒÏ?                                                                                                                     
+                    &@      5@     ÄD@      5@      (@      6@      $@      4@      D@      4@πŒºR‚$@ó≤Ö˛ó4@      ¯      ¯      ¯      ¯      ¯      ¯      $@`Â–"€4@ÀŸ;£≠D@mä≥∂F4@Odú¿wÕ?õ:j$@∏™≤ô>@N#g˛Y!$@êmk*dÓ?@ç	1ó‘È?`ºé))Á?9Ùhã‰?      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ? T„•õƒÏ?      ¯                                
+@@ 061-hwexp-rrd-1000000010-10-1000000020-20-10 status 1
+0
+@@ 061-hwexp-rrd-1000000010-10-1000000020-20-10 stdout 3039
+return_value = 0
+[1000000010]RRA[AVERAGE][1]DS[x] = 1.0000000000e+01
+[1000000010]RRA[HWPREDICT][1]DS[x] = NaN
+[1000000010]RRA[SEASONAL][1]DS[x] = 0.0000000000e+00
+[1000000010]RRA[DEVSEASONAL][1]DS[x] = NaN
+[1000000010]RRA[DEVPREDICT][1]DS[x] = NaN
+[1000000010]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000020]RRA[AVERAGE][1]DS[x] = 2.0000000000e+01
+[1000000020]RRA[HWPREDICT][1]DS[x] = NaN
+[1000000020]RRA[SEASONAL][1]DS[x] = 1.0000000000e+01
+[1000000020]RRA[DEVSEASONAL][1]DS[x] = NaN
+[1000000020]RRA[DEVPREDICT][1]DS[x] = NaN
+[1000000020]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000030]RRA[AVERAGE][1]DS[x] = 4.0000000000e+01
+[1000000030]RRA[HWPREDICT][1]DS[x] = NaN
+[1000000030]RRA[SEASONAL][1]DS[x] = 3.0000000000e+01
+[1000000030]RRA[DEVSEASONAL][1]DS[x] = NaN
+[1000000030]RRA[DEVPREDICT][1]DS[x] = NaN
+[1000000030]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000040]RRA[AVERAGE][1]DS[x] = 2.0000000000e+01
+[1000000040]RRA[HWPREDICT][1]DS[x] = NaN
+[1000000040]RRA[SEASONAL][1]DS[x] = 1.0000000000e+01
+[1000000040]RRA[DEVSEASONAL][1]DS[x] = NaN
+[1000000040]RRA[DEVPREDICT][1]DS[x] = NaN
+[1000000040]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000050]RRA[AVERAGE][1]DS[x] = 1.1000000000e+01
+[1000000050]RRA[HWPREDICT][1]DS[x] = 1.0000000000e+01
+[1000000050]RRA[SEASONAL][1]DS[x] = 2.4000000000e-01
+[1000000050]RRA[DEVSEASONAL][1]DS[x] = 1.0000000000e+00
+[1000000050]RRA[DEVPREDICT][1]DS[x] = NaN
+[1000000050]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000060]RRA[AVERAGE][1]DS[x] = 2.1000000000e+01
+[1000000060]RRA[HWPREDICT][1]DS[x] = 2.0210000000e+01
+[1000000060]RRA[SEASONAL][1]DS[x] = 1.0189600000e+01
+[1000000060]RRA[DEVSEASONAL][1]DS[x] = 7.9000000000e-01
+[1000000060]RRA[DEVPREDICT][1]DS[x] = NaN
+[1000000060]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000070]RRA[AVERAGE][1]DS[x] = 4.1000000000e+01
+[1000000070]RRA[HWPREDICT][1]DS[x] = 4.0385900000e+01
+[1000000070]RRA[SEASONAL][1]DS[x] = 3.0147384000e+01
+[1000000070]RRA[DEVSEASONAL][1]DS[x] = 6.1410000000e-01
+[1000000070]RRA[DEVPREDICT][1]DS[x] = NaN
+[1000000070]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000080]RRA[AVERAGE][1]DS[x] = 2.1000000000e+01
+[1000000080]RRA[HWPREDICT][1]DS[x] = 2.0532761000e+01
+[1000000080]RRA[SEASONAL][1]DS[x] = 1.0112137360e+01
+[1000000080]RRA[DEVSEASONAL][1]DS[x] = 4.6723900000e-01
+[1000000080]RRA[DEVPREDICT][1]DS[x] = NaN
+[1000000080]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000090]RRA[AVERAGE][1]DS[x] = 1.2000000000e+01
+[1000000090]RRA[HWPREDICT][1]DS[x] = 1.0894922190e+01
+[1000000090]RRA[SEASONAL][1]DS[x] = 5.0521867440e-01
+[1000000090]RRA[DEVSEASONAL][1]DS[x] = 1.0420311240e+00
+[1000000090]RRA[DEVPREDICT][1]DS[x] = 1.0000000000e+00
+[1000000090]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+[1000000100]RRA[AVERAGE][1]DS[x] = 2.2000000000e+01
+[1000000100]RRA[HWPREDICT][1]DS[x] = 2.1105301920e+01
+[1000000100]RRA[SEASONAL][1]DS[x] = 1.0404327539e+01
+[1000000100]RRA[DEVSEASONAL][1]DS[x] = 8.3187923196e-01
+[1000000100]RRA[DEVPREDICT][1]DS[x] = 7.9000000000e-01
+[1000000100]RRA[FAILURES][1]DS[x] = 0.0000000000e+00
+
+@@ 061-hwexp-rrd-1000000010-10-1000000020-20-10 stderr 0
+
+@@ 061-hwexp-rrd-1000000010-10-1000000020-20-10 file:hwexp.rrd 2056
+RRD 0003        /%¿«C+[              
+                                                                                       x                   GAUGE                            ¯      ¯                                                        AVERAGE                 
+                    ‡?                                                                        HWPREDICT                                     öôôôôô…?öôôôôô©?             @                                        SEASONAL                                      333333”?öôôôôô©?                                                      DEVSEASONAL                                   öôôôôôŸ?öôôôôô©?                                                      DEVPREDICT                                                                                                           FAILURES                                             @       @                                                     d ö;            22                                                                                                                    ¯                                                              6@                        ù¸⁄t0&@ÒWºÈz¿%@≠éÒÓ™®?=î¯[§?              	ı5@                        $Ù3ı∫%>@©§N@a$@                               #DÎœ$@                        ¿'µ¶„?@·zÆGÈ?                               f¨Ô1¡ûÍ?              ¯                                                        @·zÆGÈ?                                                                                                                                        ÄD@      5@      (@      6@      $@      4@      D@      4@      &@      5@      ¯      ¯      ¯      $@ˆ(\è¬54@a√”+e1D@íï_cà4@Ü≈=3 %@	ı5@      ¯      ¯      ¯#DÎœ$@$Ù3ı∫%>@5∏kj9$@|Z¿*‡?¿'µ¶„?Äõh>Á›?ÌÁÔ”(¨?f¨Ô1¡ûÍ?      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ¯      ?@·zÆGÈ?                              ¯      ¯                                                        

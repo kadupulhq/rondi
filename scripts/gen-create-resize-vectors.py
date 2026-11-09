@@ -156,7 +156,7 @@ def legacy_v1(b):
 
 def build_inputs(rrdtool, tmp):
     """Returns {suite: {name: bytes}}."""
-    made = {"create": {}, "resize": {}, "compute": {}}
+    made = {"create": {}, "resize": {}, "compute": {}, "hw": {}}
 
     def make(suite, name, steps, post=None):
         d = os.path.join(tmp, f"{suite}-{name}")
@@ -249,6 +249,74 @@ def build_inputs(rrdtool, tmp):
                                   "DS:Avg:COMPUTE:Duration,Requests,0,EQ,1,Requests,IF,/",
                                   "RRA:AVERAGE:0.5:1:10", "RRA:AVERAGE:0.5:3:4")])
 
+    # Holt-Winters inputs (docs/compatibility/holt-winters.md). Each is
+    # created fresh by the reference; created files carry a random current
+    # row and a name-dependent smoothing index (HW-2), so they are frozen.
+    g = ["DS:x:GAUGE:20:U:U"]
+
+    def hw(name, *defs, ds=g, updates=()):
+        make(
+            "hw",
+            name,
+            [cr("-b", "1000000000", "-s", "10", *ds, *defs)]
+            + ([up(list(updates))] if updates else []),
+        )
+
+    def wave(count, start=1000000010, spike=None, gap=None):
+        out = []
+        for i in range(count):
+            t = start + 10 * i
+            if gap and gap[0] <= i < gap[1]:
+                v = "U"
+            elif spike and spike[0] <= i < spike[1]:
+                v = "500"
+            else:
+                v = str([10, 20, 40, 20][i % 4] + i // 4)
+            out.append(f"{t}:{v}")
+        return out
+
+    hw("hwimp", "RRA:AVERAGE:0.5:1:10", "RRA:HWPREDICT:12:0.1:0.01:4")
+    hw("mhwimp", "RRA:AVERAGE:0.5:1:10", "RRA:MHWPREDICT:12:0.1:0.01:4")
+    hw(
+        "hwexp",
+        "RRA:AVERAGE:0.5:1:10",
+        "RRA:HWPREDICT:12:0.2:0.05:4:3",
+        "RRA:SEASONAL:4:0.3:2",
+        "RRA:DEVSEASONAL:4:0.4:2",
+        "RRA:DEVPREDICT:12:4",
+        "RRA:FAILURES:12:3:5:4",
+    )
+    hw(
+        "hwsw0",
+        "RRA:HWPREDICT:12:0.1:0.01:4:2",
+        "RRA:SEASONAL:4:0.1:1:smoothing-window=0",
+        "RRA:DEVSEASONAL:4:0.1:1:smoothing-window=0",
+        "RRA:DEVPREDICT:12:4",
+        "RRA:FAILURES:12:7:9:4",
+    )
+    hw(
+        "hwsw5",
+        "RRA:HWPREDICT:24:0.1:0.01:8:2",
+        "RRA:SEASONAL:8:0.1:1:smoothing-window=0.5",
+        "RRA:DEVSEASONAL:8:0.1:1:smoothing-window=0.5",
+        "RRA:DEVPREDICT:24:4",
+        "RRA:FAILURES:24:7:9:4",
+    )
+    hw(
+        "hw2ds",
+        "RRA:HWPREDICT:12:0.1:0.01:4",
+        ds=["DS:x:GAUGE:20:U:U", "DS:y:COUNTER:20:U:U"],
+    )
+    hw("hwrun", "RRA:AVERAGE:0.5:1:10", "RRA:HWPREDICT:12:0.1:0.01:4", updates=wave(30))
+    hw(
+        "hwpdp3",
+        "RRA:AVERAGE:0.5:3:10",
+        "RRA:HWPREDICT:12:0.1:0.01:4:3",
+        "RRA:SEASONAL:4:0.1:2",
+        "RRA:DEVSEASONAL:4:0.1:2",
+        "RRA:DEVPREDICT:12:4",
+        "RRA:FAILURES:12:7:9:4",
+    )
     return made
 
 
@@ -739,7 +807,112 @@ def compute_cases():
     return c
 
 
-SUITES = {"create": create_cases, "resize": resize_cases, "compute": compute_cases}
+def hw_cases():
+    c = []
+
+    # Rondi does not implement Holt-Winters archives yet: every command
+    # that reads or writes their state is refused (expectation
+    # `unsupported`); fetch already works. Promote cases to `same` with the
+    # implementation.
+    def add(*args, inputs=(), expect=None, note="-"):
+        if expect is None:
+            expect = "same" if args[0] == "fetch" else "unsupported"
+            note = "-" if expect == "same" else "HW-unsupported"
+        c.append((expect, note, list(inputs), list(args)))
+
+    def wave(count, start=1000000010, spike=None, gap=None, step=10):
+        out = []
+        for i in range(count):
+            t = start + step * i
+            if gap and gap[0] <= i < gap[1]:
+                v = "U"
+            elif spike and spike[0] <= i < spike[1]:
+                v = "500"
+            else:
+                v = str([10, 20, 40, 20][i % 4] + i // 4)
+            out.append(f"{t}:{v}")
+        return out
+
+    names = ["hwimp", "mhwimp", "hwexp", "hwsw0", "hwsw5", "hwpdp3"]
+    # Reading fresh files (HW-1).
+    for name in names + ["hw2ds", "hwrun"]:
+        add("info", f"{name}.rrd", inputs=[name])
+        add("dump", f"{name}.rrd", inputs=[name])
+    for cf in ["HWPREDICT", "SEASONAL", "DEVSEASONAL", "DEVPREDICT", "FAILURES"]:
+        add(
+            "fetch",
+            "hwrun.rrd",
+            cf,
+            "-s",
+            "1000000000",
+            "-e",
+            "1000000300",
+            inputs=["hwrun"],
+        )
+    add(
+        "fetch",
+        "hwrun.rrd",
+        "AVERAGE",
+        "-s",
+        "1000000000",
+        "-e",
+        "1000000300",
+        inputs=["hwrun"],
+    )
+    # Updates (stage 2 of the specification). One command per sequence; the
+    # resulting file pins every archive and every CDP slot.
+    for name in names:
+        add("update", f"{name}.rrd", *wave(1), inputs=[name])
+        add("update", f"{name}.rrd", *wave(5), inputs=[name])
+        add("update", f"{name}.rrd", *wave(40), inputs=[name])
+        add("update", f"{name}.rrd", *wave(40, spike=(20, 26)), inputs=[name])
+        add("update", f"{name}.rrd", *wave(40, gap=(10, 17)), inputs=[name])
+    add("update", "hwimp.rrd", *wave(12, step=25), inputs=["hwimp"])
+    add("update", "hwimp.rrd", *wave(12, step=35), inputs=["hwimp"])
+    add(
+        "update",
+        "hwimp.rrd",
+        "1000000010:5",
+        "1000000200:6",
+        "1000000210:7",
+        inputs=["hwimp"],
+    )
+    add(
+        "update",
+        "hwimp.rrd",
+        *[f"{1000000010 + 10 * i}:{i % 3}" for i in range(40)],
+        inputs=["hwimp"],
+    )
+    add(
+        "update",
+        "hwimp.rrd",
+        *[f"{1000000010 + 10 * i}:-{i}" for i in range(20)],
+        inputs=["hwimp"],
+    )
+    add(
+        "update",
+        "mhwimp.rrd",
+        *[f"{1000000010 + 10 * i}:0" for i in range(12)],
+        inputs=["mhwimp"],
+    )
+    add(
+        "update",
+        "hw2ds.rrd",
+        *[f"{1000000010 + 10 * i}:{(i * 7) % 11}:{i * i * 30}" for i in range(40)],
+        inputs=["hw2ds"],
+    )
+    add("update", "hwrun.rrd", *wave(20, start=1000000310), inputs=["hwrun"])
+    add("updatev", "hwimp.rrd", *wave(10), inputs=["hwimp"])
+    add("updatev", "hwexp.rrd", *wave(10), inputs=["hwexp"])
+    return c
+
+
+SUITES = {
+    "create": create_cases,
+    "resize": resize_cases,
+    "compute": compute_cases,
+    "hw": hw_cases,
+}
 
 
 # --------------------------------------------------------------------------
