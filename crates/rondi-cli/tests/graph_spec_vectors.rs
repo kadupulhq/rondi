@@ -132,12 +132,6 @@ const KNOWN_DIVERGENCES: &[Divergence] = &[
     ),
     div("graph-def-073", ALL, DEFECT, "GR-43: -Z with a missing DS"),
     div(
-        "graph-cdef-019",
-        ALL,
-        DEFECT,
-        "GR-45: self-referencing CDEF",
-    ),
-    div(
         "graph-grid-dash-011",
         ALL,
         DEFECT,

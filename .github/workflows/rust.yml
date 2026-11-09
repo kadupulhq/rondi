@@ -39,6 +39,20 @@ jobs:
       - name: Build pinned RRDtool oracle and run workspace checks
         run: docker build --progress=plain -f docker/Dockerfile.test -t rondi-ci .
 
+  provenance:
+    # Enforce the AGENTS.md comment rules: no C file names or line citations,
+    # and every Provenance: comment names an accepted source.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Test the provenance check
+        run: python3 -I -m unittest discover -s scripts -p 'test_check_provenance.py'
+      - name: Check provenance comments
+        run: python3 -I scripts/check-provenance.py
+
   fuzz-build:
     # fuzz/src/lib.rs compiles the CLI and rrdcached sources a second time, so
     # it breaks whenever their private functions change. Build every target

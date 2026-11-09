@@ -15,7 +15,7 @@
 
 ## Notes for the reviewer
 
-<!-- Risk, rollback, anything upstream Cacti does differently. Delete if empty. -->
+<!-- Risk, rollback, anything RRDtool does differently. Delete if empty. -->
 
 ---
 
