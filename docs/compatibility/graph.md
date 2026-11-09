@@ -608,6 +608,76 @@ the element is complete fails with
 is the unused text with its separators (`def-041` to `-045`,
 `print-008`, `-026`, `comment-005`, `tick-014`, `shift-029`).
 
+**GR-95** (bb; compat). Named and positional fields. A field `key=value`
+is a named field when the element knows `key`; when a known key appears
+more than once, the last one is the named field and the earlier ones are
+positional. Every other field is positional, in order. The keys are:
+
+| Element | Keys |
+|---|---|
+| DEF | `vname`, `rrd`, `ds`, `cf`, `step`, `start`, `end`, `reduce`, `daemon` |
+| CDEF, VDEF | `vname`, `rpn` |
+| SHIFT | `vname`, `shift` |
+| XPORT | `vname`, `legend`, `color` |
+| PRINT, GPRINT | `vname`, `cf`, `format`, `vformatter`, `strftime` |
+| COMMENT | `legend` |
+| TEXTALIGN | `align` |
+| HRULE, VRULE | `vname`, `legend`, `color`, `dashes`, `dash-offset` |
+| TICK | `vname`, `legend`, `color`, `fraction` |
+| AREA | `vname`, `legend`, `color`, `gradheight`, `skipscale`, `stack` |
+| LINE | `vname`, `legend`, `color`, `dashes`, `dash-offset`, `skipscale`, `stack` |
+| STACK | `vname`, `legend`, `color` |
+
+`cmd` and `debug` are known to every element.
+
+- The element name is the value of the last `cmd=` field, or else the
+  first field without `=`; with neither the element fails with
+  `ERROR: no command set in argument <element>`.
+- More than 10 fields without `=`, the name among them, fail with
+  `ERROR: too many positional arguments`, before the name is looked at.
+- Each argument comes from its named field, or else from the next
+  positional field. The legend, the format and the PRINT name take the
+  whole positional field; the name of a drawing element or rule, the
+  TICK fraction, the XPORT name, the PRINT CF, the TEXTALIGN word, the
+  SHIFT name and offset and the DEF data source, CF and file take the
+  text after its first `=`. For DEF, CDEF and VDEF a positional
+  `<name>=<rest>` gives the name and the definition; a positional field
+  without `=` gives an empty name.
+- An empty named value is an empty argument (`vname=` gives
+  `vname  not found`, `align=` gives `Unknown alignment type ''`, `cf=`
+  gives `bad CF: `), except COMMENT `legend=` and PRINT `format=`, which
+  count as absent.
+- PRINT and GPRINT: an unknown name given by key fails with
+  `ERROR: vname <name> not found`, a bad CF given by key with
+  `ERROR: bad CF: <cf>`; a missing CF for a DEF or CDEF with
+  `ERROR: No positional CDEF`. A `cf=` is ignored for a VDEF. Of
+  `valstrftime`, `valstrfduration` and `vformatter=timestamp|duration`
+  the last one given applies and the others are unused arguments;
+  another `vformatter=` value fails with
+  `ERROR: Unsupported vformatter: <value>`. `strftime=`, `stack=` and
+  `skipscale=` set their flag whatever the value.
+- `color=` takes one colour without `#` and replaces a `#colour` after
+  the name; an invalid colour hides the legend as for the `#` form
+  (GR-50). XPORT accepts and ignores `color=` and a `#` suffix. On the
+  deprecated STACK an invalid `color=` fails with
+  `ERROR: STACK should already be turned into LINE or AREA here`, after
+  the variable is checked and before the earlier LINE or AREA is looked
+  for.
+
+Provenance: black-box compatibility tests (`graph_data_differential`
+element grammar, `alias_modes` keyword cases) and probes of each key.
+
+**GR-96** (bb; compat). `debug=<integer>` is accepted on every element; a
+value that is not an integer fails with `ERROR: Bad debug value: <value>`
+before the element's other fields are checked. A DEF with a value of 1,
+once its fields passed their checks, writes this block to standard
+error: a line of 33 `=`, then `DEF   : <element>`, `VNAME : <name>`,
+`RRD   : <file>`, `DS    : <ds>`, `CF    : <n>` (0 AVERAGE, 1 MIN, 2 MAX,
+3 LAST), `START : (<start>)`, `STEP  : (<step= or the image step>)`,
+`END   : (<end>)`, `REDUCE: (<n of reduce=, else 0>)`,
+`DAEMON: <address>`, and the line of `=` again. Other values and other
+elements: Unsettled questions.
+
 **GR-41** (doc, bb; compat). Variable names (vnames) are 1 to 255
 characters from `A-Z a-z 0-9 _ -`; they may start with a digit and may
 equal an RPN operator name (`DEF:MAX=...`, `DEF:PI=...` work). A CDEF or
@@ -704,11 +774,25 @@ be shifted by a VDEF (`element-050`).
 - `step=` must be a positive integer (`atoi`-style digits only, no
   suffix): otherwise `ERROR: Bad step value: <v>`. `start=` and `end=`
   are at-style times with the GR-30 errors. `reduce=` takes a CF;
-  otherwise `ERROR: bad reduce CF: <v>`. Each key may appear once; a
-  repeated key, an unknown key or an empty field is an unused argument
-  (GR-40). `daemon=` takes an address with escaped colons (GR-26).
+  otherwise `ERROR: bad reduce CF: <v>`. A repeated key, an unknown key
+  or an empty field is positional (GR-95) and so usually an unused
+  argument (GR-40). `daemon=` takes an address with escaped colons
+  (GR-26).
+- The checks run in this order: `debug=` (GR-96), `reduce=`, `step=`,
+  `start=` and `end=`, the start, the window order, then the data source
+  and the CF. Each DEF's own start must not be before 1980:
+  `ERROR: the first entry to fetch should be after 1980 (<start>)` for a
+  start below 315360000. A start after the end fails with
+  `ERROR: start (<start>) should be less than end (<end>)`.
+- A file name starting with `cb//` is never opened nor sent to a daemon:
+  it fails when the DEFs are read with
+  `ERROR: use rrd_fetch_cb_register to register your callback prior to calling rrd_fetch_fn_cb`,
+  and with `-Z` gives unknown values.
 - With `-Z`, a missing file or data source gives unknown values instead of
-  an error (`def-072`); a bad CF is still an error (`def-074`).
+  an error (`def-072`); a bad CF is still an error (`def-074`), and so is
+  a fetch over the GR-92 limit. A file that cannot be read under `-Z` also
+  clears an earlier unreachable-daemon error (GR-26); a missing data
+  source does not.
 
 (`def-001` to `-076`.)
 
@@ -716,6 +800,17 @@ be shifted by a VDEF (`element-050`).
 (`start=`, `end=`, `step=`); the data preparation is GR-47 to GR-49 and
 the CDEF arithmetic rpn.md. A CDEF over DEFs with different windows or
 steps works on their common window (`def-070`, `-071`, GR-48).
+
+**GR-98** (bb; compat). Fetch reuse. A DEF takes the data an earlier DEF
+read, instead of reading its file, when both have the same file name as
+written, the same CF, the same `reduce=` CF (AVERAGE when not given),
+the same window start and end compared in their low 32 bits, and the
+same daemon address, and the later DEF's `step=` (or the image step)
+equals the earlier DEF's step after reduction. The data source is not
+compared: the later DEF reads its own data source from the earlier
+fetch, reduced as the earlier DEF reduced it. The daemon request of
+GR-37 is still made. Provenance: black-box compatibility test
+(`graph_engine_parity` fetch reuse) and probes changing each part.
 
 **GR-37** (bb; compat). Reading through rrdcached. With `--daemon`, every
 DEF is read through that daemon; a DEF with `daemon=` is read through its
@@ -780,6 +875,8 @@ greatest common divisor of the steps of the series it names, and its
 window runs from the latest start to the earliest end among them. Each
 row at time *t* takes from each series the row whose interval contains
 *t*; a series has no value outside its window (`prep-042` to `-059`).
+When the latest start is after the earliest end the CDEF fails with
+`ERROR: malloc im->gdes[gdi].data`; when they are equal it has no rows.
 A DEF window that starts or ends inside an archive step covers the whole
 step: with a 300 s archive, `start=1000007450` (inside the step ending at
 1000007700) gives a first row stamped 1000007700, and `end=1000014450`
@@ -832,6 +929,7 @@ Errors:
 | unknown function | `Unknown function '<f>' in VDEF '<vname>'` |
 | anything after the function, or a lower-case function | `Unknown function string '<rest>' in VDEF '<vname>'` |
 | `x,2,*` | `Unknown function '' in VDEF '<vname>'` |
+| a parameter with a function that takes none | `Function '<f>' needs no parameter in VDEF '<vname>'` |
 | `PERCENT` without parameter | `Function 'PERCENT' needs parameter in VDEF '<vname>'` |
 | parameter outside 0..100 | `Parameter '<%f>' out of range in VDEF '<vname>'` |
 
@@ -840,6 +938,18 @@ none, so `:strftime` prints the format with every conversion replaced by
 dashes of its width (`---------- --:--:--`, `vdef-001`). A VDEF over
 data that is all unknown gives `nan` and no time (`vdef-030` to `-034`).
 Values: format-strings.md and `vdef_differential.rs`.
+
+The part after the first comma is read so: when it starts with digits,
+`.`, `e`, `+` or `-` (up to 40 of them), those are the parameter. Without
+a comma right after them the function is `''`. A parameter that is not a
+decimal number with an optional sign and exponent (a bare `e` or `e+` at
+the end is ignored), or that is not finite, makes the whole part an
+unknown function string. The function is then the leading run of up to
+29 upper-case letters and lower-case `b` to `z`; anything after it is
+ignored. Without a parameter the part must be such a run and nothing
+else. The `Unknown function`, `needs parameter` and `needs no parameter`
+errors end with an empty line. Provenance: black-box compatibility test
+(`rpn_differential` VDEF parameter lexing) and probes of each form.
 
 ## 7. Drawing elements
 
@@ -913,9 +1023,11 @@ and `VRULE:<time>#color[:legend[:dashes...]]`:
 
 **GR-55** (doc, bb; compat). `SHIFT:<vname>:<offset>` shifts the data of a
 DEF or CDEF by `offset` seconds for everything after it. The offset is an
-integer (digits with an optional sign; `60.5`, `1e2`, empty and garbage
-fail with `ERROR: error parsing number <offset>`) or a VDEF name, whose
-value is used. Shifting a VDEF fails with
+integer (leading white space, an optional sign, then digits and nothing
+else; `60.5`, `1e2`, empty and garbage fail with
+`ERROR: error parsing number <offset>`; a value beyond the 64-bit range
+is clamped to it) or a VDEF name, whose value is used. A positional
+`<a>=<b>` offset uses `<b>` (GR-95). Shifting a VDEF fails with
 `ERROR: Cannot shift a VDEF: '<vname>' in line '<element>'`; a DEF or
 CDEF as offset fails with
 `ERROR: Offset cannot be a (C)DEF: '<name>' in line '<element>'` followed
@@ -924,7 +1036,7 @@ field gives `ERROR: No shift given`; a bare `SHIFT` gives
 `ERROR: No argument for definition of vdef/rrd in SHIFT`. Shifting a CDEF
 is accepted (`shift-021`). The shifted series keeps the graph's row times:
 the data moves by whole steps when the offset is a multiple of the step,
-and the offset is rounded down to whole steps otherwise (`SHIFT:x:30`
+and the offset is truncated toward zero to whole steps otherwise (GR-49) (`SHIFT:x:30`
 behaves like `SHIFT:x:0`, a VDEF offset of 11260 like 11220; `shift-001`
 to `-034`, `data-059`). Offsets and repeated SHIFTs: GR-38.
 
@@ -970,15 +1082,23 @@ trailing blank line (`xport-051`).
 
 **GR-58** (doc, bb; compat). `PRINT:<vname>:<format>[:strftime|:valstrftime|:valstrfduration]`
 for VDEFs and the deprecated `PRINT:<vname>:<CF>:<format>` for DEFs and
-CDEFs, with CF `AVERAGE`, `MIN`, `MAX`, `LAST` (case sensitive). A DEF or
-CDEF with the VDEF form, or any other CF, fails with
+CDEFs, with CF `AVERAGE`, `MIN`, `MAX`, `LAST` or one of GR-97 (case
+sensitive). A DEF or CDEF with the VDEF form, or any other CF, fails with
 `ERROR: bad CF for DEF/CDEF: <field>`; a VDEF with the CF form fails as an
 unused argument (`print-013` to `-024`). Formats and suffixes:
 format-strings.md. Each PRINT produces one output line (GR-82). Literal
 `\g`, `\l` and `\n` in a PRINT format are printed as is (`print-028` to
 `-030`). The deprecated form with `:strftime` is accepted; it has no time
 of its own and formats the current wall-clock time, so `print-035` is
-tagged `clock` and only required to finish.
+tagged `clock` and only required to finish. A format longer than 200
+bytes is cut to 200 (format-strings.md FS-7).
+
+**GR-97** (bb; compat). The CF form also accepts the archive functions of
+Holt-Winters data: `HWPREDICT`, `MHWPREDICT`, `SEASONAL`, `DEVPREDICT`
+and `DEVSEASONAL` read as `AVERAGE`, `FAILURES` as `MAX`. The CF form
+skips infinite rows as well as unknown ones. Provenance: black-box
+compatibility test (`graph_data_differential` print formatters,
+`alias_modes` CDEF and VDEF scalars) and probes of each name.
 
 **GR-59** (doc, bb; compat). `GPRINT` takes the same fields and errors and
 produces a legend entry instead of a print line. `graphv` shows it as
@@ -1508,11 +1628,6 @@ their class; the expectation stays RRDtool's. They are summarized here.
 | `limit-020` to `-025` | GR-92 | policy | refuses fetches over 10 million rows |
 | `grammar-055`, `-056`, `-061`, `out-008`, `order-009`, `-010`, `scan-001`, `-002`, `-009`, `-010`, `-012` to `-014`, `-016`, `-029`, `-031`, `-035`, `-038`, `-039`, `-048`, `-049`, `-057` to `-060`, `-062`, `-072`, `-073`, `-080`, `-087`, `-091`, `repeat-015` | GR-3 | defect | prints `0x0` for a graph with no elements |
 | `def-073` | GR-43 | defect | `-Z` with a missing DS gives `nan`; the reference prints another value (`-5.438596`) |
-| `element-056` | GR-36 | defect | `XPORT:<number>` reports `no XPORT found` |
-| `prep-096` to `-099` | GR-47 | defect | a `step=` finer than the image step refines the DEF |
-| `shift-038` to `-040`, `-043` | GR-38 | defect | repeated SHIFTs of a series add up instead of the last one replacing the earlier |
-| `shift-045`, `-046` | GR-38 | defect | a DEF or CDEF offset fails with `error parsing number` |
-| `limit-026`, `-027` | GR-92 | defect | a fetch of exactly 10,000,000 rows is refused |
 | `grid-dash-011`, `line-044`, `-045`, `hrule-027`, `-028`, `vrule-027`, `-028` | GR-24, GR-50, GR-54 | defect | no Cairo warning for zero or negative dashes |
 | `font-003`, `layout-049` (macOS); `font-019` (Linux) | GR-60 | defect | one font's metrics for every family |
 | `legend-030` | GR-60 | defect | CJK fallback metrics |
@@ -1576,3 +1691,14 @@ provenance.
 14. **rrdcached details** not covered by GR-37: `RRDCACHED_ADDRESS`, DEFs
     with different daemon addresses, and the exact text of daemon-side
     fetch errors, which comes from the daemon.
+15. **`debug=` beyond a DEF at level 1.** Other values on a DEF, and
+    `debug=` on other elements, write more diagnostic text; Rondi writes
+    only the GR-96 block for a DEF with a non-zero value and nothing for
+    other elements.
+16. **`XPORT` of a number in other spellings.** The reference fails with
+    `Encountered unknown type variable '' in line '<element>'` for every
+    number (`5`, `1e3`, `+5`, `inf`; for some the quoted text is not
+    empty). Rondi gives that error for numbers written with digits, a `-`
+    sign and a decimal point only, and exports nothing for the other
+    spellings, which `graph_xport_parity.rs` pins. Which behavior the
+    test should pin is open.
