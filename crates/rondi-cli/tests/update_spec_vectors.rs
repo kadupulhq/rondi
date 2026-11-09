@@ -30,20 +30,7 @@ use serde_json::Value;
 /// Rondi does instead. The architecture limits an entry to one Linux target
 /// (`None` applies everywhere). A listed case that starts matching fails the
 /// test so the entry is removed.
-const KNOWN_DIVERGENCES: &[(&str, Option<&str>, &str)] = &[
-    (
-        "compute-basic",
-        None,
-        "UP-36: Rondi expects a reading for every data source, COMPUTE \
-         included, so the update fails with a count error",
-    ),
-    (
-        "compute-template",
-        None,
-        "UP-36: Rondi refuses templates and updates on files with COMPUTE \
-         sources",
-    ),
-];
+const KNOWN_DIVERGENCES: &[(&str, Option<&str>, &str)] = &[];
 
 type Sections = Vec<(String, Vec<u8>)>;
 
@@ -131,20 +118,27 @@ fn vectors() -> BTreeMap<String, Sections> {
     vectors
 }
 
-/// Replaces every ten-digit number from 1700000000 to 1999999999 with
-/// `<now>`, as the generator does for cases that use `N`.
+/// Whether `byte` counts as part of a word next to a masked number: an
+/// ASCII letter, digit or underscore, as in the generator's pattern.
+fn word_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+/// Replaces every ten-digit number from 1700000000 to 1999999999 that is
+/// not adjacent to a word byte with `<now>`, as the generator does for
+/// cases that use `N`.
 fn mask_now(text: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len());
     let mut index = 0;
     while index < text.len() {
-        let boundary_before = index == 0 || !text[index - 1].is_ascii_alphanumeric();
+        let boundary_before = index == 0 || !word_byte(text[index - 1]);
         let end = index + 10;
         if boundary_before
             && end <= text.len()
             && text[index] == b'1'
             && (b'7'..=b'9').contains(&text[index + 1])
             && text[index..end].iter().all(u8::is_ascii_digit)
-            && (end == text.len() || !text[end].is_ascii_alphanumeric())
+            && (end == text.len() || !word_byte(text[end]))
         {
             out.extend_from_slice(b"<now>");
             index = end;
