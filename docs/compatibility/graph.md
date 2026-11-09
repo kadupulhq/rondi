@@ -946,11 +946,13 @@ a comma right after them the function is `''`. A parameter that is not a
 decimal number with an optional sign and exponent (a bare `e` or `e+` at
 the end is ignored), or that is not finite, makes the whole part an
 unknown function string. The function is then the leading run of up to
-29 upper-case letters and lower-case `b` to `z`; anything after it is
-ignored. Without a parameter the part must be such a run and nothing
+29 upper-case letters, plus on macOS lower-case `b` to `z` (on Linux a
+lower-case letter ends the run, so `95,PERCENTfoo` is `PERCENT`); anything
+after it is ignored. Without a parameter the part must be such a run and nothing
 else. The `Unknown function`, `needs parameter` and `needs no parameter`
 errors end with an empty line. Provenance: black-box compatibility test
-(`rpn_differential` VDEF parameter lexing) and probes of each form.
+(`rpn_differential` VDEF parameter lexing) and probes of each form on the
+pinned macOS and Linux aarch64 oracles.
 
 ## 7. Drawing elements
 

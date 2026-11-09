@@ -4,7 +4,7 @@
 use super::{Cf, DaemonHook, DefSpec, Element, Graph, Kind, Offset, Series, VdefValue};
 use crate::StoreError;
 use crate::rpn::{Evaluator, Row, Source};
-use crate::rrd_binary::fetch_rrd_file;
+use crate::rrd_binary::{fetch_rrd_file, rrd_nan};
 use crate::vdef::evaluate_vdef;
 
 /// The most rows one series or one export grid may hold (GR-92, RD-017).
@@ -215,7 +215,7 @@ fn read(def: &DefSpec) -> Result<Series, ReadError> {
                     .get(column)
                     .copied()
                     .flatten()
-                    .unwrap_or(f64::NAN)
+                    .unwrap_or(rrd_nan())
             })
             .collect(),
     })
@@ -230,7 +230,7 @@ fn unknown_series(def: &DefSpec) -> Result<Series, StoreError> {
     Ok(Series {
         start,
         step,
-        values: vec![f64::NAN; row_count(start, end, step)?],
+        values: vec![rrd_nan(); row_count(start, end, step)?],
     })
 }
 
@@ -265,7 +265,7 @@ fn reduce(series: Series, wanted: u64, cf: Cf) -> Result<Series, StoreError> {
             // Every bucket ends by `end`, so its start fits.
             let bucket_start = start + bucket as i64 * span;
             if bucket_start < first || last - span < bucket_start {
-                return f64::NAN;
+                return rrd_nan();
             }
             let from = usize::try_from((bucket_start - first) / archive_step).unwrap_or(0);
             let rows = series.values.iter().skip(from).take(per_bucket);
@@ -353,7 +353,7 @@ fn cdef(graph: &Graph, index: usize) -> Result<Series, StoreError> {
         }
     });
     let mut values = Vec::with_capacity(rows);
-    let mut previous = f64::NAN;
+    let mut previous = rrd_nan();
     for row in 0..rows {
         // Every row ends by `end`, so its time fits.
         let time = start + (row as i64 + 1) * span;

@@ -13,6 +13,7 @@ mod fields;
 
 use crate::StoreError;
 use crate::rpn::Expression;
+use crate::rrd_binary::rrd_nan;
 use crate::vdef::VdefFunction;
 
 pub use data::{Export, Grid};
@@ -99,10 +100,14 @@ impl Cf {
     }
 
     /// The function over the known values; unknown when there are none.
+    // Compatibility: a generated unknown carries RRDtool's DNAN bits, which
+    // print as `-nan` on x86_64 Linux.
+    // Provenance: black-box compatibility test (alias_modes CDEF and VDEF
+    // scalars, SI special U, on the pinned x86_64 Linux oracle).
     fn apply(self, values: impl Iterator<Item = f64>) -> f64 {
         let mut known = values.filter(|value| !value.is_nan());
         let Some(first) = known.next() else {
-            return f64::NAN;
+            return rrd_nan();
         };
         match self {
             Self::Average => {
@@ -131,7 +136,7 @@ pub struct VdefValue {
 impl Default for VdefValue {
     fn default() -> Self {
         Self {
-            value: f64::NAN,
+            value: rrd_nan(),
             time: None,
         }
     }
@@ -161,13 +166,13 @@ impl Series {
         let step = i128::from(self.step.max(1));
         let offset = i128::from(time) - i128::from(self.start);
         if offset <= 0 {
-            return f64::NAN;
+            return rrd_nan();
         }
         let index = (offset + step - 1) / step - 1;
         usize::try_from(index)
             .ok()
             .and_then(|index| self.values.get(index).copied())
-            .unwrap_or(f64::NAN)
+            .unwrap_or(rrd_nan())
     }
 }
 
@@ -349,7 +354,7 @@ impl Graph {
     pub fn print_value(&self, index: usize) -> f64 {
         let element = &self.elements[index];
         let Some(source) = element.source.map(|source| &self.elements[source]) else {
-            return f64::NAN;
+            return rrd_nan();
         };
         match element.cf {
             // Compatibility: the CF form skips infinite values as well as
@@ -420,7 +425,8 @@ mod tests {
         assert_eq!(apply(Cf::Minimum), 2.0);
         assert_eq!(apply(Cf::Maximum), 4.0);
         assert_eq!(apply(Cf::Last), 3.0);
-        assert!(Cf::Average.apply([f64::NAN].into_iter()).is_nan());
+        let none = Cf::Average.apply([f64::NAN].into_iter());
+        assert_eq!(none.to_bits(), rrd_nan().to_bits());
         assert_eq!(Cf::parse("MIN").map(Cf::name), Some("MIN"));
         assert_eq!(Cf::parse("min"), None);
     }

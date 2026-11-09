@@ -5,6 +5,7 @@ use super::{
     Cf, DefSpec, Element, Graph, Kind, Offset, TextAlign, TimeResolver, ValueFormatter, VdefSpec,
 };
 use crate::rpn::{Expression, RpnError};
+use crate::rrd_binary::rrd_nan;
 use crate::vdef::VdefFunction;
 
 /// Legend text and print formats are cut to this many bytes (GR-66,
@@ -112,7 +113,7 @@ fn element(kind: Kind) -> Element {
     Element {
         kind,
         line_width: 1.0,
-        value: f64::NAN,
+        value: rrd_nan(),
         ..Element::default()
     }
 }
@@ -325,12 +326,13 @@ fn vdef(graph: &Graph, fields: &mut Fields<'_>) -> Parsed {
 
 /// A byte of a VDEF function name.
 //
-// Compatibility: function names are read from the upper-case letters and
-// the lower-case letters `b` to `z`; `a`, digits and punctuation end them.
+// Compatibility: function names are read from the upper-case letters. On
+// macOS the lower-case letters `b` to `z` also continue them; on Linux any
+// lower-case letter ends them, like `a`, digits and punctuation do.
 // Provenance: black-box compatibility test (vdef-011 to -027, probes of
-// every letter after a parameter).
+// every letter after a parameter on the pinned macOS and Linux oracles).
 fn function_byte(byte: u8) -> bool {
-    byte.is_ascii_uppercase() || (b'b'..=b'z').contains(&byte)
+    byte.is_ascii_uppercase() || (!cfg!(target_os = "linux") && (b'b'..=b'z').contains(&byte))
 }
 
 /// The leading function name of `text`, at most [`MOST_FUNCTION_BYTES`].
@@ -757,7 +759,7 @@ fn drawing_legend(text: Option<String>, colors_valid: bool) -> String {
 /// Resolves the variable or number a drawing element draws.
 fn resolve(graph: &Graph, name: &str) -> Result<(Option<usize>, f64), String> {
     if let Some(index) = graph.variable(name) {
-        return Ok((Some(index), f64::NAN));
+        return Ok((Some(index), rrd_nan()));
     }
     match name.parse::<f64>() {
         Ok(value) if !name.eq_ignore_ascii_case("nan") => Ok((None, value)),
