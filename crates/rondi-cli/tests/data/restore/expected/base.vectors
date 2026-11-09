@@ -3815,6 +3815,46 @@ ERROR: failed to parse computed data source
 none
 @@ walk-cdef-before-name@stdin flags 0
 
+@@ walk-cdef-range-both status 1
+0
+@@ walk-cdef-range-both stdout 0
+
+@@ walk-cdef-range-both stderr 0
+
+@@ walk-cdef-range-both file 20
+2d1551941073114db93a
+@@ walk-cdef-range-both flags 0
+
+@@ walk-cdef-range-none status 1
+0
+@@ walk-cdef-range-none stdout 0
+
+@@ walk-cdef-range-none stderr 0
+
+@@ walk-cdef-range-none file 20
+051ac1ab11606636470a
+@@ walk-cdef-range-none flags 0
+
+@@ walk-cdef-range-min status 1
+0
+@@ walk-cdef-range-min stdout 0
+
+@@ walk-cdef-range-min stderr 0
+
+@@ walk-cdef-range-min file 20
+3e9758c467ce8b6199a7
+@@ walk-cdef-range-min flags 0
+
+@@ walk-cdef-range-max status 1
+0
+@@ walk-cdef-range-max stdout 0
+
+@@ walk-cdef-range-max stderr 0
+
+@@ walk-cdef-range-max file 20
+ac369549217a71060f81
+@@ walk-cdef-range-max flags 0
+
 @@ int-step-empty status 1
 1
 @@ int-step-empty stdout 0

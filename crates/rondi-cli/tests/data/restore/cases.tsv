@@ -358,6 +358,10 @@ walk-cdef-then-heartbeat	walk-cdef-then-heartbeat	file	out.rrd	none	same
 walk-cdef-then-heartbeat@stdin	walk-cdef-then-heartbeat	stdin	out.rrd	none	same
 walk-cdef-before-name	walk-cdef-before-name	file	out.rrd	none	same
 walk-cdef-before-name@stdin	walk-cdef-before-name	stdin	out.rrd	none	same
+walk-cdef-range-both	walk-cdef-range-both	file	out.rrd	none	same	-r
+walk-cdef-range-none	walk-cdef-range-none	file	out.rrd	none	same	-r
+walk-cdef-range-min	walk-cdef-range-min	file	out.rrd	none	same	-r
+walk-cdef-range-max	walk-cdef-range-max	file	out.rrd	none	same	-r
 int-step-empty	int-step-empty	file	out.rrd	none	same
 int-step-empty@stdin	int-step-empty	stdin	out.rrd	none	same
 int-step-blank	int-step-blank	file	out.rrd	none	same

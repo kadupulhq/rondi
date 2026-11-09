@@ -690,6 +690,20 @@ def walk_cases():
             d = ds + b"<ds><name>c</name><type>COMPUTE</type>" + body + b"</ds>"
         probes[name] = doc(d=d, r=rra(prep=two, db=row2))
     cases = [Case(f"walk-{name}", xml) for name, xml in probes.items()]
+    # `-r` checks a computed source against the bound slots its program
+    # bytes overlap (CP-19). A constant -1 in the third or fifth node puts
+    # NaN, no bound, in the minimum or maximum slot.
+    rows = b"<database>" + b"".join(
+        b"<row><v>1</v><v>" + v + b"</v></row>" for v in (b"5", b"-50", b"0", b"90")
+    ) + b"</database>"
+    for name, expr in [
+        ("cdef-range-both", b"a,2,*"),
+        ("cdef-range-none", b"a,0,+,-1,+,-1,+"),
+        ("cdef-range-min", b"a,0,+,-1,+,1,+"),
+        ("cdef-range-max", b"a,0,+,1,+,-1,+"),
+    ]:
+        d = ds + b"<ds><name>c</name><type>COMPUTE</type><cdef>" + expr + b"</cdef></ds>"
+        cases.append(Case(f"walk-{name}", doc(d=d, r=rra(prep=two, db=rows)), opts=["-r"]))
     return cases
 
 
