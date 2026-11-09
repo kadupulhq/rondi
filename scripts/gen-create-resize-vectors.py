@@ -28,6 +28,7 @@ Resize output is deterministic for a frozen input and kept as is.
 
 import argparse
 import os
+import random
 import shutil
 import struct
 import subprocess
@@ -156,7 +157,7 @@ def legacy_v1(b):
 
 def build_inputs(rrdtool, tmp):
     """Returns {suite: {name: bytes}}."""
-    made = {"create": {}, "resize": {}, "compute": {}, "hw": {}}
+    made = {"create": {}, "resize": {}, "compute": {}, "hw": {}, "numbers": {}}
 
     def make(suite, name, steps, post=None):
         d = os.path.join(tmp, f"{suite}-{name}")
@@ -194,6 +195,7 @@ def build_inputs(rrdtool, tmp):
            "RRA:AVERAGE:0.5:1:10", "RRA:AVERAGE:0.5:4:5"),
         up(series(1000000000, 60, 24, lambda i, t: f"{t}:{100 + i}:{200 + i}"))])
     made["create"]["text"] = b"not an rrd file\n"
+    make("numbers", "gauge", [cr(*B, "DS:x:GAUGE:120:U:U", "RRA:LAST:0.5:1:2")])
 
     make("resize", "base", [
         cr("-b", "1000000000", "-s", "60", "DS:a:GAUGE:120:U:U", "DS:b:COUNTER:120:U:U",
@@ -1065,11 +1067,221 @@ def hw_cases():
     return c
 
 
+def number_literals():
+    """Deterministic 17-digit decimal literals spread over the double range."""
+    rng = random.Random(20261109)
+    out = []
+    for _ in range(40):
+        digits = "".join(rng.choice("0123456789") for _ in range(17))
+        point = rng.randrange(1, 17)
+        sign = rng.choice(["", "-"])
+        out.append(
+            f"{sign}{digits[:point]}.{digits[point:]}e{rng.randrange(-330, 309)}"
+        )
+    return out
+
+
+def numbers_cases():
+    c = []
+
+    def add(*args, inputs=("gauge",), expect="same", note="-"):
+        c.append((expect, note, list(inputs), list(args)))
+
+    def reading(text):
+        add("update", "gauge.rrd", f"1000000001:{text}")
+
+    # Special spellings, recognized only at the start (update.md UP-11).
+    for text in (
+        "nan",
+        "NaN",
+        "-nan",
+        "nanx",
+        "inf",
+        "-inf",
+        "INF",
+        "infinity",
+        "-Infinityx",
+        "Inf5",
+        "+inf",
+        "+nan",
+        "xnan",
+        "xinf",
+        "U",
+        "Ux",
+    ):
+        reading(text)
+    # Accepted forms and syntax failures (restore.md RS-38 steps 1 to 5, 9).
+    for text in (
+        "0",
+        "-0",
+        "+5",
+        " 5",
+        "  -5",
+        "5.",
+        ".5",
+        "-.5",
+        "1e",
+        "1e+",
+        "1e-",
+        "5e2",
+        "5E2",
+        "-5e-2",
+        "+.5e+2",
+        "007",
+        "0.000",
+        "",
+        "-",
+        "+",
+        ".",
+        "e5",
+        ".e5",
+        "--5",
+        "+-5",
+        "5x",
+        "5 ",
+        "0x10",
+        "1,5",
+        "1_0",
+        "5e2e2",
+        "5.5.5",
+    ):
+        reading(text)
+    # Exponent limits: written exponent minus fraction digits (RS-38 step 6).
+    for text in (
+        "1e1024",
+        "1e1025",
+        "1e-1021",
+        "1e-1022",
+        "0.1e-1020",
+        "0.1e-1021",
+        "10e-1022",
+        "1.5e1023",
+        "1e309",
+        "1e308",
+        "1e-400",
+        "0e400",
+        "0e600",
+        "0e1024",
+        "1" + "0" * 400,
+        "0." + "0" * 1020 + "1",
+        "0." + "0" * 1021 + "1",
+    ):
+        reading(text)
+    # Rounding of the accumulator and of the scaling (RS-38 steps 2 and 7,
+    # RS-39 for the platform's multiply-add).
+    for text in (
+        "71.037",
+        "0.1",
+        "0.3",
+        "1.1",
+        "2.675",
+        "1000000003.4",
+        "0.123456789012345678",
+        "0.77921045355292324",
+        "1.2345678901234567890123",
+        "3.141592653589793238462643383279",
+        "9007199254740993",
+        "9007199254740995",
+        "18446744073709551616",
+        "123456789012345678901234567890",
+        "1.7976931348623157e308",
+        "1.7976931348623158e308",
+        "1.7976931348623159e308",
+        "2.2250738585072014e-308",
+        "2.2250738585072011e-308",
+        "4.9406564584124654e-324",
+        "2.4703282292062328e-324",
+        "5e-324",
+        "1e-320",
+        "0.000001",
+        "1000000.000001",
+    ):
+        reading(text)
+    for text in number_literals():
+        reading(text)
+    # Epoch-sized times with fractions (update.md UP-8).
+    for t in (
+        "1000000003.4",
+        "1000000002.9999999",
+        "1000000001.000001",
+        "1000000001.0000005",
+        "1000000001.9999995",
+        "1000000001.123456789",
+        "1000000001.",
+        "1000000001e0",
+        "1.000000001e9",
+        "100000000.15e1",
+        "1000000001.5e0",
+        "+1000000001.25",
+        "1000000001.0000000000000000001",
+        "1000000001x",
+        "1000000001 ",
+    ):
+        add("update", "gauge.rrd", f"{t}:1")
+    # tune --minimum and --maximum (numbers.md NM-6).
+    for text in (
+        "U",
+        "Ux",
+        "U ",
+        "UNKN",
+        "Ue",
+        "UE",
+        "U5",
+        "UU",
+        "U-",
+        "U.",
+        "U+",
+        "u",
+        "5",
+        "5x",
+        "5u",
+        "5U",
+        "5E5",
+        "5e5x",
+        "5-3",
+        "5+",
+        "5e+",
+        "5.5.5",
+        "0x10",
+        "+.5e+2x",
+        "-0",
+        "nan",
+        "inf",
+        "-inf",
+        " 5",
+        "",
+        "e5",
+        ".",
+        "1e-1021",
+        "1e-1022",
+        "1e1024",
+        "1e1025",
+        "0e600",
+        "71.037",
+        "1234567890123456789012345678901234567890",
+        "0.77921045355292324",
+    ):
+        add("tune", "gauge.rrd", "-i", f"x:{text}")
+    # The value is cut to 40 characters before it is converted.
+    for text in (
+        "0." + "0" * 37 + "1",
+        "0." + "0" * 38 + "1",
+        "1" * 45,
+        "5" * 40 + "x",
+        "1234567890123456789012345678901234567",
+    ):
+        add("tune", "gauge.rrd", "-i", f"x:{text}")
+    for text in ("U", "5x", "UU", "nan", "-0", "1e1024"):
+        add("tune", "gauge.rrd", "-a", f"x:{text}")
+    return c
+
+
 SUITES = {
     "create": create_cases,
     "resize": resize_cases,
     "compute": compute_cases,
     "hw": hw_cases,
+    "numbers": numbers_cases,
 }
 
 

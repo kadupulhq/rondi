@@ -1,0 +1,3 @@
+# Vectors are compared byte for byte; never normalize them.
+* -text -diff
+cases.tsv text eol=lf diff

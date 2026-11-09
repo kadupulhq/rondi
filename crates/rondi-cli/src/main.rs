@@ -4112,7 +4112,10 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                             let bound = if text == "U" {
                                 RrdTuneBound::Unbounded
                             } else {
-                                let value = cparse::rrd_strtodbl(&text, None).ok()?;
+                                // Compatibility: the value converts as restore.md
+                                // RS-38 with the platform's multiply-add (RS-39).
+                                // Provenance: black-box; see docs/compatibility/numbers.md.
+                                let value = rondi::parse_rrd_number(&text)?;
                                 if value.is_nan() {
                                     RrdTuneBound::Unbounded
                                 } else {
