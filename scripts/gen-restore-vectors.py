@@ -10,6 +10,11 @@ described in docs/compatibility/restore.md.
         XML file from them, run every case and replace cases.tsv, inputs/,
         expected/base.vectors and expected/outputs/.
 
+    scripts/gen-restore-vectors.py write --keep-seeds [--rrdtool PATH]
+        As above, but reuse the committed seed dumps (some carry random
+        state) and keep the platform override files, so only cases whose
+        definition or result changed move.
+
     scripts/gen-restore-vectors.py write --check
         Rebuild the case table from the committed seed dumps and compare it
         with cases.tsv and inputs/ without running any reference; exits 1 on
@@ -654,6 +659,31 @@ def walk_cases():
                                r=rra(prep=b"<cdp_prep>" + b"<ds><value>1</value></ds>" * 2 + b"</cdp_prep>",
                                      db=b"<database><row><v>1</v><v>2</v></row></database>")),
     }
+    # More COMPUTE definitions (docs/compatibility/compute.md CP-21, CP-22).
+    two = b"<cdp_prep>" + b"<ds><value>1</value></ds>" * 2 + b"</cdp_prep>"
+    row2 = b"<database><row><v>1</v><v>2</v></row></database>"
+    for name, body in [
+        ("cdef-long", b"<cdef>" + b",".join([b"a"] * 20) + b"</cdef>"),
+        ("cdef-19", b"<cdef>" + b",".join([b"a"] * 19) + b"</cdef>"),
+        ("cdef-const", b"<cdef>a,40000,+</cdef>"),
+        ("cdef-frac", b"<cdef>a,1.5,+</cdef>"),
+        ("cdef-time", b"<cdef>a,TIME,+</cdef>"),
+        ("cdef-prev", b"<cdef>a,PREV(a),+</cdef>"),
+        ("cdef-trailing-number", b"<cdef>a,1</cdef>"),
+        ("cdef-spaced", b"<cdef> a,2,* </cdef>"),
+        ("cdef-empty", b"<cdef></cdef>"),
+        ("cdef-missing", b""),
+        ("cdef-twice", b"<cdef>a,2,*</cdef><cdef>a,3,*</cdef>"),
+        ("cdef-with-heartbeat", b"<minimal_heartbeat>20</minimal_heartbeat><cdef>a,2,*</cdef>"),
+        ("cdef-self", b"<cdef>c,2,*</cdef>"),
+        ("cdef-on-gauge", None),
+    ]:
+        if body is None:
+            d = ds.replace(b"</type>", b"</type><cdef>a,2,*</cdef>") + \
+                b"<ds><name>b</name><type>GAUGE</type></ds>"
+        else:
+            d = ds + b"<ds><name>c</name><type>COMPUTE</type>" + body + b"</ds>"
+        probes[name] = doc(d=d, r=rra(prep=two, db=row2))
     cases = [Case(f"walk-{name}", xml) for name, xml in probes.items()]
     return cases
 
@@ -975,12 +1005,6 @@ def write_outputs(outputs):
 # rebuild of the table keeps them; docs/compatibility/restore.md lists why.
 
 EXPECT = {
-    # RS-70: COMPUTE data sources.
-    "seed-compute": "unsupported",
-    "type-compute": "unsupported",
-    "walk-cdef-ok": "unsupported",
-    "walk-cdef-bad": "unsupported",
-    "walk-cdef-unknown-ds": "unsupported",
     # RS-86 and RS-87: documented divergences.
     "dup-database": "diverge",
     "opt-force-longer-file": "truncates",
@@ -1011,6 +1035,11 @@ def apply_expectations(cases, results):
             case.expect = "diverge"
         elif case.input in malformed and case.expect == "same":
             case.expect = "xml-syntax"
+
+
+def read_file(path):
+    with open(path, "rb") as handle:
+        return handle.read()
 
 
 def committed_seeds():
@@ -1047,15 +1076,33 @@ def command_write(args):
         if check_table():
             sys.exit(1)
         return
-    with tempfile.TemporaryDirectory() as work:
-        seeds = make_seeds(args.rrdtool, work)
+    if args.keep_seeds:
+        seeds = committed_seeds()
+    else:
+        with tempfile.TemporaryDirectory() as work:
+            seeds = make_seeds(args.rrdtool, work)
     cases = all_cases(seeds)
     results = record(args.rrdtool, cases, runs=3)
     apply_expectations(cases, results)
+    # Platform overrides come from `overrides` runs on other hosts. Keep them
+    # and the outputs they name; refresh them there after a rewrite.
+    expected = os.path.join(DATA, "expected")
+    kept = {}
+    for name in sorted(os.listdir(expected)) if os.path.isdir(expected) else []:
+        if name.startswith("linux-") and name.endswith(".vectors"):
+            path = os.path.join(expected, name)
+            kept[name] = read_file(path)
+            for sections in parse_vectors(path).values():
+                output = os.path.join(expected, "outputs", sections["file"].decode() + ".rrd")
+                if os.path.exists(output):
+                    kept[os.path.join("outputs", os.path.basename(output))] = read_file(output)
     for sub_dir in ("inputs", "expected"):
         shutil.rmtree(os.path.join(DATA, sub_dir), ignore_errors=True)
     os.makedirs(os.path.join(DATA, "inputs"))
-    os.makedirs(os.path.join(DATA, "expected"))
+    os.makedirs(os.path.join(expected, "outputs"))
+    for name, data in kept.items():
+        with open(os.path.join(expected, name), "wb") as handle:
+            handle.write(data)
     written = set()
     for case in cases:
         if case.input in written:
@@ -1123,6 +1170,8 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     write = commands.add_parser("write")
     write.add_argument("--rrdtool", default="rrdtool")
+    write.add_argument("--keep-seeds", action="store_true",
+                       help="reuse the committed seed dumps instead of creating new ones")
     write.add_argument("--check", action="store_true",
                        help="rebuild the table from the committed seeds and compare; run nothing")
     overrides = commands.add_parser("overrides")

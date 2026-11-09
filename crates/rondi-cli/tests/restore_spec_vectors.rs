@@ -35,7 +35,8 @@ enum Expect {
     /// Not well-formed XML. Status and file match; the message text is
     /// libxml2's and only its `ERROR: ` prefix is required (RS-40).
     XmlSyntax,
-    /// A COMPUTE data source: refused with Rondi's own message (RS-70).
+    /// A feature Rondi refuses with its own message. No case uses it since
+    /// COMPUTE data sources are restored (RS-70); the table format keeps it.
     Unsupported,
     /// `-f` over a longer file: RRDtool keeps the old tail, Rondi
     /// truncates (RS-56). Everything else matches.
@@ -655,7 +656,6 @@ fn restore_vectors_cover_the_specification() {
     for expect in [
         Expect::Same,
         Expect::XmlSyntax,
-        Expect::Unsupported,
         Expect::Truncates,
         Expect::TextDiffers,
         Expect::Diverge,

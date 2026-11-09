@@ -156,7 +156,7 @@ def legacy_v1(b):
 
 def build_inputs(rrdtool, tmp):
     """Returns {suite: {name: bytes}}."""
-    made = {"create": {}, "resize": {}}
+    made = {"create": {}, "resize": {}, "compute": {}}
 
     def make(suite, name, steps, post=None):
         d = os.path.join(tmp, f"{suite}-{name}")
@@ -222,6 +222,33 @@ def build_inputs(rrdtool, tmp):
     made["resize"]["short"] = base[:-20]
     made["resize"]["currow"] = patch_pointers(base, [7, 1])
     made["resize"]["text"] = b"not an rrd file\n"
+
+    # COMPUTE inputs (docs/compatibility/compute.md). Restore of COMPUTE
+    # definitions is pinned by scripts/gen-restore-vectors.py instead, whose
+    # normal form handles restore's random row pointers.
+    two = ["DS:a:GAUGE:20:U:U", "DS:b:GAUGE:20:0:100"]
+    rras = ["RRA:AVERAGE:0.5:1:10", "RRA:MAX:0.5:2:5", "RRA:LAST:0.5:1:4", "RRA:MIN:0.5:3:3"]
+
+    def cp(name, expr, *extra, updates=()):
+        make("compute", name, [cr("-b", "1000000000", "-s", "10", *two,
+                                  f"DS:c:COMPUTE:{expr}", *extra, *rras)]
+             + ([up(list(updates))] if updates else []))
+
+    cp("cpsum", "a,b,+")
+    cp("cpsumu", "a,b,+", updates=["1000000010:1:2", "1000000020:3:4", "1000000025:U:6",
+                                    "1000000030:5:200", "1000000040:7:8"])
+    cp("cpif", "a,UN,0,a,IF,b,MAX")
+    cp("cpdiv", "a,b,/")
+    cp("cpchain", "a,2,*", "DS:d:COMPUTE:c,b,-")
+    cp("cpstack", "a,b")
+    cp("cpunder", "a,+")
+    cp("cpprev", "a,PREV(b),+")
+    cp("cpset", "a,b,a,b,4,SORT,POP,POP,+")
+    make("compute", "cprate", [cr("-b", "1000000000", "-s", "10", "DS:Requests:DERIVE:30:0:U",
+                                  "DS:Duration:DERIVE:30:0:U",
+                                  "DS:Avg:COMPUTE:Duration,Requests,0,EQ,1,Requests,IF,/",
+                                  "RRA:AVERAGE:0.5:1:10", "RRA:AVERAGE:0.5:3:4")])
+
     return made
 
 
@@ -421,8 +448,8 @@ def create_cases():
     for ds in ["DS:y:COMPUTE:x,2,*", "DS:y:COMPUTE:x,1,+,x,*",
                "DS:y:COMPUTE:z,2,*", "DS:y:COMPUTE:x,TIME,+", "DS:y:COMPUTE:y,1,+",
                "DS:y:COMPUTE:x,1,+:extra", "DS:y:COMPUTE:x,PREV,+", "DS:y:COMPUTE:x,COUNT,+"]:
-        mk(DS, ds, RRA, **hw)
-    mk("DS:y:COMPUTE:2,3,+", RRA, **hw)
+        mk(DS, ds, RRA)
+    mk("DS:y:COMPUTE:2,3,+", RRA)
     mk(DS, "DS:y:COMPUTE", RRA)
     mk(DS, "DS:y:COMPUTE:", RRA)
 
@@ -535,11 +562,42 @@ def create_cases():
     add("o.rrd", "--template")
     add("o.rrd", "--start")
     mk("RRA:HWPREDICT:20:0:0.01:5", DS, expect="unsupported", note="CR-unsupported")
-    mk(RRA, "DS:y:COMPUTE:2,3,+", "foo", expect="unsupported", note="CR-unsupported")
+    mk(RRA, "DS:y:COMPUTE:2,3,+", "foo")
     mk(DS, "DS:x:DCOUNTER:20:U:U", "RRA:MHWPREDICT:20:0.1:0.01:5", expect="unsupported",
        note="CR-unsupported")
     mk("DS:d:DCOUNTER:20:U:U", "RRA:MHWPREDICT:20:0.1:0.01:5", expect="unsupported",
        note="CR-unsupported")
+    # COMPUTE expression grammar and encoding (docs/compatibility/compute.md
+    # CP-1 to CP-9). The file bytes pin each operator's code.
+    two = ["DS:a:GAUGE:20:U:U", "DS:b:GAUGE:20:0:100"]
+    for expr in ["a,b,+", "b,a,+", "a", "a,b", "+", "a,2,*", "a,-2,*", "a,+02,+", "a,1e2,+",
+                 "a,1.0,+", "a,-0,+", "a,32767,+", "a,-32768,+", "a,32768,+", "a,-32769,+",
+                 "a,1.5,+", "a,1e10,+", "a,0x10,+", "7,a,+", "1", "a,1", "a,1,b,1",
+                 "a,1,1,+,+", "a,,+", "a, b,+", "A,b,+", "a,b,+:x", "a,UN,0,a,IF",
+                 "a,b,c,+,+", ",".join(["a"] * 19), ",".join(["a"] * 20),
+                 ",".join(["a"] * 25), "a,PREV(b),+", "a,PREV(z),+",
+                 "Duration,Requests,0,EQ,1,Requests,IF,/"]:
+        mk(*two, f"DS:c:COMPUTE:{expr}", RRA)
+    # Check order (CP-4): parse, operator restriction, node limit, constants.
+    a19 = "a," * 19
+    for expr in [f"z,{a19}+", f"{a19}z", f"TIME,{a19}+", "z,TIME,+", "TIME,z,+",
+                 "40000,z,+", "z,40000,+", "40000,TIME,+", "TIME,40000,+", f"a,1,{a19}+",
+                 "a,40000", "a,1,TIME", f"40000,{a19}+", f"1.5,{a19}+", "a,40000,TIME,+",
+                 "a,40000,+,1.5,+"]:
+        mk(*two, f"DS:c:COMPUTE:{expr}", RRA)
+    for op in ["+", "-", "*", "/", "%", "ADDNAN", "POW", "SIN", "COS", "LOG", "EXP",
+               "SQRT", "ATAN", "ATAN2", "FLOOR", "CEIL", "ROUND", "DEG2RAD", "RAD2DEG",
+               "ABS", "LT", "LE", "GT", "GE", "EQ", "NE", "UN", "ISINF", "IF", "MIN", "MAX",
+               "MINNAN", "MAXNAN", "LIMIT", "UNKN", "INF", "NEGINF", "NOW", "DUP", "POP",
+               "EXC", "DEPTH", "COPY", "INDEX", "ROLL", "SORT", "REV", "AVG", "SMIN", "SMAX",
+               "MEDIAN", "STDEV", "PERCENT", "TIME", "LTIME", "STEPWIDTH", "NEWDAY",
+               "NEWWEEK", "NEWMONTH", "NEWYEAR", "TREND", "TRENDNAN", "PREDICT",
+               "PREDICTSIGMA", "PREDICTPERC", "COUNT", "PREV"]:
+        mk(*two, f"DS:c:COMPUTE:a,a,a,{op}", RRA)
+    mk(*two, "DS:c:COMPUTE:a,2,*", "DS:d:COMPUTE:c,a,+", RRA)
+    mk("DS:a:GAUGE:20:U:U", "DS:c:COMPUTE:a,b,+", "DS:b:GAUGE:20:U:U", RRA)
+    mk(*two, "DS:c:COMPUTE:a,b,+", "RRA:AVERAGE:0.5:1:5", "RRA:MAX:0.5:2:5",
+       "RRA:LAST:0.5:1:3", "RRA:MIN:0.5:3:2")
     return c
 
 
@@ -622,7 +680,60 @@ def resize_cases():
     return c
 
 
-SUITES = {"create": create_cases, "resize": resize_cases}
+def compute_cases():
+    c = []
+
+    def add(*args, inputs=(), expect="same", note="-"):
+        c.append((expect, note, list(inputs), list(args)))
+
+    def upd(name, *values, cmd="update"):
+        add(cmd, f"{name}.rrd", *values, inputs=[name])
+
+    # Value count and templates: COMPUTE sources take no value (CP-10, CP-11).
+    upd("cpsum", "1000000010:1")
+    upd("cpsum", "1000000010:1:2")
+    upd("cpsum", "1000000010:1:2:3")
+    for template, values in [("a:c", "1:2"), ("c", "1"), ("b:a", "5:6"), ("a", "5"),
+                             ("a:b:c", "1:2:99"), ("c:a:b", "99:1:2"), ("a:b:d", "1:2:3")]:
+        upd("cpsum", "-t", template, f"1000000010:{values}")
+    # PDPs computed from the other sources' PDPs (CP-12 to CP-15).
+    upd("cpsum", "1000000010:1:2", "1000000020:3:4", "1000000025:U:6", "1000000030:5:200",
+        "1000000040:7:8", "1000000045:2:2", "1000000050:1:1")
+    upd("cpsum", "1000000010:1:2", "1000000055:3:4")
+    upd("cpsum", "1000000010:1:2", "1000000045:3:4")
+    upd("cpsum", "1000000004:1:2", "1000000017:3:4", "1000000033:5:6")
+    upd("cpsumu", "1000000050:1:1", "1000000060:2:2", "1000000070:3:3")
+    upd("cpsum", "1000000010:1:2", "1000000020:3:4", cmd="updatev")
+    upd("cpchain", "1000000010:3:4", "1000000020:5:6", "1000000030:U:1")
+    upd("cpif", "1000000010:U:2", "1000000020:3:4", "1000000030:-5:1")
+    upd("cpdiv", "1000000010:-4:0", "1000000020:0:0", "1000000030:3:0", "1000000040:6:3")
+    upd("cpset", "1000000010:1:2", "1000000020:9:4")
+    upd("cprate", "1000000010:100:500", "1000000020:150:1000", "1000000030:150:1000",
+        "1000000040:10:20")
+    # Evaluation failures stop the update partway (CP-16).
+    for name in ["cpstack", "cpunder", "cpprev"]:
+        upd(name, "1000000005:1:2")
+        upd(name, "1000000012:1:2")
+        upd(name, "1000000005:1:2", "1000000012:1:2", "1000000025:1:2")
+    # Reading commands (CP-17 to CP-20).
+    for name in ["cpsum", "cpsumu", "cpchain", "cpif", "cprate", "cpprev", "cpset"]:
+        add("info", f"{name}.rrd", inputs=[name])
+        add("dump", f"{name}.rrd", inputs=[name])
+    add("lastupdate", "cpsumu.rrd", inputs=["cpsumu"])
+    add("last", "cpsumu.rrd", inputs=["cpsumu"])
+    add("first", "cpsumu.rrd", inputs=["cpsumu"])
+    for cf, res in [("AVERAGE", "10"), ("MAX", "20"), ("LAST", "10"), ("MIN", "30")]:
+        add("fetch", "cpsumu.rrd", cf, "-s", "1000000000", "-e", "1000000050", "-r", res,
+            inputs=["cpsumu"])
+    add("xport", "-s", "1000000000", "-e", "1000000040", "--step", "10",
+        "DEF:x=cpsumu.rrd:c:AVERAGE", "DEF:y=cpsumu.rrd:a:AVERAGE", "XPORT:x", "XPORT:y",
+        inputs=["cpsumu"])
+    add("resize", "cpsumu.rrd", "0", "GROW", "2", inputs=["cpsumu"])
+    add("resize", "cpchain.rrd", "1", "SHRINK", "1", inputs=["cpchain"])
+    return c
+
+
+SUITES = {"create": create_cases, "resize": resize_cases, "compute": compute_cases}
 
 
 # --------------------------------------------------------------------------
@@ -760,12 +871,20 @@ def write(rrdtool, rondi, keep_inputs):
                 # Committed inputs carry their own random rows; keep them so
                 # that existing vectors stay valid.
                 folder = os.path.join(base, "inputs")
-                for name in os.listdir(folder):
+                for name in os.listdir(folder) if os.path.isdir(folder) else []:
                     made[suite][name[:-4]] = read_bytes(os.path.join(folder, name))
+            # Platform overrides come from `overrides` runs on other hosts;
+            # keep them across a rewrite and refresh them there afterwards.
+            expected = os.path.join(base, "expected")
+            kept = {name: read_bytes(os.path.join(expected, name))
+                    for name in (os.listdir(expected) if os.path.isdir(expected) else [])
+                    if name != f"{suite}.vectors"}
             if os.path.isdir(base):
                 shutil.rmtree(base)
             os.makedirs(os.path.join(base, "inputs"))
-            os.makedirs(os.path.join(base, "expected"))
+            os.makedirs(expected)
+            for name, data in kept.items():
+                write_bytes(os.path.join(expected, name), data)
             with open(os.path.join(base, ".gitattributes"), "w") as handle:
                 handle.write("# Vectors are compared byte for byte; never normalize them.\n"
                              "* -text -diff\ncases.tsv text eol=lf diff\n")
