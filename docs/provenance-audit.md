@@ -18,8 +18,8 @@ About 12,400 lines of Rust (38 percent of non-test source) are rated High: modul
 | `crates/rondi/src/rrd_restore.rs` | Replaced | 912 | Declared port; replaced by a clean-room rewrite from `docs/compatibility/restore.md` |
 | `crates/rondi/src/rrd_create.rs` | Removed | 790 | Declared port; replaced by the clean-room `rrd_create.rs` and `rrd_definitions.rs` |
 | `crates/rondi/src/rrd_resize.rs` | Removed | 288 | Declared port; replaced by a clean-room `rrd_resize.rs` |
-| `crates/rondi/src/graph.rs` | High | 2,357 | Declared port of graph script parsing and data preparation; 18 shared function names |
-| `crates/rondi/src/graph_layout.rs` | Replaced | 1,011 | Declared port of image layout functions; replaced by the clean-room `layout/` from `docs/compatibility/graph.md` |
+| `crates/rondi/src/graph.rs` | Replaced | 2,357 | Declared port of graph script parsing and data preparation; replaced by the clean-room `graph/` modules from `docs/compatibility/graph.md` |
+| `crates/rondi/src/graph_layout.rs` | Removed | 1,011 | Declared port of image layout functions; replaced by the clean-room `layout/` from `docs/compatibility/graph.md`; the file is deleted |
 | `crates/rondi-cli/src/graph_options.rs` | Replaced | 880 | Option tables keyed to C line numbers; replaced by the clean-room `graph_args.rs` from `docs/compatibility/graph.md` |
 | `crates/rondi-cli/src/optparse.rs` | Removed | 445 | Port of the bundled option parser; replaced by the clean-room `frontend/options.rs` |
 | `crates/rondi/src/rrd_snprintf.rs` | Replaced | 702 | Declared port of the portable snprintf; replaced by the clean-room `format_value/` from `docs/compatibility/format-strings.md` and black-box runs |
@@ -122,6 +122,7 @@ Risk tiers:
 - Compatibility requirement: graph element syntax (DEF, CDEF, VDEF, SHIFT, PRINT, GPRINT and the drawing elements), per-DEF fetch windows, step reduction, and export values.
 - Likely source: `rrdgraph_data`, `rrdgraph_graph`, `rrdxport` man pages; numeric results black-box observable; element-append ordering and reduce-window integer behaviour from reference-source inspection.
 - Remediation: replace by spec and fresh implementation, in two parts: an element grammar spec with error table, and a data-preparation spec (window, step GCD, reduce rule). Tests: `graph_data_differential.rs` (15), `graph_engine_parity.rs` (5), `graph_xport_parity.rs` (10), `vdef_differential.rs` (3), `xport_option_differential.rs`.
+- Status: replaced. `crates/rondi/src/graph/` (`mod.rs`, `elements.rs`, `fields.rs`, `data.rs`: element parsing, DEF fetch and reduction, CDEF, VDEF and SHIFT evaluation, and the export grid) was written from the GR rules of `docs/compatibility/graph.md`, its vectors and black-box runs of RRDtool 1.11.0, without reading the removed module's bodies or the C source. The author saw the legacy module only as a signature listing and an import grep, and deleted it with `git rm` without reading its bodies; the session transcripts were checked for this. The CLI, fuzz and bench callers now use `rondi::graph`.
 
 **`crates/rondi/src/graph_layout.rs`: `graph_size_location`, `leg_place`, `data_proc`, `si_unit`, `expand_range`, `gfx_get_text_width`, legend position helpers**
 
@@ -129,7 +130,7 @@ Risk tiers:
 - Compatibility requirement: `graphv` image size, legend positions, value range and SI unit selection.
 - Likely source: black-box observation of `graphv` output; text metrics from the font; the step-by-step layout from reference-source inspection.
 - Remediation: replace by spec and fresh implementation; derive a layout spec from measured `graphv` outputs across option combinations. Tests: `graph_option_differential.rs` (8), `graph_line_width.rs`, in-module tests.
-- Status: replaced. `crates/rondi/src/layout/` (text metrics, legend lines, frame and value range) was written from GR-60 to GR-73 of `docs/compatibility/graph.md`, its vectors and black-box runs of RRDtool 1.11.0, without reading the removed module's bodies or the C source; the module was deleted from a signature listing. `graph_layout.rs` now holds only two enums and the default font sizes that the legacy `graph.rs` still stores, written fresh.
+- Status: replaced. `crates/rondi/src/layout/` (text metrics, legend lines, frame and value range) was written from GR-60 to GR-73 of `docs/compatibility/graph.md`, its vectors and black-box runs of RRDtool 1.11.0, without reading the removed module's bodies or the C source; the module was deleted from a signature listing. The file `graph_layout.rs` is now removed; the two enums and the default font sizes it kept moved into the new modules, written fresh.
 
 **`crates/rondi-cli/src/graph_options.rs`: `rrd_graph_options`, `bad_format_axis`, `parse_color`, xport option parsing**
 
@@ -169,7 +170,8 @@ Risk tiers:
 - Compatibility requirement: `rrdtool -` stdin mode (used by Cacti and Kadupul pollers), command dispatch, `list` output order, PRINT/GPRINT `%s`, `strftime` and duration formats.
 - Likely source: man pages (`rrdtool`, `rrdgraph_graph` for GPRINT and duration formats) and black-box observation.
 - Remediation: replace by spec and fresh implementation; the stdin tokenizer and `list` are small. Tests: `alias_modes.rs` (90), `cli_list_and_aliases.rs`, `graph_data_differential.rs`.
-- Status: the dispatcher, usage, alias programs and pipe mode (`rrdtool_usage` through `rrdtool_batch`) are replaced by `crates/rondi-cli/src/frontend/`, written from `docs/compatibility/cli.md`, `docs/compatibility/pipe-mode.md`, their vectors and black-box runs without reading the removed functions or the C source. `print_calc`, `strfduration`, `time_clean` and the `list` helpers are not part of that change.
+- Status: the dispatcher, usage, alias programs and pipe mode (`rrdtool_usage` through `rrdtool_batch`) are replaced by `crates/rondi-cli/src/frontend/`, written from `docs/compatibility/cli.md`, `docs/compatibility/pipe-mode.md`, their vectors and black-box runs without reading the removed functions or the C source. `print_calc`, `strfduration`, `time_clean` and the `list` helpers were not part of that change (see the next bullet).
+- Status of the `list` helpers: `rrd_list_r`, `rrd_list_rec` and `c_stat` are replaced by `crates/rondi-cli/src/frontend/list.rs`, written from CLI-70 to CLI-75 and CLI-79 of `docs/compatibility/cli.md`, the `list_matches_reference` differential test and black-box runs of RRDtool 1.11.0, without reading the removed functions' bodies or the C source; one search during the rewrite printed four call-site fragments (60 characters each) of the removed helpers after the design was settled. They were deleted from a signature listing.
 - Status of the print helpers: `print_calc`, `strfduration`, `time_clean` and their formatting helpers (with `format_graph_numeric` and `parse_graph_numeric_format`) are replaced by `crates/rondi-cli/src/print_format.rs` and `crates/rondi/src/format_value/`, written from `docs/compatibility/format-strings.md`, the vectors and black-box runs without reading the removed code or the C source.
 
 **`crates/rondi-cli/src/help/*.txt` and the `RRDCACHED_HELP` string in `main.rs`**
@@ -261,7 +263,7 @@ Effort is the non-test line count to rewrite. "Pinned by" lists tests that alrea
 | 1 | `rpn.rs` | ~1,080 | `rpn_differential.rs` (11), `graph_data_differential.rs`, fuzz `rpn_diff`, `rpn_xport` | Operator table from `rrdgraph_rpn` plus observed unknown and edge cases |
 | 2 | `rrd_modify.rs` | ~960 | `tune_modify_differential.rs` (5, thin) | Resampling formula and candidate selection from `rrdtune` plus new differential vectors |
 | 3 | `rrd_restore.rs` with decision on `xml_reader.rs` | ~840 (+1,860) | `csrc_mutate.rs` (16), fuzz `restore_xml` | XML schema, error table, decision on libxml2 line numbers |
-| 4 | `graph.rs`, `graph_layout.rs`, `graph_options.rs` | ~4,100 | `graph_data_differential.rs` (15), `graph_xport_parity.rs` (10), `graph_option_differential.rs` (8), `graph_engine_parity.rs` (5), `vdef_differential.rs` (3) | Element grammar, data preparation, layout measurements, option table |
+| 4 | `graph.rs`, `graph_layout.rs`, `graph_options.rs` (done) | ~4,100 | `graph_data_differential.rs` (15), `graph_xport_parity.rs` (10), `graph_option_differential.rs` (8), `graph_engine_parity.rs` (5), `vdef_differential.rs` (3) | Element grammar, data preparation, layout measurements, option table |
 | 5 | `rrdcached_listen.rs` and ported handlers in `rondi-server/src/lib.rs` | ~850 + ~600 | `rrdcached_listeners.rs` (13), `rrdcached_privileges.rs` (6), `rrdcached_startup.rs` (7), `rrdcached_protocol_parity.rs` (11), `server_roundtrip.rs` (35) | `rrdcached` options, protocol, journal and queue spec (GPL-2.0-only origin) |
 | 6 | `rrd_create.rs` and `rrd_resize.rs` | ~970 | `csrc_create.rs` (8), `csrc_mutate.rs` | `.rrd` format spec, create argument grammar, resize row mapping |
 | 7 | `optparse.rs` and `main.rs` front end (dispatch, stdin mode, list) | ~300 + ~600 | `rrdtool_optparse.rs` (25), `rrdtool_command_options.rs` (14), `alias_modes.rs` (90), `cli_list_and_aliases.rs` | Option-permutation spec, stdin tokenizer spec, list ordering |

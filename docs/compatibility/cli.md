@@ -527,16 +527,29 @@ floating point values use `%.10e` (`5.0000000000e-01`) except that NaN is
 value written, with `%.10e` values.
 
 **CLI-70** (doc, bb; must). `list <dir>` prints, one per line and without
-a path prefix, the name of every entry of `<dir>` that is a subdirectory
-or a regular file whose name ends in `.rrd`. Other files are not listed.
-Directories and files are not grouped: entries appear in directory order
-(CLI-75).
+a path prefix, the name of every entry of `<dir>` other than `.` and `..`
+that is an RRD name or a directory. An entry's type is taken after
+following symbolic links, so a link to a directory counts as a directory
+and a link that leads nowhere is not listed. An RRD name is a name whose
+first occurrence of `.rrd` (case-sensitive) is its last four bytes:
+`a.rrd`, `.rrd`, `a..rrd`, `a.rr.rrd` and `c.Rrd.rrd` qualify; `a.rrd.rrd`,
+`a.rrdb.rrd`, `b.RRD` and `a.rrdx` do not. An entry with an RRD name is
+listed whatever its type, so a FIFO named `f.rrd` is listed. Names that
+start with `.` are not skipped. A directory is listed even when it cannot
+be read. Directories and files are not grouped: entries appear in
+directory order (CLI-75).
 
 **CLI-71** (doc, bb; must). `list -r <dir>` (`--recursive`) instead prints
-every `.rrd` file below `<dir>` as a path relative to `<dir>`
-(`sub/deep/c.rrd`). Directory names are not printed. A subdirectory's
-files are printed, recursively, at the position where the subdirectory
-appears in its parent's directory order.
+every entry below `<dir>` that has an RRD name (CLI-70) and is not a
+directory, as a path relative to `<dir>` (`sub/deep/c.rrd`). Directories,
+including links to directories and directories with an RRD name such as
+`x.rrd`, are entered and never printed. A subdirectory's entries are
+printed, recursively, at the position where the subdirectory appears in
+its parent's directory order. A subdirectory that cannot be read
+contributes nothing and is not an error. Links to directories are
+followed; a link loop ends where the operating system refuses the longer
+path (too many levels of symbolic links), silently, so the output holds
+each level up to that depth.
 
 **CLI-72** (bb; must). A trailing `/` or a leading `./` in the directory
 does not change the output.
@@ -546,19 +559,54 @@ does not change the output.
 **CLI-74** (bb; defect). `list` on a path that is missing, not a
 directory, an empty string, or a directory with nothing to list writes only
 the system error text, with no `ERROR: ` prefix and no newline, to
-standard error and exits 0. For an empty directory the text is the
-platform's message for error number 0 (macOS `Undefined error: 0`, glibc
-`Success`).
+standard error and exits 0. The same applies to every error of CLI-79,
+whose error numbers are named there by their POSIX symbol. For an empty
+directory the text is the platform's message for error number 0 (macOS
+`Undefined error: 0`, glibc `Success`).
 
 **CLI-75** (bb; should). Entries appear in the order the operating
 system enumerates the directory, which differs between file systems
 (macOS APFS and the overlay file systems of the recording and CI
 containers gave different orders for the
-same fixture). The reference does not sort. Every `list` vector carries
+same fixture). The reference does not sort directory listings; glob
+results (CLI-79) are sorted. Every `list` vector carries
 the tag `dir-order` and is compared as a set of sorted lines, so the
 vectors pin which entries are printed, not their order. A replacement
 should keep the enumeration order rather than sort, so that it matches the
 reference on the same file system.
+
+**CLI-79** (bb; must). Without a daemon, `list` classifies its argument
+`<path>` in this order. The first rule that applies decides.
+
+1. `<path>` contains `..` anywhere (also `a..b`): error `EACCES`
+   (`Permission denied`).
+2. `<path>` contains `*` or `?`: with `-r`, error `EINVAL` (`Invalid
+   argument`). Otherwise `<path>` is expanded as a shell pattern by the
+   platform's `glob(3)` with no flags: matches are sorted, `\` escapes
+   the next character, `[...]` classes work once the pattern contains `*`
+   or `?`, a leading `.` must be matched explicitly (`.*` also matches `.`
+   and `..`), and every component may hold wildcards (`d/su*/s.rrd`). For
+   each match that contains `/`, the text after its last `/` is printed
+   on its own line; a match that ends in `/` prints an empty line.
+   Matches are not filtered by type or name. When no match contains `/`
+   (no match at all, or a pattern without `/` such as `*`), the result is
+   error `ENOENT` (`No such file or directory`).
+3. `<path>` is an RRD path: its first occurrence of `.rrd` is its last
+   four bytes (CLI-70's rule applied to the whole string, so
+   `x.rrd/in.rrd` and `d/a.rrd.rrd` are not RRD paths). It applies with
+   or without `-r`. If `<path>` cannot be examined (following links), the
+   result is that error (`ENOENT` for a missing file or a dangling link).
+   If it is not a regular file (a directory or a FIFO), error `ENXIO`
+   (macOS `Device not configured`, glibc `No such device or address`). If
+   it contains no `/`, error `EINVAL`. Otherwise the text after its last
+   `/` is printed on its own line (`list ./a.rrd` prints `a.rrd`).
+4. Otherwise `<path>` is listed as a directory (CLI-70, CLI-71). If it
+   cannot be opened, the result is that error (`ENOENT`, `ENOTDIR`,
+   `EACCES`); if nothing is printed, error number 0 (CLI-74).
+
+Provenance: black-box probes of RRDtool 1.11.0 on macOS and
+`cli_list_and_aliases.rs` (`list_matches_reference`), which compares the
+same fixture against the reference on every CI platform.
 
 **CLI-76** (bb; must). Opening a path that is not a valid RRD file fails
 with the error of the file layer: `opening '<path>': <system error>` for a

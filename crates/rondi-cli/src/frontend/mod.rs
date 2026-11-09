@@ -10,6 +10,9 @@
 // docs/compatibility/pipe-mode.md, which were written from the manual
 // pages and black-box runs of RRDtool 1.11.0.
 
+/// `rrdtool list` without a daemon.
+#[cfg(unix)]
+pub(crate) mod list;
 /// Command option scanning.
 ///
 /// Every `rrdtool` command except `resize` describes its options with a

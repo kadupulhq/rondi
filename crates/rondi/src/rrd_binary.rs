@@ -471,9 +471,11 @@ fn prepare_fetch(
         // The unsigned row count wraps to a size malloc cannot satisfy.
         return Err(StoreError::Rrd("malloc fetch data area".into()));
     }
+    // The rows a fetch returns end after `start` and by `end`, one per
+    // step (graph.md GR-92: exactly 10,000,000 rows are within the limit).
     let range_rows = end
         .checked_sub(start)
-        .and_then(|span| usize::try_from(span / step_i64 + 1).ok())
+        .and_then(|span| usize::try_from(span / step_i64).ok())
         .ok_or_else(|| rrd_error("RRD fetch range is too large"))?;
     if row_limit.is_some_and(|limit| range_rows > limit) {
         return Err(StoreError::RrdUnsupported(

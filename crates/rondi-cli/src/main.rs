@@ -14,7 +14,7 @@ mod print_format;
 /// The `rrdcached` personality: reads the daemon's options and starts it.
 mod rrdcached;
 
-use frontend::{OptionScanner, OptionSpec, RawMessage, last_os_errno, system_error_text};
+use frontend::{OptionScanner, OptionSpec, RawMessage, system_error_text};
 use print_format::{PrintOutcome, local_tm, printf_double as c_printf_double};
 
 use clap::{Parser, Subcommand};
@@ -836,7 +836,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     let graph_colors = graph_colors(&options.colors);
     let grid_dash = vec![options.grid_dash.0, options.grid_dash.1];
     let border_width = u32::try_from(options.border).unwrap_or(0);
-    let (mut im, _) = prepare_graph_image(GraphImageRequest {
+    let mut im = prepare_graph_image(GraphImageRequest {
         start: options.start,
         end: options.end,
         step: options.step,
@@ -847,23 +847,24 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     configure_graph_image(&mut im, &options);
     let png_output = options.format == graph_args::ImageFormat::Png;
     // The renderer enforces the same limit on the final canvas, but only after
-    // data_proc has allocated per-pixel buffers sized by --width. Print-only
+    // the data is prepared for every pixel column of --width. Print-only
     // graphs draw nothing and keep the unbounded behavior of rrdtool.
     let side = |size: i64| u32::try_from(size).unwrap_or(u32::MAX);
     if png_output
         && !png_within_limit(side(image_width), side(image_height))
-        && im.gdes.iter().any(|element| {
-            use rondi::graph::Gf;
+        && im.elements.iter().any(|element| {
+            use rondi::graph::Kind;
             matches!(
-                element.gf,
-                Gf::Gprint | Gf::Line | Gf::Area | Gf::Tick | Gf::Hrule | Gf::Vrule | Gf::Stack
+                element.kind,
+                Kind::Gprint | Kind::Line | Kind::Area | Kind::Tick | Kind::Hrule | Kind::Vrule
             )
         })
     {
         return Err(PNG_DIMENSION_LIMIT_MESSAGE.into());
     }
     let time_format = options.x_label_format.as_deref();
-    // RRDtool's graphv: graph_paint, then image_info and the image itself.
+    // graphv prints the drawn graph's keys, then the image keys and the
+    // image itself.
     let mut info = GraphInfo::default();
     let to_memory = filename == "-";
     let mut image = None::<Vec<u8>>;
@@ -883,7 +884,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
             DataFormat::Ssv => XportFormat::Separated(';'),
         };
         flush_and_prepare_data(&mut im)?;
-        let data = im.xport(true)?;
+        let data = im.export(true)?;
         info.push("graph_start", InfoValue::Count(data.start));
         info.push("graph_end", InfoValue::Count(data.end));
         info.push("graph_step", InfoValue::Count(data.step as i64));
@@ -1016,7 +1017,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                     // A negative --units-length moves the graph origin left of
                     // the image; cairo clips whatever falls outside the surface.
                     let clamp = |value: i64| u32::try_from(value.max(0));
-                    let (rendered, series) = graph_render_input(&im);
+                    let (rendered, series) = graph_render_input(&im)?;
                     let png = render_graph_png(
                         &rendered,
                         &series,
@@ -1114,14 +1115,14 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
 /// GR-87: the JSONTIME export `--add-jsontime` writes to the output after
 /// the graph. Returns the error to report once the keys are printed.
 fn export_jsontime(
-    im: &mut rondi::graph::GraphImage,
+    im: &mut rondi::graph::Graph,
     info: &mut GraphInfo,
     filename: &str,
     si_base: u32,
     time_format: Option<&str>,
 ) -> Result<Option<String>, Box<dyn std::error::Error>> {
     let to_memory = filename == "-";
-    let data = match im.xport(true) {
+    let data = match im.export(true) {
         Ok(data) => data,
         Err(error) => {
             // Compatibility: the file is opened, and so truncated, before
@@ -1237,10 +1238,8 @@ fn graph_colors(colors: &[(graph_args::ColorTag, [u8; 4])]) -> GraphColors {
     palette
 }
 
-/// Hands the options the legacy graph engine reads to it.
-fn configure_graph_image(im: &mut rondi::graph::GraphImage, options: &graph_args::GraphArgs) {
-    im.xsize = options.width;
-    im.ysize = options.height;
+/// Hands the command-line options the graph module reads to the image.
+fn configure_graph_image(im: &mut rondi::graph::Graph, options: &graph_args::GraphArgs) {
     im.allow_missing_ds = options.missing_as_nan;
 }
 
@@ -1331,17 +1330,17 @@ fn range_options(options: &graph_args::GraphArgs) -> rondi::layout::RangeOptions
 
 /// The legend entries of the elements in order (GR-54, GR-59, GR-66).
 fn legend_entries(
-    im: &rondi::graph::GraphImage,
+    im: &rondi::graph::Graph,
     options: &graph_args::GraphArgs,
 ) -> Vec<rondi::layout::Entry> {
-    use rondi::graph::{Gf, TextAlign};
+    use rondi::graph::{Kind, TextAlign};
     use rondi::layout::{Align, Entry};
     let mut align = Align::Justified;
     let mut entries = Vec::new();
-    for (index, element) in im.gdes.iter().enumerate() {
-        let comment = match element.gf {
-            Gf::TextAlign => {
-                align = match element.txtalign {
+    for (index, element) in im.elements.iter().enumerate() {
+        let comment = match element.kind {
+            Kind::TextAlign => {
+                align = match element.align {
                     TextAlign::Left => Align::Left,
                     TextAlign::Right => Align::Right,
                     TextAlign::Center => Align::Center,
@@ -1355,28 +1354,28 @@ fn legend_entries(
                 });
                 continue;
             }
-            Gf::Comment => true,
-            Gf::Gprint | Gf::Line | Gf::Area | Gf::Stack | Gf::Tick | Gf::Xport => false,
+            Kind::Comment => true,
+            Kind::Gprint | Kind::Line | Kind::Area | Kind::Tick | Kind::Xport => false,
             // Compatibility: an HRULE beyond a given --upper-limit or
             // --lower-limit shows no legend unless --force-rules-legend asks
             // for it; the final value range does not matter.
             // Provenance: black-box compatibility test (layout fuzzing
             // against the oracle; HRULE probes with -u and -l).
-            Gf::Hrule
+            Kind::Hrule
                 if options.force_rules_legend
                     || !(options
                         .upper_limit
-                        .is_some_and(|upper| element.yrule > upper)
+                        .is_some_and(|upper| element.value > upper)
                         || options
                             .lower_limit
-                            .is_some_and(|lower| element.yrule < lower)) =>
+                            .is_some_and(|lower| element.value < lower)) =>
             {
                 false
             }
             // A VRULE outside the graph's time range shows no legend unless
             // --force-rules-legend asks for it.
-            Gf::Vrule
-                if options.force_rules_legend || (im.start..=im.end).contains(&element.xrule) =>
+            Kind::Vrule
+                if options.force_rules_legend || (im.start..=im.end).contains(&element.time) =>
             {
                 false
             }
@@ -1403,25 +1402,25 @@ fn legend_entries(
 
 /// The values the drawing elements put on the graph, one per pixel column
 /// and stacked, for the value range (GR-52, GR-70).
-fn scale_values(im: &rondi::graph::GraphImage, width: i64) -> rondi::layout::Scale {
-    use rondi::graph::Gf;
+fn scale_values(im: &rondi::graph::Graph, width: i64) -> rondi::layout::Scale {
+    use rondi::graph::Kind;
     let columns = usize::try_from(width.max(1)).unwrap_or(1);
     let mut scale = rondi::layout::Scale::new();
     let mut below = vec![0.0_f64; columns];
     let span = (im.end - im.start) as f64;
-    for element in &im.gdes {
+    for element in &im.elements {
         // A TICK carries data that a later STACK builds on, but it takes no
         // part in the range itself (GR-53).
-        if !matches!(element.gf, Gf::Line | Gf::Area | Gf::Stack | Gf::Tick) {
+        if !matches!(element.kind, Kind::Line | Kind::Area | Kind::Tick) {
             continue;
         }
         let mut values: Vec<f64> = (0..columns)
             .map(|column| {
                 let time = im.start + (span * column as f64 / columns as f64) as i64;
-                match element.vidx.map(|source| &im.gdes[source]) {
-                    Some(source) if source.gf == Gf::Vdef => source.vf.val,
-                    Some(_) => im.value_at(element.vidx.unwrap_or_default(), time),
-                    None => element.yrule,
+                match element.source.map(|source| &im.elements[source]) {
+                    Some(source) if source.kind == Kind::Vdef => source.vdef.value,
+                    Some(_) => im.value_at(element.source.unwrap_or_default(), time),
+                    None => element.value,
                 }
             })
             .collect();
@@ -1430,7 +1429,7 @@ fn scale_values(im: &rondi::graph::GraphImage, width: i64) -> rondi::layout::Sca
                 *value += if base.is_nan() { 0.0 } else { *base };
             }
         }
-        if !element.skipscale && element.gf != Gf::Tick {
+        if !element.skip_scale && element.kind != Kind::Tick {
             for value in &values {
                 scale.add(*value);
             }
@@ -1441,8 +1440,8 @@ fn scale_values(im: &rondi::graph::GraphImage, width: i64) -> rondi::layout::Sca
 }
 
 /// The error `RRDtool` still finds set when a graph or xport otherwise
-/// succeeded, such as a daemon that `data_fetch` could not reach.
-fn pending_error(im: &rondi::graph::GraphImage) -> Result<(), Box<dyn std::error::Error>> {
+/// succeeded, such as a daemon the DEFs could not reach.
+fn pending_error(im: &rondi::graph::Graph) -> Result<(), Box<dyn std::error::Error>> {
     match &im.pending_error {
         Some(message) => Err(message.clone().into()),
         None => Ok(()),
@@ -1546,37 +1545,37 @@ struct GraphImageRequest<'a> {
 }
 
 /// The image step and the graph element parser, after the option parser checked
-/// the time range. The flag reports a parser that stopped
-/// without an error, after which RRDtool keeps the elements read so far.
+/// the time range.
 fn prepare_graph_image(
     request: GraphImageRequest<'_>,
-) -> Result<(rondi::graph::GraphImage, bool), Box<dyn std::error::Error>> {
+) -> Result<rondi::graph::Graph, Box<dyn std::error::Error>> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
     let (start, end) = (request.start, request.end);
     let step = request.step.max((end - start) / request.xsize.max(1));
-    let mut im = rondi::graph::GraphImage::new(start, end, step.max(0) as u64);
-    im.daemon_addr = request
+    let mut im = rondi::graph::Graph::new(start, end, step.max(0) as u64);
+    im.daemon = request
         .daemon
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok());
-    // newGraphDescription starts each DEF window as absolute times at the
-    // image window and parses only the given `start=`/`end=`.
+    // Each DEF window starts as the image window in absolute times; only a
+    // given `start=`/`end=` is parsed (GR-43).
     let resolve = |start_spec: Option<&str>, end_spec: Option<&str>, start: i64, end: i64| {
         resolve_window(start_spec, end_spec, (start, end), now)
     };
-    match im.graph_script(request.elements, &resolve) {
-        Ok(()) => Ok((im, false)),
-        Err(rondi::graph::ScriptError::Silent) => Ok((im, true)),
-        Err(rondi::graph::ScriptError::Error(message)) => Err(message.into()),
+    let parsed = im.parse_elements(request.elements, &resolve);
+    // GR-96: what `debug=` asked for is written as each element is read,
+    // so it precedes an error in a later element.
+    eprint!("{}", std::mem::take(&mut im.debug));
+    match parsed {
+        Ok(()) => Ok(im),
+        Err(error) => Err(error.to_string().into()),
     }
 }
 
-/// `data_fetch` (flushing each DEF's file through its rrdcached first) and
-/// `data_calc`.
-fn flush_and_prepare_data(
-    im: &mut rondi::graph::GraphImage,
-) -> Result<(), Box<dyn std::error::Error>> {
+/// Reads every DEF, flushing its file through its rrdcached first, and
+/// computes the CDEFs, VDEFs and SHIFTs (GR-26, GR-47 to GR-49).
+fn flush_and_prepare_data(im: &mut rondi::graph::Graph) -> Result<(), Box<dyn std::error::Error>> {
     let mut flushed = std::collections::HashSet::new();
     let mut flush_error = None::<Box<dyn std::error::Error>>;
     let mut hook = |address: &str, filename: &str| {
@@ -1589,8 +1588,8 @@ fn flush_and_prepare_data(
                 flushed.insert(key);
                 Ok(None)
             }
-            // data_fetch treats a failed rrdc_connect as "no daemon" and
-            // reads the local file, leaving the error set.
+            // A daemon that cannot be reached counts as no daemon: the local
+            // file is read and the error stays set (GR-26).
             Err(error) if error.is::<RrdcachedConnectError>() => Ok(Some(error.to_string())),
             Err(error) => {
                 let message = error.to_string();
@@ -1599,12 +1598,12 @@ fn flush_and_prepare_data(
             }
         }
     };
-    let fetched = im.data_fetch(&mut hook);
+    let fetched = im.fetch(&mut hook);
     if let Some(error) = flush_error {
         return Err(error);
     }
     fetched?;
-    im.data_calc()?;
+    im.compute()?;
     Ok(())
 }
 
@@ -1672,7 +1671,7 @@ fn render_xport(args: &[String]) -> Result<(String, Option<String>), Box<dyn std
         .as_secs() as i64;
     let xport = graph_args::parse_xport(args, now)?;
     let (json, show_time, enum_ds) = (xport.json, xport.show_time, xport.enum_ds);
-    let (mut im, _) = prepare_graph_image(GraphImageRequest {
+    let mut im = prepare_graph_image(GraphImageRequest {
         start: xport.start,
         end: xport.end,
         step: xport.step,
@@ -1680,68 +1679,66 @@ fn render_xport(args: &[String]) -> Result<(String, Option<String>), Box<dyn std
         daemon: xport.daemon,
         elements: &xport.elements,
     })?;
-    if im.gdes.is_empty() {
+    if im.elements.is_empty() {
         return Err("can't make an xport without contents".into());
     }
     // Unlike graph, RRDtool's xport connects to the image-wide daemon up front
     // and gives up when that fails.
     #[cfg(unix)]
-    if let Some(address) = im
-        .daemon_addr
-        .as_deref()
-        .filter(|address| !address.is_empty())
-    {
+    if let Some(address) = im.daemon.as_deref().filter(|address| !address.is_empty()) {
         connect_rrdcached(address)?;
     }
     flush_and_prepare_data(&mut im)?;
-    let data = im.xport(false)?;
+    let data = im.export(false)?;
     let flags = u8::from(json) | (u8::from(show_time) << 1) | (u8::from(enum_ds) << 2);
     let (output, error) = format_xport_xmljson(flags, &mut im, &data, 1000, false, None);
     Ok((output, error.or_else(|| im.pending_error.clone())))
 }
 
 /// Turns graph elements into the native renderer's series, with one column
-/// per drawn element on the common xport grid.
-fn graph_render_input(im: &rondi::graph::GraphImage) -> (RenderedGraphXport, Vec<GraphSeries>) {
-    use rondi::graph::Gf;
+/// per drawn element on the grid the exports use (GR-48, GR-92).
+fn graph_render_input(
+    im: &rondi::graph::Graph,
+) -> Result<(RenderedGraphXport, Vec<GraphSeries>), rondi::StoreError> {
+    use rondi::graph::Kind;
     let mut series = Vec::new();
     let mut sources = Vec::new();
-    for (index, element) in im.gdes.iter().enumerate() {
-        let style = match element.gf {
-            Gf::Line => "line",
-            Gf::Area => "area",
-            Gf::Tick => "tick",
-            Gf::Hrule => "hrule",
-            Gf::Vrule => "vrule",
+    for (index, element) in im.elements.iter().enumerate() {
+        let style = match element.kind {
+            Kind::Line => "line",
+            Kind::Area => "area",
+            Kind::Tick => "tick",
+            Kind::Hrule => "hrule",
+            Kind::Vrule => "vrule",
             _ => continue,
         };
-        let (rule_value, rule_time) = match element.gf {
-            Gf::Hrule => (Some(element.yrule), None),
-            Gf::Vrule => (None, Some(element.xrule)),
+        let (rule_value, rule_time) = match element.kind {
+            Kind::Hrule => (Some(element.value), None),
+            Kind::Vrule => (None, Some(element.time)),
             _ => (None, None),
         };
         let variable = format!("#{index}");
-        if matches!(element.gf, Gf::Line | Gf::Area | Gf::Tick) {
-            sources.push((variable.clone(), element.vidx, element.yrule));
+        if matches!(element.kind, Kind::Line | Kind::Area | Kind::Tick) {
+            sources.push((variable.clone(), element.source, element.value));
         }
         series.push(GraphSeries {
             variable,
             style,
-            line_width: match element.gf {
-                Gf::Line => element.linewidth,
-                Gf::Area => 0.0,
+            line_width: match element.kind {
+                Kind::Line => element.line_width,
+                Kind::Area => 0.0,
                 _ => 1.0,
             },
             stack: element.stack,
             color: element.color,
             color2: element.color2,
-            grad_height: if element.gf == Gf::Area {
-                element.gradheight
+            grad_height: if element.kind == Kind::Area {
+                element.gradient_height
             } else {
                 0.0
             },
-            tick_fraction: if element.gf == Gf::Tick {
-                element.yrule
+            tick_fraction: if element.kind == Kind::Tick {
+                element.value
             } else {
                 0.0
             },
@@ -1751,29 +1748,19 @@ fn graph_render_input(im: &rondi::graph::GraphImage) -> (RenderedGraphXport, Vec
             dash_offset: element.dash_offset,
         });
     }
-    let step = sources
+    let used: Vec<usize> = sources
         .iter()
-        .filter_map(|(_, vidx, _)| vidx.map(|vidx| im.gdes[vidx].step))
-        .fold(
-            0,
-            |step, next| if step == 0 { next } else { gcd_u64(step, next) },
-        );
-    let step = if step == 0 { im.step.max(1) } else { step };
-    let step_i64 = step as i64;
-    let start = im.start - im.start.rem_euclid(step_i64);
-    let mut end = im.end - im.end.rem_euclid(step_i64);
-    if im.end > end {
-        end += step_i64;
-    }
-    let row_count = usize::try_from((end - start) / step_i64).unwrap_or(0);
-    let rows = (0..row_count)
+        .filter_map(|(_, source, _)| *source)
+        .collect();
+    let grid = im.grid(&used)?;
+    let rows = (0..grid.rows)
         .map(|row| {
-            let now = start + row as i64 * step_i64;
+            let now = grid.time(row);
             sources
                 .iter()
-                .map(|(_, vidx, yrule)| {
-                    let value = match vidx {
-                        Some(vidx) => im.value_at(*vidx, now),
+                .map(|(_, source, yrule)| {
+                    let value = match source {
+                        Some(source) => im.value_at(*source, now),
                         None => *yrule,
                     };
                     (!value.is_nan()).then_some(value)
@@ -1781,22 +1768,15 @@ fn graph_render_input(im: &rondi::graph::GraphImage) -> (RenderedGraphXport, Vec
                 .collect()
         })
         .collect();
-    (
+    Ok((
         RenderedGraphXport {
-            start,
-            end,
+            start: grid.start,
+            end: grid.end,
             variables: sources.into_iter().map(|(name, _, _)| name).collect(),
             rows,
         },
         series,
-    )
-}
-
-fn gcd_u64(mut left: u64, mut right: u64) -> u64 {
-    while right != 0 {
-        (left, right) = (right, left % right);
-    }
-    left
+    ))
 }
 
 struct RenderedGraphXport {
@@ -2873,19 +2853,20 @@ fn escape_json(text: &str) -> String {
 fn format_xport_addprints(
     json: bool,
     output: &mut String,
-    im: &mut rondi::graph::GraphImage,
+    im: &mut rondi::graph::Graph,
     si_base: u32,
 ) -> Result<(), String> {
-    use rondi::graph::Gf;
+    use rondi::graph::Kind;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs() as i64);
-    let mut tmvdef = local_tm(now);
+    let mut vdef_time = local_tm(now);
     let (mut prints, mut gprints, mut rules) = (String::new(), String::new(), String::new());
     let mut si_scale = rondi::format_value::UnitScale::new(si_base);
-    // time_clean writes to a different buffer than the one printed, so a
-    // never-set VDEF time repeats the previous formatted text.
-    let mut dbuf = String::new();
+    // Compatibility: a VDEF without a time repeats the text the previous
+    // time-formatted entry printed.
+    // Provenance: black-box compatibility test (graphv print keys).
+    let mut last_text = String::new();
     let entry = |tag: &str, text: &str| {
         if json {
             format!(",\n        {{ \"{tag}\": \"{text}\" }}")
@@ -2893,46 +2874,46 @@ fn format_xport_addprints(
             format!("        <{tag}>{text}</{tag}>\n")
         }
     };
-    for i in 0..im.gdes.len() {
-        let element = &im.gdes[i];
-        match element.gf {
-            Gf::Print | Gf::Gprint => {
-                let source = element.vidx.map(|vidx| &im.gdes[vidx]);
-                if let Some(source) = source.filter(|source| source.gf == Gf::Vdef) {
-                    tmvdef = local_tm(source.vf.when);
+    for i in 0..im.elements.len() {
+        let element = &im.elements[i];
+        match element.kind {
+            Kind::Print | Kind::Gprint => {
+                let source = element.source.map(|index| &im.elements[index]);
+                if let Some(source) = source.filter(|source| source.kind == Kind::Vdef) {
+                    vdef_time = local_tm(source.vdef.time.unwrap_or(0));
                 }
-                let never = source.is_some_and(|source| source.vf.never);
-                let printval = im.print_value(i);
-                let element = &im.gdes[i];
-                if element.strftm {
+                let never = source.is_some_and(|source| source.vdef.time.is_none());
+                let value = im.print_value(i);
+                let element = &im.elements[i];
+                if element.strftime {
                     if !never {
-                        dbuf = print_format::strftime_text(&element.format, &tmvdef, 1024);
+                        last_text = print_format::strftime_text(&element.format, &vdef_time, 1024);
                     }
                 } else {
-                    // bad_format_print runs before the "%S" rewrite here.
+                    // The format is validated before `%S` is rewritten.
                     let original = element.format.clone();
                     let mut format = original.clone();
-                    match print_format::xport_print_text(printval, &mut format, &mut si_scale) {
-                        Ok(text) => dbuf = text,
+                    match print_format::xport_print_text(value, &mut format, &mut si_scale) {
+                        Ok(text) => last_text = text,
                         Err(_) => {
                             return Err(format!("bad format for PRINT in \"{original}'"));
                         }
                     }
-                    im.gdes[i].format = format;
+                    im.elements[i].format = format;
                 }
                 let text = if json {
-                    escape_json(&dbuf)
+                    escape_json(&last_text)
                 } else {
-                    dbuf.clone()
+                    last_text.clone()
                 };
-                let (tag, buffer) = if im.gdes[i].gf == Gf::Print {
+                let (tag, buffer) = if im.elements[i].kind == Kind::Print {
                     ("print", &mut prints)
                 } else {
                     ("gprint", &mut gprints)
                 };
                 buffer.push_str(&entry(tag, &text));
             }
-            Gf::Comment => {
+            Kind::Comment => {
                 let text = if json {
                     escape_json(&element.legend)
                 } else {
@@ -2940,7 +2921,7 @@ fn format_xport_addprints(
                 };
                 gprints.push_str(&entry("comment", &text));
             }
-            Gf::Line => {
+            Kind::Line => {
                 let legend = element
                     .legend
                     .trim_start_matches(|ch: char| ch.is_ascii_whitespace());
@@ -2951,10 +2932,9 @@ fn format_xport_addprints(
                 };
                 gprints.push_str(&entry("line", &text));
             }
-            Gf::Area => gprints.push_str(&entry("area", &element.legend)),
-            Gf::Stack => gprints.push_str(&entry("stack", &element.legend)),
-            Gf::TextAlign => {
-                let align = match element.txtalign {
+            Kind::Area => gprints.push_str(&entry("area", &element.legend)),
+            Kind::TextAlign => {
+                let align = match element.align {
                     rondi::graph::TextAlign::Left => "left",
                     rondi::graph::TextAlign::Right => "right",
                     rondi::graph::TextAlign::Center => "center",
@@ -2962,8 +2942,12 @@ fn format_xport_addprints(
                 };
                 gprints.push_str(&entry("align", align));
             }
-            Gf::Hrule => rules.push_str(&entry("hrule", &format_xport_value(element.vf.val))),
-            Gf::Vrule => rules.push_str(&entry("vrule", &element.vf.when.to_string())),
+            // Compatibility: the rules section lists a horizontal rule as a
+            // zero in the value format and a vertical rule as the integer 0,
+            // whatever position the rule has.
+            // Provenance: black-box compatibility test (graph-ruleexport-001 to -024).
+            Kind::Hrule => rules.push_str(&entry("hrule", &format_xport_value(0.0))),
+            Kind::Vrule => rules.push_str(&entry("vrule", "0")),
             _ => {}
         }
     }
@@ -3002,8 +2986,8 @@ fn format_xport_addprints(
 /// the message are both returned.
 fn format_xport_xmljson(
     flags: u8,
-    im: &mut rondi::graph::GraphImage,
-    data: &rondi::graph::XportData,
+    im: &mut rondi::graph::Graph,
+    data: &rondi::graph::Export,
     si_base: u32,
     in_memory: bool,
     time_format: Option<&str>,
@@ -3131,7 +3115,7 @@ fn export_time(time: i64, format: Option<&str>) -> String {
 /// Writes xport output as CSV, TSV or SSV.
 fn format_xport_sv(
     separator: char,
-    data: &rondi::graph::XportData,
+    data: &rondi::graph::Export,
     time_format: Option<&str>,
 ) -> String {
     let mut output = String::from("\"time\"");
@@ -4494,11 +4478,10 @@ fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Error connecting to rrdcached");
         return Ok(());
     }
-    // A failed listing prints strerror(errno) without a
-    // newline and the command still succeeds.
-    match rrd_list_r(recursive, &directory.to_string_lossy()) {
-        Ok(Some(text)) => print!("{text}"),
-        Ok(None) => eprint!("{}", system_error_text(0)),
+    // A failed listing prints the system error text without a newline and
+    // the command still succeeds.
+    match frontend::list::list_local(recursive, directory.as_os_str()) {
+        Ok(bytes) => std::io::Write::write_all(&mut std::io::stdout(), &bytes)?,
         Err(errno) => eprint!("{}", system_error_text(errno)),
     }
     Ok(())
@@ -4893,147 +4876,6 @@ fn send_rrdcached_multiline_command(
     Err("rrdcached Unix socket commands are unavailable on this platform".into())
 }
 
-/// Lists a directory. `Ok(None)` is an empty listing, which
-/// upstream reports through errno 0; `Err` carries errno.
-#[cfg(unix)]
-fn rrd_list_r(recursive: bool, dirname: &str) -> Result<Option<String>, libc::c_int> {
-    // Prevent moving up the directory tree.
-    if dirname.contains("..") {
-        return Err(libc::EACCES);
-    }
-    let c_dirname = std::ffi::CString::new(dirname).map_err(|_| libc::ENOENT)?;
-    if dirname.contains(['*', '?']) {
-        if recursive {
-            return Err(libc::EINVAL);
-        }
-        let mut out = String::new();
-        // SAFETY: glob fills `buffer`, its paths are read while it is alive,
-        // and globfree releases it on every path.
-        unsafe {
-            let mut buffer = std::mem::zeroed::<libc::glob_t>();
-            if libc::glob(c_dirname.as_ptr(), 0, None, &mut buffer) != 0 {
-                libc::globfree(&mut buffer);
-                return Err(libc::ENOENT);
-            }
-            for index in 0..buffer.gl_pathc as usize {
-                let path = std::ffi::CStr::from_ptr(*buffer.gl_pathv.add(index)).to_bytes();
-                if let Some(slash) = path.iter().rposition(|byte| *byte == b'/') {
-                    out.push_str(&String::from_utf8_lossy(&path[slash + 1..]));
-                    out.push('\n');
-                }
-            }
-            libc::globfree(&mut buffer);
-        }
-        return if out.is_empty() {
-            Err(libc::ENOENT)
-        } else {
-            Ok(Some(out))
-        };
-    }
-    // A name whose first ".rrd" ends it (strstr) is one file.
-    if dirname
-        .find(".rrd")
-        .is_some_and(|index| index + 4 == dirname.len())
-    {
-        let metadata = c_stat(&c_dirname)?;
-        if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
-            return Err(libc::ENXIO);
-        }
-        return match dirname.rfind('/') {
-            Some(slash) => Ok(Some(format!("{}\n", &dirname[slash + 1..]))),
-            None => Err(libc::EINVAL),
-        };
-    }
-    let metadata = c_stat(&c_dirname)?;
-    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
-        return Err(libc::ENOTDIR);
-    }
-    rrd_list_rec(recursive, dirname.as_bytes(), dirname.as_bytes())
-}
-
-#[cfg(unix)]
-fn c_stat(path: &std::ffi::CStr) -> Result<libc::stat, libc::c_int> {
-    // SAFETY: stat writes one struct into the zeroed buffer.
-    unsafe {
-        let mut status = std::mem::zeroed::<libc::stat>();
-        if libc::stat(path.as_ptr(), &mut status) != 0 {
-            return Err(last_os_errno());
-        }
-        Ok(status)
-    }
-}
-
-/// Recursive listing: readdir order, directories listed unless
-/// recursing, regular files only with an `.rrd` suffix.
-#[cfg(unix)]
-fn rrd_list_rec(
-    recursive: bool,
-    root: &[u8],
-    dirname: &[u8],
-) -> Result<Option<String>, libc::c_int> {
-    let c_dirname = std::ffi::CString::new(dirname).map_err(|_| libc::ENOENT)?;
-    let mut out = None::<String>;
-    // SAFETY: the directory handle is owned here and closed before return;
-    // each entry name is NUL-terminated.
-    unsafe {
-        let dir = libc::opendir(c_dirname.as_ptr());
-        if dir.is_null() {
-            return Err(last_os_errno());
-        }
-        loop {
-            let entry = libc::readdir(dir);
-            if entry.is_null() {
-                break;
-            }
-            let name = std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()).to_bytes();
-            if name == b"." || name == b".." {
-                continue;
-            }
-            if dirname.len() + name.len() + 1 >= libc::PATH_MAX as usize {
-                continue;
-            }
-            let current = [dirname, b"/", name].concat();
-            let Ok(c_current) = std::ffi::CString::new(current.clone()) else {
-                continue;
-            };
-            let Ok(status) = c_stat(&c_current) else {
-                continue;
-            };
-            let kind = status.st_mode & libc::S_IFMT;
-            if kind == libc::S_IFDIR && recursive {
-                if let Ok(Some(nested)) = rrd_list_rec(recursive, root, &current) {
-                    out.get_or_insert_with(String::new).push_str(&nested);
-                }
-                continue;
-            }
-            if kind == libc::S_IFREG {
-                let suffix = name.windows(4).position(|window| window == b".rrd");
-                if suffix.is_none_or(|index| index + 4 != name.len()) {
-                    continue;
-                }
-            }
-            // move_past_prefix: skip the characters shared with the root.
-            let mut short = &current[..];
-            if root.len() <= current.len() {
-                let shared = root
-                    .iter()
-                    .zip(&current)
-                    .take_while(|(left, right)| left == right)
-                    .count();
-                short = &current[shared..];
-            }
-            if short.first() == Some(&b'/') {
-                short = &short[1..];
-            }
-            let out = out.get_or_insert_with(String::new);
-            out.push_str(&String::from_utf8_lossy(short));
-            out.push('\n');
-        }
-        libc::closedir(dir);
-    }
-    Ok(out)
-}
-
 fn format_info_float(value: f64) -> String {
     if value.is_nan() {
         "NaN".to_owned()
@@ -5237,15 +5079,14 @@ mod xml_output_tests {
     // well-formed XML when they contain markup characters.
     #[test]
     fn writes_graph_xport_text_nodes_verbatim() {
-        let mut im = rondi::graph::GraphImage::new(1_000_000_000, 1_000_000_010, 10);
+        let mut im = rondi::graph::Graph::new(1_000_000_000, 1_000_000_010, 10);
         let script = ["DEF:rate=unused.rrd:x:AVERAGE", "COMMENT:<ok & done>"].map(String::from);
-        im.graph_script(&script, &|_, _, start, end| Ok((start, end)))
+        im.parse_elements(&script, &|_, _, start, end| Ok((start, end)))
             .unwrap();
-        let data = rondi::graph::XportData {
+        let data = rondi::graph::Export {
             start: 100,
             end: 110,
             step: 10,
-            columns: vec![0],
             legends: vec!["load & <peak>".to_owned()],
             rows: vec![vec![2.0]],
         };
@@ -5293,18 +5134,22 @@ mod graph_stroke_tests {
             .map(|name| format!("DEF:{name}=unused.rrd:x:AVERAGE"))
             .collect();
         script.push(definition.to_owned());
-        let mut im = rondi::graph::GraphImage::new(1_000_000_000, 1_000_000_100, 10);
-        im.graph_script(&script, &|_, _, start, end| Ok((start, end)))?;
-        let last = im.gdes.last().expect("a drawing element");
-        let source = last.vname.clone();
-        // data_proc leaves TICKs and skipscale elements out of the range.
-        let skip_scale = last.skipscale || last.gf == rondi::graph::Gf::Tick;
+        let mut im = rondi::graph::Graph::new(1_000_000_000, 1_000_000_100, 10);
+        im.parse_elements(&script, &|_, _, start, end| Ok((start, end)))?;
+        let last = im.elements.last().expect("a drawing element");
+        let source = last
+            .source
+            .and_then(|source| im.elements[source].name.clone())
+            .unwrap_or_default();
+        // TICKs and skipscale elements do not take part in the value range.
+        let skip_scale = last.skip_scale || last.kind == rondi::graph::Kind::Tick;
         let legend = last
             .legend
             .strip_prefix("  ")
             .unwrap_or(&last.legend)
             .to_owned();
-        let (_, series) = graph_render_input(&im);
+        let (_, series) = graph_render_input(&im)
+            .map_err(|error| rondi::graph::ScriptError(error.to_string()))?;
         let mut series = series.into_iter().last().expect("a drawing element");
         series.variable = source;
         Ok(TestElement {
@@ -5312,6 +5157,50 @@ mod graph_stroke_tests {
             legend,
             skip_scale,
         })
+    }
+
+    #[test]
+    fn render_grid_is_capped_for_coprime_steps() {
+        // 1800 s and 1801 s series share a 1 s grid, so a window of more
+        // than 10 million seconds is refused instead of allocated.
+        let script = [
+            "DEF:a=a.rrd:x:AVERAGE".to_owned(),
+            "DEF:b=b.rrd:x:AVERAGE".to_owned(),
+            "LINE1:a#ff0000".to_owned(),
+            "LINE1:b#0000ff".to_owned(),
+        ];
+        let window = |seconds: i64| {
+            let start = 1_000_000_800;
+            let mut im = rondi::graph::Graph::new(start, start + seconds, 1);
+            im.parse_elements(&script, &|_, _, start, end| Ok((start, end)))
+                .unwrap();
+            im.elements[0].series = rondi::graph::Series {
+                start,
+                step: 1800,
+                values: vec![1.0; 4],
+            };
+            im.elements[1].series = rondi::graph::Series {
+                start,
+                step: 1801,
+                values: vec![2.0; 4],
+            };
+            im
+        };
+        let error = graph_render_input(&window(20_000_000)).err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "unsupported RRD operation: RRD fetch range exceeds the 10 million row safety limit"
+        );
+        assert!(window(20_000_000).export(true).is_err());
+        let (rendered, _) = graph_render_input(&window(7200)).unwrap();
+        assert_eq!(rendered.rows.len(), 7200);
+        assert_eq!(rendered.rows[0], [Some(1.0), Some(2.0)]);
+        let exported = window(7200).export(true).unwrap();
+        assert_eq!(
+            (exported.start, exported.end),
+            (rendered.start, rendered.end)
+        );
+        assert_eq!(exported.rows.len(), rendered.rows.len());
     }
 
     fn parse_graph_series(
