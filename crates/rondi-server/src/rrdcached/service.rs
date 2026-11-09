@@ -619,8 +619,7 @@ impl Shared {
         let result = match file {
             Ok(file) => {
                 let values = values.iter().map(String::as_str).collect::<Vec<_>>();
-                rondi::update_rrd_text_file(file, path, None, &values, false)
-                    .1
+                rondi::update_rrd_text_file_quiet(file, path, None, &values, false)
                     .map_err(|error| error.to_string())
             }
             Err(error) => Err(opening(name, &error)),

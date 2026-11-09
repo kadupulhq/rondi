@@ -75,6 +75,40 @@ pub fn update_rrd_text_file(
     (summaries, result)
 }
 
+/// [`update_rrd_text`] without the summaries, which a long gap would
+/// otherwise build one per row.
+pub fn update_rrd_text_quiet(
+    path: impl AsRef<Path>,
+    template: Option<&str>,
+    arguments: &[&str],
+    skip_past_updates: bool,
+) -> Result<(), StoreError> {
+    let path = path.as_ref();
+    update_rrd_text_file_quiet(
+        open_rrd_write(path)?,
+        path,
+        template,
+        arguments,
+        skip_past_updates,
+    )
+}
+
+/// [`update_rrd_text_quiet`] on a file the caller opened for reading and
+/// writing. `path` names it in errors.
+pub fn update_rrd_text_file_quiet(
+    file: File,
+    path: &Path,
+    template: Option<&str>,
+    arguments: &[&str],
+    skip_past_updates: bool,
+) -> Result<(), StoreError> {
+    let input = Input::Text {
+        template,
+        arguments,
+    };
+    apply(file, path, &input, skip_past_updates, None)
+}
+
 /// Applies updates whose readings are already split per data source.
 pub fn update_rrd_raw_batch(
     path: impl AsRef<Path>,

@@ -52,6 +52,7 @@ pub use update::{
     RrdRawUpdate, RrdUpdateSummary, update_rrd_file, update_rrd_file_precise, update_rrd_raw_batch,
     update_rrd_raw_batch_file, update_rrd_raw_values, update_rrd_raw_values_precise,
     update_rrd_raw_values_precise_verbose, update_rrd_raw_values_verbose, update_rrd_text,
-    update_rrd_text_file, update_rrd_values, update_rrd_values_verbose,
+    update_rrd_text_file, update_rrd_text_file_quiet, update_rrd_text_quiet, update_rrd_values,
+    update_rrd_values_verbose,
 };
 pub use vdef::{VdefError, VdefFunction, VdefResult, evaluate_vdef};
