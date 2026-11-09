@@ -788,9 +788,10 @@ mod tests {
         let wide = format!("DEF:a={file}:x:AVERAGE:step=1:end={}", T + 10_000_001);
         let mut wide = graph(&[&wide]);
         wide.allow_missing_ds = true;
-        assert!(matches!(
-            wide.fetch(&mut no_daemon),
-            Err(StoreError::RrdUnsupported(_))
-        ));
+        let message = wide.fetch(&mut no_daemon).unwrap_err().to_string();
+        assert!(
+            message.contains("RRD fetch range exceeds the 10 million row safety limit"),
+            "{message}"
+        );
     }
 }

@@ -80,7 +80,7 @@ pub(crate) fn format_print_items(
         let kind = im.elements[index].kind;
         let vdef = im.elements[index]
             .source
-            .map(|vidx| &im.elements[vidx])
+            .map(|index| &im.elements[index])
             .filter(|source| source.kind == Kind::Vdef)
             .map(|source| source.vdef);
         match kind {

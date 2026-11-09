@@ -55,8 +55,8 @@ impl Fixture {
         script
     }
 
-    /// Runs the graph engine's script parsing, data_fetch, data_calc and
-    /// xport steps, as `rrdtool xport` does after option parsing.
+    /// Runs the script parsing, the data fetch, the CDEF and VDEF calculation and the
+    /// export steps, as `rrdtool xport` does after option parsing.
     fn calculate(&self, script: &[String]) -> (Graph, Export) {
         let mut image = Graph::new(self.start, self.end, 1);
         let resolve = |_: Option<&str>, _: Option<&str>, start: i64, end: i64| Ok((start, end));
