@@ -14,7 +14,7 @@ mod print_format;
 /// The `rrdcached` personality: reads the daemon's options and starts it.
 mod rrdcached;
 
-use frontend::{OptionScanner, OptionSpec, RawMessage, last_os_errno, system_error_text};
+use frontend::{OptionScanner, OptionSpec, RawMessage, system_error_text};
 use print_format::{PrintOutcome, local_tm, printf_double as c_printf_double};
 
 use clap::{Parser, Subcommand};
@@ -4493,11 +4493,10 @@ fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         eprintln!("Error connecting to rrdcached");
         return Ok(());
     }
-    // A failed listing prints strerror(errno) without a
-    // newline and the command still succeeds.
-    match rrd_list_r(recursive, &directory.to_string_lossy()) {
-        Ok(Some(text)) => print!("{text}"),
-        Ok(None) => eprint!("{}", system_error_text(0)),
+    // A failed listing prints the system error text without a newline and
+    // the command still succeeds.
+    match frontend::list::list_local(recursive, directory.as_os_str()) {
+        Ok(bytes) => std::io::Write::write_all(&mut std::io::stdout(), &bytes)?,
         Err(errno) => eprint!("{}", system_error_text(errno)),
     }
     Ok(())
@@ -4890,147 +4889,6 @@ fn send_rrdcached_multiline_command(
     _command: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
     Err("rrdcached Unix socket commands are unavailable on this platform".into())
-}
-
-/// Lists a directory. `Ok(None)` is an empty listing, which
-/// upstream reports through errno 0; `Err` carries errno.
-#[cfg(unix)]
-fn rrd_list_r(recursive: bool, dirname: &str) -> Result<Option<String>, libc::c_int> {
-    // Prevent moving up the directory tree.
-    if dirname.contains("..") {
-        return Err(libc::EACCES);
-    }
-    let c_dirname = std::ffi::CString::new(dirname).map_err(|_| libc::ENOENT)?;
-    if dirname.contains(['*', '?']) {
-        if recursive {
-            return Err(libc::EINVAL);
-        }
-        let mut out = String::new();
-        // SAFETY: glob fills `buffer`, its paths are read while it is alive,
-        // and globfree releases it on every path.
-        unsafe {
-            let mut buffer = std::mem::zeroed::<libc::glob_t>();
-            if libc::glob(c_dirname.as_ptr(), 0, None, &mut buffer) != 0 {
-                libc::globfree(&mut buffer);
-                return Err(libc::ENOENT);
-            }
-            for index in 0..buffer.gl_pathc as usize {
-                let path = std::ffi::CStr::from_ptr(*buffer.gl_pathv.add(index)).to_bytes();
-                if let Some(slash) = path.iter().rposition(|byte| *byte == b'/') {
-                    out.push_str(&String::from_utf8_lossy(&path[slash + 1..]));
-                    out.push('\n');
-                }
-            }
-            libc::globfree(&mut buffer);
-        }
-        return if out.is_empty() {
-            Err(libc::ENOENT)
-        } else {
-            Ok(Some(out))
-        };
-    }
-    // A name whose first ".rrd" ends it (strstr) is one file.
-    if dirname
-        .find(".rrd")
-        .is_some_and(|index| index + 4 == dirname.len())
-    {
-        let metadata = c_stat(&c_dirname)?;
-        if metadata.st_mode & libc::S_IFMT != libc::S_IFREG {
-            return Err(libc::ENXIO);
-        }
-        return match dirname.rfind('/') {
-            Some(slash) => Ok(Some(format!("{}\n", &dirname[slash + 1..]))),
-            None => Err(libc::EINVAL),
-        };
-    }
-    let metadata = c_stat(&c_dirname)?;
-    if metadata.st_mode & libc::S_IFMT != libc::S_IFDIR {
-        return Err(libc::ENOTDIR);
-    }
-    rrd_list_rec(recursive, dirname.as_bytes(), dirname.as_bytes())
-}
-
-#[cfg(unix)]
-fn c_stat(path: &std::ffi::CStr) -> Result<libc::stat, libc::c_int> {
-    // SAFETY: stat writes one struct into the zeroed buffer.
-    unsafe {
-        let mut status = std::mem::zeroed::<libc::stat>();
-        if libc::stat(path.as_ptr(), &mut status) != 0 {
-            return Err(last_os_errno());
-        }
-        Ok(status)
-    }
-}
-
-/// Recursive listing: readdir order, directories listed unless
-/// recursing, regular files only with an `.rrd` suffix.
-#[cfg(unix)]
-fn rrd_list_rec(
-    recursive: bool,
-    root: &[u8],
-    dirname: &[u8],
-) -> Result<Option<String>, libc::c_int> {
-    let c_dirname = std::ffi::CString::new(dirname).map_err(|_| libc::ENOENT)?;
-    let mut out = None::<String>;
-    // SAFETY: the directory handle is owned here and closed before return;
-    // each entry name is NUL-terminated.
-    unsafe {
-        let dir = libc::opendir(c_dirname.as_ptr());
-        if dir.is_null() {
-            return Err(last_os_errno());
-        }
-        loop {
-            let entry = libc::readdir(dir);
-            if entry.is_null() {
-                break;
-            }
-            let name = std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()).to_bytes();
-            if name == b"." || name == b".." {
-                continue;
-            }
-            if dirname.len() + name.len() + 1 >= libc::PATH_MAX as usize {
-                continue;
-            }
-            let current = [dirname, b"/", name].concat();
-            let Ok(c_current) = std::ffi::CString::new(current.clone()) else {
-                continue;
-            };
-            let Ok(status) = c_stat(&c_current) else {
-                continue;
-            };
-            let kind = status.st_mode & libc::S_IFMT;
-            if kind == libc::S_IFDIR && recursive {
-                if let Ok(Some(nested)) = rrd_list_rec(recursive, root, &current) {
-                    out.get_or_insert_with(String::new).push_str(&nested);
-                }
-                continue;
-            }
-            if kind == libc::S_IFREG {
-                let suffix = name.windows(4).position(|window| window == b".rrd");
-                if suffix.is_none_or(|index| index + 4 != name.len()) {
-                    continue;
-                }
-            }
-            // move_past_prefix: skip the characters shared with the root.
-            let mut short = &current[..];
-            if root.len() <= current.len() {
-                let shared = root
-                    .iter()
-                    .zip(&current)
-                    .take_while(|(left, right)| left == right)
-                    .count();
-                short = &current[shared..];
-            }
-            if short.first() == Some(&b'/') {
-                short = &short[1..];
-            }
-            let out = out.get_or_insert_with(String::new);
-            out.push_str(&String::from_utf8_lossy(short));
-            out.push('\n');
-        }
-        libc::closedir(dir);
-    }
-    Ok(out)
 }
 
 fn format_info_float(value: f64) -> String {
