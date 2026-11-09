@@ -511,6 +511,21 @@ def def_cases() -> None:
         'DEF:x=e.rrd:x:AVERAGE', 'PRINT:x:AVERAGE:%lf', LINE)
     run('def', 'graph', '/dev/null', *RANGE,
         'DEF:x=d.rrd:x:AVERAGE', 'PRINT:x:AVERAGE:%lf', LINE)
+    # A DEF may take a name already defined: it is still read, and every
+    # reference resolves to the first definition (GR-34).
+    defs = [DEFX, 'VDEF:v=x,MAXIMUM', 'CDEF:c=x,2,*']
+    for elements in [
+            [*defs, 'DEF:c=f.rrd:y:AVERAGE', 'PRINT:c:MAX:%lf'],
+            [*defs, 'DEF:v=f.rrd:y:AVERAGE', 'PRINT:v:%lf'],
+            [*defs, 'DEF:v=f.rrd:y:AVERAGE', 'PRINT:v:MAX:%lf'],
+            [*defs, 'DEF:x=f.rrd:y:AVERAGE', 'CDEF:e=x,1,*',
+             'PRINT:e:MAX:%lf', 'VDEF:m=x,MAXIMUM', 'PRINT:m:%lf'],
+            ['DEF:x=f.rrd:x:AVERAGE:step=300', 'DEF:x=f.rrd:y:AVERAGE',
+             'PRINT:x:MAX:%lf'],
+            [DEFX, 'DEF:x=missing.rrd:x:AVERAGE', 'PRINT:x:MAX:%lf'],
+            [DEFX, 'DEF:x=f.rrd:nope:AVERAGE', 'PRINT:x:MAX:%lf'],
+            [*defs, 'CDEF:c=x,3,*', 'PRINT:c:MAX:%lf']]:
+        run('def', 'graph', '/dev/null', *RANGE, *elements)
 
 
 def cdef_cases() -> None:
@@ -654,6 +669,20 @@ def print_cases() -> None:
         env={'TZ': 'Asia/Kolkata'})
     run('print', 'graph', '/dev/null', *RANGE, DEFX, 'VDEF:v=x,MAXIMUM',
         'PRINT:v:%H\\:%M %Z:strftime', env={'TZ': 'Asia/Kolkata'})
+    # The CF form selects the same value as the matching VDEF, over a
+    # window whose last rows are unknown (GR-39).
+    tail = ['--start', T0, '--end', '1000001500', DEFX]
+    run('print', 'graph', '/dev/null', *tail, 'PRINT:x:LAST:%lf',
+        'PRINT:x:AVERAGE:%lf', 'PRINT:x:MIN:%lf', 'PRINT:x:MAX:%lf',
+        'VDEF:l=x,LAST', 'PRINT:l:%lf', 'PRINT:l:%s:strftime',
+        'VDEF:a=x,AVERAGE', 'PRINT:a:%lf', 'VDEF:n=x,MINIMUM', 'PRINT:n:%lf',
+        'VDEF:m=x,MAXIMUM', 'PRINT:m:%lf', 'PRINT:m:%s:strftime')
+    run('print', 'graphv', '/dev/null', *tail, 'GPRINT:x:LAST:%lf',
+        'GPRINT:x:AVERAGE:%lf', 'GPRINT:x:MIN:%lf', 'VDEF:l=x,LAST',
+        'GPRINT:l:%lf', 'PRINT:x:MAX:%lf', LINE)
+    run('print', 'graph', '/dev/null', *tail, 'CDEF:c=x,2,*',
+        'PRINT:c:LAST:%lf', 'PRINT:c:AVERAGE:%lf', 'VDEF:v=c,LAST',
+        'PRINT:v:%lf')
 
 
 def comment_cases() -> None:
@@ -713,6 +742,37 @@ def shift_cases() -> None:
         run('shift', 'graph', '-', *RANGE, DEFX, 'CDEF:c=x,2,*',
             'VDEF:v=x,TOTAL', 'VDEF:w=x,MAXIMUM', form, LINE,
             '--imgformat', 'CSV')
+    # Offset sources and the position of SHIFT among the elements that
+    # use the series (GR-38).
+    xp = ['xport', '--start', '1000003600', '--end', '1000021600', '-m',
+          '10']
+    a = 'DEF:a=d.rrd:x:AVERAGE:step=1800'
+    for elements in [
+            ['DEF:u=e.rrd:x:AVERAGE', 'VDEF:n=u,AVERAGE', 'SHIFT:a:n',
+             'XPORT:a'],
+            ['CDEF:k=a,0,*,-3600,+', 'VDEF:o=k,AVERAGE', 'SHIFT:a:o',
+             'XPORT:a'],
+            ['CDEF:k=a,0,*,3600,+', 'VDEF:o=k,FIRST', 'SHIFT:a:o',
+             'XPORT:a'],
+            ['SHIFT:a:3600', 'SHIFT:a:1800', 'XPORT:a'],
+            ['SHIFT:a:3600', 'SHIFT:a:-1800', 'XPORT:a'],
+            ['SHIFT:a:3600', 'SHIFT:a:0', 'XPORT:a'],
+            ['XPORT:a', 'SHIFT:a:3600'],
+            ['CDEF:c=a', 'SHIFT:a:3600', 'XPORT:c', 'XPORT:a'],
+            ['SHIFT:a:3600', 'CDEF:c=a', 'SHIFT:a:1800', 'XPORT:c',
+             'XPORT:a'],
+            ['CDEF:c=a,2,*', 'SHIFT:c:3600', 'XPORT:c', 'XPORT:a'],
+            ['CDEF:c=a,2,*', 'SHIFT:a:c', 'XPORT:a'],
+            ['SHIFT:a:a', 'XPORT:a']]:
+        run('shift', *xp, a, *elements)
+    window = ['--start', '1000003600', '--end', '1000021600']
+    for elements in [['VDEF:f=a,FIRST', 'SHIFT:a:3600'],
+                     ['SHIFT:a:3600', 'VDEF:f=a,FIRST']]:
+        run('shift', 'graph', '/dev/null', *window, a, *elements,
+            'PRINT:f:%s:strftime', 'PRINT:f:%lf', 'PRINT:a:LAST:%lf',
+            'PRINT:a:AVERAGE:%lf')
+    run('shift', 'graph', '-', *window, '-w', '10', a, 'LINE1:a#f00:a',
+        'SHIFT:a:3600', '-a', 'CSV')
 
 
 def textalign_cases() -> None:
@@ -738,6 +798,45 @@ def misc_element_cases() -> None:
     run('element', 'xport', *RANGE, DEFX, 'XPORT:x:leg', 'LINE1:x#f00')
     run('element', 'xport', *RANGE, DEFX, 'XPORT:x:leg', 'PRINT:x:MAX:%lf')
     run('element', 'xport', *RANGE, DEFX, 'XPORT:x:leg', 'COMMENT:hi')
+    # Which error wins: parsing, then reading the files, then formats
+    # (GR-35).
+    missing = 'DEF:x=missing.rrd:x:AVERAGE'
+    for elements in [
+            ['FOO:x', 'BAR:y'],
+            [missing, 'FOO:x'],
+            [missing, 'DEF:y=f.rrd:nope:AVERAGE', 'LINE1:x#f00'],
+            ['DEF:y=f.rrd:nope:AVERAGE', missing, 'LINE1:y#f00'],
+            [missing, 'CDEF:c=nope,1,+', 'LINE1:x#f00'],
+            [missing, 'VDEF:v=x,BOGUS', 'LINE1:x#f00'],
+            [missing, 'LINE1:nope#f00'],
+            [missing, 'PRINT:nope:MAX:%lf'],
+            [missing, 'LINE1:x#f00', 'SHIFT:x:abc'],
+            [missing, 'PRINT:x:MAX:%d'],
+            [missing, 'GPRINT:x:MAX:%d', 'LINE1:x#f00'],
+            [missing, 'LINE1:x#f00', '--imginfo', '%d'],
+            ['DEF:x=f.rrd:x:AVERAGE:start=abc', 'FOO:x'],
+            [DEFX, 'PRINT:x:MAX:%d', 'FOO:x'],
+            [DEFX, 'PRINT:x:MAX:%lf', 'DEF:z=missing.rrd:x:AVERAGE'],
+            [DEFX, 'GPRINT:x:MAX:%d', 'PRINT:x:MAX:%lf %lf'],
+            [DEFX, 'PRINT:x:MAX:%lf %lf', 'GPRINT:x:MAX:%d'],
+            [DEFX, 'PRINT:x:MAX:%lf', 'LINE1:x#f00', '--imginfo', '%d'],
+            [DEFX, 'CDEF:x=x,2,*', 'FOO:x']]:
+        run('element', 'graph', '/dev/null', *RANGE, *elements)
+    run('element', 'graph', '/dev/null', *RANGE, missing, '--bogus', 'FOO:x')
+    run('element', 'graph', '/dev/null', 'FOO:x', *RANGE, '-w', 'abc')
+    run('element', 'xport', *RANGE, missing, 'FOO:x')
+    run('element', 'xport', *RANGE, missing, 'XPORT:nope')
+    # A VDEF where a series is expected (GR-36); the other pairings are
+    # pinned by the vectors of each element's own group.
+    kinds = [DEFX, 'VDEF:v=x,MAXIMUM', 'CDEF:c=x,2,*']
+    for elements in [['TICK:v#f00:0.5'], ['AREA:v#f00'], ['LINE1:v#f00:l'],
+                     ['CDEF:d=v,x,+', 'PRINT:d:MAX:%lf'],
+                     ['CDEF:d=x,c,v,+,+', 'PRINT:d:MAX:%lf'],
+                     ['SHIFT:c:v', 'PRINT:c:MAX:%lf'],
+                     ['LINE1:x#f00', 'STACK:v#f00'], ['TICK:5#f00:0.5'],
+                     ['PRINT:5:%lf'], ['SHIFT:5:60'], ['VDEF:w=5,AVERAGE']]:
+        run('element', 'graphv', '/dev/null', *RANGE, *kinds, *elements)
+    run('element', 'xport', *RANGE, *kinds, 'XPORT:5')
 
 
 # ------------------------------------------------------------ layout
@@ -1038,6 +1137,83 @@ def range_cases() -> None:
                 'LINE1:c#ff0000', *opts)
 
 
+def prep_cases() -> None:
+    """Data preparation: fetch steps, reduction, windows of CDEFs and
+    VDEFs, SHIFT and the export grid (GR-44, GR-47 to GR-49)."""
+    window = ['--start', '1000003600', '--end', '1000021600']
+    odd = ['--start', '1000003700', '--end', '1000021500']
+    xp = ['xport'] + window
+    da = 'DEF:a=d.rrd:x:AVERAGE'
+    for opts in ['', ':step=600', ':step=900', ':step=1000', ':step=1800',
+                 ':step=3600', ':step=7200', ':step=86400',
+                 ':step=900:reduce=MAX', ':step=900:reduce=MIN',
+                 ':step=900:reduce=LAST', ':step=900:reduce=AVERAGE']:
+        run('prep', *xp, da + opts, 'XPORT:a')
+        run('prep', 'xport', *odd, da + opts, 'XPORT:a')
+    for cf in ['MAX', 'MIN', 'LAST']:
+        for step in ['', ':step=600', ':step=1800', ':step=5400']:
+            run('prep', *xp, f'DEF:a=d.rrd:x:{cf}{step}', 'XPORT:a')
+    for opts in [['--step', '900'], ['--step', '1000'], ['-m', '10'],
+                 ['-m', '25'], ['--step', '7200']]:
+        run('prep', *xp, *opts, da, 'XPORT:a')
+    # Windows and steps of DEFs combined in a CDEF and exported together.
+    for second in [':step=1800', ':step=900', ':step=600:start=1000007200',
+                   ':end=1000014400', ':start=1000000000:end=1000043200',
+                   ':start=1000007500:end=1000014500:step=900']:
+        b = 'DEF:b=d.rrd:x:AVERAGE' + second
+        run('prep', *xp, da, b, 'CDEF:c=a,b,+', 'XPORT:c')
+        run('prep', *xp, da, b, 'XPORT:a', 'XPORT:b')
+        run('prep', *xp, b, 'XPORT:b')
+    # VDEF and PRINT read the whole series of their DEF.
+    for b in ['DEF:b=d.rrd:x:AVERAGE:start=1000010000:end=1000012000',
+              'DEF:b=d.rrd:x:AVERAGE:step=1800',
+              'DEF:b=d.rrd:x:AVERAGE:start=1000000000:end=1000086400']:
+        run('prep', 'graph', '/dev/null', *window, b, 'VDEF:v=b,AVERAGE',
+            'VDEF:w=b,MAXIMUM', 'VDEF:f=b,FIRST', 'VDEF:l=b,LAST',
+            'PRINT:v:%.6lf', 'PRINT:w:%.6lf', 'PRINT:w:%s:strftime',
+            'PRINT:f:%s:strftime', 'PRINT:l:%s:strftime',
+            'PRINT:b:AVERAGE:%.6lf', 'PRINT:b:MAX:%.6lf',
+            'PRINT:b:LAST:%.6lf')
+    # SHIFT by offsets that are and are not whole steps.
+    for offset in ['30', '150', '300', '-300', '450', '-450', '1800',
+                   '-1800']:
+        run('prep', *xp, da, f'SHIFT:a:{offset}', 'XPORT:a')
+        run('prep', *xp, da + ':step=900', f'SHIFT:a:{offset}', 'XPORT:a')
+    run('prep', *xp, da, 'DEF:b=d.rrd:x:AVERAGE', 'SHIFT:a:600',
+        'CDEF:c=a,b,-', 'XPORT:c', 'XPORT:a')
+    # Data exports of a graph follow its width.
+    for width in ['20', '60', '100']:
+        run('prep', 'graph', '-', *window, '-w', width, '-a', 'CSV', da,
+            'LINE1:a#f00:a')
+    # A graph area one pixel wide (full-size mode with a small width)
+    # under --alt-autoscale; the image step is the whole window (GR-47,
+    # GR-71).
+    for opts in [['-w', '10'], ['-w', '40'], ['-w', '60']]:
+        run('prep', 'graphv', '/dev/null', *window, '-D', *opts, '-h', '100',
+            '-A', da, 'LINE1:a#f00')
+    run('prep', 'graphv', '/dev/null', *window, '-D', '-w', '10', '-h',
+        '100', '-A', da + ':step=1800', 'LINE1:a#f00')
+    # DEF windows that start or end inside a step of the archive (GR-48).
+    for second in [':start=1000007450', ':end=1000014450',
+                   ':start=1000007450:end=1000014450',
+                   ':start=1000007450:end=1000014450:step=900']:
+        b = 'DEF:b=d.rrd:x:AVERAGE' + second
+        run('prep', *xp, da, b, 'CDEF:c=a,b,+', 'XPORT:c')
+        run('prep', *xp, da, b, 'XPORT:a', 'XPORT:b')
+    run('prep', 'graph', '/dev/null', *window,
+        'DEF:b=d.rrd:x:AVERAGE:start=1000007450:end=1000014450',
+        'VDEF:f=b,FIRST', 'VDEF:l=b,LAST', 'PRINT:f:%s:strftime',
+        'PRINT:l:%s:strftime', 'PRINT:b:AVERAGE:%.6lf')
+    # A step= finer than the image step does not refine the DEF (GR-47).
+    run('prep', 'xport', *window, '-m', '10', da + ':step=300', 'XPORT:a')
+    run('prep', 'xport', *window, '-m', '10', da + ':step=600', 'XPORT:a')
+    run('prep', 'graph', '/dev/null', *window, '-w', '10',
+        da + ':step=300', 'PRINT:a:AVERAGE:%lf', 'VDEF:v=a,FIRST',
+        'PRINT:v:%s:strftime')
+    run('prep', 'graph', '-', *window, '-w', '10', da + ':step=300',
+        'LINE1:a#f00:a', '-a', 'CSV')
+
+
 def up_cases() -> None:
     """`\\u` lines after and between other lines (GR-66)."""
     lines = {
@@ -1138,6 +1314,14 @@ def data_cases() -> None:
         '--add-jsontime')
     run('data', 'graph', '-', *RANGE, DEFX, 'LINE1:x#ff0000:xx',
         '--add-jsontime')
+    # Columns follow element order; TICK is never a column and a stacked
+    # element exports its own values (GR-94).
+    run('data', 'graph', '-', *RANGE, DEFX, DEFY, 'CDEF:c=x,y,+',
+        'LINE1:y#f00:yy', 'XPORT:x:xx', 'AREA:c#0f0:cc', 'LINE1:x#00f',
+        'TICK:x#f00:0.5:tt', 'XPORT:y', '-a', 'CSV', '-w', '10', '-S', '300')
+    run('data', 'graph', '-', *RANGE, DEFX, 'LINE1:x#f00:a',
+        'LINE1:x#f00:a:STACK', 'AREA:x#00f::STACK', '-a', 'CSV', '-w', '10',
+        '-S', '300')
 
 
 def xport_cases() -> None:
@@ -1176,6 +1360,12 @@ def xport_cases() -> None:
     run('xport', 'xport', *RANGE)
     run('xport', 'xport', *RANGE, 'XPORT:x')
     run('xport', 'xport', '-s', T0, '-e', T1, DEFX, 'XPORT:x', '-a', 'XML')
+    # Column order is XPORT order, not definition order (GR-94).
+    for opts in [[], ['--json']]:
+        run('xport', *xp, '-m', '10', *opts, DEFX, DEFY, 'CDEF:c=x,y,+',
+            'XPORT:c:cc', 'LINE1:x#f00:ll', 'XPORT:x', 'XPORT:c:again')
+        run('xport', *xp, '-m', '10', *opts, DEFX, DEFY, 'XPORT:y:y',
+            'XPORT:x:x')
 
 
 def output_cases() -> None:
@@ -1270,6 +1460,13 @@ def limit_cases() -> None:
             'DEF:x=f.rrd:x:AVERAGE:step=60', 'PRINT:x:AVERAGE:%lf')
         run('limit', 'xport', '--start', T0, '--end', end, '-m', '10',
             'DEF:x=f.rrd:x:AVERAGE:step=60', 'XPORT:x')
+    # Exactly 10,000,000 fetched rows is within the limit (GR-92). The
+    # CDEF keeps the printed value off `nan`, whose text varies by libc.
+    run('limit', 'graph', '/dev/null', '--start', T0, '--end', '1599999940',
+        'DEF:x=f.rrd:x:AVERAGE:step=60', 'CDEF:z=x,UN,0,x,IF',
+        'PRINT:z:MAX:%lf')
+    run('limit', 'xport', '--start', T0, '--end', '1599999940', '-m', '10',
+        'DEF:x=f.rrd:x:AVERAGE:step=60', 'XPORT:x')
 
 
 def order_cases() -> None:
@@ -1468,10 +1665,26 @@ def repeat_cases() -> None:
     run('repeat', 'xport', '-d', 'a', '-d', 'b', '-m', '5')
 
 
+def ruleexport_cases() -> None:
+    """HRULE and VRULE entries of the `<rules>` section (GR-99)."""
+    for rules in [['HRULE:5#ff0000'], ['HRULE:5#ff0000:five'],
+                  ['VDEF:v=x,MAXIMUM', 'HRULE:v#ff0000'],
+                  ['VRULE:1000000300#ff0000'],
+                  ['VDEF:v=x,MAXIMUM', 'VRULE:v#ff0000'],
+                  ['HRULE:-2.5#ff0000', 'VRULE:1000000300#ff0000',
+                   'HRULE:1e3#00ff00']]:
+        for opts in [[], ['--json']]:
+            run('ruleexport', 'xport', *RANGE, *opts, DEFX, 'XPORT:x:xx',
+                *rules)
+        for fmt in ['XML', 'JSON']:
+            run('ruleexport', 'graph', '-', *RANGE, DEFX, 'LINE1:x#ff0000:xx',
+                *rules, '-a', fmt)
+
+
 # Groups added after the first capture; --add appends them to the table
 # without regenerating the others.
 LATER_GROUPS = ['order', 'scan', 'lazy', 'jsontime', 'xgridtime', 'duration',
-                'repeat']
+                'repeat', 'ruleexport']
 
 
 def all_cases() -> list[dict]:
@@ -1497,6 +1710,7 @@ def all_cases() -> list[dict]:
     fit_cases()
     range_cases()
     up_cases()
+    prep_cases()
     scale_cases()
     data_cases()
     xport_cases()
@@ -1509,6 +1723,7 @@ def all_cases() -> list[dict]:
     xgridtime_cases()
     duration_cases()
     repeat_cases()
+    ruleexport_cases()
     counters: dict[str, int] = {}
     for entry in CASES:
         n = counters.get(entry['group'], 0) + 1
@@ -1715,13 +1930,14 @@ def compare(binary: str, fixture: Path, table: dict, check: bool,
 def add_groups(binary: str, fixture: Path, out: str,
                groups: list[str]) -> int:
     """Captures `groups` against the table's own fixture files and puts
-    them in place of any earlier capture, leaving the other vectors and
-    their platform expectations untouched."""
+    them in place of any earlier capture, leaving the other vectors
+    untouched. A re-captured group keeps its place in the table, and a
+    case whose steps and environment are unchanged keeps its platform
+    expectations and tags, which only a Linux run can refresh."""
     table = read_table(out)
     setup(binary, fixture, table['files'])
-    kept = [entry for entry in table['vectors']
-            if entry['group'] not in groups]
-    added = []
+    old = {entry['id']: entry for entry in table['vectors']}
+    captured: dict[str, list[dict]] = {}
     for entry in all_cases():
         if entry['group'] not in groups:
             continue
@@ -1730,10 +1946,27 @@ def add_groups(binary: str, fixture: Path, out: str,
         if again != entry['expect']:
             entry['tags'].append('unstable')
         add_tags(entry, entry['expect'])
-        added.append(ordered(entry))
-    table['vectors'] = kept + added
+        previous = old.get(entry['id'])
+        if (previous and previous['steps'] == entry['steps']
+                and previous.get('env') == entry.get('env')):
+            if 'expect_platform' in previous:
+                entry['expect_platform'] = previous['expect_platform']
+            for tag in previous['tags']:
+                if tag not in entry['tags']:
+                    entry['tags'].append(tag)
+        captured.setdefault(entry['group'], []).append(ordered(entry))
+    count = sum(len(entries) for entries in captured.values())
+    vectors = []
+    for entry in table['vectors']:
+        if entry['group'] not in groups:
+            vectors.append(entry)
+        elif entry['group'] in captured:
+            vectors.extend(captured.pop(entry['group']))
+    for entries in captured.values():
+        vectors.extend(entries)
+    table['vectors'] = vectors
     write_text(out, render(table))
-    print(f'{len(added)} vectors captured for {",".join(groups)}')
+    print(f'{count} vectors captured for {",".join(groups)}')
     return 0
 
 
