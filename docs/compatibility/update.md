@@ -155,7 +155,8 @@ error texts, the `@` form's at-style time with `ds time:` errors). For the
 `:` form the number *t* is read with the decimal conversion of `restore.md`
 RS-38 (with UP-35's platform arithmetic), and the time is
 *s* = floor(*t*), *µ* = trunc((*t* − *s*) × 1000000.0): `1000000003.4`
-gives *µ* = 399999 and `1000000002.9999999` gives *µ* = 999999. The `@`
+gives *µ* = 399999 and `1000000002.999999` gives *µ* = 999999, while `1000000002.9999999`
+converts to 1000000003.0 and so gives (1000000003, 0). The `@`
 form always has *µ* = 0. `N` is the current time including microseconds,
 so `N:5 N:6` in one command normally succeeds twice (vectors
 `time-parse`, `time-before-value`, `time-microseconds`, `split-at`,
