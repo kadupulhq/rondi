@@ -54,11 +54,13 @@ pub(crate) enum Completed {
 }
 
 /// Consecutive completed PDPs sharing one value per DS. PDP *j* of the run
-/// starts at `start + j·S`.
+/// starts at `start + j·S`; the run ends at `end`, which is `start + len·S`
+/// unless the step count wrapped (see [`plan`]).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Run {
     pub start: i64,
     pub len: u64,
+    pub end: i64,
     pub values: Vec<f64>,
 }
 
@@ -86,7 +88,11 @@ pub(crate) fn plan(last: Time, new: Time, step: u64) -> StepPlan {
 
     let t0 = step_start(last.secs, step_secs);
     let t1 = step_start(new.secs, step_secs);
-    let n = u64::try_from(t1.saturating_sub(t0) / step_secs).unwrap_or(0);
+    // Compatibility: the count of step boundaries crossed wraps to a signed
+    // 32-bit value and is then used as an unsigned 64-bit count, so 2^32
+    // steps count as none and 2^31 steps as nearly 2^64.
+    // Provenance: black-box compatibility test (csrc_update a19).
+    let n = (t1.saturating_sub(t0) / step_secs) as i32 as i64 as u64;
     let fraction_at_start = last.usec > 0;
 
     // Provenance: specification (docs/compatibility/update.md UP-20).
@@ -146,8 +152,8 @@ pub(crate) fn advance(
     // Provenance: specification (docs/compatibility/update.md UP-24).
     let too_unknown = u.saturating_mul(2) > step;
     let step_f = step as f64;
-    let step_secs = step_secs(step);
-    let span = plan.t1.saturating_sub(plan.t0);
+    // n·S and (n − 1)·S in the wrapping count arithmetic of `plan`.
+    let span = plan.n.wrapping_mul(step);
 
     let (completed, rate) = if plan.split {
         // Provenance: specification (docs/compatibility/update.md UP-22).
@@ -157,7 +163,7 @@ pub(crate) fn advance(
                 let vt = rrd_mul_add(q / plan.lead1, plan.lead1, base);
                 let rem = a - q;
                 let r2 = rem / (plan.interval - plan.lead1);
-                let later_span = span.saturating_sub(step_secs) as f64;
+                let later_span = plan.n.wrapping_sub(1).wrapping_mul(step) as f64;
                 let rest = (r2 * (plan.w - plan.lead1)) / later_span;
                 (vt, u as f64, rest, Some(r2))
             }
@@ -187,10 +193,15 @@ pub(crate) fn advance(
     };
 
     // Provenance: specification (docs/compatibility/update.md UP-25).
-    *state = match rate {
-        Some(r) => PdpState {
+    // Compatibility: a known amount whose carried value is NaN (an infinite
+    // amount minus its infinite share) leaves the step as unknown would.
+    // Provenance: black-box compatibility test (rrdtool_differential
+    // dcounter_dderive_special_samples_match_rrdtool_byte_for_byte).
+    let carried = rate.map(|r| r * plan.tail).filter(|value| !value.is_nan());
+    *state = match carried {
+        Some(value) => PdpState {
             unknown_seconds: 0,
-            value: r * plan.tail,
+            value,
         },
         None => PdpState {
             unknown_seconds: plan.tail.trunc() as u64,
@@ -221,11 +232,13 @@ pub(crate) fn runs(plan: &StepPlan, step: u64, completed: &[Completed]) -> Vec<R
             Run {
                 start: plan.t0,
                 len: 1,
+                end: second_start,
                 values: collect(first),
             },
             Run {
                 start: second_start,
                 len: plan.n.saturating_sub(1),
+                end: plan.t1,
                 values: collect(rest),
             },
         ]
@@ -237,6 +250,7 @@ pub(crate) fn runs(plan: &StepPlan, step: u64, completed: &[Completed]) -> Vec<R
         vec![Run {
             start: plan.t0,
             len: plan.n,
+            end: plan.t1,
             values: collect(whole),
         }]
     }
@@ -302,6 +316,7 @@ mod tests {
             vec![Run {
                 start: 100,
                 len: 2,
+                end: 120,
                 values: vec![5.0]
             }]
         );
@@ -329,11 +344,13 @@ mod tests {
                 Run {
                     start: 100,
                     len: 1,
+                    end: 110,
                     values: vec![2.0]
                 },
                 Run {
                     start: 110,
                     len: 2,
+                    end: 130,
                     values: vec![2.0]
                 },
             ]

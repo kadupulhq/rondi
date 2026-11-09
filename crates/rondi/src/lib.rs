@@ -30,16 +30,13 @@ pub use format::{
 };
 pub use rrd_binary::{
     RrdArchiveInfo, RrdCdpPrepInfo, RrdDataSourceInfo, RrdDataSourceTune, RrdDumpHeader,
-    RrdFetchRows, RrdInfo, RrdRawUpdate, RrdResizeAction, RrdTuneBound, RrdUpdateSummary,
-    cf_conv_error, create_rrd_file, dst_conv_error, dump_rrd_file, dump_rrd_file_with_header,
-    dump_rrd_file_with_header_bytes, dump_rrd_open_file, dump_rrd_open_file_bytes, fetch_rrd_file,
-    fetch_rrd_open_file, fetch_rrd_open_rows, fetch_rrd_rows, first_rrd_time,
-    first_rrd_time_from_info, inspect_rrd_file, inspect_rrd_open_file, is_rrd_locking_mode,
-    open_output_file, parse_rrd_scaled_duration, rrd_name_error, tune_rrd_data_sources,
-    tune_rrd_data_sources_file, update_rrd_file, update_rrd_file_precise, update_rrd_raw_batch,
-    update_rrd_raw_batch_file, update_rrd_raw_values, update_rrd_raw_values_precise,
-    update_rrd_raw_values_precise_verbose, update_rrd_raw_values_verbose, update_rrd_text,
-    update_rrd_text_file, update_rrd_values, update_rrd_values_verbose, with_rrd_locking,
+    RrdFetchRows, RrdInfo, RrdResizeAction, RrdTuneBound, cf_conv_error, create_rrd_file,
+    dst_conv_error, dump_rrd_file, dump_rrd_file_with_header, dump_rrd_file_with_header_bytes,
+    dump_rrd_open_file, dump_rrd_open_file_bytes, fetch_rrd_file, fetch_rrd_open_file,
+    fetch_rrd_open_rows, fetch_rrd_rows, first_rrd_time, first_rrd_time_from_info,
+    inspect_rrd_file, inspect_rrd_open_file, is_rrd_locking_mode, open_output_file,
+    parse_rrd_scaled_duration, rrd_name_error, tune_rrd_data_sources, tune_rrd_data_sources_file,
+    with_rrd_locking,
 };
 pub use rrd_create::{CreateOptions, create_rrd};
 #[cfg(unix)]
@@ -51,4 +48,10 @@ pub use rrd_restore::{
 };
 pub use storage::{DEFAULT_IDEMPOTENCY_WINDOW, DEFAULT_MAX_ROWS, Store, StoreError, StoreOptions};
 pub use tune_modify::{RrdRowChange, RrdStructureOp, modify_rrd_file};
+pub use update::{
+    RrdRawUpdate, RrdUpdateSummary, update_rrd_file, update_rrd_file_precise, update_rrd_raw_batch,
+    update_rrd_raw_batch_file, update_rrd_raw_values, update_rrd_raw_values_precise,
+    update_rrd_raw_values_precise_verbose, update_rrd_raw_values_verbose, update_rrd_text,
+    update_rrd_text_file, update_rrd_values, update_rrd_values_verbose,
+};
 pub use vdef::{VdefError, VdefFunction, VdefResult, evaluate_vdef};

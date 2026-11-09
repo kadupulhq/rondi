@@ -144,68 +144,95 @@ fn place(run: &Run, step: u64, pdp_per_row: u64) -> Placement {
     }
 }
 
-/// The `updatev` times of the rows a run writes, saturated to `i64`.
+/// The `updatev` times of the rows a run writes (UP-32). They count back
+/// from the end of the last slot the run completes, so that the row written
+/// last is printed one slot after it.
 // Provenance: specification (docs/compatibility/update.md UP-32).
+// Compatibility: the times are computed in wrapping 64-bit arithmetic, so a
+// run ending near the largest time prints wrapped, negative times.
+// Provenance: black-box compatibility test (csrc_update a19).
 struct PrintedTimes {
-    /// End of the slot the run completes first (*E*).
-    first_slot_end: i128,
+    /// End of the last slot the run completes.
+    last_slot_end: i128,
     /// Slot length (*D*).
     slot: i128,
-    /// Completed rows not written because the archive is too short (*N* − *K*).
-    skipped: i128,
+    /// Rows written (*K*).
+    written: u64,
     /// The time of an opening row completed by the first run of a split
     /// update whose last update has a microsecond part.
     early_opening: Option<i128>,
 }
 
 impl PrintedTimes {
-    fn new(run: &Run, step: u64, pdp_per_row: u64, skipped: u128, early: bool) -> Self {
+    fn new(run: &Run, step: u64, pdp_per_row: u64, written: u64, early: bool) -> Self {
         let step = i128::from(step.max(1));
         let slot = step.saturating_mul(i128::from(pdp_per_row));
+        let end = i128::from(run.end);
         let start = i128::from(run.start);
-        let first_slot_end = (start - start.rem_euclid(slot)).saturating_add(slot);
         PrintedTimes {
-            first_slot_end,
+            last_slot_end: end - end.rem_euclid(slot),
             slot,
-            skipped: i128::try_from(skipped).unwrap_or(i128::MAX),
-            early_opening: early.then(|| start.saturating_add(step).saturating_sub(slot)),
+            written,
+            early_opening: early.then(|| start.wrapping_add(step).wrapping_sub(slot)),
         }
     }
 
+    /// The time of the row `back` rows before the last slot's row.
+    fn before_last(&self, back: u64) -> i128 {
+        self.last_slot_end
+            .wrapping_sub(i128::from(back).wrapping_mul(self.slot))
+    }
+
     fn opening(&self) -> i64 {
-        let time = self.early_opening.unwrap_or_else(|| {
-            self.first_slot_end
-                .saturating_add(self.skipped.saturating_mul(self.slot))
-        });
-        clamp_time(time)
+        let time = self
+            .early_opening
+            .unwrap_or_else(|| self.before_last(self.written.saturating_sub(1)));
+        wrap_time(time)
     }
 
     /// The time of the `j`-th row after the opening row.
     fn following(&self, j: u64) -> i64 {
-        let slots = self.skipped.saturating_add(i128::from(j));
-        clamp_time(
-            self.first_slot_end
-                .saturating_add(slots.saturating_mul(self.slot))
-                .saturating_add(self.slot),
-        )
+        let back = self.written.saturating_sub(1).saturating_sub(j);
+        wrap_time(self.before_last(back).wrapping_add(self.slot))
     }
 }
 
-fn clamp_time(time: i128) -> i64 {
-    i64::try_from(time).unwrap_or(if time < 0 { i64::MIN } else { i64::MAX })
+/// Truncates to 64 bits, as the reference's time arithmetic wraps.
+fn wrap_time(time: i128) -> i64 {
+    time as i64
 }
 
+/// A row would be written past the end of the file. The archive's current
+/// row has already advanced to it; nothing after it in the update is
+/// consolidated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RowPastEnd;
+
 // Provenance: specification (docs/compatibility/update.md UP-30).
+// Compatibility: a row past the end of a damaged file (row count larger
+// than the file holds) stops the update at that row.
+// Provenance: black-box compatibility test (csrc_header
+// huge_row_count_update_stops_at_end_of_file).
+#[allow(clippy::too_many_arguments)]
 fn write_row(
     index: usize,
     archive: &mut RrdArchiveInfo,
+    rows_in_file: u64,
     values: Vec<f64>,
     timestamp: i64,
     rows_out: &mut Vec<RowWrite>,
     summaries: &mut Vec<RrdUpdateSummary>,
-) {
-    let next = (u128::from(archive.current_row) + 1) % u128::from(archive.rows);
-    archive.current_row = next as u64;
+) -> Result<(), RowPastEnd> {
+    // Compatibility: the next row wraps to 0 once it reaches the row count,
+    // so a current row stored past the end restarts at row 0, and the
+    // largest value wraps to 0 as well.
+    // Provenance: black-box compatibility test (csrc_create
+    // b10_rrd_open_accepts_what_it_does_not_check).
+    let next = archive.current_row.wrapping_add(1);
+    archive.current_row = if next >= archive.rows { 0 } else { next };
+    if archive.current_row >= rows_in_file {
+        return Err(RowPastEnd);
+    }
     summaries.push(RrdUpdateSummary {
         timestamp,
         consolidation: archive.consolidation.clone(),
@@ -217,6 +244,7 @@ fn write_row(
         row: archive.current_row,
         values,
     });
+    Ok(())
 }
 
 /// Consolidates one run into one classic archive: folds its PDPs, writes
@@ -225,6 +253,7 @@ fn write_row(
 ///
 /// `early_first_row` marks the first run of a split update whose last
 /// update has a microsecond part; it only changes printed times (UP-32).
+/// `rows_in_file` is how many of the archive's rows lie inside the file.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn consolidate_run(
     index: usize,
@@ -233,12 +262,13 @@ pub(crate) fn consolidate_run(
     run: &Run,
     step: u64,
     early_first_row: bool,
+    rows_in_file: u64,
     rows_out: &mut Vec<RowWrite>,
     summaries: &mut Vec<RrdUpdateSummary>,
-) {
+) -> Result<(), RowPastEnd> {
     let ArchiveKind::Classic(cf) = kind;
     if archive.rows == 0 || run.len == 0 {
-        return;
+        return Ok(());
     }
     let pdp_per_row = archive.pdp_per_row.max(1);
     let placement = place(run, step, pdp_per_row);
@@ -247,7 +277,7 @@ pub(crate) fn consolidate_run(
         for (cdp, &z) in archive.cdp_prep.iter_mut().zip(&run.values) {
             cf.fold(cdp, z, run.len);
         }
-        return;
+        return Ok(());
     }
 
     // Provenance: specification (docs/compatibility/update.md UP-29).
@@ -277,31 +307,28 @@ pub(crate) fn consolidate_run(
         })
         .collect();
 
-    let times = PrintedTimes::new(
-        run,
-        step,
-        pdp_per_row,
-        placement.completed - u128::from(written),
-        early_first_row,
-    );
+    let times = PrintedTimes::new(run, step, pdp_per_row, written, early_first_row);
     write_row(
         index,
         archive,
+        rows_in_file,
         opening,
         times.opening(),
         rows_out,
         summaries,
-    );
+    )?;
     for j in 1..written {
         write_row(
             index,
             archive,
+            rows_in_file,
             run.values.clone(),
             times.following(j),
             rows_out,
             summaries,
-        );
+        )?;
     }
+    Ok(())
 }
 
 /// Consolidates one run into every archive, in archive order (UP-28). This
@@ -310,16 +337,19 @@ pub(crate) fn consolidate_run(
 /// Holt-Winters archives are coupled PDP by PDP across archives; their later
 /// handler takes the whole run for all of its archives here, rather than per
 /// archive.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn consolidate_all(
     archives: &mut [RrdArchiveInfo],
     kinds: &[ArchiveKind],
     run: &Run,
     step: u64,
     early_first_row: bool,
+    rows_in_file: &[u64],
     rows_out: &mut Vec<RowWrite>,
     summaries: &mut Vec<RrdUpdateSummary>,
-) {
+) -> Result<(), RowPastEnd> {
     for (index, (archive, &kind)) in archives.iter_mut().zip(kinds).enumerate() {
+        let fit = rows_in_file.get(index).copied().unwrap_or(u64::MAX);
         match kind {
             ArchiveKind::Classic(_) => consolidate_run(
                 index,
@@ -328,11 +358,13 @@ pub(crate) fn consolidate_all(
                 run,
                 step,
                 early_first_row,
+                fit,
                 rows_out,
                 summaries,
-            ),
+            )?,
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -370,9 +402,11 @@ mod tests {
     }
 
     fn run(start: i64, len: u64, value: f64) -> Run {
+        let end = i128::from(start) + i128::from(len) * i128::from(STEP);
         Run {
             start,
             len,
+            end: end as i64,
             values: vec![value],
         }
     }
@@ -391,9 +425,11 @@ mod tests {
                 run,
                 STEP,
                 false,
+                u64::MAX,
                 &mut rows,
                 &mut summaries,
-            );
+            )
+            .unwrap();
         }
         (rows, summaries)
     }
@@ -606,16 +642,18 @@ mod tests {
             &run(i64::MAX, u64::MAX, 1.0),
             u64::MAX,
             true,
+            u64::MAX,
             &mut rows,
             &mut summaries,
-        );
+        )
+        .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].row, 0);
 
         let mut rra = archive("LAST", 1, 3, 0.5);
         let (rows, summaries) = feed(&mut rra, &[run(i64::MAX, u64::MAX, 1.0)]);
         assert_eq!(rows.len(), 3);
-        assert!(summaries.iter().all(|s| s.timestamp == i64::MAX));
+        assert_eq!(summaries.len(), 3);
 
         let mut rra = archive("AVERAGE", 3, 0, 0.5);
         let (rows, _) = feed(&mut rra, &[run(100, 10, 1.0)]);
@@ -653,9 +691,11 @@ mod tests {
             &run(110, 1, 1.0),
             STEP,
             true,
+            u64::MAX,
             &mut rows,
             &mut summaries,
-        );
+        )
+        .unwrap();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].timestamp, 100);
     }
@@ -672,9 +712,11 @@ mod tests {
             &run(100, 2, 2.0),
             STEP,
             false,
+            &[],
             &mut rows,
             &mut summaries,
-        );
+        )
+        .unwrap();
         assert_eq!(
             rows.iter()
                 .map(|row| (row.archive, row.row))

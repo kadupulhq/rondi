@@ -1,7 +1,7 @@
 //! Template and argument text of an update (UP-4 to UP-8).
 
 use super::pdp::Time;
-use crate::time::{parse_time_spec, parse_update_timestamp};
+use crate::time::{parse_time_spec, parse_update_time_unclamped};
 
 /// One parsed update argument.
 #[derive(Clone, Debug, PartialEq)]
@@ -68,10 +68,14 @@ fn parse_time(time_text: &str, at_form: bool, now: Time) -> Result<Time, Argumen
         return Ok(now);
     }
     let now_seconds = now.secs as f64 + now.usec as f64 / 1e6;
-    let parsed = parse_update_timestamp(time_text, now_seconds).map_err(ArgumentError::Time)?;
+    let (secs, usec) =
+        parse_update_time_unclamped(time_text, now_seconds).map_err(ArgumentError::Time)?;
+    // Compatibility: the microseconds are stored as converted, as the bits
+    // of a signed value, even outside 0 to 999999.
+    // Provenance: black-box compatibility test (csrc_update a19).
     Ok(Time {
-        secs: parsed.seconds,
-        usec: u64::from(parsed.microseconds),
+        secs,
+        usec: usec as u64,
     })
 }
 

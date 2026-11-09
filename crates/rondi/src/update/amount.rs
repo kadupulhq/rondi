@@ -121,9 +121,13 @@ pub(crate) fn amount(
             let new = convert(kind, reading)?;
             let old = convert(kind, &stored)?;
             let d = new - old;
-            // Compatibility: a decreasing DCOUNTER is unknown, never a reset.
-            // Provenance: specification (docs/compatibility/update.md UP-17).
-            if kind == DsKind::DCounter && d < 0.0 {
+            // Compatibility: a DCOUNTER change is unknown when it points away
+            // from zero relative to the new reading's sign: a decrease to a
+            // positive reading, or an increase to a negative one. A reading
+            // of zero, or an unchanged reading, is accepted either way.
+            // Provenance: black-box compatibility test (rrdtool_differential
+            // dcounter_dderive_special_samples_match_rrdtool_byte_for_byte).
+            if kind == DsKind::DCounter && ((d < 0.0 && new > 0.0) || (d > 0.0 && new < 0.0)) {
                 return Ok(None);
             }
             (d, None)
@@ -320,9 +324,25 @@ mod tests {
     #[test]
     fn dcounter_decrease_is_unknown_and_bad_stored_text_fails() {
         assert_eq!(run(DsKind::DCounter, "10", "5"), Ok(None));
+        assert_eq!(run(DsKind::DCounter, "-5", "-3"), Ok(None));
         let err = run(DsKind::DCounter, "12abc", "20").unwrap_err();
         assert!(err.contains("'12abc'"), "{err}");
         assert_eq!(run(DsKind::DCounter, "U", "12abc"), Ok(None));
+    }
+
+    #[test]
+    fn dcounter_counts_down_with_a_negative_reading() {
+        assert_eq!(run(DsKind::DCounter, "3", "-5"), Ok(Some(-8.0)));
+        assert_eq!(
+            run(DsKind::DCounter, "3", "-inf"),
+            Ok(Some(f64::NEG_INFINITY))
+        );
+        assert_eq!(run(DsKind::DCounter, "-3", "1"), Ok(Some(4.0)));
+        assert_eq!(run(DsKind::DCounter, "-3", "-3"), Ok(Some(0.0)));
+        assert_eq!(run(DsKind::DCounter, "3", "0"), Ok(Some(-3.0)));
+        assert_eq!(run(DsKind::DCounter, "-3", "0"), Ok(Some(3.0)));
+        assert_eq!(run(DsKind::DCounter, "-inf", "-5"), Ok(None));
+        assert_eq!(run(DsKind::DCounter, "inf", "5"), Ok(None));
     }
 
     #[test]

@@ -18,6 +18,7 @@ use std::fmt;
 use local::Fields;
 use parser::{Base, Clock, Day, Shift, Wall, Year};
 
+pub(crate) use update::parse_update_time_unclamped;
 pub use update::{UpdateTimestamp, parse_update_timestamp};
 
 /// The option a relative specification refers to.

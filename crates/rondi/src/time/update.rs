@@ -29,11 +29,22 @@ impl fmt::Display for UpdateTimestamp {
 /// Provenance: black-box compatibility test (the text RRDtool writes to an
 /// rrdcached socket).
 pub fn parse_update_timestamp(text: &str, now: f64) -> Result<UpdateTimestamp, String> {
+    let (seconds, fraction) = parse_update_time_unclamped(text, now)?;
+    Ok(UpdateTimestamp {
+        seconds,
+        microseconds: u32::try_from(fraction.clamp(0, 999_999)).unwrap_or_default(),
+    })
+}
+
+/// [`parse_update_timestamp`] with the microsecond conversion as it comes
+/// out, before clamping. Outside the range of whole seconds it can be far
+/// beyond 999999, and the update path stores it as it is.
+// Compatibility: a time beyond the range of seconds keeps the converted
+// microseconds unclamped in the file's last update.
+// Provenance: black-box compatibility test (csrc_update a19).
+pub(crate) fn parse_update_time_unclamped(text: &str, now: f64) -> Result<(i64, i64), String> {
     if text == "N" {
-        return Ok(UpdateTimestamp {
-            seconds: crate::numeric_cast::c_long(now.floor()),
-            microseconds: 0,
-        });
+        return Ok((crate::numeric_cast::c_long(now.floor()), 0));
     }
     let mut value =
         crate::rrd_number::rrd_strtodbl(text, "error while parsing time in get_time_from_reading")?;
@@ -43,10 +54,7 @@ pub fn parse_update_timestamp(text: &str, now: f64) -> Result<UpdateTimestamp, S
     let seconds = crate::numeric_cast::c_long(value.floor());
     // The fraction is kept to the microsecond (TS-68).
     let fraction = crate::numeric_cast::c_long((value - seconds as f64) * 1e6);
-    Ok(UpdateTimestamp {
-        seconds,
-        microseconds: u32::try_from(fraction.clamp(0, 999_999)).unwrap_or_default(),
-    })
+    Ok((seconds, fraction))
 }
 
 #[cfg(test)]
