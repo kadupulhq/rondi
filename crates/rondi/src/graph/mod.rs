@@ -15,7 +15,7 @@ use crate::StoreError;
 use crate::rpn::Expression;
 use crate::vdef::VdefFunction;
 
-pub use data::Export;
+pub use data::{Export, Grid};
 
 /// What an element is.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -377,6 +377,12 @@ impl Graph {
         } else {
             element.series.at(time)
         }
+    }
+
+    /// The grid shared by the series of the elements `sources` (GR-48),
+    /// refused above 10 million rows (GR-92).
+    pub fn grid(&self, sources: &[usize]) -> Result<Grid, StoreError> {
+        data::grid(self, sources.iter().map(|&index| &self.elements[index]))
     }
 
     /// The exported series on their common grid (GR-48, GR-86): the XPORT

@@ -847,7 +847,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
     configure_graph_image(&mut im, &options);
     let png_output = options.format == graph_args::ImageFormat::Png;
     // The renderer enforces the same limit on the final canvas, but only after
-    // data_proc has allocated per-pixel buffers sized by --width. Print-only
+    // the data is prepared for every pixel column of --width. Print-only
     // graphs draw nothing and keep the unbounded behavior of rrdtool.
     let side = |size: i64| u32::try_from(size).unwrap_or(u32::MAX);
     if png_output
@@ -863,7 +863,8 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
         return Err(PNG_DIMENSION_LIMIT_MESSAGE.into());
     }
     let time_format = options.x_label_format.as_deref();
-    // RRDtool's graphv: graph_paint, then image_info and the image itself.
+    // graphv prints the drawn graph's keys, then the image keys and the
+    // image itself.
     let mut info = GraphInfo::default();
     let to_memory = filename == "-";
     let mut image = None::<Vec<u8>>;
@@ -1016,7 +1017,7 @@ fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::erro
                     // A negative --units-length moves the graph origin left of
                     // the image; cairo clips whatever falls outside the surface.
                     let clamp = |value: i64| u32::try_from(value.max(0));
-                    let (rendered, series) = graph_render_input(&im);
+                    let (rendered, series) = graph_render_input(&im)?;
                     let png = render_graph_png(
                         &rendered,
                         &series,
@@ -1439,7 +1440,7 @@ fn scale_values(im: &rondi::graph::Graph, width: i64) -> rondi::layout::Scale {
 }
 
 /// The error `RRDtool` still finds set when a graph or xport otherwise
-/// succeeded, such as a daemon that `data_fetch` could not reach.
+/// succeeded, such as a daemon the DEFs could not reach.
 fn pending_error(im: &rondi::graph::Graph) -> Result<(), Box<dyn std::error::Error>> {
     match &im.pending_error {
         Some(message) => Err(message.clone().into()),
@@ -1558,8 +1559,8 @@ fn prepare_graph_image(
     im.daemon = request
         .daemon
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok());
-    // newGraphDescription starts each DEF window as absolute times at the
-    // image window and parses only the given `start=`/`end=`.
+    // Each DEF window starts as the image window in absolute times; only a
+    // given `start=`/`end=` is parsed (GR-43).
     let resolve = |start_spec: Option<&str>, end_spec: Option<&str>, start: i64, end: i64| {
         resolve_window(start_spec, end_spec, (start, end), now)
     };
@@ -1573,8 +1574,8 @@ fn prepare_graph_image(
     }
 }
 
-/// `data_fetch` (flushing each DEF's file through its rrdcached first) and
-/// `data_calc`.
+/// Reads every DEF, flushing its file through its rrdcached first, and
+/// computes the CDEFs, VDEFs and SHIFTs (GR-26, GR-47 to GR-49).
 fn flush_and_prepare_data(im: &mut rondi::graph::Graph) -> Result<(), Box<dyn std::error::Error>> {
     let mut flushed = std::collections::HashSet::new();
     let mut flush_error = None::<Box<dyn std::error::Error>>;
@@ -1588,8 +1589,8 @@ fn flush_and_prepare_data(im: &mut rondi::graph::Graph) -> Result<(), Box<dyn st
                 flushed.insert(key);
                 Ok(None)
             }
-            // data_fetch treats a failed rrdc_connect as "no daemon" and
-            // reads the local file, leaving the error set.
+            // A daemon that cannot be reached counts as no daemon: the local
+            // file is read and the error stays set (GR-26).
             Err(error) if error.is::<RrdcachedConnectError>() => Ok(Some(error.to_string())),
             Err(error) => {
                 let message = error.to_string();
@@ -1696,8 +1697,10 @@ fn render_xport(args: &[String]) -> Result<(String, Option<String>), Box<dyn std
 }
 
 /// Turns graph elements into the native renderer's series, with one column
-/// per drawn element on the common xport grid.
-fn graph_render_input(im: &rondi::graph::Graph) -> (RenderedGraphXport, Vec<GraphSeries>) {
+/// per drawn element on the grid the exports use (GR-48, GR-92).
+fn graph_render_input(
+    im: &rondi::graph::Graph,
+) -> Result<(RenderedGraphXport, Vec<GraphSeries>), rondi::StoreError> {
     use rondi::graph::Kind;
     let mut series = Vec::new();
     let mut sources = Vec::new();
@@ -1746,25 +1749,11 @@ fn graph_render_input(im: &rondi::graph::Graph) -> (RenderedGraphXport, Vec<Grap
             dash_offset: element.dash_offset,
         });
     }
-    let step = sources
-        .iter()
-        .filter_map(|(_, vidx, _)| vidx.map(|vidx| im.elements[vidx].series.step))
-        .fold(
-            0,
-            |step, next| if step == 0 { next } else { gcd_u64(step, next) },
-        );
-    let step = if step == 0 { im.step.max(1) } else { step };
-    let step_i64 = step as i64;
-    let start = im.start - im.start.rem_euclid(step_i64);
-    let mut end = im.end - im.end.rem_euclid(step_i64);
-    if im.end > end {
-        end += step_i64;
-    }
-    let row_count = usize::try_from((end - start) / step_i64).unwrap_or(0);
-    let rows = (0..row_count)
+    let used: Vec<usize> = sources.iter().filter_map(|(_, vidx, _)| *vidx).collect();
+    let grid = im.grid(&used)?;
+    let rows = (0..grid.rows)
         .map(|row| {
-            // GR-48: a row is stamped at the end of its step.
-            let now = start + (row as i64 + 1) * step_i64;
+            let now = grid.time(row);
             sources
                 .iter()
                 .map(|(_, vidx, yrule)| {
@@ -1777,22 +1766,15 @@ fn graph_render_input(im: &rondi::graph::Graph) -> (RenderedGraphXport, Vec<Grap
                 .collect()
         })
         .collect();
-    (
+    Ok((
         RenderedGraphXport {
-            start,
-            end,
+            start: grid.start,
+            end: grid.end,
             variables: sources.into_iter().map(|(name, _, _)| name).collect(),
             rows,
         },
         series,
-    )
-}
-
-fn gcd_u64(mut left: u64, mut right: u64) -> u64 {
-    while right != 0 {
-        (left, right) = (right, left % right);
-    }
-    left
+    ))
 }
 
 struct RenderedGraphXport {
@@ -2879,8 +2861,9 @@ fn format_xport_addprints(
     let mut tmvdef = local_tm(now);
     let (mut prints, mut gprints, mut rules) = (String::new(), String::new(), String::new());
     let mut si_scale = rondi::format_value::UnitScale::new(si_base);
-    // time_clean writes to a different buffer than the one printed, so a
-    // never-set VDEF time repeats the previous formatted text.
+    // Compatibility: a VDEF without a time repeats the text the previous
+    // time-formatted entry printed.
+    // Provenance: black-box compatibility test (graphv print keys).
     let mut dbuf = String::new();
     let entry = |tag: &str, text: &str| {
         if json {
@@ -2905,7 +2888,7 @@ fn format_xport_addprints(
                         dbuf = print_format::strftime_text(&element.format, &tmvdef, 1024);
                     }
                 } else {
-                    // bad_format_print runs before the "%S" rewrite here.
+                    // The format is validated before `%S` is rewritten.
                     let original = element.format.clone();
                     let mut format = original.clone();
                     match print_format::xport_print_text(printval, &mut format, &mut si_scale) {
@@ -5295,14 +5278,15 @@ mod graph_stroke_tests {
             .source
             .and_then(|source| im.elements[source].name.clone())
             .unwrap_or_default();
-        // data_proc leaves TICKs and skipscale elements out of the range.
+        // TICKs and skipscale elements do not take part in the value range.
         let skip_scale = last.skip_scale || last.kind == rondi::graph::Kind::Tick;
         let legend = last
             .legend
             .strip_prefix("  ")
             .unwrap_or(&last.legend)
             .to_owned();
-        let (_, series) = graph_render_input(&im);
+        let (_, series) = graph_render_input(&im)
+            .map_err(|error| rondi::graph::ScriptError(error.to_string()))?;
         let mut series = series.into_iter().last().expect("a drawing element");
         series.variable = source;
         Ok(TestElement {
@@ -5310,6 +5294,50 @@ mod graph_stroke_tests {
             legend,
             skip_scale,
         })
+    }
+
+    #[test]
+    fn render_grid_is_capped_for_coprime_steps() {
+        // 1800 s and 1801 s series share a 1 s grid, so a window of more
+        // than 10 million seconds is refused instead of allocated.
+        let script = [
+            "DEF:a=a.rrd:x:AVERAGE".to_owned(),
+            "DEF:b=b.rrd:x:AVERAGE".to_owned(),
+            "LINE1:a#ff0000".to_owned(),
+            "LINE1:b#0000ff".to_owned(),
+        ];
+        let window = |seconds: i64| {
+            let start = 1_000_000_800;
+            let mut im = rondi::graph::Graph::new(start, start + seconds, 1);
+            im.parse_elements(&script, &|_, _, start, end| Ok((start, end)))
+                .unwrap();
+            im.elements[0].series = rondi::graph::Series {
+                start,
+                step: 1800,
+                values: vec![1.0; 4],
+            };
+            im.elements[1].series = rondi::graph::Series {
+                start,
+                step: 1801,
+                values: vec![2.0; 4],
+            };
+            im
+        };
+        let error = graph_render_input(&window(20_000_000)).err().unwrap();
+        assert_eq!(
+            error.to_string(),
+            "unsupported RRD operation: RRD fetch range exceeds the 10 million row safety limit"
+        );
+        assert!(window(20_000_000).export(true).is_err());
+        let (rendered, _) = graph_render_input(&window(7200)).unwrap();
+        assert_eq!(rendered.rows.len(), 7200);
+        assert_eq!(rendered.rows[0], [Some(1.0), Some(2.0)]);
+        let exported = window(7200).export(true).unwrap();
+        assert_eq!(
+            (exported.start, exported.end),
+            (rendered.start, rendered.end)
+        );
+        assert_eq!(exported.rows.len(), rendered.rows.len());
     }
 
     fn parse_graph_series(

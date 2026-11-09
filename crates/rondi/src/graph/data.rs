@@ -425,6 +425,52 @@ fn shift(graph: &mut Graph, index: usize) {
     target.shifted = whole;
 }
 
+/// The grid that exported and drawn series share (GR-48): the greatest
+/// common step of their series, from the image start rounded down to it to
+/// the image end rounded up to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Grid {
+    pub start: i64,
+    pub end: i64,
+    pub step: u64,
+    /// At most [`MOST_ROWS`].
+    pub rows: usize,
+}
+
+impl Grid {
+    /// The stamp of row `row`: the end of its step.
+    pub fn time(&self, row: usize) -> i64 {
+        // Every row ends by `end`, so its stamp fits.
+        self.start + (row as i64 + 1) * self.step as i64
+    }
+}
+
+/// The grid of the series `sources` (VDEFs have none), refused above
+/// [`MOST_ROWS`] rows (GR-92).
+pub(super) fn grid<'g>(
+    graph: &Graph,
+    sources: impl IntoIterator<Item = &'g Element>,
+) -> Result<Grid, StoreError> {
+    let step = sources
+        .into_iter()
+        .filter(|source| source.kind != Kind::Vdef)
+        .fold(0, |step, source| gcd(step, source.series.step));
+    let step = if step == 0 { graph.step.max(1) } else { step };
+    let span = signed_step(step)?;
+    let start = graph
+        .start
+        .div_euclid(span)
+        .checked_mul(span)
+        .ok_or_else(too_many_rows)?;
+    let end = round_up(graph.end, span)?;
+    Ok(Grid {
+        start,
+        end,
+        step,
+        rows: row_count(start, end, step)?,
+    })
+}
+
 pub(super) fn export(graph: &Graph, with_drawn: bool) -> Result<Export, StoreError> {
     let columns: Vec<(&Element, &Element)> = graph
         .elements
@@ -442,18 +488,10 @@ pub(super) fn export(graph: &Graph, with_drawn: bool) -> Result<Export, StoreErr
     if columns.is_empty() {
         return Err(StoreError::Rrd("no XPORT found, nothing to do".into()));
     }
-    let step = columns
-        .iter()
-        .filter(|(_, source)| source.kind != Kind::Vdef)
-        .fold(0, |step, (_, source)| gcd(step, source.series.step));
-    let step = if step == 0 { graph.step.max(1) } else { step };
-    let span = signed_step(step)?;
-    let start = graph.start.div_euclid(span) * span;
-    let end = round_up(graph.end, span)?;
-    let count = row_count(start, end, step)?;
-    let rows = (0..count)
+    let grid = grid(graph, columns.iter().map(|(_, source)| *source))?;
+    let rows = (0..grid.rows)
         .map(|row| {
-            let time = start + (row as i64 + 1) * span;
+            let time = grid.time(row);
             columns
                 .iter()
                 .map(|(_, source)| {
@@ -466,6 +504,9 @@ pub(super) fn export(graph: &Graph, with_drawn: bool) -> Result<Export, StoreErr
                 .collect()
         })
         .collect();
+    let Grid {
+        start, end, step, ..
+    } = grid;
     Ok(Export {
         start,
         end,
@@ -600,6 +641,24 @@ mod tests {
             wide.export(false).unwrap_err().to_string(),
             too_many_rows().to_string()
         );
+    }
+
+    #[test]
+    fn grids_of_coprime_steps_are_bounded() {
+        let mut graph = graph(&["DEF:a=f.rrd:x:AVERAGE", "DEF:b=f.rrd:x:AVERAGE"]);
+        graph.elements[0].series = series(T, 1800, &[1.0]);
+        graph.elements[1].series = series(T, 1801, &[1.0]);
+        let shared = graph.grid(&[0, 1]).unwrap();
+        assert_eq!((shared.step, shared.rows), (1, 1200));
+        assert_eq!(shared.time(0), T + 1);
+        graph.end = T + 20_000_000;
+        assert_eq!(
+            graph.grid(&[0, 1]).unwrap_err().to_string(),
+            too_many_rows().to_string()
+        );
+        // A start near the bottom of the time range does not overflow.
+        graph.start = i64::MIN;
+        assert!(graph.grid(&[0, 1]).is_err());
     }
 
     #[test]
