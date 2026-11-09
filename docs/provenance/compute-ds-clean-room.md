@@ -12,8 +12,9 @@
   RRDtool 1.11.0 (Homebrew on macOS arm64, and the pinned Linux build on
   arm64 and x86_64). No RRDtool C source was inspected.
 - Produced: `docs/compatibility/compute.md` CP-1 to CP-20; the `compute`
-  vector suite (54 cases), COMPUTE cases appended to the `create` suite,
-  and `walk-cdef-*` cases in the `restore` suite.
+  vector suite (55 cases including one added by the implementation
+  context), 124 COMPUTE cases appended to the `create` suite, and 32
+  `walk-cdef-*` cases in the `restore` suite.
 
 ## Implementation context
 
