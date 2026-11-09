@@ -7,7 +7,8 @@
 #[macro_use]
 mod common;
 
-use std::os::unix::fs::symlink;
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::Path;
 use std::process::Command;
 
@@ -47,6 +48,35 @@ fn fixture(dir: &Path) {
     std::fs::copy(dir.join("a.rrd"), dir.join("d2/inner/z.rrd")).unwrap();
     symlink("missing.rrd", dir.join("d2/dangling.rrd")).unwrap();
     std::fs::create_dir_all(dir.join("empty")).unwrap();
+    for name in [".h.rrd", ".rrd", "c.Rrd.rrd", "g.rrdx", "d2/u.rrd.rrd"] {
+        std::fs::copy(dir.join("a.rrd"), dir.join(name)).unwrap();
+    }
+    for (name, inner) in [(".hid", "h.rrd"), ("x.rrd", "in.rrd"), ("noread", "n.rrd")] {
+        std::fs::create_dir_all(dir.join(name)).unwrap();
+        std::fs::copy(dir.join("a.rrd"), dir.join(name).join(inner)).unwrap();
+    }
+    let fifo = std::ffi::CString::new(dir.join("fifo.rrd").as_os_str().as_bytes()).unwrap();
+    // SAFETY: `fifo` is a valid NUL-terminated path that outlives the call.
+    assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0);
+    symlink("a.rrd", dir.join("la.rrd")).unwrap();
+    symlink("sub", dir.join("lsub")).unwrap();
+    std::fs::create_dir_all(dir.join("loop")).unwrap();
+    std::fs::copy(dir.join("a.rrd"), dir.join("loop/l.rrd")).unwrap();
+    symlink("../loop", dir.join("loop/up")).unwrap();
+    std::fs::set_permissions(dir.join("noread"), std::fs::Permissions::from_mode(0o000)).unwrap();
+}
+
+/// Restores `noread` so the temporary directory can be removed, even when
+/// an assertion fails.
+struct RestoreNoread<'a>(&'a Path);
+
+impl Drop for RestoreNoread<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::set_permissions(
+            self.0.join("noread"),
+            std::fs::Permissions::from_mode(0o755),
+        );
+    }
 }
 
 type Outcome = (Option<i32>, String, String);
@@ -81,6 +111,7 @@ fn each(cases: &[Case<'_>]) {
     }
     let dir = tempfile::tempdir().unwrap();
     fixture(dir.path());
+    let _restore = RestoreNoread(dir.path());
     let alias_dir = tempfile::tempdir().unwrap();
     let alias = alias_dir.path().join("rrdtool");
     symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
@@ -103,7 +134,7 @@ fn each(cases: &[Case<'_>]) {
 // A failed listing prints strerror(errno)
 // without a newline and still exits 0.
 #[test]
-fn list_matches_rrd_list_r() {
+fn list_matches_reference() {
     each(&[
         (&["list", "a..b"], &[]),
         (&["list", "a.rrd"], &[]),
@@ -122,8 +153,35 @@ fn list_matches_rrd_list_r() {
         (&["list", "d2/*.rrd"], &[]),
         (&["list", "--recursive", "d2/*.rrd"], &[]),
         (&["list", "d2/*.none"], &[]),
+        (&["list", "d2/dangling.rrd"], &[]),
         (&["list", "d2"], &[("RRDCACHED_ADDRESS", "")]),
         (&["list", "--daemon", "", "d2"], &[]),
+        (&["list", "."], &[]),
+        (&["list", "-r", "loop"], &[]),
+        (&["list", "noread"], &[]),
+        (&["list", "x.rrd"], &[]),
+        (&["list", "x.rrd/"], &[]),
+        (&["list", "x.rrd/in.rrd"], &[]),
+        (&["list", "-r", "x.rrd"], &[]),
+        (&["list", "fifo.rrd"], &[]),
+        (&["list", "./fifo.rrd"], &[]),
+        (&["list", "la.rrd"], &[]),
+        (&["list", "./la.rrd"], &[]),
+        (&["list", "./c.Rrd.rrd"], &[]),
+        (&["list", "d2/u.rrd.rrd"], &[]),
+        (&["list", "-r", "./a.rrd"], &[]),
+        (&["list", "sub/../sub"], &[]),
+        (&["list", "-r", "a..b"], &[]),
+        (&["list", "d2/*"], &[]),
+        (&["list", "./.*"], &[]),
+        (&["list", "./*.rrd/"], &[]),
+        (&["list", "d2/[xy]*"], &[]),
+        (&["list", "d2/\\*.rrd"], &[]),
+        (&["list", "./s?b"], &[]),
+        (&["list", "su*/b.rrd"], &[]),
+        (&["list", "*"], &[]),
+        (&["list", "-r", "*"], &[]),
+        (&["list", "-r", "./*.rrd"], &[]),
     ]);
 }
 
