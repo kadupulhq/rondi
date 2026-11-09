@@ -31,10 +31,10 @@ because files written by both implementations must agree).
 
 The recipes below were checked with a black-box model, a script outside
 the repository that implements sections 2 to 9 and was never derived from
-RRDtool or Rondi code. It reproduces all 132 recorded vectors it can replay
+RRDtool or Rondi code. It reproduces all 165 recorded vectors it can replay
 (the others need `@`, `N`, `COMPUTE`, the usage text or a missing file),
-both the macOS arm64 recording and, with UP-35's x86_64 arithmetic, the
-Linux x86_64 recording. It also agrees with RRDtool on several thousand
+the macOS arm64 recording, the Linux aarch64 overrides and, with UP-35's
+x86_64 arithmetic, the Linux x86_64 overrides. It also agrees with RRDtool on several thousand
 further random update sequences over all six non-computed types.
 
 Out of scope: Holt-Winters archives (Rondi refuses them at create time,
@@ -45,8 +45,10 @@ Out of scope: Holt-Winters archives (Rondi refuses them at create time,
 
 - *S* is the file's step in seconds. Data sources (DSs) and archives are
   numbered in file order from 0.
-- A *time* is a pair (*s*, *µ*) of whole seconds and microseconds,
-  0 ≤ *µ* < 1000000. Times compare as pairs. The file's *last update* is
+- A *time* is a pair (*s*, *µ*) of whole seconds and microseconds, both
+  signed 64-bit integers, normally with 0 ≤ *µ* < 1000000 (UP-8 gives
+  larger *µ* for times beyond the range of whole seconds). Times compare
+  as pairs. The file's *last update* is
   (*s0*, *µ0*); the time of the argument being applied is (*s1*, *µ1*).
 - A *reading* is the text given for one DS in one argument. The *stored
   text* of a DS is the reading text kept in the file (UP-13); a new file
@@ -163,6 +165,25 @@ so `N:5 N:6` in one command normally succeeds twice (vectors
 `split-at-fraction`, `skip-past-bad-time`, `now-ok`, `now-twice`,
 `now-before-last`, `now-at`).
 
+Both conversions to an integer above are conversions of a double to a
+signed 64-bit integer, and their out-of-range results depend on the build
+(defect, platform specific):
+
+- macOS arm64 and Linux aarch64 saturate and map NaN to 0: a value
+  ≥ 2⁶³ gives 2⁶³ − 1. So *s* = 2⁶³ − 1 for
+  every *t* ≥ 2⁶³, and *µ* = (*t* − 2⁶³) × 1000000.0 converted the same
+  way, stored as it is: `9223372036854775807` reads as 2⁶³ + 2048 under
+  RS-38 and gives (2⁶³ − 1, 2048000000); `9.22337203685478e18` gives
+  (2⁶³ − 1, 4096000000); `1e19` and `inf` give (2⁶³ − 1, 2⁶³ − 1). `nan`
+  gives (0, 0), which then fails UP-9 with time 0. Because times compare
+  as pairs, `inf:U` after `9223372036854775807:U` is accepted.
+- Linux x86_64 gives −2⁶³ for every value ≥ 2⁶³ and for NaN,
+  so such a time fails UP-9 with time `-9223372036854775808`.
+
+Below 2⁶³ every build gives the same result, and *µ* < 1000000
+(vectors `time-beyond-range`, `time-beyond-range-v`, `time-saturated`,
+`time-nan`).
+
 **UP-9** (black-box; must). If (*s1*, *µ1*) ≤ (*s0*, *µ0*), the argument
 fails with `<file>: illegal attempt to update using time <s1> when last
 update time is <s0> (minimum one second step)`, whole seconds only, before
@@ -278,13 +299,19 @@ converted (UP-11), then the stored text is converted the same way, and the
 amount is reading − stored. A conversion failure of the stored text reports
 the stored text (`Converted '12abc' to 12.000000, but cannot convert
 'abc'`), so such a DS fails every later update until a `U` reading or an
-exceeded heartbeat replaces the text (defect; reproduce). For `DCOUNTER` a
-negative amount is unknown: every decrease is unknown and there is no
+exceeded heartbeat replaces the text (defect; reproduce). For `DCOUNTER`
+the amount is unknown when its sign disagrees with the converted reading
+*x*: when the amount is negative and *x* > 0, or the amount is positive and
+*x* < 0. A reading of 0 or −0, and an amount of 0 or −0, are accepted in
+either direction. So `3` then `-5` gives −8, `-5` then `-3` is unknown,
+`3` then `0` gives −3, `-3` then `1` gives 4, `-2` then `-0` gives 2,
+`5` then `3` is unknown, and an unchanged reading gives 0. There is no
 direction detection or reset, although `rrdcreate(1)` describes a
-downward-counting mode (documentation conflict; reproduce the reference)
-(vectors `val-dcounter-after-unknown`, `val-dcounter-new-first`,
+downward-counting mode (documentation conflict; reproduce the reference).
+`DDERIVE` has no sign test: every change is accepted (vectors
+`val-dcounter-after-unknown`, `val-dcounter-new-first`,
 `val-dcounter-bad-new`, `rate-dcounter`, `rate-dcounter-down`,
-`rate-dcounter-fraction`, `rate-all-types`).
+`rate-dcounter-fraction`, `rate-dcounter-signs`, `rate-all-types`).
 
 **UP-18** (black-box; must). When the amount *a* is known, a *rate* is
 compared with the DS's minimum and maximum (bounds stored as NaN are not
@@ -304,9 +331,26 @@ length (vectors `range-gauge`, `range-gauge-reading`,
 
 Let *T0* = *s0* − (*s0* mod *S*) and *T1* = *s1* − (*s1* mod *S*), the
 start times of the steps that hold the last update and the new time, and
-*n* = (*T1* − *T0*) / *S*, the number of step boundaries crossed.
+*k* = (*T1* − *T0*) / *S*, the number of step boundaries crossed.
 UP-19 to UP-25 apply per DS, with that DS's *u*, *v*, heartbeat and amount
 *a*.
+
+**UP-37** (black-box; must, defect). The step count *n* used below is not
+*k* itself: the low 32 bits of *k* are read as a signed 32-bit integer,
+which is then taken as an unsigned 64-bit integer (a negative value
+becomes 2⁶⁴ minus its magnitude). So *k* = 2³¹ − 1 gives
+*n* = 2³¹ − 1, *k* = 2³¹ gives *n* = 2⁶⁴ − 2³¹, *k* = 2³² − 1 gives
+*n* = 2⁶⁴ − 1, *k* = 2³² gives *n* = 0 (the update is treated as
+crossing no boundary), *k* = 2³² + 1 gives *n* = 1 and *k* = 2³³ + 1
+gives *n* = 1. Comparisons with *n* are unsigned; the products *n*·*S* and
+(*n* − 1)·*S* below wrap modulo 2⁶⁴ before they are converted to double;
+UP-28's *c* + *m* and the quotients and remainders derived from it are
+exact, without wrapping. *T0*, *T1*, *W* and *tail* still come from the
+real times, so a wrapped count leaves the PDP state and the printed times
+(UP-32) consistent with *s1* while the number of PDPs and rows follows
+*n* (vectors `steps-wrap-2p31m1-split` to `steps-wrap-2p33p1-split`,
+`steps-wrap-2p31m1-whole` to `steps-wrap-2p33p1-whole`,
+`steps-wrap-2p31-unknown`).
 
 **UP-19** (black-box; must). If *n* = 0: when *a* is unknown, *u* becomes
 *u* + trunc(*i*); otherwise *v* becomes *a* when *v* is unknown and
@@ -314,21 +358,30 @@ UP-19 to UP-25 apply per DS, with that DS's *u*, *v*, heartbeat and amount
 `rate-gauge`, `rate-absolute`, `acc-unknown`, `acc-first-known`,
 `zero-aligned`, `zero-split`).
 
-**UP-20** (black-box; must). If *n* ≥ 1, define
+**UP-20** (black-box; must, defect). If *n* ≥ 1, define
 
-- *lead* = double(*T0* + *S* − *s0*) − double(*µ0*) / 1000000.0, the time
-  from the last update to the first boundary crossed;
-- *lead1* = floor(*lead*), the whole seconds of *lead*: *T0* + *S* − *s0*,
-  minus 1 when *µ0* > 0;
 - *tail* = double(*s1* − *T1*) + double(*µ1*) / 1000000.0, the time from
   the last boundary crossed to the new time;
 - *W* = double(*T1* − *s0*) − double(*µ0*) / 1000000.0, the time from the
-  last update to the last boundary.
+  last update to the last boundary;
+- *lead* = fmod(*W*, double(*S*)), the exact remainder of *W* divided by
+  *S* (0 ≤ *lead* < *S*), the time from the last update to the first
+  boundary crossed;
+- *lead1* = floor(*lead*), the whole seconds of *lead*.
 
-The update is *split* when *n* ≥ 2, *lead1* ≥ 1, and not both
-*s0* mod *S* = 0 and *µ0* = 0. Otherwise it is *whole* (vectors
-`one-step`, `one-step-fraction`, `multi-aligned`, `multi-split`,
-`multi-lead-under-one`).
+While *W* is exact, *lead* is *T0* + *S* − *s0* − *µ0*/10⁶, or 0 when
+*s0* mod *S* = 0 and *µ0* = 0, so *lead1* is *T0* + *S* − *s0*, minus 1
+when *µ0* > 0. Because *lead* is taken from the rounded *W*, it differs
+once *W* is no longer exact (defect; reproduce): with *µ0* = 1 and
+*T1* − *s0* = 39999999997, *W* rounds to an integer and *lead1* is 7, not
+6; beyond 2⁵³ seconds *lead1* follows the rounding of *W* (a gap from
+1000000003 to 10¹⁶ gives *lead1* = 6, to 10¹⁶ + 10 gives 8), and an
+update from an aligned time can be split.
+
+The update is *split* when *n* ≥ 2 and *lead1* ≥ 1. Otherwise it is
+*whole* (vectors `one-step`, `one-step-fraction`, `multi-aligned`,
+`multi-split`, `multi-lead-under-one`, `lead-rounded-w`, `lead-huge-low`,
+`lead-huge-high`, `time-beyond-range-v`).
 
 **UP-21** (black-box; must). A whole update yields one value *V* for all
 *n* PDPs. Let *b* be +0 when *v* is unknown and *v* otherwise.
@@ -338,7 +391,7 @@ The update is *split* when *n* ≥ 2, *lead1* ≥ 1, and not both
 - When *a* is unknown: *vt* = *v* (possibly unknown), *e* = *W*.
 
 *V* is unknown when 2·*u* > *S* or *i* is greater than the heartbeat.
-Otherwise *V* = *vt* / ((double(*n*·*S*) − *u*) − *e*), subtracting *u*
+Otherwise *V* = *vt* / ((double(*n*·*S* mod 2⁶⁴) − *u*) − *e*), subtracting *u*
 first and *e* second; a zero divisor gives the IEEE result. Subtracting
 *u* + *e* at once changes the last bits (vectors `one-step`,
 `one-step-unknown`, `one-step-fraction`, `one-step-exact`,
@@ -352,7 +405,7 @@ unknown and *v* otherwise.
   *lead1* seconds);
   *vt* = fma(*q* / *lead1*, *lead1*, *b*); *ut* = *u*;
   *rem* = *a* − *q*; *r2* = *rem* / (*i* − *lead1*);
-  *R* = (*r2* × (*W* − *lead1*)) / double((*n* − 1)·*S*).
+  *R* = (*r2* × (*W* − *lead1*)) / double((*n* − 1)·*S* mod 2⁶⁴).
 - When *a* is unknown: *vt* = *v* (possibly unknown); *ut* = *u* + *lead1*;
   *R* is unknown.
 
@@ -361,22 +414,24 @@ not fma(*a* / *i*, *lead1*, *b*) (vector `fp-lead-ratio`) nor *q* + *b*
 (vector `fp-fused-first`).
 *F* is unknown when 2·*u* > *S* or *lead1* is greater than the heartbeat;
 otherwise *F* = *vt* / (double(*S*) − *ut*). Only the whole seconds *lead1*
-go to *F*; when *µ0* > 0 the fraction *lead* − *lead1* is counted twice,
+go to *F*; when *lead* has a fraction it is counted twice,
 once in *rem* and again because *W* − *lead1* exceeds (*n* − 1)·*S* by it,
 so *R* is slightly too large (defect; reproduce). `rrd_pdpcalc(7)`'s worked
 example computes the intermediate PDPs differently and does not match
 1.11.0 (vectors `multi-split`, `multi-split-unknown`,
 `multi-fraction-split`, `multi-start-unknown`, `multi-s7`,
 `hb-split-subinterval`, `hb-split-known-part`, `zero-split`, `fp-fused-first`,
-`fp-lead-ratio`).
+`fp-lead-ratio`, `lead-rounded-w`, `steps-wrap-2p31-split`).
 
 **UP-23** (black-box; must). The PDPs an update completes, in time order,
 are consolidated (section 7) as *runs* of equal values: for a split update
 a run of one *F* starting at *T0*, then a run of *n* − 1 *R* starting at
 *T0* + *S*; for a whole update with *n* = 1 a run of one *V* starting at
 *T0*; for a whole update with *n* ≥ 2 one run of *n* *V* starting at
-*T0*. A PDP *starts* at the beginning of its step (vectors
-`multi-aligned`, `multi-lead-under-one`, `multi-s7-aligned`).
+*T0*. A PDP *starts* at the beginning of its step. With a wrapped *n*
+(UP-37) the runs have the wrapped lengths: *n* = 2⁶⁴ − 2³¹ gives a run
+of 2⁶⁴ − 2³¹ − 1 *R* (vectors `multi-aligned`, `multi-lead-under-one`,
+`multi-s7-aligned`, `steps-wrap-2p31-whole`, `steps-wrap-2p32m1-split`).
 
 **UP-24** (black-box; must). The unknown-seconds limit tests the *u*
 stored before the update (2·*u* > *S*, so exactly half the step unknown
@@ -388,10 +443,17 @@ known *F* from the earlier known part of the step (vectors `hb-long-gap`,
 `one-step-start-unknown`, `multi-start-unknown`).
 
 **UP-25** (black-box; must). After an update with *n* ≥ 1, the PDP state
-starts the step *T1*: when *a* is unknown, *v* is unknown and
-*u* = trunc(*tail*); otherwise *u* = 0 and *v* = *r* × *tail* for a whole
-update or *r2* × *tail* for a split one (vectors `one-step`,
-`one-step-unknown`, `one-step-fraction`, `multi-split-unknown`).
+starts the step *T1*. Let the *carry* be unknown when *a* is unknown, and
+otherwise *r* × *tail* for a whole update or *r2* × *tail* for a split
+one. When the carry is unknown, *v* is unknown and *u* = trunc(*tail*);
+otherwise *u* = 0 and *v* is the carry. A known amount can give an unknown
+carry: an infinite amount in a split update has *rem* = ∞ − ∞, so *r2*
+and the carry are NaN, and the next step then starts with
+*u* = trunc(*tail*) as if the amount were unknown (`1000000003:1` then
+`1000000027:inf` with *S* = 10 leaves *u* = 7, and the next completed
+step is unknown because 2·7 > 10) (vectors `one-step`,
+`one-step-unknown`, `one-step-fraction`, `multi-split-unknown`,
+`carry-nan-split`, `carry-nan-state`).
 
 ## 7. Consolidation
 
@@ -445,10 +507,14 @@ unchanged otherwise (vectors
 `rows-capped-split`, `rows-capped-long`).
 
 **UP-30** (black-box; must). Writing a row advances the archive's current
-row *r* to (*r* + 1) mod *rows* and stores one value per DS, in DS order,
-in that row. Rows are written in the order UP-28 and UP-29 produce them,
-so a run longer than the archive overwrites rows it wrote earlier in the
-same update (vectors `rows-wrap`, `rows-capped`, `rows-capped-long`).
+row *r* to *r* + 1 (an unsigned 64-bit addition, so 2⁶⁴ − 1 becomes 0), or
+to 0 when *r* + 1 ≥ *rows*, and stores one value per DS, in DS order, in
+that row. For a stored *r* < *rows* this is (*r* + 1) mod *rows*; a damaged
+stored *r* ≥ *rows* also goes to 0 (with 3 rows, a stored 7 goes to 0, not
+to 8 mod 3 = 2). Rows are written in the order UP-28 and UP-29 produce
+them, so a run longer than the archive overwrites rows it wrote earlier in
+the same update (vectors `rows-wrap`, `rows-capped`, `rows-capped-long`,
+`rows-current-high`).
 
 ## 8. `updatev` output
 
@@ -471,18 +537,27 @@ arguments skipped by UP-9 print nothing. `update` prints nothing (vectors
 
 **UP-32** (black-box; defect). The printed times differ from the slot ends
 in three cases, which a replacement reproduces in `updatev` output only
-(the file is not affected). Let *E* be the end of the slot the run
-completes first, (*B* − (*B* mod *D*)) + *D*.
+(the file is not affected). The times count back from the run's end *Z*:
+*T0* + *S* for the first run of a split update, and *T1* for every other
+run. Let *G* = *Z* − (*Z* mod *D*), the end of the last slot the run
+completes. All arithmetic here wraps modulo 2⁶⁴ and the result is printed
+as a signed 64-bit integer.
 
-- The opening row of UP-29 is printed at *E* + (*N* − *K*)·*D*, so when
+- The opening row of UP-29 is printed at *G* − (*K* − 1)·*D*, so when
   rows are capped the opening row (the oldest data) carries a recent time.
 - The *j*-th following row (*j* = 1 … *K* − 1) is printed at
-  *E* + (*N* − *K* + *j*)·*D* + *D*, one slot late.
-- In a split update with *µ0* > 0, a row completed by the first run (*F*)
-  is printed at *T0* + *S* − *D*, one slot early.
+  *G* − (*K* − 1 − *j*)·*D* + *D*, one slot late.
+- In a split update with *s0* + *lead1* < *T0* + *S* (normally, when
+  *µ0* > 0), a row completed by the first run (*F*) is printed at
+  *G* − *D* = *T0* + *S* − *D*, one slot early.
 
-(vectors `rows-secondary-times`, `rows-capped`, `rows-capped-split`,
-`multi-fraction-split`, `multi-fraction-one`).
+Without a wrapped *n* (UP-37), *G* is the end of the slot the run completes
+first plus (*N* − 1)·*D*. With one, the times still end at *T1* although
+fewer rows were written, and the last following row of a run with
+*G* = 2⁶³ − 8 and *D* = 10 prints as `-9223372036854775806` (vectors `rows-secondary-times`, `rows-capped`,
+`rows-capped-split`, `multi-fraction-split`, `multi-fraction-one`,
+`lead-rounded-w`, `lead-huge-low`, `steps-wrap-2p32p1-whole`,
+`time-beyond-range-v`).
 
 ## 9. The file
 
@@ -506,9 +581,53 @@ command stops with its error and exit status 1, the arguments before it
 remain applied (and printed by `updatev`), and within the failing argument
 the DSs before the failing reading keep their new stored text (UP-13)
 while nothing else of that argument is written. A failed `COMPUTE`
-evaluation follows `compute.md` CP-16 instead (vectors `multi-arg-fail`,
+evaluation follows `compute.md` CP-16 instead, and a row write outside the
+file follows UP-38 (vectors `multi-arg-fail`,
 `multi-arg-fail-order`, `multi-arg-fail-count`, `multi-arg-ok`,
 `val-partial-last-ds`, `val-partial-counter`).
+
+**UP-38** (black-box; must, defect, platform specific). Damaged files.
+When the file is opened (UP-3), it must be at least as long as its header
+implies: the header, definitions, live head, PDP and CDP states and
+current-row words of `create.md` section 10, plus *rows* × (number of
+DSs) × 8 bytes for each archive, all summed modulo 2⁶⁴. A shorter file
+fails with `'<file>' is too small (should be <size> bytes)`, without the
+file prefix, as in `resize.md`. Because the sum wraps, an archive whose
+row count is too large by a multiple of 2⁶¹ / (number of DSs) passes this
+check while it claims more rows than the file holds. Its rows are placed
+as usual (each archive's rows follow the previous archive's, offsets
+modulo 2⁶⁴), so a row index past the real end lies outside the file.
+Updates work until a row to be written lies outside the file:
+
+- Within one run (UP-23), every archive is consolidated first: all CDP
+  state of section 7, including *primary_value* and *secondary_value*,
+  changes for every archive. Then the rows are written archive by archive
+  in archive order, each row after advancing that archive's current row
+  (UP-30).
+- When the row to be written lies outside the file, `updatev` prints the
+  line for that row's first DS only, and the command stops with
+  `<file>: writing rrd: <text>` and exit status 1 (`return_value = -1`).
+  *text* is the platform's message for error number 0: `Undefined
+  error: 0` on macOS, `Success` on Linux.
+- What stays written: the failing argument's stored texts and PDP state
+  (below), the CDP state of every archive for the failing run and the
+  earlier runs, every current-row word including the failing archive's
+  advanced one, and the rows written before the failing one. Not written:
+  the failing row, the rows of later archives in that run (their current
+  rows are unchanged), the argument's later runs, its live head (which
+  keeps the previous argument's time, or the time before the command),
+  and the later arguments.
+- The failing argument's PDP state is UP-25's state when a whole update
+  or the second run of a split update fails. When the first run of a
+  split update fails, it is the state UP-25 gives for *tail* = 0: *u* = 0
+  for every DS, *v* unknown when the carry is unknown, and otherwise
+  *r2* × 0.0 (+0, or −0 for a negative rate).
+
+Later commands fail the same way as soon as they write a row of that
+archive, because its current row stays past the end (vectors
+`damaged-short`, `damaged-rows-whole`, `damaged-rows-split-first`,
+`damaged-rows-split-specials`, `damaged-rows-split-second`,
+`damaged-rows-first-archive`, `damaged-rows-update`).
 
 ## 10. Platforms
 
@@ -516,14 +635,16 @@ evaluation follows `compute.md` CP-16 instead (vectors `multi-arg-fail`,
 build and the Linux aarch64 build of the reference, every fma in this
 document and the multiply-add of `restore.md` RS-38's digit loop (used by
 UP-8, UP-11, UP-16 and UP-17) use one rounding; the two builds gave
-identical results in every vector. In the Linux x86_64 build (Debian,
+identical results in every vector except UP-38's error text, which
+`expected/update.linux-aarch64.vectors` holds. In the Linux x86_64 build (Debian,
 compiled without contracting multiply-adds), each of them is a rounded
 multiplication followed by a rounded addition: *fma(a, b, c)* is
 (*a* × *b*) + *c*, and UP-26's `AVERAGE` fold is *cv* + (*z* × *k*). This
 is a property of how the reference was compiled for each platform, not of
 the CPU: an x86_64 CPU can fuse, and an arm64 build could be compiled not
 to. A replacement reproduces the build it is compared with; the vectors
-pin these three builds. The x86_64 results differ in the last bits;
+pin these three builds. The x86_64 results differ in the last bits, in
+the conversion of out-of-range times (UP-8) and in UP-38's error text;
 `expected/update.linux-x86_64.vectors` holds the cases that differ there,
 and the independent model reproduces them with this arithmetic. Unknowns
 are written as each platform's NaN pattern (Terms); the tests fold the
@@ -562,15 +683,19 @@ that fail when they are done differently:
 
 ## Summary by class
 
-Must reproduce exactly: UP-1 to UP-15, UP-18 to UP-21, UP-23 to UP-31,
-UP-33, UP-35 and UP-36, and the values of UP-16, UP-17, UP-22 and UP-34.
+Must reproduce exactly: UP-1 to UP-15, UP-18, UP-19, UP-21, UP-23 to
+UP-31, UP-33, UP-35 and UP-36, and the values of UP-16, UP-17, UP-20,
+UP-22, UP-34, UP-37 and UP-38.
 
 Should reproduce: none beyond the usage banner's build date (UP-1).
 
-Reference defects that a replacement reproduces: UP-16 (the 2³² − 1 wrap
-constant and the second wrap in doubles), UP-17 (stuck stored texts, no
-`DCOUNTER` direction), UP-22 (the double-counted fraction), UP-32 (printed
-times) and UP-34 (partial stored texts).
+Reference defects that a replacement reproduces: UP-8 (saturated seconds
+and unclamped microseconds beyond 2⁶³ on arm64 and aarch64), UP-16 (the
+2³² − 1 wrap constant and the second wrap in doubles), UP-17 (stuck stored
+texts, no `DCOUNTER` direction), UP-20 (*lead* from the rounded *W*),
+UP-22 (the double-counted fraction), UP-32 (printed times), UP-34 (partial
+stored texts), UP-37 (the 32-bit step count) and UP-38 (partial writes to
+a damaged file).
 
 ## Behavior not pinned
 
@@ -578,14 +703,22 @@ times) and UP-34 (partial stored texts).
 - Wall-clock results of `N`: the `now-*` vectors compare masked output only
   and no file.
 - Readings longer than the argument limits of the operating system, and
-  files damaged between updates.
+  files damaged in other ways than UP-30 and UP-38 describe (for example a
+  row count whose implied size does not wrap back to the file's length is
+  pinned only as UP-38's open error).
 - Consolidation with an `xff` stored as NaN (`create.md` CR-77) is not
   specified and no vector pins it.
 
 ## Known divergences
 
-None. Rondi matches RRDtool 1.11.0 in every vector on macOS arm64, Linux
-aarch64 and Linux x86_64. (Before `COMPUTE` support was merged,
+The test's `KNOWN_DIVERGENCES` list is empty. When the vectors for UP-8's
+out-of-range times, UP-20's rounded *lead*, UP-37 and UP-38 were added,
+Rondi's update did not yet match `time-beyond-range-v`, `time-saturated`,
+`lead-rounded-w`, `lead-huge-low`, `lead-huge-high`, `damaged-rows-whole`,
+`damaged-rows-split-first`, `damaged-rows-split-specials`,
+`damaged-rows-split-second` and `damaged-rows-first-archive` on macOS
+arm64 and Linux aarch64, nor the same cases except `time-beyond-range-v`
+and `time-saturated` on Linux x86_64; every other vector matched. (Before `COMPUTE` support was merged,
 `compute-basic` and `compute-template` diverged; they now match.)
 
 ## Tests
@@ -598,16 +731,20 @@ aarch64 and Linux x86_64. (Before `COMPUTE` support was merged,
   `KNOWN_DIVERGENCES` list holds the divergent cases with their rule; an
   entry that starts matching fails the test.
 - `crates/rondi-cli/tests/data/update/cases.json` lists the seeds (their
-  create commands) and the cases: id, UP rules, expectation (`same`, or
-  `now` for wall-clock cases), seed and steps.
+  create commands), the header words patched into the damaged seeds of
+  UP-38 and UP-30 (`seed_patches`: the `rows` word of an archive
+  definition or an archive's `cur_row` word), and the cases: id, UP rules,
+  expectation (`same`, or `now` for wall-clock cases), seed and steps.
 - `inputs/*.rrd` are the seeds, created once by RRDtool 1.11.0 on macOS
-  and frozen because `create` picks random current rows.
+  (and then patched where `seed_patches` says) and frozen because
+  `create` picks random current rows.
 - `expected/update.vectors` holds, per case and step, the exit status,
   standard output (usage banner build date removed) and standard error,
   then `file` with the final bytes of `t.rrd` or `same` when unchanged,
   framed as `@@ <id> <section> <length>`, the bytes and a newline.
-  `expected/update.linux-x86_64.vectors` replaces the cases that differ on
-  Linux x86_64 (UP-35); Linux aarch64 needs none.
+  `expected/update.linux-x86_64.vectors` and
+  `expected/update.linux-aarch64.vectors` replace the cases that differ on
+  Linux x86_64 and Linux aarch64 (UP-35).
 - `scripts/gen-update-vectors.py` regenerates the vectors; run without
   arguments it reuses the seeds and reproduces the committed files exactly.
   `--linux-overrides` writes the per-architecture overrides inside a Linux
