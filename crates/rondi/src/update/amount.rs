@@ -149,26 +149,52 @@ fn stored_str(stored: &[u8]) -> String {
 
 /// Exact decimal difference of two integer texts (UP-16); NaN when unknown.
 fn integer_difference(reading: &str, stored: &str) -> f64 {
+    // rrd_diff documents a limit on digits; UP-16 limits characters, so a
+    // sign plus 30 digits needs this check.
     if reading.len() > STORED_LEN {
         return f64::NAN;
     }
     rrd_diff(reading, stored)
 }
 
-/// Floating conversion of UP-11.
+/// Floating conversion of UP-11. Prefix checks look at the reading as given;
+/// only then are C-locale blanks skipped for the numeric conversion.
 fn convert(kind: DsKind, text: &str) -> Result<f64, String> {
-    let lower = text.to_ascii_lowercase();
-    if lower.starts_with("nan") || lower.starts_with("-nan") {
+    let bytes = text.as_bytes();
+    let starts = |prefix: &str| {
+        bytes
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+    };
+    if starts("nan") || starts("-nan") {
         return Ok(f64::NAN);
     }
-    if lower.starts_with("inf") {
+    if starts("inf") {
         return Ok(f64::INFINITY);
     }
-    if lower.starts_with("-inf") {
+    if starts("-inf") {
         return Ok(f64::NEG_INFINITY);
     }
     let context = format!("Function update_pdp_prep, case DST_{}", kind.type_name());
-    rrd_strtodbl(text.trim_start(), &context)
+    let blanks = |c: char| matches!(c, ' ' | '\t' | '\n' | '\x0b' | '\x0c' | '\r');
+    // Messages quote the reading as given, so retarget them after converting
+    // the blank-trimmed text.
+    let trimmed = text.trim_start_matches(blanks);
+    // After blanks, a nan/inf spelling is not special: the numeric conversion
+    // finds no number there. Provenance: specification
+    // (docs/compatibility/update.md UP-11).
+    let lower = trimmed.to_ascii_lowercase();
+    if text.len() != trimmed.len()
+        && ["nan", "-nan", "inf", "-inf"]
+            .iter()
+            .any(|special| lower.starts_with(special))
+    {
+        return Err(format!("{context} - Cannot convert '{text}' to float"));
+    }
+    rrd_strtodbl(trimmed, &context).map_err(|message| {
+        let lead = &text[..text.len() - trimmed.len()];
+        message.replacen(&format!("'{trimmed}'"), &format!("'{lead}{trimmed}'"), 1)
+    })
 }
 
 #[cfg(test)]
@@ -297,6 +323,38 @@ mod tests {
         let err = run(DsKind::DCounter, "12abc", "20").unwrap_err();
         assert!(err.contains("'12abc'"), "{err}");
         assert_eq!(run(DsKind::DCounter, "U", "12abc"), Ok(None));
+    }
+
+    #[test]
+    fn leading_blank_nan_is_rejected() {
+        assert_eq!(
+            run(DsKind::Gauge, "U", " nan"),
+            Err(
+                "Function update_pdp_prep, case DST_GAUGE - Cannot convert ' nan' to float"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn leading_blank_message_keeps_reading() {
+        assert_eq!(
+            run(DsKind::Gauge, "U", "  5x"),
+            Err("Function update_pdp_prep, case DST_GAUGE - Converted '  5x' to 5.000000, but cannot convert 'x'"
+                .to_string())
+        );
+        assert_eq!(run(DsKind::Gauge, "U", "\t\n 5"), Ok(Some(5.0)));
+    }
+
+    #[test]
+    fn non_ascii_blank_is_not_skipped() {
+        assert_eq!(
+            run(DsKind::Gauge, "U", "\u{a0}5"),
+            Err(
+                "Function update_pdp_prep, case DST_GAUGE - Cannot convert '\u{a0}5' to float"
+                    .to_string()
+            )
+        );
     }
 
     #[test]
