@@ -317,6 +317,27 @@ def build_inputs(rrdtool, tmp):
         "RRA:DEVPREDICT:12:4",
         "RRA:FAILURES:12:7:9:4",
     )
+
+    # Stage 2 inputs (holt-winters.md section 2 and 3).
+    def explicit(
+        cf, period, alpha, beta, gamma, window, failures="RRA:FAILURES:60:3:5:3"
+    ):
+        return [
+            f"RRA:{cf}:60:{alpha}:{beta}:{period}:2",
+            f"RRA:SEASONAL:{period}:{gamma}:1:smoothing-window={window}",
+            f"RRA:DEVSEASONAL:{period}:{gamma}:1:smoothing-window={window}",
+            "RRA:DEVPREDICT:60:3",
+            failures,
+        ]
+
+    hw("hwtie", *explicit("HWPREDICT", 4, 0.5, 0.5, 0.5, 0, "RRA:FAILURES:60:1:1:3"))
+    hw("hwsm10", *explicit("HWPREDICT", 10, 0.37, 0.13, 0.21, 0.3))
+    hw("mhwsm10", *explicit("MHWPREDICT", 10, 0.37, 0.13, 0.21, 0.4))
+    hw(
+        "hwruns",
+        *explicit("HWPREDICT", 5, 0.37, 0.13, 0.21, 0),
+        ds=["DS:x:GAUGE:1000:U:U"],
+    )
     return made
 
 
@@ -904,6 +925,42 @@ def hw_cases():
     add("update", "hwrun.rrd", *wave(20, start=1000000310), inputs=["hwrun"])
     add("updatev", "hwimp.rrd", *wave(10), inputs=["hwimp"])
     add("updatev", "hwexp.rrd", *wave(10), inputs=["hwexp"])
+
+    # Stage 2: failure bounds. With alpha = beta = gamma = 0.5 and these
+    # integers every value is an exact binary fraction; after them the
+    # prediction is 15.558929443359375 and the deviation 1.39453125, so
+    # the next value is placed on, just inside or just outside a bound.
+    tie = [10, 20, 40, 20, 12, 22, 42, 22, 14, 24, 44, 24]
+    pred, dev = 15.558929443359375, 1.39453125
+    for x in (
+        pred + 2 * dev,
+        pred + 2 * dev + 2**-10,
+        pred - 2 * dev,
+        pred - 2 * dev - 2**-10,
+    ):
+        args = [f"{1000000010 + 10 * i}:{v}" for i, v in enumerate([*tie, x])]
+        add("update", "hwtie.rrd", *args, inputs=["hwtie"])
+
+    # Stage 2: smoothing passes, additive (half-width 1) and multiplicative
+    # (half-width 2), with and without unknown values, all in one command.
+    def season(count, period, gaps=()):
+        out = []
+        for i in range(count):
+            high = 25 * ((i % period) in (3, 4, 5))
+            v = f"{50 + high + (i * 37 % 11) / 4 + 0.2 * i:.3f}"
+            out.append(f"{1000000010 + 10 * i}:{'U' if i in gaps else v}")
+        return out
+
+    for name in ("hwsm10", "mhwsm10"):
+        add("update", f"{name}.rrd", *season(60, 10), inputs=[name])
+        gaps = (13, 20, 21, 22, *range(33, 40))
+        add("update", f"{name}.rrd", *season(60, 10, gaps), inputs=[name])
+    # Stage 2b: runs of 2, 3 and 5 PDPs after three seasons.
+    base = season(15, 5)
+    for k in (2, 3, 5):
+        for v in ("77.5", "U"):
+            arg = f"{1000000150 + 10 * k}:{v}"
+            add("update", "hwruns.rrd", *base, arg, inputs=["hwruns"])
     return c
 
 

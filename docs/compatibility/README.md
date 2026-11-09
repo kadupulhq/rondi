@@ -13,7 +13,7 @@ The specifications are being written.
 | `rrdtool resize` row changes and `resize.rrd` | [resize.md](resize.md) | `crates/rondi-cli/tests/resize_spec_vectors.rs` |
 | `COMPUTE` data sources: grammar, storage, update, info/dump and restore | [compute.md](compute.md) | `crates/rondi-cli/tests/compute_spec_vectors.rs`, `create_spec_vectors.rs`, `restore_spec_vectors.rs` |
 | `rrdtool update` and `updatev` readings, rates, PDP and CDP state, rows and output | [update.md](update.md) | `crates/rondi-cli/tests/update_spec_vectors.rs` |
-| Holt-Winters archives (draft: create-time state; update and tune to follow) | [holt-winters.md](holt-winters.md) | `crates/rondi-cli/tests/hw_spec_vectors.rs` |
+| Holt-Winters archives (draft: create-time state and single-PDP update; multi-PDP runs and tune to follow) | [holt-winters.md](holt-winters.md) | `crates/rondi-cli/tests/hw_spec_vectors.rs` |
 | At-style time specifications, `update` timestamps, `dump` date comments | [time-spec.md](time-spec.md) | `crates/rondi-cli/tests/time_spec_vectors.rs` |
 | Command dispatch, option parsing, help, exit status, environment, alias executables, `info`/`fetch`/`list` output | [cli.md](cli.md) | `crates/rondi-cli/tests/cli_spec_vectors.rs` |
 | Pipe mode (`rrdtool -`): line reading, quoting, built-in commands, replies | [pipe-mode.md](pipe-mode.md) | `crates/rondi-cli/tests/cli_spec_vectors.rs` |
