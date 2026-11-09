@@ -150,7 +150,6 @@ fn place(run: &Run, step: u64, pdp_per_row: u64) -> Placement {
 // Provenance: specification (docs/compatibility/update.md UP-32).
 // Compatibility: the times are computed in wrapping 64-bit arithmetic, so a
 // run ending near the largest time prints wrapped, negative times.
-// Provenance: black-box compatibility test (csrc_update a19).
 struct PrintedTimes {
     /// End of the last slot the run completes.
     last_slot_end: i128,
@@ -203,16 +202,14 @@ fn wrap_time(time: i128) -> i64 {
 }
 
 /// A row would be written past the end of the file. The archive's current
-/// row has already advanced to it; nothing after it in the update is
-/// consolidated.
+/// row has already advanced to it, and the row's first value is in the
+/// summaries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RowPastEnd;
 
-// Provenance: specification (docs/compatibility/update.md UP-30).
+// Provenance: specification (docs/compatibility/update.md UP-30, UP-38).
 // Compatibility: a row past the end of a damaged file (row count larger
 // than the file holds) stops the update at that row.
-// Provenance: black-box compatibility test (csrc_header
-// huge_row_count_update_stops_at_end_of_file).
 #[allow(clippy::too_many_arguments)]
 fn write_row(
     index: usize,
@@ -226,11 +223,16 @@ fn write_row(
     // Compatibility: the next row wraps to 0 once it reaches the row count,
     // so a current row stored past the end restarts at row 0, and the
     // largest value wraps to 0 as well.
-    // Provenance: black-box compatibility test (csrc_create
-    // b10_rrd_open_accepts_what_it_does_not_check).
     let next = archive.current_row.wrapping_add(1);
     archive.current_row = if next >= archive.rows { 0 } else { next };
     if archive.current_row >= rows_in_file {
+        // Provenance: specification (docs/compatibility/update.md UP-38).
+        summaries.push(RrdUpdateSummary {
+            timestamp,
+            consolidation: archive.consolidation.clone(),
+            pdp_per_row: archive.pdp_per_row,
+            values: values.into_iter().take(1).collect(),
+        });
         return Err(RowPastEnd);
     }
     summaries.push(RrdUpdateSummary {
@@ -348,9 +350,15 @@ pub(crate) fn consolidate_all(
     rows_out: &mut Vec<RowWrite>,
     summaries: &mut Vec<RrdUpdateSummary>,
 ) -> Result<(), RowPastEnd> {
+    // Provenance: specification (docs/compatibility/update.md UP-38). Every
+    // archive's CDP state changes for the run, but rows are written archive
+    // by archive, so a row past the end of the file keeps the rows and
+    // current rows of later archives unwritten.
+    let current_rows: Vec<u64> = archives.iter().map(|archive| archive.current_row).collect();
+    let mut stopped = None;
     for (index, (archive, &kind)) in archives.iter_mut().zip(kinds).enumerate() {
         let fit = rows_in_file.get(index).copied().unwrap_or(u64::MAX);
-        match kind {
+        let result = match kind {
             ArchiveKind::Classic(_) => consolidate_run(
                 index,
                 archive,
@@ -361,10 +369,21 @@ pub(crate) fn consolidate_all(
                 fit,
                 rows_out,
                 summaries,
-            )?,
+            ),
+        };
+        if result.is_err() && stopped.is_none() {
+            stopped = Some((index, rows_out.len(), summaries.len()));
         }
     }
-    Ok(())
+    let Some((failed, rows_len, summaries_len)) = stopped else {
+        return Ok(());
+    };
+    rows_out.truncate(rows_len);
+    summaries.truncate(summaries_len);
+    for (archive, &current_row) in archives.iter_mut().zip(&current_rows).skip(failed + 1) {
+        archive.current_row = current_row;
+    }
+    Err(RowPastEnd)
 }
 
 #[cfg(test)]

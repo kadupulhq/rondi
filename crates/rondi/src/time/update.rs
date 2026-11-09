@@ -41,7 +41,7 @@ pub fn parse_update_timestamp(text: &str, now: f64) -> Result<UpdateTimestamp, S
 /// beyond 999999, and the update path stores it as it is.
 // Compatibility: a time beyond the range of seconds keeps the converted
 // microseconds unclamped in the file's last update.
-// Provenance: black-box compatibility test (csrc_update a19).
+// Provenance: specification (docs/compatibility/update.md UP-8).
 pub(crate) fn parse_update_time_unclamped(text: &str, now: f64) -> Result<(i64, i64), String> {
     if text == "N" {
         return Ok((crate::numeric_cast::c_long(now.floor()), 0));

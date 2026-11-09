@@ -125,8 +125,7 @@ pub(crate) fn amount(
             // from zero relative to the new reading's sign: a decrease to a
             // positive reading, or an increase to a negative one. A reading
             // of zero, or an unchanged reading, is accepted either way.
-            // Provenance: black-box compatibility test (rrdtool_differential
-            // dcounter_dderive_special_samples_match_rrdtool_byte_for_byte).
+            // Provenance: specification (docs/compatibility/update.md UP-17).
             if kind == DsKind::DCounter && ((d < 0.0 && new > 0.0) || (d > 0.0 && new < 0.0)) {
                 return Ok(None);
             }

@@ -72,7 +72,7 @@ fn parse_time(time_text: &str, at_form: bool, now: Time) -> Result<Time, Argumen
         parse_update_time_unclamped(time_text, now_seconds).map_err(ArgumentError::Time)?;
     // Compatibility: the microseconds are stored as converted, as the bits
     // of a signed value, even outside 0 to 999999.
-    // Provenance: black-box compatibility test (csrc_update a19).
+    // Provenance: specification (docs/compatibility/update.md UP-8).
     Ok(Time {
         secs,
         usec: usec as u64,

@@ -14,7 +14,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use amount::{DsKind, amount, stored_text};
 use arguments::{Argument, ArgumentError, parse_argument, template_order};
 use consolidate::{ArchiveKind, RowWrite, consolidate_all};
-use pdp::{Completed, PdpState, Time, advance, plan, runs};
+use pdp::{Completed, PdpState, StepPlan, Time, advance, plan, runs};
 
 use crate::rpn::ComputeProgram;
 use crate::rrd_binary::{
@@ -517,6 +517,7 @@ fn apply(
 
         // Provenance: specification (docs/compatibility/update.md UP-19 to
         // UP-25; compute.md CP-15).
+        let mut before = Vec::with_capacity(source_count);
         let mut states = Vec::with_capacity(source_count);
         let mut completed = Vec::with_capacity(source_count);
         for (source, &found) in info.data_sources.iter().zip(&amounts) {
@@ -524,6 +525,7 @@ fn apply(
                 unknown_seconds: source.unknown_seconds,
                 value: source.pdp_value,
             };
+            before.push(state);
             completed.push(advance(&mut state, found, &plan, step, source.heartbeat));
             states.push(state);
         }
@@ -557,7 +559,7 @@ fn apply(
         let mut written = Vec::new();
         let mut past_end = false;
         for (position, run) in runs(&plan, step, &completed).iter().enumerate() {
-            let early_first_row = position == 0 && plan.split && plan.fraction_at_start;
+            let early_first_row = position == 0 && plan.early_first_print;
             let consolidated = consolidate_all(
                 &mut info.archives,
                 &archive_kinds,
@@ -570,31 +572,31 @@ fn apply(
             );
             if consolidated.is_err() {
                 past_end = true;
-                // Compatibility: when the first PDP of a split update
-                // fails this way, each PDP state is left as at the start
-                // of a step: no unknown seconds, and 0 for a known amount
-                // or unknown otherwise.
-                // Provenance: black-box compatibility test (csrc_header
-                // huge_row_count_update_stops_at_end_of_file).
+                // Provenance: specification (docs/compatibility/update.md
+                // UP-38): a split update failing in its first run keeps the
+                // PDP state UP-25 gives for a tail of 0.
                 if position == 0 && plan.split {
-                    for (state, found) in states.iter_mut().zip(&amounts) {
-                        let known = found.is_some_and(|a| !a.is_nan());
-                        *state = PdpState {
-                            unknown_seconds: 0,
-                            value: if known { 0.0 } else { rrd_nan() },
-                        };
+                    let at_boundary = StepPlan { tail: 0.0, ..plan };
+                    for (ds, source) in info.data_sources.iter().enumerate() {
+                        let mut state = before[ds];
+                        advance(
+                            &mut state,
+                            amounts[ds],
+                            &at_boundary,
+                            step,
+                            source.heartbeat,
+                        );
+                        states[ds] = state;
                     }
                 }
                 break;
             }
         }
 
-        // Provenance: specification (docs/compatibility/update.md UP-33).
-        // Compatibility: when a row falls past the end of the file, the
-        // PDP and CDP state, current rows and earlier rows are written but
-        // the last update time is not, and the update fails.
-        // Provenance: black-box compatibility test (csrc_header
-        // huge_row_count_update_stops_at_end_of_file).
+        // Provenance: specification (docs/compatibility/update.md UP-33,
+        // UP-38). When a row falls past the end of the file, the PDP and
+        // CDP state, current rows and earlier rows are written but the last
+        // update time is not, and the update fails.
         if !past_end {
             put_u64(&mut header, layout.live, argument.time.secs as u64);
             if info.live_head_len >= 16 {
@@ -642,6 +644,7 @@ fn apply(
             write_at(&mut file, offset, &bytes)?;
         }
         if past_end {
+            summaries.append(&mut written);
             let unwritten = std::io::Error::from_raw_os_error(0);
             return Err(StoreError::RrdExpression(format!(
                 "writing rrd: {}",

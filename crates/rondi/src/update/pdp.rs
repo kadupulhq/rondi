@@ -31,8 +31,9 @@ pub(crate) struct StepPlan {
     pub w: f64,
     /// Whether the update is split rather than whole (UP-20).
     pub split: bool,
-    /// Whether the last update has a nonzero microsecond part.
-    pub fraction_at_start: bool,
+    /// Whether a row completed by the first run of a split update is
+    /// printed one slot early: *s0* + *lead1* < *T0* + *S* (UP-32).
+    pub early_first_print: bool,
 }
 
 /// The per-DS PDP state: unknown seconds and the accumulated value.
@@ -91,19 +92,18 @@ pub(crate) fn plan(last: Time, new: Time, step: u64) -> StepPlan {
     // Compatibility: the count of step boundaries crossed wraps to a signed
     // 32-bit value and is then used as an unsigned 64-bit count, so 2^32
     // steps count as none and 2^31 steps as nearly 2^64.
-    // Provenance: black-box compatibility test (csrc_update a19).
+    // Provenance: specification (docs/compatibility/update.md UP-37).
     let n = (t1.saturating_sub(t0) / step_secs) as i32 as i64 as u64;
-    let fraction_at_start = last.usec > 0;
 
     // Provenance: specification (docs/compatibility/update.md UP-20).
-    let lead1 = t0
-        .saturating_add(step_secs)
-        .saturating_sub(last.secs)
-        .saturating_sub(i64::from(fraction_at_start)) as f64;
     let tail = new.secs.saturating_sub(t1) as f64 + micros(new.usec);
     let w = t1.saturating_sub(last.secs) as f64 - micros(last.usec);
-    let aligned_start = last.secs.rem_euclid(step_secs) == 0 && !fraction_at_start;
-    let split = n >= 2 && lead1 >= 1.0 && !aligned_start;
+    // The remainder of the rounded W, so it follows W's rounding.
+    let lead1 = (w % step as f64).floor();
+    let split = n >= 2 && lead1 >= 1.0;
+    // Provenance: specification (docs/compatibility/update.md UP-32).
+    let early_first_print =
+        split && i128::from(last.secs) + (lead1 as i128) < i128::from(t0) + i128::from(step_secs);
 
     StepPlan {
         interval,
@@ -114,7 +114,7 @@ pub(crate) fn plan(last: Time, new: Time, step: u64) -> StepPlan {
         tail,
         w,
         split,
-        fraction_at_start,
+        early_first_print,
     }
 }
 
@@ -193,10 +193,8 @@ pub(crate) fn advance(
     };
 
     // Provenance: specification (docs/compatibility/update.md UP-25).
-    // Compatibility: a known amount whose carried value is NaN (an infinite
-    // amount minus its infinite share) leaves the step as unknown would.
-    // Provenance: black-box compatibility test (rrdtool_differential
-    // dcounter_dderive_special_samples_match_rrdtool_byte_for_byte).
+    // A known amount whose carry is NaN (an infinite amount minus its
+    // infinite share) leaves the step as an unknown amount would.
     let carried = rate.map(|r| r * plan.tail).filter(|value| !value.is_nan());
     *state = match carried {
         Some(value) => PdpState {
@@ -414,7 +412,7 @@ mod tests {
             STEP,
         );
         assert_eq!(p.interval, 2.0 + (-300000.0 / 1000000.0));
-        assert!(p.fraction_at_start);
+        assert!(!p.split);
     }
 
     #[test]
