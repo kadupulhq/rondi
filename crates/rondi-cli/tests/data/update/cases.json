@@ -1,0 +1,3578 @@
+{
+ "seeds": {
+  "cap": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:100000:U:U",
+   "RRA:AVERAGE:0.5:1:3",
+   "RRA:AVERAGE:0.5:2:2",
+   "RRA:MAX:0.5:5:2",
+   "RRA:LAST:0.5:1:1"
+  ],
+  "cf": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:25:U:U",
+   "DS:b:GAUGE:600:U:U",
+   "RRA:AVERAGE:0.5:3:4",
+   "RRA:MIN:0.5:3:4",
+   "RRA:MAX:0.5:3:4",
+   "RRA:LAST:0.5:3:4",
+   "RRA:AVERAGE:0.5:1:6"
+  ],
+  "cmm": [
+   "--start",
+   "1000000000",
+   "--step",
+   "300",
+   "DS:c:COUNTER:600:0:1",
+   "RRA:AVERAGE:0.5:1:5"
+  ],
+  "cmp": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:600:U:U",
+   "DS:c:COMPUTE:a,2,*",
+   "DS:d:COMPUTE:a,0,/",
+   "RRA:AVERAGE:0.5:1:5"
+  ],
+  "cnt": [
+   "--start",
+   "1000000000",
+   "--step",
+   "300",
+   "DS:c:COUNTER:600:U:U",
+   "RRA:AVERAGE:0.5:1:5"
+  ],
+  "dcn": [
+   "--start",
+   "1000000000",
+   "--step",
+   "300",
+   "DS:dc:DCOUNTER:600:U:U",
+   "DS:dd:DDERIVE:600:U:U",
+   "RRA:AVERAGE:0.5:1:5"
+  ],
+  "der": [
+   "--start",
+   "1000000000",
+   "--step",
+   "300",
+   "DS:d:DERIVE:600:U:U",
+   "RRA:AVERAGE:0.5:1:5"
+  ],
+  "fp10": [
+   "--start",
+   "1000000009",
+   "--step",
+   "10",
+   "DS:a:GAUGE:200:U:U",
+   "RRA:AVERAGE:0.5:1:10",
+   "RRA:AVERAGE:0.5:3:5"
+  ],
+  "fp300": [
+   "--start",
+   "1000000010",
+   "--step",
+   "300",
+   "DS:a:GAUGE:6000:U:U",
+   "RRA:AVERAGE:0.5:1:10",
+   "RRA:AVERAGE:0.5:3:5"
+  ],
+  "fp7": [
+   "--start",
+   "1000000007",
+   "--step",
+   "10",
+   "DS:a:GAUGE:200:U:U",
+   "RRA:AVERAGE:0.5:1:10",
+   "RRA:AVERAGE:0.5:3:5"
+  ],
+  "fpden": [
+   "--start",
+   "1000000117",
+   "--step",
+   "300",
+   "DS:a:GAUGE:300:-5:50",
+   "RRA:AVERAGE:0.5:1:3"
+  ],
+  "fut": [
+   "--start",
+   "4000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:600:U:U",
+   "RRA:AVERAGE:0.5:1:5"
+  ],
+  "g1": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:600:U:U",
+   "RRA:AVERAGE:0.5:1:5"
+  ],
+  "g2": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:600:U:U",
+   "DS:b:GAUGE:600:U:U",
+   "RRA:AVERAGE:0.5:1:5",
+   "RRA:MAX:0.5:2:5"
+  ],
+  "g3": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:600:U:U",
+   "DS:b:GAUGE:600:U:U",
+   "DS:cc:GAUGE:600:U:U",
+   "RRA:AVERAGE:0.5:1:5"
+  ],
+  "hb": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:5:U:U",
+   "DS:b:GAUGE:600:U:U",
+   "RRA:AVERAGE:0.5:1:5"
+  ],
+  "mm": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:600:0:100",
+   "DS:b:ABSOLUTE:600:U:5",
+   "RRA:AVERAGE:0.5:1:5"
+  ],
+  "rnd00": [
+   "--start",
+   "1000000065",
+   "--step",
+   "60",
+   "DS:d0:GAUGE:6000:0:1000",
+   "DS:d1:GAUGE:30:-5:U",
+   "DS:d2:ABSOLUTE:60:0:1000",
+   "RRA:LAST:0:2:3",
+   "RRA:LAST:0.1:1:8"
+  ],
+  "rnd01": [
+   "--start",
+   "1000000149",
+   "--step",
+   "60",
+   "DS:d0:COUNTER:181:U:U",
+   "RRA:MIN:0:4:3",
+   "RRA:LAST:0:1:5"
+  ],
+  "rnd02": [
+   "--start",
+   "1000000882",
+   "--step",
+   "300",
+   "DS:d0:GAUGE:901:0:1000",
+   "DS:d1:GAUGE:300:0:U",
+   "DS:d2:GAUGE:600:U:U",
+   "RRA:MIN:0.1:12:5",
+   "RRA:MIN:0.1:12:5"
+  ],
+  "rnd03": [
+   "--start",
+   "1000000005",
+   "--step",
+   "10",
+   "DS:d0:COUNTER:100:U:1e9",
+   "DS:d1:DERIVE:31:-5:1000",
+   "DS:d2:ABSOLUTE:10:U:1e9",
+   "RRA:MIN:0.99:1:2",
+   "RRA:MAX:0.1:3:2"
+  ],
+  "rnd04": [
+   "--start",
+   "1000000844",
+   "--step",
+   "300",
+   "DS:d0:ABSOLUTE:30000:U:U",
+   "RRA:AVERAGE:0.99:5:8",
+   "RRA:LAST:0.99:4:3"
+  ],
+  "rnd05": [
+   "--start",
+   "1000000029",
+   "--step",
+   "60",
+   "DS:d0:DDERIVE:181:U:1000",
+   "RRA:LAST:0.5:1:3"
+  ],
+  "rnd06": [
+   "--start",
+   "1000000014",
+   "--step",
+   "7",
+   "DS:d0:ABSOLUTE:70:0:1000",
+   "RRA:MAX:0.75:12:1",
+   "RRA:MAX:0:3:3"
+  ],
+  "rnd07": [
+   "--start",
+   "1000000021",
+   "--step",
+   "7",
+   "DS:d0:COUNTER:3:U:1000",
+   "RRA:AVERAGE:0:1:8",
+   "RRA:AVERAGE:0.75:1:2",
+   "RRA:MAX:0.99:3:8",
+   "RRA:LAST:0:3:5"
+  ],
+  "rnd08": [
+   "--start",
+   "1000000418",
+   "--step",
+   "300",
+   "DS:d0:ABSOLUTE:600:U:1000",
+   "RRA:AVERAGE:0.1:5:8",
+   "RRA:MAX:0.75:4:2",
+   "RRA:AVERAGE:0.75:2:3",
+   "RRA:MAX:0.75:4:1"
+  ],
+  "rnd09": [
+   "--start",
+   "1000000005",
+   "--step",
+   "7",
+   "DS:d0:COUNTER:22:0:U",
+   "DS:d1:GAUGE:700:-5:1e9",
+   "RRA:AVERAGE:0:2:8",
+   "RRA:AVERAGE:0.1:3:2",
+   "RRA:AVERAGE:0:12:3",
+   "RRA:LAST:0.99:5:8"
+  ],
+  "rnd10": [
+   "--start",
+   "1000000014",
+   "--step",
+   "10",
+   "DS:d0:GAUGE:100:U:1000",
+   "RRA:LAST:0.1:12:1",
+   "RRA:LAST:0.1:5:8",
+   "RRA:MAX:0.1:4:3",
+   "RRA:LAST:0.5:5:2"
+  ],
+  "rnd11": [
+   "--start",
+   "1000000813",
+   "--step",
+   "300",
+   "DS:d0:DCOUNTER:3000:0:U",
+   "DS:d1:DCOUNTER:3000:U:1e9",
+   "DS:d2:DERIVE:3000:-5:1000",
+   "RRA:AVERAGE:0.75:1:2"
+  ],
+  "rnd12": [
+   "--start",
+   "1000000089",
+   "--step",
+   "60",
+   "DS:d0:ABSOLUTE:600:U:U",
+   "RRA:MIN:0.99:12:5"
+  ],
+  "rnd13": [
+   "--start",
+   "1000000003",
+   "--step",
+   "1",
+   "DS:d0:COUNTER:10:0:U",
+   "DS:d1:COUNTER:4:U:1e9",
+   "DS:d2:DDERIVE:2:-5:1000",
+   "RRA:LAST:0:5:8",
+   "RRA:AVERAGE:0:1:3"
+  ],
+  "rnd14": [
+   "--start",
+   "1000000000",
+   "--step",
+   "1",
+   "DS:d0:GAUGE:100:-5:1e9",
+   "RRA:AVERAGE:0.5:12:2",
+   "RRA:LAST:0.75:12:1",
+   "RRA:AVERAGE:0.1:1:5"
+  ],
+  "rnd15": [
+   "--start",
+   "1000000002",
+   "--step",
+   "5",
+   "DS:d0:DERIVE:50:0:U",
+   "DS:d1:ABSOLUTE:10:0:U",
+   "RRA:LAST:0.5:3:3",
+   "RRA:MAX:0.1:12:2",
+   "RRA:MAX:0.5:1:8",
+   "RRA:MIN:0.5:3:8"
+  ],
+  "s7": [
+   "--start",
+   "1000000003",
+   "--step",
+   "7",
+   "DS:a:GAUGE:100:U:U",
+   "DS:b:ABSOLUTE:100:U:U",
+   "RRA:AVERAGE:0.5:1:10",
+   "RRA:AVERAGE:0.5:4:5",
+   "RRA:MAX:0.5:4:5",
+   "RRA:MIN:0.5:4:5",
+   "RRA:LAST:0.5:4:5"
+  ],
+  "types": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:g:GAUGE:600:U:U",
+   "DS:c:COUNTER:600:U:U",
+   "DS:d:DERIVE:600:U:U",
+   "DS:ab:ABSOLUTE:600:U:U",
+   "DS:dc:DCOUNTER:600:U:U",
+   "DS:dd:DDERIVE:600:U:U",
+   "RRA:AVERAGE:0.5:1:5"
+  ],
+  "un": [
+   "--start",
+   "1000000007",
+   "--step",
+   "10",
+   "DS:a:GAUGE:600:U:U",
+   "RRA:AVERAGE:0.5:1:6",
+   "RRA:AVERAGE:0.5:4:3",
+   "RRA:LAST:0.5:4:3"
+  ],
+  "xff": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:15:U:U",
+   "RRA:AVERAGE:0:3:4",
+   "RRA:AVERAGE:0.34:3:4",
+   "RRA:AVERAGE:0.99:3:4",
+   "RRA:LAST:0.5:3:4",
+   "RRA:MAX:0.67:3:4"
+  ],
+  "zero": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:600:U:U",
+   "RRA:AVERAGE:0.5:1:5",
+   "RRA:AVERAGE:0.5:2:5",
+   "RRA:MAX:0.5:2:5",
+   "RRA:LAST:0.5:2:5",
+   "RRA:MIN:0.5:2:5"
+  ]
+ },
+ "cases": [
+  {
+   "id": "arg-usage",
+   "rules": [
+    "UP-1"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "update"
+    ]
+   ]
+  },
+  {
+   "id": "arg-usage-v",
+   "rules": [
+    "UP-1"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "updatev"
+    ]
+   ]
+  },
+  {
+   "id": "arg-none",
+   "rules": [
+    "UP-1"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "update",
+     "t.rrd"
+    ]
+   ]
+  },
+  {
+   "id": "arg-none-v",
+   "rules": [
+    "UP-1",
+    "UP-31"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd"
+    ]
+   ]
+  },
+  {
+   "id": "arg-options-only",
+   "rules": [
+    "UP-1",
+    "UP-2"
+   ],
+   "expect": "same",
+   "seed": "g3",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "-t",
+     "zz"
+    ]
+   ]
+  },
+  {
+   "id": "arg-missing",
+   "rules": [
+    "UP-3"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "update",
+     "missing.rrd",
+     "1000000010:1"
+    ]
+   ]
+  },
+  {
+   "id": "arg-missing-v",
+   "rules": [
+    "UP-3",
+    "UP-31"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "updatev",
+     "missing.rrd",
+     "1000000010:1"
+    ]
+   ]
+  },
+  {
+   "id": "arg-not-rrd",
+   "rules": [
+    "UP-3"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "update",
+     "cases.txt",
+     "1000000010:1"
+    ]
+   ]
+  },
+  {
+   "id": "arg-long-options",
+   "rules": [
+    "UP-2"
+   ],
+   "expect": "same",
+   "seed": "g3",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "--template=cc",
+     "1000000010:7"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "--skip-past-updates",
+     "1000000005:1:2:3",
+     "1000000020:1:2:3"
+    ]
+   ]
+  },
+  {
+   "id": "arg-option-after",
+   "rules": [
+    "UP-2"
+   ],
+   "expect": "same",
+   "seed": "g3",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:2:3",
+     "-t",
+     "b",
+     "1000000020:4"
+    ]
+   ]
+  },
+  {
+   "id": "tpl-one",
+   "rules": [
+    "UP-4",
+    "UP-5"
+   ],
+   "expect": "same",
+   "seed": "g3",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "-t",
+     "b",
+     "1000000010:5"
+    ]
+   ]
+  },
+  {
+   "id": "tpl-reorder",
+   "rules": [
+    "UP-4",
+    "UP-5"
+   ],
+   "expect": "same",
+   "seed": "g3",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "-t",
+     "cc:b:a",
+     "1000000010:1:2:3"
+    ]
+   ]
+  },
+  {
+   "id": "tpl-duplicate",
+   "rules": [
+    "UP-5"
+   ],
+   "expect": "same",
+   "seed": "g3",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "-t",
+     "b:b",
+     "1000000010:5:6"
+    ]
+   ]
+  },
+  {
+   "id": "tpl-last-wins",
+   "rules": [
+    "UP-2",
+    "UP-4"
+   ],
+   "expect": "same",
+   "seed": "g3",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "-t",
+     "a",
+     "-t",
+     "b",
+     "1000000010:9"
+    ]
+   ]
+  },
+  {
+   "id": "tpl-unknown",
+   "rules": [
+    "UP-4"
+   ],
+   "expect": "same",
+   "seed": "g3",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "-t",
+     "zz",
+     "1000000010:5"
+    ]
+   ]
+  },
+  {
+   "id": "tpl-empty",
+   "rules": [
+    "UP-4"
+   ],
+   "expect": "same",
+   "seed": "g3",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "-t",
+     "",
+     "1000000010:5"
+    ]
+   ]
+  },
+  {
+   "id": "tpl-trailing-colon",
+   "rules": [
+    "UP-4"
+   ],
+   "expect": "same",
+   "seed": "g3",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "-t",
+     "a:",
+     "1000000010:1:2"
+    ]
+   ]
+  },
+  {
+   "id": "tpl-too-many",
+   "rules": [
+    "UP-4"
+   ],
+   "expect": "same",
+   "seed": "g3",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "-t",
+     "a:b:cc:a",
+     "1000000010:1:2:3:4"
+    ]
+   ]
+  },
+  {
+   "id": "tpl-unknown-first",
+   "rules": [
+    "UP-4"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "-t",
+     "zz:a:b:a",
+     "1000000010:5"
+    ]
+   ]
+  },
+  {
+   "id": "tpl-count-before-name",
+   "rules": [
+    "UP-4"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "-t",
+     "a:b:zz",
+     "1000000010:5"
+    ]
+   ]
+  },
+  {
+   "id": "tpl-count-mismatch",
+   "rules": [
+    "UP-4",
+    "UP-7"
+   ],
+   "expect": "same",
+   "seed": "g3",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "-t",
+     "b:a",
+     "1000000010:5"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "-t",
+     "b",
+     "1000000010:5:6"
+    ]
+   ]
+  },
+  {
+   "id": "tpl-after-open",
+   "rules": [
+    "UP-3",
+    "UP-4"
+   ],
+   "expect": "same",
+   "seed": "g3",
+   "steps": [
+    [
+     "update",
+     "missing.rrd",
+     "-t",
+     "zz",
+     "1000000010:1"
+    ],
+    [
+     "updatev",
+     "missing.rrd",
+     "-t",
+     "zz"
+    ]
+   ]
+  },
+  {
+   "id": "tpl-updatev-error",
+   "rules": [
+    "UP-4",
+    "UP-31"
+   ],
+   "expect": "same",
+   "seed": "g3",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "-t",
+     "zz",
+     "1000000010:1"
+    ]
+   ]
+  },
+  {
+   "id": "tpl-updatev",
+   "rules": [
+    "UP-4",
+    "UP-31"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "-t",
+     "b",
+     "1000000025:4"
+    ]
+   ]
+  },
+  {
+   "id": "split-no-separator",
+   "rules": [
+    "UP-6"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000015"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "abc"
+    ]
+   ]
+  },
+  {
+   "id": "split-at",
+   "rules": [
+    "UP-6",
+    "UP-8"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000012@5:6"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000030@1:2"
+    ]
+   ]
+  },
+  {
+   "id": "split-at-extra-at",
+   "rules": [
+    "UP-6",
+    "UP-7"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000012@5@6"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000013@5:6@7"
+    ]
+   ]
+  },
+  {
+   "id": "split-at-wins",
+   "rules": [
+    "UP-6",
+    "UP-7"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000014:5@6"
+    ]
+   ]
+  },
+  {
+   "id": "split-at-fraction",
+   "rules": [
+    "UP-8"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000040.5@1:2"
+    ]
+   ]
+  },
+  {
+   "id": "count-few",
+   "rules": [
+    "UP-7"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010.5:5"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000016:"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "abc:5"
+    ]
+   ]
+  },
+  {
+   "id": "count-many",
+   "rules": [
+    "UP-7"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000011.25:5:6:7"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000005:1:2:3:4"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000005:1:2::"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000018:U:U:"
+    ]
+   ]
+  },
+  {
+   "id": "count-empty-values",
+   "rules": [
+    "UP-7",
+    "UP-11"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000017::"
+    ]
+   ]
+  },
+  {
+   "id": "count-before-order",
+   "rules": [
+    "UP-7",
+    "UP-9"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000019:1:2"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000005:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000005:1:2:3"
+    ]
+   ]
+  },
+  {
+   "id": "time-parse",
+   "rules": [
+    "UP-8"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "abc:5:6"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000010x:5:6"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "+1000000010:5:6"
+    ]
+   ]
+  },
+  {
+   "id": "time-before-value",
+   "rules": [
+    "UP-8",
+    "UP-9",
+    "UP-11"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000019:1:2"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000005:zz:1"
+    ]
+   ]
+  },
+  {
+   "id": "order-equal",
+   "rules": [
+    "UP-9"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000019:1:2"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000019:1:2"
+    ]
+   ]
+  },
+  {
+   "id": "order-before",
+   "rules": [
+    "UP-9"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000019:1:2"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000005:1:2"
+    ]
+   ]
+  },
+  {
+   "id": "order-start",
+   "rules": [
+    "UP-9"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000000:1:2"
+    ]
+   ]
+  },
+  {
+   "id": "time-microseconds",
+   "rules": [
+    "UP-8",
+    "UP-14",
+    "UP-33"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000001.0000005:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000002.9999999:2"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000003.4:3"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000004.000001:4"
+    ]
+   ]
+  },
+  {
+   "id": "order-fraction",
+   "rules": [
+    "UP-9",
+    "UP-14"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000004.5:1",
+     "1000000004.7:2"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000004.6:3"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000004.7:3"
+    ]
+   ]
+  },
+  {
+   "id": "skip-past",
+   "rules": [
+    "UP-9"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000019:1:2"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "-s",
+     "1000000005:1:2",
+     "1000000020:1:2",
+     "1000000006:1:2"
+    ]
+   ]
+  },
+  {
+   "id": "skip-past-bad-value",
+   "rules": [
+    "UP-9",
+    "UP-11"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000019:1:2"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "-s",
+     "1000000005:zz:1"
+    ]
+   ]
+  },
+  {
+   "id": "skip-past-bad-count",
+   "rules": [
+    "UP-7",
+    "UP-9"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000019:1:2"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "-s",
+     "1000000005:1"
+    ]
+   ]
+  },
+  {
+   "id": "skip-past-bad-time",
+   "rules": [
+    "UP-8",
+    "UP-9"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "-s",
+     "abc:1:2"
+    ]
+   ]
+  },
+  {
+   "id": "skip-past-v",
+   "rules": [
+    "UP-9",
+    "UP-31"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000019:1:2"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "-s",
+     "1000000001:1:2",
+     "1000000031:3:4"
+    ]
+   ]
+  },
+  {
+   "id": "now-ok",
+   "rules": [
+    "UP-8"
+   ],
+   "expect": "now",
+   "seed": "g1",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "N:5"
+    ]
+   ]
+  },
+  {
+   "id": "now-twice",
+   "rules": [
+    "UP-8",
+    "UP-9"
+   ],
+   "expect": "now",
+   "seed": "g1",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "N:5",
+     "N:6"
+    ]
+   ]
+  },
+  {
+   "id": "now-before-last",
+   "rules": [
+    "UP-8",
+    "UP-9"
+   ],
+   "expect": "now",
+   "seed": "fut",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "N:5"
+    ]
+   ]
+  },
+  {
+   "id": "now-at",
+   "rules": [
+    "UP-8"
+   ],
+   "expect": "now",
+   "seed": "g1",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "N@5"
+    ]
+   ]
+  },
+  {
+   "id": "val-gauge-forms",
+   "rules": [
+    "UP-11",
+    "UP-13"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000001:1e",
+     "1000000002:1e+",
+     "1000000003:.5",
+     "1000000004:5.",
+     "1000000005:+5",
+     "1000000006:1e400",
+     "1000000007:-1e400"
+    ]
+   ]
+  },
+  {
+   "id": "val-gauge-specials",
+   "rules": [
+    "UP-11",
+    "UP-15",
+    "UP-26",
+    "UP-31"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000006:nan:inf",
+     "1000000016:-inf:1",
+     "1000000026:1:1",
+     "1000000046:1:1"
+    ]
+   ]
+  },
+  {
+   "id": "val-gauge-nan-text",
+   "rules": [
+    "UP-11"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000001:-nan",
+     "1000000002:NaN",
+     "1000000003:INF"
+    ]
+   ]
+  },
+  {
+   "id": "val-gauge-reject",
+   "rules": [
+    "UP-11"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000001:+inf"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000002:e5"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000003:."
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000004:-"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000005:+"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000006:unknown"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000007:0x10"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000008:1,5"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000009:12abc"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000010: 5"
+    ]
+   ]
+  },
+  {
+   "id": "val-unknown-prefix",
+   "rules": [
+    "UP-10",
+    "UP-13"
+   ],
+   "expect": "same",
+   "seed": "types",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:Uxyz:Unknown:U-1:U:Ufoo:Ubar"
+    ]
+   ]
+  },
+  {
+   "id": "val-absolute-reject",
+   "rules": [
+    "UP-11"
+   ],
+   "expect": "same",
+   "seed": "types",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:1:1:zz:1:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:1:1:2x:1:1"
+    ]
+   ]
+  },
+  {
+   "id": "val-counter-reject",
+   "rules": [
+    "UP-12"
+   ],
+   "expect": "same",
+   "seed": "types",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:1.5:1:1:1:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:-5:1:1:1:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:+5:1:1:1:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:1e3:1:1:1:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:0x10:1:1:1:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:-0:1:1:1:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:12abc:1:1:1:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:inf:1:1:1:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:u:1:1:1:1"
+    ]
+   ]
+  },
+  {
+   "id": "val-derive-reject",
+   "rules": [
+    "UP-12"
+   ],
+   "expect": "same",
+   "seed": "types",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:1:+5:1:1:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:1:-+5:1:1:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:1:--5:1:1:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:1:1e3:1:1:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:1:1.0:1:1:1"
+    ]
+   ]
+  },
+  {
+   "id": "val-integer-accept",
+   "rules": [
+    "UP-12",
+    "UP-16"
+   ],
+   "expect": "same",
+   "seed": "types",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1::-:1:1:1",
+     "1000000020:1:0:-0:1:1:1"
+    ]
+   ]
+  },
+  {
+   "id": "val-heartbeat-no-parse",
+   "rules": [
+    "UP-10"
+   ],
+   "expect": "same",
+   "seed": "types",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000700:zz:zz:zz:zz:zz:zz"
+    ]
+   ]
+  },
+  {
+   "id": "val-dcounter-after-unknown",
+   "rules": [
+    "UP-17"
+   ],
+   "expect": "same",
+   "seed": "dcn",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:U:U",
+     "1000000020:12abc:zz",
+     "1000000030:13:14"
+    ]
+   ]
+  },
+  {
+   "id": "val-dcounter-new-first",
+   "rules": [
+    "UP-17"
+   ],
+   "expect": "same",
+   "seed": "dcn",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:U:U",
+     "1000000020:12abc:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000030:zz:1"
+    ]
+   ]
+  },
+  {
+   "id": "val-dcounter-bad-new",
+   "rules": [
+    "UP-17"
+   ],
+   "expect": "same",
+   "seed": "dcn",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:5:5"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000020:zz:5"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000030:5:5x"
+    ]
+   ]
+  },
+  {
+   "id": "val-partial-last-ds",
+   "rules": [
+    "UP-13",
+    "UP-34"
+   ],
+   "expect": "same",
+   "seed": "g3",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:2:3"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000020:7:zz:9"
+    ]
+   ]
+  },
+  {
+   "id": "val-partial-counter",
+   "rules": [
+    "UP-13",
+    "UP-34"
+   ],
+   "expect": "same",
+   "seed": "types",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:1:1:1:1:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000020:7:zz:1:1:1:1"
+    ]
+   ]
+  },
+  {
+   "id": "val-last-ds-truncate",
+   "rules": [
+    "UP-13"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1.000000000000000000000000000000000000001",
+     "1000000020:2.0000000000000000000000000000000000000000000000000001e0"
+    ]
+   ]
+  },
+  {
+   "id": "val-last-ds-shorter",
+   "rules": [
+    "UP-13"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:123456.789:U",
+     "1000000020:7:1"
+    ]
+   ]
+  },
+  {
+   "id": "rate-gauge",
+   "rules": [
+    "UP-14",
+    "UP-15",
+    "UP-19"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000002:3",
+     "1000000005:4",
+     "1000000009.5:5"
+    ]
+   ]
+  },
+  {
+   "id": "rate-absolute",
+   "rules": [
+    "UP-15",
+    "UP-19"
+   ],
+   "expect": "same",
+   "seed": "types",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000002:1:1:1:30:1:1",
+     "1000000007:1:1:1:7.5:1:1"
+    ]
+   ]
+  },
+  {
+   "id": "rate-counter-basic",
+   "rules": [
+    "UP-16"
+   ],
+   "expect": "same",
+   "seed": "cnt",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:100",
+     "1000000020:200",
+     "1000000030:200",
+     "1000000040:12345678901234567890"
+    ]
+   ]
+  },
+  {
+   "id": "rate-counter-wrap32",
+   "rules": [
+    "UP-16"
+   ],
+   "expect": "same",
+   "seed": "cnt",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:4294967290",
+     "1000000020:5",
+     "1000000030:4294967296",
+     "1000000040:5",
+     "1000000050:200",
+     "1000000060:100"
+    ]
+   ]
+  },
+  {
+   "id": "rate-counter-wrap-edges",
+   "rules": [
+    "UP-16"
+   ],
+   "expect": "same",
+   "seed": "cnt",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:4294967295",
+     "1000000020:0",
+     "1000000030:8589934592",
+     "1000000040:0",
+     "1000000050:18446744073709551615",
+     "1000000060:5"
+    ]
+   ]
+  },
+  {
+   "id": "rate-counter-wrap64",
+   "rules": [
+    "UP-16"
+   ],
+   "expect": "same",
+   "seed": "cnt",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:18446744073709551615",
+     "1000000020:18446744073709551614"
+    ]
+   ]
+  },
+  {
+   "id": "rate-counter-big",
+   "rules": [
+    "UP-16"
+   ],
+   "expect": "same",
+   "seed": "cnt",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:0",
+     "1000000020:9007199254740993",
+     "1000000030:123456789012345678901",
+     "1000000040:123456789012345678999",
+     "1000000050:0",
+     "1000000060:12345678901234567890123"
+    ]
+   ]
+  },
+  {
+   "id": "rate-counter-long",
+   "rules": [
+    "UP-13",
+    "UP-16"
+   ],
+   "expect": "same",
+   "seed": "cnt",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:7",
+     "1000000020:1111111111111111111111111111111",
+     "1000000030:9",
+     "1000000040:222222222222222222222222222222",
+     "1000000050:333333333333333333333333333333"
+    ]
+   ]
+  },
+  {
+   "id": "rate-counter-zeros",
+   "rules": [
+    "UP-13",
+    "UP-16"
+   ],
+   "expect": "same",
+   "seed": "cnt",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:000000000000000000000000000001",
+     "1000000020:000000000000000000000000000003",
+     "1000000030:0007",
+     "1000000040:9"
+    ]
+   ]
+  },
+  {
+   "id": "rate-counter-empty",
+   "rules": [
+    "UP-16"
+   ],
+   "expect": "same",
+   "seed": "cnt",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:7",
+     "1000000020:",
+     "1000000030:9",
+     "1000000040:12"
+    ]
+   ]
+  },
+  {
+   "id": "rate-counter-range",
+   "rules": [
+    "UP-16",
+    "UP-18"
+   ],
+   "expect": "same",
+   "seed": "cmm",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:0",
+     "1000000020:5",
+     "1000000030:15",
+     "1000000040:16",
+     "1000000050:15"
+    ]
+   ]
+  },
+  {
+   "id": "rate-derive",
+   "rules": [
+    "UP-16"
+   ],
+   "expect": "same",
+   "seed": "der",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:100",
+     "1000000020:200",
+     "1000000030:100",
+     "1000000040:-5",
+     "1000000050:-3",
+     "1000000060:-5",
+     "1000000070:-5"
+    ]
+   ]
+  },
+  {
+   "id": "rate-derive-signs",
+   "rules": [
+    "UP-16"
+   ],
+   "expect": "same",
+   "seed": "der",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:3",
+     "1000000020:-5",
+     "1000000030:4",
+     "1000000040:-0",
+     "1000000050:-0",
+     "1000000060:0",
+     "1000000070:-",
+     "1000000080:-5"
+    ]
+   ]
+  },
+  {
+   "id": "rate-derive-zero",
+   "rules": [
+    "UP-16"
+   ],
+   "expect": "same",
+   "seed": "der",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:-5",
+     "1000000020:-5",
+     "1000000030:5",
+     "1000000040:5"
+    ]
+   ]
+  },
+  {
+   "id": "rate-dcounter",
+   "rules": [
+    "UP-17"
+   ],
+   "expect": "same",
+   "seed": "dcn",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:10:10",
+     "1000000020:12.5:12.5",
+     "1000000030:15:15",
+     "1000000040:14:14",
+     "1000000050:11:11",
+     "1000000060:12:12",
+     "1000000070:12.25:1e3"
+    ]
+   ]
+  },
+  {
+   "id": "rate-dcounter-down",
+   "rules": [
+    "UP-17"
+   ],
+   "expect": "same",
+   "seed": "dcn",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:20:20",
+     "1000000020:18:18",
+     "1000000030:16:16",
+     "1000000040:17:17"
+    ]
+   ]
+  },
+  {
+   "id": "rate-dcounter-fraction",
+   "rules": [
+    "UP-14",
+    "UP-17"
+   ],
+   "expect": "same",
+   "seed": "dcn",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010.25:0.1:0.1",
+     "1000000020.5:0.3:0.7",
+     "1000000033.125:0.7:0.2"
+    ]
+   ]
+  },
+  {
+   "id": "rate-all-types",
+   "rules": [
+    "UP-15",
+    "UP-16",
+    "UP-17",
+    "UP-31",
+    "UP-33"
+   ],
+   "expect": "same",
+   "seed": "types",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000005:1:100:100:5:1.5:1.5",
+     "1000000017:2:220:90:6:2.5:0.5",
+     "1000000031:3:221:95:7:2.5:-1",
+     "1000000064:4:300:100:8:9:9"
+    ]
+   ]
+  },
+  {
+   "id": "range-gauge",
+   "rules": [
+    "UP-18"
+   ],
+   "expect": "same",
+   "seed": "mm",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:-1:1",
+     "1000000020:0:5",
+     "1000000030:100:50",
+     "1000000040:100.000001:51",
+     "1000000050:50:0"
+    ]
+   ]
+  },
+  {
+   "id": "range-absolute-interval",
+   "rules": [
+    "UP-18"
+   ],
+   "expect": "same",
+   "seed": "mm",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000005:1:25",
+     "1000000010:1:26",
+     "1000000030:1:100",
+     "1000000040:1:51"
+    ]
+   ]
+  },
+  {
+   "id": "hb-equal",
+   "rules": [
+    "UP-10"
+   ],
+   "expect": "same",
+   "seed": "hb",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000005:1:1",
+     "1000000010:2:2",
+     "1000000015.000001:3:3",
+     "1000000020:4:4"
+    ]
+   ]
+  },
+  {
+   "id": "hb-long-gap",
+   "rules": [
+    "UP-10",
+    "UP-24"
+   ],
+   "expect": "same",
+   "seed": "hb",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000002:1:1",
+     "1000000037:2:2",
+     "1000000039:3:3"
+    ]
+   ]
+  },
+  {
+   "id": "hb-split-subinterval",
+   "rules": [
+    "UP-22",
+    "UP-24"
+   ],
+   "expect": "same",
+   "seed": "hb",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000004:1:1",
+     "1000000029:2:2"
+    ]
+   ]
+  },
+  {
+   "id": "hb-split-known-part",
+   "rules": [
+    "UP-22",
+    "UP-24"
+   ],
+   "expect": "same",
+   "seed": "hb",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003:1:1",
+     "1000000006:1:1",
+     "1000000008:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000031:5:5"
+    ]
+   ]
+  },
+  {
+   "id": "acc-unknown",
+   "rules": [
+    "UP-19"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000002:U:1",
+     "1000000004.5:2:U",
+     "1000000007.25:U:U",
+     "1000000009.999999:3:4"
+    ]
+   ]
+  },
+  {
+   "id": "acc-first-known",
+   "rules": [
+    "UP-19"
+   ],
+   "expect": "same",
+   "seed": "un",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000008:5",
+     "1000000009:6"
+    ]
+   ]
+  },
+  {
+   "id": "one-step",
+   "rules": [
+    "UP-20",
+    "UP-21",
+    "UP-25",
+    "UP-28"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000004:2",
+     "1000000013:3",
+     "1000000027:4"
+    ]
+   ]
+  },
+  {
+   "id": "one-step-unknown",
+   "rules": [
+    "UP-21",
+    "UP-24",
+    "UP-25"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000004:U:1",
+     "1000000013:3:U",
+     "1000000027:4:4"
+    ]
+   ]
+  },
+  {
+   "id": "one-step-half-unknown",
+   "rules": [
+    "UP-24"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000005:U:U",
+     "1000000012:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000016:U:U",
+     "1000000022:1:1"
+    ]
+   ]
+  },
+  {
+   "id": "one-step-start-unknown",
+   "rules": [
+    "UP-24"
+   ],
+   "expect": "same",
+   "seed": "un",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000012:5",
+     "1000000019.5:6",
+     "1000000021:7"
+    ]
+   ]
+  },
+  {
+   "id": "one-step-fraction",
+   "rules": [
+    "UP-14",
+    "UP-20",
+    "UP-21",
+    "UP-25"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000004.25:2",
+     "1000000013.75:3",
+     "1000000020.000001:4"
+    ]
+   ]
+  },
+  {
+   "id": "one-step-exact",
+   "rules": [
+    "UP-21"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:2",
+     "1000000020:3",
+     "1000000030.5:4"
+    ]
+   ]
+  },
+  {
+   "id": "multi-aligned",
+   "rules": [
+    "UP-20",
+    "UP-23",
+    "UP-29"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1",
+     "1000000045:2:3"
+    ]
+   ]
+  },
+  {
+   "id": "multi-split",
+   "rules": [
+    "UP-20",
+    "UP-22",
+    "UP-28",
+    "UP-29"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000013:1:1",
+     "1000000047:2:3"
+    ]
+   ]
+  },
+  {
+   "id": "multi-split-unknown",
+   "rules": [
+    "UP-22",
+    "UP-25"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000013:1:1",
+     "1000000047:U:3",
+     "1000000068:4:U"
+    ]
+   ]
+  },
+  {
+   "id": "multi-pre-under-one",
+   "rules": [
+    "UP-20",
+    "UP-23"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000009.5:1",
+     "1000000035:2"
+    ]
+   ]
+  },
+  {
+   "id": "multi-fraction-split",
+   "rules": [
+    "UP-22",
+    "UP-32"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000013.5:1:1",
+     "1000000047.25:2:3",
+     "1000000061:4:4"
+    ]
+   ]
+  },
+  {
+   "id": "multi-fraction-one",
+   "rules": [
+    "UP-21",
+    "UP-32"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000013.5:1:1",
+     "1000000021:2:3"
+    ]
+   ]
+  },
+  {
+   "id": "multi-start-unknown",
+   "rules": [
+    "UP-22",
+    "UP-24"
+   ],
+   "expect": "same",
+   "seed": "un",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000013:1",
+     "1000000039:2"
+    ]
+   ]
+  },
+  {
+   "id": "multi-s7",
+   "rules": [
+    "UP-22",
+    "UP-26",
+    "UP-29"
+   ],
+   "expect": "same",
+   "seed": "s7",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000005.5:3:1",
+     "1000000050.75:4:9",
+     "1000000061:5:2",
+     "1000000099.3:U:3",
+     "1000000140:6:U"
+    ]
+   ]
+  },
+  {
+   "id": "multi-s7-aligned",
+   "rules": [
+    "UP-23",
+    "UP-29"
+   ],
+   "expect": "same",
+   "seed": "s7",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1",
+     "1000000080:2:30",
+     "1000000101:3:3"
+    ]
+   ]
+  },
+  {
+   "id": "cf-basic",
+   "rules": [
+    "UP-26",
+    "UP-27",
+    "UP-28"
+   ],
+   "expect": "same",
+   "seed": "cf",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1",
+     "1000000020:5:2",
+     "1000000030:3:3",
+     "1000000040:2:4",
+     "1000000050:U:5",
+     "1000000060:7:6"
+    ]
+   ]
+  },
+  {
+   "id": "cf-last-unknown",
+   "rules": [
+    "UP-27"
+   ],
+   "expect": "same",
+   "seed": "cf",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1",
+     "1000000020:5:2",
+     "1000000030:U:3",
+     "1000000040:2:4",
+     "1000000050:3:U",
+     "1000000060:4:U"
+    ]
+   ]
+  },
+  {
+   "id": "cf-bulk",
+   "rules": [
+    "UP-26",
+    "UP-29"
+   ],
+   "expect": "same",
+   "seed": "cf",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1",
+     "1000000080:2:2",
+     "1000000200:3:3"
+    ]
+   ]
+  },
+  {
+   "id": "cf-bulk-unknown",
+   "rules": [
+    "UP-27",
+    "UP-29"
+   ],
+   "expect": "same",
+   "seed": "cf",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1",
+     "1000000020:2:2",
+     "1000000075:3:U",
+     "1000000081:4:4"
+    ]
+   ]
+  },
+  {
+   "id": "xff-limits",
+   "rules": [
+    "UP-27"
+   ],
+   "expect": "same",
+   "seed": "xff",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1",
+     "1000000020:U",
+     "1000000030:3",
+     "1000000040:U",
+     "1000000050:U",
+     "1000000060:6",
+     "1000000070:U",
+     "1000000080:U",
+     "1000000090:U",
+     "1000000100:1",
+     "1000000110:2",
+     "1000000120:3"
+    ]
+   ]
+  },
+  {
+   "id": "xff-bulk",
+   "rules": [
+    "UP-27",
+    "UP-29"
+   ],
+   "expect": "same",
+   "seed": "xff",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1",
+     "1000000080:2",
+     "1000000101:U",
+     "1000000140:4"
+    ]
+   ]
+  },
+  {
+   "id": "cdp-alignment",
+   "rules": [
+    "UP-28",
+    "UP-29"
+   ],
+   "expect": "same",
+   "seed": "un",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000013:1",
+     "1000000024:2",
+     "1000000037:3",
+     "1000000101:4"
+    ]
+   ]
+  },
+  {
+   "id": "rows-wrap",
+   "rules": [
+    "UP-30"
+   ],
+   "expect": "same",
+   "seed": "cap",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1",
+     "1000000020:2",
+     "1000000030:3",
+     "1000000040:4",
+     "1000000050:5",
+     "1000000060:6",
+     "1000000070:7"
+    ]
+   ]
+  },
+  {
+   "id": "rows-capped",
+   "rules": [
+    "UP-29",
+    "UP-30",
+    "UP-32"
+   ],
+   "expect": "same",
+   "seed": "cap",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1",
+     "1000000250:2"
+    ]
+   ]
+  },
+  {
+   "id": "rows-capped-split",
+   "rules": [
+    "UP-29",
+    "UP-32"
+   ],
+   "expect": "same",
+   "seed": "cap",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000013:1",
+     "1000000247:2",
+     "1000000253:3"
+    ]
+   ]
+  },
+  {
+   "id": "rows-capped-long",
+   "rules": [
+    "UP-29",
+    "UP-30"
+   ],
+   "expect": "same",
+   "seed": "cap",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1",
+     "1000100010:2",
+     "1000100015.5:3",
+     "1000200020.25:4"
+    ]
+   ]
+  },
+  {
+   "id": "rows-secondary-times",
+   "rules": [
+    "UP-31",
+    "UP-32"
+   ],
+   "expect": "same",
+   "seed": "s7",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1",
+     "1000000300:2:2"
+    ]
+   ]
+  },
+  {
+   "id": "multi-arg-fail",
+   "rules": [
+    "UP-34",
+    "UP-31"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000025:3:3",
+     "1000000031:zz:1",
+     "1000000041:5:5"
+    ]
+   ]
+  },
+  {
+   "id": "multi-arg-fail-order",
+   "rules": [
+    "UP-34",
+    "UP-9"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000025:3:3",
+     "1000000020:1:1",
+     "1000000041:5:5"
+    ]
+   ]
+  },
+  {
+   "id": "multi-arg-fail-count",
+   "rules": [
+    "UP-34",
+    "UP-7"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000050.7:1:2",
+     "1000000051:1"
+    ]
+   ]
+  },
+  {
+   "id": "multi-arg-ok",
+   "rules": [
+    "UP-34"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000005:1:1",
+     "1000000012:2:2",
+     "1000000031:3:3",
+     "1000000032.5:4:4"
+    ]
+   ]
+  },
+  {
+   "id": "updatev-none",
+   "rules": [
+    "UP-31"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000005:1"
+    ]
+   ]
+  },
+  {
+   "id": "updatev-error",
+   "rules": [
+    "UP-31"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000005:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000005:1"
+    ]
+   ]
+  },
+  {
+   "id": "updatev-formats",
+   "rules": [
+    "UP-31"
+   ],
+   "expect": "same",
+   "seed": "g2",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:0:-0",
+     "1000000020:1e-300:1.23456789012345e300",
+     "1000000030:-123.456789:0.000001234567890123"
+    ]
+   ]
+  },
+  {
+   "id": "zero-aligned",
+   "rules": [
+    "UP-19",
+    "UP-21",
+    "UP-26"
+   ],
+   "expect": "same",
+   "seed": "zero",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:-0"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000020:-0",
+     "1000000030:-0"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000060:-0"
+    ]
+   ]
+  },
+  {
+   "id": "zero-split",
+   "rules": [
+    "UP-19",
+    "UP-22",
+    "UP-26"
+   ],
+   "expect": "same",
+   "seed": "zero",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003:-0",
+     "1000000005:-0"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000037:-0"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000040:-0"
+    ]
+   ]
+  },
+  {
+   "id": "compute-basic",
+   "rules": [
+    "UP-36"
+   ],
+   "expect": "same",
+   "seed": "cmp",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000006:3",
+     "1000000016:4",
+     "1000000026:U"
+    ]
+   ]
+  },
+  {
+   "id": "compute-template",
+   "rules": [
+    "UP-36"
+   ],
+   "expect": "same",
+   "seed": "cmp",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "-t",
+     "c",
+     "1000000030:5"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000031:1:2:3"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000032:1"
+    ]
+   ]
+  },
+  {
+   "id": "fp-interval",
+   "rules": [
+    "UP-14",
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "fp10",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000043.771754:9.38595867742349e-06"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000044.771754:0.0005911534350013039"
+    ]
+   ]
+  },
+  {
+   "id": "fp-fused-first",
+   "rules": [
+    "UP-22",
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "fp300",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000529.692611:0.05447021635789045"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000001338.692611:575.84596"
+    ]
+   ]
+  },
+  {
+   "id": "fp-fused-average",
+   "rules": [
+    "UP-26",
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "fp7",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000021.931505:69.8"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000079.237859:635.9725"
+    ]
+   ]
+  },
+  {
+   "id": "fp-unknown-denominator",
+   "rules": [
+    "UP-21",
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "fpden",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000017240:U"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000017389:607"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000017505.795224:0.00038331942765209925"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000017646.606297:-43"
+    ]
+   ]
+  },
+  {
+   "id": "rnd-00",
+   "rules": [
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "rnd00",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000079.569229:9:U:410",
+     "1000000151.569229:1.593176662818906e-06:110.5725:41.993",
+     "1000000238.289548:U:0.602718586908989:494.744"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000315.289548:75:-719.3183:88.113"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000428.289548:35:368.3861:380",
+     "1000000577.289548:-100:94:593",
+     "1000000615.289548:607.7060885609195:-495.8:134.168",
+     "1000001389.289548:-338.9831:0.02248466787086824:160.826"
+    ]
+   ]
+  },
+  {
+   "id": "rnd-01",
+   "rules": [
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "rnd01",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000482:760646",
+     "1000000512:819968"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000515:879245"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000668:932790"
+    ]
+   ]
+  },
+  {
+   "id": "rnd-02",
+   "rules": [
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "rnd02",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000001685:-34:-5:U",
+     "1000002113:692564.042716737:U:73347.7847044601"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000002471:9.790430546960418e-06:89:U",
+     "1000006196:2274568.9739578012:23:-58",
+     "1000006736:8.222285856795596:U:585.0443306"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000012967:40750515.69823479:-36:-79.33299775"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000012984.216303:382.581825:U:3.8850831409221745e-05"
+    ]
+   ]
+  },
+  {
+   "id": "rnd-03",
+   "rules": [
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "rnd03",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000070:368119:807335:10.916",
+     "1000000218:386612:8644603619778210276:338.485",
+     "1000000223.520371:U:8644603619778252295:272.177",
+     "1000000235.520371:406054:8644603619778293332:122.153"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000236.520371:416810:U:370"
+    ]
+   ]
+  },
+  {
+   "id": "rnd-04",
+   "rules": [
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "rnd04",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000963:851"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000005792:346.258",
+     "1000005795:U",
+     "1000005796:960",
+     "1000005840:U"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000010691:306",
+     "1000022586:16.323"
+    ]
+   ]
+  },
+  {
+   "id": "rnd-05",
+   "rules": [
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "rnd05",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000187:622298.02",
+     "1000001937:622469.946953",
+     "1000002985:622727.0"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000003056:622833.753598",
+     "1000003098.565220:622828.0"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000003164.160786:622854.37",
+     "1000003230.160786:623099.6"
+    ]
+   ]
+  },
+  {
+   "id": "rnd-06",
+   "rules": [
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "rnd06",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000103:303.468",
+     "1000000109.942846:202.865",
+     "1000000121.942846:422.552"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000134.942846:U",
+     "1000000279.942846:504"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000401.942846:349.052",
+     "1000000413.568133:150.709",
+     "1000000422.691347:551"
+    ]
+   ]
+  },
+  {
+   "id": "rnd-07",
+   "rules": [
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "rnd07",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000023:873263"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000028:969809995708582333",
+     "1000000031:969809995708679830"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000041:969809995708687974",
+     "1000000062:12379047598197931378",
+     "1000000187:12379047598198023252"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000387:U",
+     "1000000398.346324:U",
+     "1000000409.059384:12379047598198045306",
+     "1000000417.227026:12379047598198113138"
+    ]
+   ]
+  },
+  {
+   "id": "rnd-08",
+   "rules": [
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "rnd08",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000001231:298.157",
+     "1000001232:U"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000005111:113",
+     "1000007948:104"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000016774:991"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000025103:495",
+     "1000034129:206.941",
+     "1000034567.260894:372.569",
+     "1000040838.260894:69.684"
+    ]
+   ]
+  },
+  {
+   "id": "rnd-09",
+   "rules": [
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "rnd09",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000102:450992:41",
+     "1000000123:494655:429.8059526",
+     "1000000139:U:727.89"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000140:555519:U",
+     "1000000142.709244:599890:-661.8629353",
+     "1000000144.709244:18263785722694880444:U"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000250.709244:18263785722694893458:42",
+     "1000000259.709244:18263785722694937391:3.937575981065817e-05",
+     "1000000267.709244:18263785722695012103:45406.089097539916",
+     "1000000271.709244:18263785722695053683:5"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000277.709244:U:36",
+     "1000000277.861595:18263785722695149815:0.0006395996280426415",
+     "1000000329.861595:18263785722695221712:59"
+    ]
+   ]
+  },
+  {
+   "id": "rnd-10",
+   "rules": [
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "rnd10",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000064:U"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000087:52",
+     "1000000090.909824:0.05616914798797325",
+     "1000000284.909824:75224441.27261977",
+     "1000000312.909824:-189.2183979"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000317.909824:1300186398.7805395",
+     "1000000347.909824:43",
+     "1000000358.215133:46672604.001024365"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000382.215133:5455845841.240817",
+     "1000000393.048726:-350.79719862"
+    ]
+   ]
+  },
+  {
+   "id": "rnd-11",
+   "rules": [
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "rnd11",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000988:U:953513.9:606268",
+     "1000001733:240700.37151:953617.56:648555",
+     "1000002603:240709.36:953869.0:724993",
+     "1000003043:240787.1:954134.765823:744133"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000003462:U:954214.8483:744562",
+     "1000003732:240806.5:954264.37:840260",
+     "1000004225.250857:240887.9:954496.0:U",
+     "1000004440.250857:241115.4:U:899031"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000004976.250857:241244.3:954594.182426:981342"
+    ]
+   ]
+  },
+  {
+   "id": "rnd-12",
+   "rules": [
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "rnd12",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000105.773035:479"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000160.773035:271.064",
+     "1000000194.773035:328.157",
+     "1000000197.773035:668"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000198.773035:884"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000311.773035:960",
+     "1000000326.290803:136.306",
+     "1000000451.290803:195.324",
+     "1000001308.290803:891"
+    ]
+   ]
+  },
+  {
+   "id": "rnd-13",
+   "rules": [
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "rnd13",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000004:968328:978915:94288.0",
+     "1000000004.675615:999740:1058703:94346.9277"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000005.198264:10915883023058432885:1083483:94511.3"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000006.198264:10915883023058510702:1113323:94771.83",
+     "1000000008.198264:10915883023058529848:1203093:94883.0"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000008.555040:10915883023058600491:1237042:95167.1113",
+     "1000000010.555040:10915883023058628985:1305965:95272.634913"
+    ]
+   ]
+  },
+  {
+   "id": "rnd-14",
+   "rules": [
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "rnd14",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000035:58",
+     "1000000036.407984:-61"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000039.407984:651.267",
+     "1000000042.407984:-792.685973"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000044.407984:-43",
+     "1000000044.644623:546054.6796631064",
+     "1000000053.644623:731.23"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000060.644623:79",
+     "1000000061.644623:102.99697864755453"
+    ]
+   ]
+  },
+  {
+   "id": "rnd-15",
+   "rules": [
+    "UP-35"
+   ],
+   "expect": "same",
+   "seed": "rnd15",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000045:U:951",
+     "1000000048:640149:220",
+     "1000000056:16843015454912557339:20.306"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000251:12364621126436492961:249.203",
+     "1000000256.288470:12364621126436537566:296.664",
+     "1000000269.288470:12364621126436636516:186.359"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "1000000280.288470:12364621126436702877:476.974",
+     "1000000284.288470:12364621126436749633:340.2",
+     "1000000344.288470:12364621126436800653:67.125",
+     "1000000424.288470:12364621126436816608:622"
+    ]
+   ]
+  }
+ ]
+}
