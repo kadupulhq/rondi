@@ -249,6 +249,21 @@ fn write_row(
     Ok(())
 }
 
+/// The current row after `count` row writes from `current` in an archive
+/// of `rows` rows (UP-30), without stepping through them.
+fn advance_rows(current: u64, rows: u64, count: u64) -> u64 {
+    if count == 0 || rows == 0 {
+        return current;
+    }
+    // A stored row past the end goes to 0 on the first write (UP-30).
+    let (start, remaining) = if current < rows {
+        (current, count)
+    } else {
+        (0, count - 1)
+    };
+    ((u128::from(start) + u128::from(remaining)) % u128::from(rows)) as u64
+}
+
 /// Consolidates one run into one classic archive: folds its PDPs, writes
 /// the rows it completes and updates the archive's CDP state and current
 /// row. The work is independent of the run's length.
@@ -284,6 +299,12 @@ pub(crate) fn consolidate_run(
 
     // Provenance: specification (docs/compatibility/update.md UP-29).
     let written = placement.completed.min(u128::from(archive.rows)) as u64;
+    if archive.cdp_prep.is_empty() {
+        // Rows without data sources hold no bytes and print nothing, so
+        // only the current row moves, by `written` steps of UP-30.
+        archive.current_row = advance_rows(archive.current_row, archive.rows, written);
+        return Ok(());
+    }
     let xff = archive.xff;
     let opening: Vec<f64> = archive
         .cdp_prep
@@ -774,5 +795,22 @@ mod tests {
             ArchiveKind::Classic(Cf::Average)
         );
         assert!(ArchiveKind::from_raw(b"BOGUS").is_err());
+    }
+
+    #[test]
+    fn advance_rows_matches_single_steps() {
+        for (current, rows) in [(0, 5), (3, 5), (4, 5), (7, 5), (u64::MAX, 5), (2, 1)] {
+            let mut stepped = current;
+            for count in 0..12 {
+                assert_eq!(
+                    advance_rows(current, rows, count),
+                    stepped,
+                    "{current} {rows} {count}"
+                );
+                let next = stepped.wrapping_add(1);
+                stepped = if next >= rows { 0 } else { next };
+            }
+        }
+        assert_eq!(advance_rows(0, u64::MAX, u64::MAX), 0);
     }
 }

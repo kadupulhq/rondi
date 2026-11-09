@@ -717,4 +717,45 @@ mod tests {
         assert_eq!(info.data_sources[0].raw_last_value, b"7");
         assert_eq!(info.data_sources[1].raw_last_value, b"6");
     }
+
+    /// A file with no data sources: one archive of `rows` rows.
+    fn write_zero_source_file(path: &Path, rows: u64) {
+        let mut bytes = vec![0u8; STAT_HEAD_LEN + RRA_DEF_LEN];
+        bytes[..4].copy_from_slice(b"RRD\0");
+        bytes[4..9].copy_from_slice(b"0003\0");
+        bytes[16..24].copy_from_slice(&crate::rrd_binary::FLOAT_COOKIE.to_le_bytes());
+        bytes[32..40].copy_from_slice(&1u64.to_le_bytes());
+        bytes[40..48].copy_from_slice(&300u64.to_le_bytes());
+        let rra = STAT_HEAD_LEN;
+        bytes[rra..rra + 7].copy_from_slice(b"AVERAGE");
+        bytes[rra + 24..rra + 32].copy_from_slice(&rows.to_le_bytes());
+        bytes[rra + 32..rra + 40].copy_from_slice(&1u64.to_le_bytes());
+        bytes[rra + 40..rra + 48].copy_from_slice(&0.5f64.to_le_bytes());
+        bytes.extend_from_slice(&1_000_000_000i64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn zero_source_file_with_huge_rows_finishes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("empty.rrd");
+        write_zero_source_file(&path, u64::MAX);
+        let steps: u64 = 2_000_000_000;
+        let timestamp = 1_000_000_000 + (steps * 300) as i64;
+        let update = RrdRawUpdate {
+            timestamp,
+            timestamp_usec: 0,
+            values: Vec::new(),
+        };
+        let started = std::time::Instant::now();
+        let summaries = update_rrd_raw_batch(&path, &[update], false).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(summaries.is_empty());
+        let info = crate::inspect_rrd_file(&path).unwrap();
+        // The starting row 0 advances once per PDP (UP-30).
+        assert_eq!(info.archives[0].current_row, steps);
+        assert_eq!(info.last_update, timestamp);
+    }
 }
