@@ -87,7 +87,8 @@ and the process exits with status 1, unless the rule says otherwise.
   `--record-platform KEY` / `--merge-platform KEY FILE` record and merge
   Linux results (run inside an image built like `docker/Dockerfile.test`).
   `--add GROUPS` captures the named groups and keeps the rest of the
-  table. A case that runs `--lazy` on `/dev/null` is tagged `host`: its
+  table; a re-captured group keeps its place, and a case whose steps and
+  environment are unchanged keeps its Linux expectations and tags. A case that runs `--lazy` on `/dev/null` is tagged `host`: its
   result depends on whether the host keeps the device's modification
   time current (GR-84), so the replay compares it with the live oracle
   only.
@@ -609,8 +610,9 @@ is the unused text with its separators (`def-041` to `-045`,
 
 **GR-41** (doc, bb; compat). Variable names (vnames) are 1 to 255
 characters from `A-Z a-z 0-9 _ -`; they may start with a digit and may
-equal an RPN operator name (`DEF:MAX=...`, `DEF:PI=...` work). A name
-defined twice fails with `ERROR: trying to reuse vname <name>`. A name is
+equal an RPN operator name (`DEF:MAX=...`, `DEF:PI=...` work). A CDEF or
+VDEF whose name is already defined fails with
+`ERROR: trying to reuse vname <name>`; a DEF does not (GR-34). A name is
 usable only after its definition; elements are processed in order
 (`element-017`, `-018`, `def-066` to `-069`). A DEF whose name contains
 another character (`x.y`, `x y`, `x!`, a space before or after the name)
@@ -625,6 +627,57 @@ rules, `ERROR: undefined vname <name>` for `PRINT` and definitions, and
 `ERROR: vname <name> not found` for `SHIFT`. An element whose first field
 is missing fails with `ERROR: No positional VNAME`, or for `PRINT`,
 `GPRINT` and `COMMENT` without format `ERROR: No positional CF/FORMAT`.
+`XPORT` with an unknown name fails like a drawing element (`element-044`).
+
+**GR-34** (bb; compat). A DEF may take a name that an earlier DEF, CDEF
+or VDEF already defined. This is not an error. The later DEF is still
+read when the data is fetched, so its file and data source errors are
+reported (GR-35), but every reference to the name, before or after it,
+resolves to the first definition: a later `DEF:c=...` leaves a CDEF `c`
+in place, a later `DEF:v=...` leaves the VDEF `v` in place (so
+`PRINT:v:%lf` still works and `PRINT:v:MAX:%lf` is still an unused
+argument), and a later `DEF:x=...` with another data source or `step=`
+does not change what `x` reads (`def-065`, `-077` to `-084`).
+
+**GR-35** (bb; compat). Evaluation order. A run goes through these
+phases, and the first error stops it with that error only:
+
+1. Options, wherever they stand among the elements (GR-17): an invalid
+   option or option value after an invalid element is reported, not the
+   element (`element-041`, `-042`).
+2. Elements, in command-line order: the element name and fields, DEF
+   option values (`start=abc`), RPN and VDEF syntax, references to names
+   (GR-41, GR-42), SHIFT offsets and name reuse. No file is opened in
+   this phase, so an invalid element after a DEF of a missing file wins
+   over the missing file (`element-022`, `-023`, `-026` to `-030`, `-034`,
+   `-035`, `-040`, `-043`, `-044`).
+3. The DEFs are read in element order; the first DEF that fails ends the
+   run, whatever comes before or after it (`element-024`, `-025`, `-036`,
+   `def-082`, `-083`).
+4. The formats of `PRINT` and `GPRINT`, in element order, both kinds
+   together: the first invalid format wins (`element-031`, `-032`, `-037`,
+   `-038`).
+5. The `--imginfo` format (GR-17, GR-83): checked only after the print
+   formats passed (`element-033`, `-039`).
+
+`xport` follows the same order for its elements (`element-043`, `-044`).
+
+**GR-36** (doc, bb; compat). The kinds of name each element accepts. Every
+name must be defined by an earlier element (GR-41).
+
+| Element | DEF or CDEF | VDEF | Number |
+|---|---|---|---|
+| CDEF expression | yes | yes, the same value in every row | yes; GR-45 needs one DEF or CDEF |
+| VDEF | yes | no (GR-46) | no: `Not a valid vname: <n> in line <rpn>` (`element-055`) |
+| `LINE`, `AREA`, `TICK`, `STACK` value | yes | yes (`element-045` to `-047`, `-051`) | yes (GR-50, `element-052`) |
+| `HRULE`, `VRULE` | no (GR-54) | value or time | yes |
+| `PRINT`, `GPRINT` | CF form (GR-58) | VDEF form | no: `undefined vname <n>` (`element-053`) |
+| `SHIFT` series | yes | no (GR-55) | no: `vname <n> not found` (`element-054`) |
+| `SHIFT` offset | no (GR-38) | its value | yes |
+| `XPORT` | yes | no (GR-57) | no: `Encountered unknown type variable '' in line '<element>'` (`element-056`) |
+
+A CDEF may mix DEFs, CDEFs and VDEFs (`element-048`, `-049`); a CDEF may
+be shifted by a VDEF (`element-050`).
 
 ## 5. DEF
 
@@ -664,13 +717,46 @@ is missing fails with `ERROR: No positional VNAME`, or for `PRINT`,
 the CDEF arithmetic rpn.md. A CDEF over DEFs with different windows or
 steps works on their common window (`def-070`, `-071`, GR-48).
 
-**GR-47** (bb; compat). Fetch and reduction of a DEF. The wanted step
-of a DEF is its `step=`, or else the image step: the larger of `--step`
-and (end − start) / width for `graph` (the width in pixels) and
-(end − start) / `--maxrows` for `xport`. The DEF reads its file for its
-window and wanted step the way `rrdtool fetch` does (the CF's best
-archive; rows stamped at the end of their interval). When the archive
-step *a* is smaller than the wanted step, rows are combined:
+**GR-37** (bb; compat). Reading through rrdcached. With `--daemon`, every
+DEF is read through that daemon; a DEF with `daemon=` is read through its
+own address, and the other DEFs follow `--daemon` or read the local file.
+Each DEF sends one `FETCH <file> <CF> <start> <end>` request, in element
+order, after all elements are parsed (GR-35): `<file>` is the DEF's file
+as an absolute path with `.` and `..` resolved, and `<start>` and
+`<end>` are the DEF's own window (its `start=`/`end=` or the graph's
+`--start`/`--end`) as given, not aligned to a step. The step, the reduce
+CF and the data source name are not sent. Requests are never merged: two
+identical DEFs, a DEF that reuses a name (GR-34) and DEFs of one file that
+differ only in data source, CF, `step=`, `start=` or `reduce=` each send
+their own request. Graph and xport send no `FLUSH`, so the daemon's
+`STATS` counters `FlushesReceived` and `UpdatesWritten` do not move. In
+these runs, DEFs that use the same address shared one connection. A fetch
+the daemon refuses ends the run with
+`ERROR: rrdcached@<address>: <daemon message>`; with `-Z` a missing file
+gives unknown values as for a local file. A data source missing from the
+file is reported after its fetch as `ERROR: No DS called '<ds>' in '<file>'`
+with the file name as written. A daemon that cannot be reached is GR-26.
+Provenance: black-box runs of the reference against `rrdcached` 1.11.0
+through a logging proxy on its Unix socket; there are no vectors, because
+the replay harness runs no daemon. Whether `RRDCACHED_ADDRESS` behaves
+like `--daemon` here, and how DEFs with different addresses share
+connections, were not checked.
+
+**GR-47** (bb; compat). Fetch and reduction of a DEF. The image step is
+the larger of `--step` and (end − start) / width for `graph` (the width
+of the graph area in pixels) and (end − start) / `--maxrows` for `xport`.
+The DEF reads its file for its window and for its `step=`, or without
+one the image step, the way `rrdtool fetch` does (the CF's best archive;
+rows stamped at the end of their interval). The wanted step of the DEF
+is the larger of its `step=` and the image step: a `step=` finer than the
+image step chooses the archive but does not refine the result, as
+`--step` below one pixel is ignored (GR-32). With an 18000 s window,
+`-m 10` or `-w 10` and `step=300`, the 300 s archive is read and reduced
+to 1800 s, so the first and last buckets are unknown where the 1800 s
+archive read without `step=` has values (`prep-096` to `-099` against
+`prep-039`; `limit-020` to `-027` print `nan`, `0.000000` and 11 rows
+for the same reason). When the archive step *a* is smaller than the
+wanted step, rows are combined:
 
 - the new step is f·*a* with f = ceil(wanted / *a*) (`step=1000` over a
   300 s archive gives 1200, `prep-007`);
@@ -694,6 +780,14 @@ greatest common divisor of the steps of the series it names, and its
 window runs from the latest start to the earliest end among them. Each
 row at time *t* takes from each series the row whose interval contains
 *t*; a series has no value outside its window (`prep-042` to `-059`).
+A DEF window that starts or ends inside an archive step covers the whole
+step: with a 300 s archive, `start=1000007450` (inside the step ending at
+1000007700) gives a first row stamped 1000007700, and `end=1000014450`
+(inside the step ending at 1000014600) a last row stamped 1000014600;
+`start=1000007400` also gives 1000007700 and `end=1000014600` gives
+1000014900. That is, the first and last rows are stamped
+floor(*t*/*a*)·*a* + *a* for *t* the start and the end (`prep-087` to
+`-095`). The CDEF and export rules above then apply unchanged.
 The exported series of `xport` and of the data formats share one grid:
 its step is the greatest common divisor of their steps, it starts at the
 image start rounded down to that step and ends at the image end rounded
@@ -705,7 +799,7 @@ window. The data formats of `graph` use the width for the image step
 **GR-49** (bb; compat). A VDEF and the deprecated `PRINT`/`GPRINT` with a
 CF read every row their DEF or CDEF holds, including rows outside the
 image window, so a DEF with its own `start=`/`end=` or `step=` gives
-values and times over that window (`prep-060` to `-062`). `SHIFT`
+values and times over that window (`prep-060` to `-062`, `-095`). `SHIFT`
 (GR-55) moves the series by its offset truncated toward zero to whole
 steps of that series: with a 300 s step, 150 and -150 do not move it and
 450 moves it by 300 (`prep-063` to `-079`).
@@ -822,14 +916,42 @@ DEF or CDEF by `offset` seconds for everything after it. The offset is an
 integer (digits with an optional sign; `60.5`, `1e2`, empty and garbage
 fail with `ERROR: error parsing number <offset>`) or a VDEF name, whose
 value is used. Shifting a VDEF fails with
-`ERROR: Cannot shift a VDEF: '<vname>' in line '<element>'`; no offset
+`ERROR: Cannot shift a VDEF: '<vname>' in line '<element>'`; a DEF or
+CDEF as offset fails with
+`ERROR: Offset cannot be a (C)DEF: '<name>' in line '<element>'` followed
+by an empty line (`shift-045`, `-046`); no offset
 field gives `ERROR: No shift given`; a bare `SHIFT` gives
 `ERROR: No argument for definition of vdef/rrd in SHIFT`. Shifting a CDEF
 is accepted (`shift-021`). The shifted series keeps the graph's row times:
 the data moves by whole steps when the offset is a multiple of the step,
 and the offset is rounded down to whole steps otherwise (`SHIFT:x:30`
 behaves like `SHIFT:x:0`, a VDEF offset of 11260 like 11220; `shift-001`
-to `-034`, `data-059`).
+to `-034`, `data-059`). Offsets and repeated SHIFTs: GR-38.
+
+**GR-38** (bb; compat). SHIFT offsets and their order.
+
+- A positive offset moves the data later: the row stamped *t* shows the
+  value the series had at *t* − offset; a negative offset moves it
+  earlier (`shift-036`, `-039`).
+- A VDEF offset uses the VDEF's value, never its time, also for `FIRST`
+  and `LAST` (`shift-037`); a VDEF whose value is unknown shifts by 0
+  (`shift-035`). The VDEF must be defined before the SHIFT (GR-41): a
+  name defined later fails with `error parsing number <name>`.
+- A SHIFT replaces the offset an earlier SHIFT gave the same series; it
+  does not add to it. `SHIFT:a:3600` then `SHIFT:a:1800` shifts by 1800,
+  then `SHIFT:a:-1800` by -1800, then `SHIFT:a:0` not at all
+  (`shift-038` to `-040`).
+- A CDEF or VDEF sees the offset in force where it stands in element
+  order: a CDEF or VDEF before the SHIFT reads the unshifted series, one
+  after it the shifted series, and after a second SHIFT the new offset
+  (`shift-042`, `-043`, `-047`, `-048`). A shifted CDEF is shifted the
+  same way (`shift-044`).
+- Drawing elements, `XPORT` and the data formats use the last offset of
+  the series, wherever the SHIFT stands: an `XPORT` or `LINE` before the
+  SHIFT is shifted (`shift-041`, `-043`, `-049`).
+- The deprecated `PRINT`/`GPRINT` with a CF read every row of the series
+  (GR-49), so a SHIFT does not change their value (`shift-047`, `-048`).
+
 
 **GR-56** (doc, bb; compat). `TEXTALIGN:left|right|center|justified`
 changes the default alignment of legend lines that follow it (GR-66).
@@ -868,6 +990,19 @@ legends of drawing elements alike. A backslash followed by a character
 other than the markers at the end of the text fails with
 `ERROR: Unknown control code at the end of '<text>'` (`a\\b`, `x\q`); a
 lone trailing backslash is kept as text (`comment-006`, `-027`).
+
+**GR-39** (bb; compat). The value a `PRINT` or `GPRINT` shows. The VDEF
+form shows the VDEF's value or, with `:strftime`, its time. The CF form
+shows what the matching VDEF of the same series gives: `AVERAGE` as
+`AVERAGE`, `MIN` as `MINIMUM`, `MAX` as `MAXIMUM`, `LAST` as `LAST`,
+over every row the series holds (GR-49). Unknown rows are skipped, so
+`LAST` is the last known value also when the window ends in unknown rows
+(`print-042`, `-044`). `GPRINT` shows the same values as `PRINT`
+(`print-043`). The time of a VDEF is the stamp of its row (the end of the
+row's interval) for `LAST`, `MAXIMUM` and `MINIMUM`, and the start of
+the row's interval for `FIRST`: one step before the stamp of the first
+known row (`print-042`, `prep-095`, `vdef-005`). The numbers come from
+format-strings.md.
 
 ## 9. Image size and layout
 
@@ -1199,8 +1334,8 @@ line, exit 1.
 
 **GR-86** (doc, bb; compat). `--imgformat` XML, XMLENUM, JSON, JSONTIME,
 CSV, TSV, SSV turn the graph into a data export of every drawing element
-with data (`LINE`, `AREA`, `STACK`, `XPORT`; a `TICK` alone is not
-exported), using the legend as column name:
+with data (`LINE`, `AREA`, `STACK`, `XPORT`; a `TICK` is never
+exported), using the legend as column name (column order: GR-94):
 
 - With a file name the data is written to the file and the run prints
   `0x0` and the print lines (`data-003`, `-004`). With `-` or with a file
@@ -1274,6 +1409,17 @@ value tags (`<v0>`), `--json` writes the JSON form of GR-86. The legend
 is the XPORT legend or empty. Values print as `%.10e` and unknown as
 `NaN` (XML) or `null` (JSON) (`xport-001` to `-063`).
 
+**GR-94** (bb; compat). Export columns. `xport` writes one column per
+`XPORT` element in element order, whatever the order of the definitions;
+a name may be exported more than once, each time with its own legend; a
+legend entry is the XPORT legend or empty (`xport-082` to `-085`). A
+drawing element in `xport` adds no column; its legend appears under
+`gprints` (`xport-084`). The data formats of `graph` write one column per
+`LINE`, `AREA`, `STACK` and `XPORT` element in element order, mixed
+freely; a `TICK` adds none, also when other columns exist; an element
+without legend gives a column with an empty name; a stacked element's
+column holds its own values, not the stacked sum (`data-065`, `-066`).
+
 ## 13. Limits
 
 **GR-90** (bb; platform-specific). Image bytes are not part of the
@@ -1313,7 +1459,11 @@ Rondi policy (RD-017): a DEF whose fetch would return more than 10,000,000
 rows fails before any data is read with
 `ERROR: unsupported RRD operation: RRD fetch range exceeds the 10 million row safety limit`,
 nothing on standard output (`limit-020` to `-025`; the reference prints
-the result). `rrdtool fetch` streams and is not limited.
+the result). The rows counted are those `rrdtool fetch` returns for the
+DEF's window: from 1000000000 to 1599999940 a 60 s archive gives exactly
+10,000,000 rows, which is within the limit, so the reference result is
+the expectation (`limit-026`, `-027`). `rrdtool fetch` streams and is not
+limited.
 
 ## Rondi policies
 
@@ -1358,7 +1508,11 @@ their class; the expectation stays RRDtool's. They are summarized here.
 | `limit-020` to `-025` | GR-92 | policy | refuses fetches over 10 million rows |
 | `grammar-055`, `-056`, `-061`, `out-008`, `order-009`, `-010`, `scan-001`, `-002`, `-009`, `-010`, `-012` to `-014`, `-016`, `-029`, `-031`, `-035`, `-038`, `-039`, `-048`, `-049`, `-057` to `-060`, `-062`, `-072`, `-073`, `-080`, `-087`, `-091`, `repeat-015` | GR-3 | defect | prints `0x0` for a graph with no elements |
 | `def-073` | GR-43 | defect | `-Z` with a missing DS gives `nan`; the reference prints another value (`-5.438596`) |
-| `cdef-019` | GR-45 | defect | a CDEF that names itself is refused instead of giving `nan` |
+| `element-056` | GR-36 | defect | `XPORT:<number>` reports `no XPORT found` |
+| `prep-096` to `-099` | GR-47 | defect | a `step=` finer than the image step refines the DEF |
+| `shift-038` to `-040`, `-043` | GR-38 | defect | repeated SHIFTs of a series add up instead of the last one replacing the earlier |
+| `shift-045`, `-046` | GR-38 | defect | a DEF or CDEF offset fails with `error parsing number` |
+| `limit-026`, `-027` | GR-92 | defect | a fetch of exactly 10,000,000 rows is refused |
 | `grid-dash-011`, `line-044`, `-045`, `hrule-027`, `-028`, `vrule-027`, `-028` | GR-24, GR-50, GR-54 | defect | no Cairo warning for zero or negative dashes |
 | `font-003`, `layout-049` (macOS); `font-019` (Linux) | GR-60 | defect | one font's metrics for every family |
 | `legend-030` | GR-60 | defect | CJK fallback metrics |
@@ -1412,3 +1566,13 @@ provenance.
 12. **Tab stops with a fractional `--tabwidth`** under `--y-grid none` do
     not fall on multiples of the value (`-T 16.5` gives stops at 16, 33,
     50 and 67); only whole tab widths are specified there (GR-64).
+13. **One-pixel graph areas.** `--width` below 10 is refused, so a graph
+    area 1 px wide comes from `--full-size-mode` with a small width. Under
+    `--alt-autoscale`, `-w 10` and `-w 60` give a value range around the
+    data (72.70 to 73.57 and 73.60 to 74.48), while `-w 40` gives -0.1 to
+    1.1, the range of a graph without data (`prep-083` to `-086`). Why the
+    image width changes the result when the graph area does not was not
+    settled; the vectors pin the three cases.
+14. **rrdcached details** not covered by GR-37: `RRDCACHED_ADDRESS`, DEFs
+    with different daemon addresses, and the exact text of daemon-side
+    fetch errors, which comes from the daemon.
