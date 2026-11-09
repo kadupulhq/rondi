@@ -1563,7 +1563,11 @@ fn prepare_graph_image(
     let resolve = |start_spec: Option<&str>, end_spec: Option<&str>, start: i64, end: i64| {
         resolve_window(start_spec, end_spec, (start, end), now)
     };
-    match im.parse_elements(request.elements, &resolve) {
+    let parsed = im.parse_elements(request.elements, &resolve);
+    // GR-96: what `debug=` asked for is written as each element is read,
+    // so it precedes an error in a later element.
+    eprint!("{}", std::mem::take(&mut im.debug));
+    match parsed {
         Ok(()) => Ok((im, false)),
         Err(error) => Err(error.to_string().into()),
     }
@@ -1571,9 +1575,7 @@ fn prepare_graph_image(
 
 /// `data_fetch` (flushing each DEF's file through its rrdcached first) and
 /// `data_calc`.
-fn flush_and_prepare_data(
-    im: &mut rondi::graph::Graph,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn flush_and_prepare_data(im: &mut rondi::graph::Graph) -> Result<(), Box<dyn std::error::Error>> {
     let mut flushed = std::collections::HashSet::new();
     let mut flush_error = None::<Box<dyn std::error::Error>>;
     let mut hook = |address: &str, filename: &str| {
@@ -1683,11 +1685,7 @@ fn render_xport(args: &[String]) -> Result<(String, Option<String>), Box<dyn std
     // Unlike graph, RRDtool's xport connects to the image-wide daemon up front
     // and gives up when that fails.
     #[cfg(unix)]
-    if let Some(address) = im
-        .daemon
-        .as_deref()
-        .filter(|address| !address.is_empty())
-    {
+    if let Some(address) = im.daemon.as_deref().filter(|address| !address.is_empty()) {
         connect_rrdcached(address)?;
     }
     flush_and_prepare_data(&mut im)?;
@@ -1765,7 +1763,8 @@ fn graph_render_input(im: &rondi::graph::Graph) -> (RenderedGraphXport, Vec<Grap
     let row_count = usize::try_from((end - start) / step_i64).unwrap_or(0);
     let rows = (0..row_count)
         .map(|row| {
-            let now = start + row as i64 * step_i64;
+            // GR-48: a row is stamped at the end of its step.
+            let now = start + (row as i64 + 1) * step_i64;
             sources
                 .iter()
                 .map(|(_, vidx, yrule)| {
@@ -2959,7 +2958,9 @@ fn format_xport_addprints(
                 gprints.push_str(&entry("align", align));
             }
             Kind::Hrule => rules.push_str(&entry("hrule", &format_xport_value(element.vdef.value))),
-            Kind::Vrule => rules.push_str(&entry("vrule", &element.vdef.time.unwrap_or(0).to_string())),
+            Kind::Vrule => {
+                rules.push_str(&entry("vrule", &element.vdef.time.unwrap_or(0).to_string()))
+            }
             _ => {}
         }
     }

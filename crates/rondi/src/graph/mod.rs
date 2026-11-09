@@ -18,7 +18,7 @@ use crate::vdef::VdefFunction;
 pub use data::Export;
 
 /// What an element is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Kind {
     Def,
     Cdef,
@@ -31,6 +31,7 @@ pub enum Kind {
     Vrule,
     Print,
     Gprint,
+    #[default]
     Comment,
     TextAlign,
     Xport,
@@ -111,7 +112,9 @@ impl Cf {
                 sum / count as f64
             }
             Self::Minimum => known.fold(first, |low, value| if value < low { value } else { low }),
-            Self::Maximum => known.fold(first, |high, value| if value > high { value } else { high }),
+            Self::Maximum => {
+                known.fold(first, |high, value| if value > high { value } else { high })
+            }
             Self::Last => known.last().unwrap_or(first),
         }
     }
@@ -144,16 +147,19 @@ pub struct Series {
 }
 
 impl Series {
-    /// The end of the last interval.
+    /// The end of the last interval, clamped to the 64-bit range.
     pub fn end(&self) -> i64 {
-        self.start + self.values.len() as i64 * self.step as i64
+        let span = self.values.len() as i128 * i128::from(self.step.max(1));
+        clamp_time(i128::from(self.start) + span)
     }
 
     /// The value whose interval holds `time`: from just after its start to
     /// its end. Unknown outside the series.
     pub fn at(&self, time: i64) -> f64 {
-        let step = self.step.max(1) as i64;
-        let offset = time - self.start;
+        // A shifted start may sit anywhere in the 64-bit range, so the
+        // offset is taken in 128 bits.
+        let step = i128::from(self.step.max(1));
+        let offset = i128::from(time) - i128::from(self.start);
         if offset <= 0 {
             return f64::NAN;
         }
@@ -165,6 +171,10 @@ impl Series {
     }
 }
 
+fn clamp_time(time: i128) -> i64 {
+    time.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
 /// What a DEF reads (GR-43).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct DefSpec {
@@ -173,9 +183,14 @@ pub(crate) struct DefSpec {
     cf: Cf,
     /// The reduction CF, the DEF's CF by default.
     reduce: Cf,
+    /// `reduce=`, when given.
+    reduce_given: Option<Cf>,
     start: i64,
     end: i64,
-    /// `step=`, or the image step.
+    /// The step the file is read for: `step=`, or the image step.
+    fetch_step: u64,
+    /// The step the result is reduced to: the larger of `step=` and the
+    /// image step (GR-47).
     step: u64,
     daemon: Option<String>,
 }
@@ -237,12 +252,11 @@ pub struct Element {
     pub(crate) offset: Option<Offset>,
     /// The CF of a deprecated PRINT or GPRINT over a DEF or CDEF.
     pub(crate) cf: Option<Cf>,
-}
-
-impl Default for Kind {
-    fn default() -> Self {
-        Self::Comment
-    }
+    /// The whole-step offset the last SHIFT of this series applied
+    /// (GR-38).
+    pub(crate) shifted: i64,
+    /// The `debug=` block of a DEF, moved to [`Graph::debug`].
+    pub(crate) debug: String,
 }
 
 /// Resolves the `start=` and `end=` of a DEF against the image window:
@@ -284,6 +298,9 @@ pub struct Graph {
     /// An error RRDtool leaves set without failing, reported once the
     /// command finished.
     pub pending_error: Option<String>,
+    /// What `debug=` asked to write to standard error, in element order
+    /// (GR-96).
+    pub debug: String,
 }
 
 impl Graph {
@@ -335,7 +352,18 @@ impl Graph {
             return f64::NAN;
         };
         match element.cf {
-            Some(cf) => cf.apply(source.series.values.iter().copied()),
+            // Compatibility: the CF form skips infinite values as well as
+            // unknown ones.
+            // Provenance: black-box compatibility test (alias_modes CDEF and
+            // VDEF scalars, probes with INF and NEGINF rows).
+            Some(cf) => cf.apply(
+                source
+                    .series
+                    .values
+                    .iter()
+                    .copied()
+                    .filter(|value| value.is_finite()),
+            ),
             None => source.vdef.value,
         }
     }
