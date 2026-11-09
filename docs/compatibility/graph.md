@@ -1585,13 +1585,20 @@ DEF's window: from 1000000000 to 1599999940 a 60 s archive gives exactly
 the expectation (`limit-026`, `-027`). `rrdtool fetch` streams and is not
 limited.
 
+The same limit and text apply to the series Rondi builds after the
+fetch: a DEF's unknown values under `-Z`, a reduced DEF, a CDEF's common
+window, and the grid that exported and drawn series share (GR-48). That
+grid's step is the greatest common divisor of the series' steps, so
+series of 1800 s and 1801 s share a 1 s grid, and a window of more than
+10,000,000 s is refused. The reference draws such graphs.
+
 ## Rondi policies
 
 | Rule | Reference | Rondi |
 |---|---|---|
 | GR-93 | writes SVG, PDF, EPS | refuses with `ERROR: RRDtool graph format <F> is unsupported` (RD-006) |
 | GR-91 | renders up to 32767 px per side | refuses a graph side above 32767 or an image above 2^24 pixels (RD-016) |
-| GR-92 | fetches any range | refuses more than 10 million rows per fetch (RD-017) |
+| GR-92 | fetches any range | refuses more than 10 million rows per fetch, series or shared grid (RD-017) |
 
 The replay test requires Rondi's standard error to contain the policy
 text for each of these vectors.
