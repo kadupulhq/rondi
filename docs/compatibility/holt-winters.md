@@ -1,10 +1,8 @@
 # Holt-Winters archives
 
-Status: draft. Stage 1 (create-time state) and stage 2 (`update` for
-runs of one PDP, section 2) are written; stage 2b (runs of two or more
-PDPs, section 3) is recorded but not yet specified, and stage 3 (`tune`) is
-not started. Until those are done this file is not a complete
-specification.
+Status: draft. Stage 1 (create-time state) and stage 2 (`update`,
+sections 2 and 3) are written; stage 3 (`tune`) is not started. Until it is
+done this file is not a complete specification.
 
 This specification describes what RRDtool 1.11.0 does with the Holt-Winters
 archives `HWPREDICT`, `MHWPREDICT`, `SEASONAL`, `DEVSEASONAL`, `DEVPREDICT`
@@ -84,8 +82,8 @@ choice put them (CR-46), so position 0 of the season is not tied to time.
 *d* = *δ*, the values prefetched by the previous PDP (HW-16), and set
 *n'* = *n*.
 
-1. If *I* is unknown (no state yet): when *x* is known, *I* = *I'* = *x*
-   and *T* = *T'* = 0. The prediction *p* is unknown, and the new
+1. If *I* is unknown (no state yet): when *x* is known, *I* = *I'* = *x*,
+   *T* = *T'* = 0 and *n* = *n'* = 1 (*n* may have grown in runs, HW-21). The prediction *p* is unknown, and the new
    coefficient is *s'* = *x* ⊖ *I* (so 0 or 1 for the first value; unknown
    when *x* is unknown).
 2. Else if *s* is unknown (the first season): *p* is unknown, *I'* = *I*,
@@ -184,21 +182,54 @@ product followed by a sum. All other operations are single roundings in
 the order written. The prediction, deviation and smoothing results
 differ in the last bits between the platforms.
 
-## 3. Update: runs of two or more PDPs (stage 2b, not yet specified)
+## 3. Update: runs of two or more PDPs
 
-Observed, for whole updates aligned to the step (one run of *m* equal
-PDPs, `update.md` UP-23); to be specified:
+`update.md` UP-23 splits the PDPs an argument completes into runs of equal
+values: a whole update gives one run of *n* PDPs, a split update a run of
+one (*F*, section 2) followed by a run of *n* − 1. The Holt-Winters
+archives treat a run of *m* ≥ 2 PDPs of value *z* as a unit, not as *m*
+single PDPs. Let *r0* be an archive's current row before the run.
 
-- *m* ≥ 3: the prediction and DEVPREDICT rows are unknown, FAILURES rows
-  are 0 and its history unchanged, SEASONAL and DEVSEASONAL rows are
-  rewritten with their current coefficients, *I*, *I'*, *T*, *T'* are
-  unchanged, *n* increases by *m* and *n'* becomes *m*. The PDP value is
-  ignored, known or not.
-- *m* = 2: the prediction archive learns from the value twice, the
-  second time with the SEASONAL coefficient two positions ahead of the
-  first; SEASONAL and DEVSEASONAL rows keep their coefficients.
+**HW-20** (black-box; must). A run of two PDPs is processed as two PDPs by
+HW-11 to HW-14 and HW-17, each with *x* = *z*, with these differences:
 
-The `hw` vectors with irregular and gapped updates freeze the results.
+- The prefetch after each PDP (HW-16) reads the row two positions after
+  the one just reached (*r* + 2 mod *P*) instead of one. So the second
+  PDP uses the coefficient and deviation at *r0* + 3, not *r0* + 2, and
+  after the run slot 2 holds row *r0* + 4 and slot 3 the second PDP's
+  coefficient.
+- SEASONAL and DEVSEASONAL rows do not change. The new coefficients and
+  deviations of the first and second PDP go only to those archives'
+  *primary_value* and *secondary_value* (words 8 and 9).
+- The prediction archive's *primary_value* and *secondary_value* are the
+  two predictions; its two rows, and the DEVPREDICT and FAILURES rows, are
+  as HW-15 gives them for each PDP, and the failure history shifts twice.
+
+This holds with or without state, and in the first season: a run of two
+that reaches a known coefficient learns from it (vectors `052`, `070`,
+`071`).
+
+**HW-21** (black-box; must). A run of *m* ≥ 3 PDPs ignores *z*, known or
+not:
+
+- Each archive writes *K* = min(*m*, *rows*) rows (`update.md` UP-29),
+  advancing its current row *K* positions: unknown in the prediction and
+  DEVPREDICT archives, 0.0 in FAILURES, and the existing values in SEASONAL
+  and DEVSEASONAL (no change). The season counter and triggers (HW-17)
+  follow those *K* positions.
+- *I*, *I'*, *T* and *T'* are unchanged, unknown or not; *n* becomes
+  *n* + *m* and *n'* becomes *n'* + *m* − 1 (not the *n* before the last
+  PDP). The next known value is therefore predicted *n* steps ahead.
+- The failure history is cleared to all zero bytes.
+- SEASONAL slot 3 becomes the row at (*r0* + *m*) mod *P* and slot 2 the
+  row after it, using the full *m* even when the rows written were capped
+  at *K* = *P*; DEVSEASONAL likewise. Both read the rows as they were
+  before any smoothing pass of the command (HW-18).
+- The prediction archive's *primary_value* and *secondary_value* become
+  unknown; those of SEASONAL and DEVSEASONAL are unchanged.
+
+(vectors `053`, `054`, `072` to `075`; the 43-PDP gaps and the runs before
+any state in the recordings described under "Vectors").
 
 ## Open questions
 
@@ -207,11 +238,11 @@ The `hw` vectors with irregular and gapped updates freeze the results.
   the `hwsw0` and `hwsw5` inputs) are accepted by `create`. The rows such
   archives write are frozen by vectors `037` to `046` but not specified.
 
-- Stage 2b: the rules for runs of two or more PDPs (section 3), including
-  split updates and runs before any state exists.
 - Whether a gap of many PDPs ever resets the model: none observed for gaps
-  up to 7 PDPs with *P* = 5 (beyond the season), nor in 43-PDP gaps, which
-  are runs (section 3).
+  of single unknown PDPs up to 7 with *P* = 5, nor for runs of 43 PDPs
+  (HW-21 keeps *I* and *T*).
+- Which words 8 and 9 of DEVPREDICT and FAILURES hold after runs: frozen
+  by the vectors, not specified.
 
 - HW-2: the exact derivation of the initial `seasonal_smooth_idx`. It
   could not be settled black-box: it is stable for a given file name but
@@ -232,18 +263,20 @@ already been updated. The cases read them (`info`, `dump`, `fetch` of each
 archive) and update them with seasonal, spiking, gapped, irregular,
 multi-source, failure-bound, smoothing and run series.
 
-Section 2 was checked with a black-box model, a script outside the
-repository written from these rules and never derived from RRDtool or
-Rondi code. Started from the committed input and given each case's PDP
-values, it reproduces the final file state (every CDP slot, the
-Holt-Winters rows and the failure history) of the 42 single-source `hw`
-update cases whose PDPs come one per argument, on macOS arm64 and on Linux
-x86_64, with two exceptions explained elsewhere: the DEVPREDICT and FAILURES rows of
-the `hwsw0` and `hwsw5` cases (Open questions), and on x86_64 cases `062`
-and `063`, whose long readings convert to a slightly different value there
+Sections 2 and 3 were checked with a black-box model, a script outside the
+repository written from these rules and `update.md` UP-10 and UP-19 to
+UP-25, never derived from RRDtool or Rondi code. Started from the committed
+input and given each case's arguments, it reproduces the final file state
+(every CDP slot it models, the Holt-Winters rows and the failure history)
+of all 51 single-source `hw` update cases, including split, irregular,
+gapped and multi-PDP updates, on macOS arm64 and on Linux x86_64, with two
+exceptions explained elsewhere: the DEVPREDICT and FAILURES rows of the
+`hwsw0` and `hwsw5` cases (Open questions), and on x86_64 cases `062` and
+`063`, whose long readings convert to a slightly different value there
 (`update.md` UP-35), so the bound tie is pinned on the fused builds only.
-The model also matches 26 recordings made one `update` command per
-argument (18 on macOS arm64, 8 on Linux x86_64), of up to 60 updates, with
-one and two data sources. Until Rondi
+The model also matches 37 recordings made one `update` command per
+argument (27 on macOS arm64, 10 on Linux x86_64), of up to 60 updates,
+with one and two data sources, gaps of up to 43 PDPs and runs before any
+state exists. Until Rondi
 implements these archives, the cases that read or write their state are
 expected to be refused; the `fetch` cases already match.

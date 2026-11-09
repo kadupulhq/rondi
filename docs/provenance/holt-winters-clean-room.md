@@ -21,7 +21,7 @@
   resulting files' raw bytes, `info` and `dump`. It read no RRDtool C
   source. Rondi has no Holt-Winters update code to read.
 - Produced: `docs/compatibility/holt-winters.md` HW-1, HW-2 and HW-10 to
-  HW-19, the `hw` cases in `scripts/gen-create-resize-vectors.py`,
+  HW-21, the `hw` cases in `scripts/gen-create-resize-vectors.py`,
   `crates/rondi-cli/tests/data/hw/` (76 cases, x86_64 overrides) and
   `crates/rondi-cli/tests/hw_spec_vectors.rs`.
 
