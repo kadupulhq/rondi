@@ -567,9 +567,11 @@ fn holt_winters_group(info: &RrdInfo, kinds: &[ArchiveKind]) -> Result<Option<Gr
         }
     }
     // Compatibility: a prediction, SEASONAL or DEVSEASONAL link that names
-    // an archive of another type (only in a crafted file) changes what
-    // RRDtool computes in ways no vector pins; Rondi refuses such a file
-    // before writing anything. DEVPREDICT and FAILURES links are followed.
+    // an archive of another type changes what RRDtool computes in ways no
+    // vector pins; Rondi refuses such a file before writing anything.
+    // `rrdtool create` stores a misnumbered rra-num as given (create.md
+    // CR-35), so an ordinary create can produce one, not only a crafted
+    // file. DEVPREDICT and FAILURES links are followed.
     // Provenance: black-box compatibility test (hwimp with each link
     // patched); docs/compatibility/holt-winters.md Open questions.
     if !group.season_links_match_types(&info.archives) {

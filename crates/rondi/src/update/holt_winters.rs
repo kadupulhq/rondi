@@ -180,13 +180,15 @@ impl Seasons {
 }
 
 /// The half-width *h* of the smoothing window of season archive `archive`,
-/// when the pass smooths it: *h* ≥ 1 and the window no wider than 2P + 1.
+/// when the pass smooths it: 1 ≤ *h* < P, so the window is narrower than
+/// 2P + 1.
 // Compatibility: the window fraction is the stored smoothing_window for a
 // version that reads as 4 or more and 0.05 otherwise; h = trunc(f·P / 2).
 // Provenance: specification (docs/compatibility/holt-winters.md HW-18).
-// Compatibility: a fraction above 2, NaN or negative occurs only in a
-// crafted file; such an archive is left unsmoothed, so the pass stays
-// linear in P.
+// Compatibility: a fraction of 2 or more (h ≥ P), NaN or negative occurs
+// only in a crafted file; such an archive is left unsmoothed, so the pass
+// stays linear in P. RRDtool smooths at 2 and above (hwsm10 patched to 2.0
+// and 2.5), so Rondi diverges there; fractions in (1, 2) match it.
 // Provenance: specification (docs/compatibility/holt-winters.md HW-18 does
 // not cover fractions above 1; Rondi's choice).
 fn half_width(archive: &RrdArchiveInfo, version: &str) -> Option<u64> {
@@ -196,7 +198,7 @@ fn half_width(archive: &RrdArchiveInfo, version: &str) -> Option<u64> {
         0.05
     };
     let half = (fraction * archive.rows as f64 / 2.0).trunc();
-    (half >= 1.0 && half <= archive.rows as f64).then_some(half as u64)
+    (half >= 1.0 && half < archive.rows as f64).then_some(half as u64)
 }
 
 /// The smoothing pass of an `update` command (HW-18): smooths the SEASONAL
@@ -1595,6 +1597,19 @@ mod tests {
             && a.iter()
                 .zip(b)
                 .all(|(x, y)| (x - y).abs() <= 1e-12 * y.abs().max(1.0))
+    }
+
+    #[test]
+    fn half_width_stays_below_the_period() {
+        // P = 4: f = 1.99 gives h = 3; f = 2 would give h = P and is left
+        // unsmoothed, as are NaN and negative fractions.
+        let mut archive = additive_group().remove(1);
+        for (fraction, half) in [(0.5, Some(1)), (1.99, Some(3)), (2.0, None), (-1.0, None)] {
+            archive.param_words[param::SMOOTHING_WINDOW] = f(fraction);
+            assert_eq!(half_width(&archive, "0004"), half, "{fraction}");
+        }
+        archive.param_words[param::SMOOTHING_WINDOW] = f(rrd_nan());
+        assert_eq!(half_width(&archive, "0004"), None);
     }
 
     #[test]
