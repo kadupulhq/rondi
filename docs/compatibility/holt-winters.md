@@ -1,9 +1,9 @@
 # Holt-Winters archives
 
-Status: complete for create-time state (section 1), `update` (sections 2
-and 3) and `tune` (section 4). `info`, `dump`, `fetch` and `restore` of
-these archives are covered by the vectors and by the specifications of
-those commands, not restated here.
+Status: complete for create-time state (section 1), `info` and `dump`
+output (section 1a), `update` (sections 2 and 3) and `tune` (section 4).
+`fetch` and `restore` of these archives are covered by the vectors and by
+the specifications of those commands, not restated here.
 
 This specification describes what RRDtool 1.11.0 does with the Holt-Winters
 archives `HWPREDICT`, `MHWPREDICT`, `SEASONAL`, `DEVSEASONAL`, `DEVPREDICT`
@@ -46,6 +46,143 @@ the inode, but it does depend on the output file name (`s.rrd`, `h3.rrd`,
 not specified here. A replacement may choose any value in range;
 comparisons of created files mask this slot as they mask the current rows
 (CR-46). See "Open questions".
+
+## 1a. `info` and `dump`
+
+`info` (`cli.md` CLI-68) and `dump` print a file with Holt-Winters
+archives as they print a classic file, except for the parameter and CDP
+items of the Holt-Winters archives given here. The file and data source
+items are unchanged; `header_size` counts the Holt-Winters archives'
+definitions, CDP records and row pointers like any others (1624 for
+`hwimp`). Every line of a classic archive is the same as in a file
+without Holt-Winters archives: the probes compared an `AVERAGE` archive
+alone, before an implicit `HWPREDICT` group and after it, after the same
+30 updates, and its `info` and `dump` lines differed only in the archive
+index and `cur_row` (CR-46). Neither command changes the file (the
+`same:` records of vectors `000` to `015`). Slot names are those of
+`restore.md` RS-53; *w* is the FAILURES `window_len`.
+
+**HW-3** (black-box; must). `info`. For a Holt-Winters archive *i*, the
+lines `rra[i].cf`, `.rows`, `.cur_row` and `.pdp_per_row` are as for a
+classic archive. Then, instead of `rra[i].xff` and the per-DS
+`rra[i].cdp_prep[j].value` and `.unknown_datapoints`, the archive prints
+its parameter keys `rra[i].<key>`, then for each DS *j* in DS order its
+CDP keys `rra[i].cdp_prep[j].<key>`, all of one DS before the next:
+
+| CF | Parameter keys, in order | CDP keys per DS, in order |
+|---|---|---|
+| `HWPREDICT`, `MHWPREDICT` | `alpha` (`hw_alpha`), `beta` (`hw_beta`) | `intercept`, `slope`, `NaN_count` (`nan_count`) |
+| `SEASONAL` | `gamma` (`seasonal_gamma`), then `smoothing_window` if the rule below allows | `seasonal` |
+| `DEVSEASONAL` | `gamma` (`seasonal_gamma`), then `smoothing_window` if the rule below allows | `deviation` (CDP slot 2) |
+| `DEVPREDICT` | none | none |
+| `FAILURES` | `delta_pos`, `delta_neg`, `failure_threshold`, `window_length` (`window_len`) | `history` |
+
+`info` never prints `dependent_rra_idx`, `seasonal_smooth_idx`,
+`last_intercept`, `last_slope`, `last_nan_count`, `last_seasonal`,
+`init_flag`, `primary_value` or `secondary_value`. Doubles use the
+CLI-68 form: C `%.10e` (`1.4484406767e+01`, `-0.0000000000e+00` for −0,
+`1.5000000000e-310` for a subnormal), `NaN` for any NaN on every
+platform, and `inf` / `-inf`. The CLI-49 locale comma applies
+(`rra[1].alpha = 1,0000000000e-01`). Integers are unsigned 64-bit
+decimal (`18446744073709551615`).
+
+`history` is a quoted string of *w* characters. Character *k* is `1` when
+byte *k* of the DS's CDP record is 1 and `0` for any other byte value
+(2, 10, `0x30`, `0x80` and `0xff` all print `0`). Byte 0 holds the newest
+result (HW-14), so the text reads newest first: in the probe with
+*w* = 28, the results 1, 1, 1, 1, 0, 0, 0, 0, 0, 1 (oldest to newest,
+after only zeros) print `"1000001111000000000000000000"`. *w* = 1
+prints one character; a new file with *w* = 9 prints `"000000000"`.
+
+`smoothing_window` (parameter slot 2) is printed, by `info` and by `dump`
+(HW-4), when the file's version string read as C `atoi` (leading blanks,
+an optional sign, then decimal digits up to the first other byte) is 4 or
+more. It is not printed otherwise, whatever value the slot holds. So it is
+present in `0004`, `0005`, `4`, `04`, ` 4`, `+4`, `4a` and `4x`, and absent
+in `0003`, `0002`, `3`, `1`, `-4`, `x4` and `abc`. The stored value is
+kept: restoring `hwsw5`'s dump with `<version>0003</version>` hides 0.5,
+and setting the version bytes back to `0004` shows it again. Which files
+`create` writes as `0004` is CR-37, so a `MHWPREDICT` file or an explicit
+`smoothing-window=` (even `=0`) shows the key and an implicit `HWPREDICT`
+group or explicit archives without the option do not; `tune -s` and
+`-S` raise the version (HW-34) and so make the key appear.
+
+Vectors: `000` (`hwimp`, `0003`, no `smoothing_window`), `002`
+(`mhwimp`, `0004`, `smoothing_window = 0.0000000000e+00`), `004`
+(`hwexp`, explicit archives at `0003`), `006` (`hwsw0`), `008` (`hwsw5`,
+`5.0000000000e-01`), `010` (`hwpdp3`, beside an `AVERAGE` archive of 3
+PDPs per row), `012` (`hw2ds`, two DSs) and `014` (`hwrun`, state after
+updates). The Linux x86_64 and aarch64 builds print the same bytes for
+all eight.
+
+*w* outside 1 to 28 occurs only in a crafted file: `create` and `tune`
+(HW-33) limit it to 1 to 28, but `restore` accepts any `<window_len>`.
+Then *w* = 0 prints `""`, and RRDtool prints *w* bytes of the record from
+byte 0 for *w* up to 31 on macOS and up to at least 32 on Linux. Larger
+values abort on macOS (no output, signal 6 from *w* = 32) and crash on
+Linux (signal 11 by *w* = 80). A replacement must not crash or read outside the DS's
+CDP record; for *w* above 28 it should fail with an error (defect in the
+reference; not pinned).
+
+**HW-4** (black-box; must). `dump`. A Holt-Winters `<rra>` has the
+classic layout: `<cf>`, `<pdp_per_row>` with its `<!-- N seconds -->`
+comment, an empty line, `<params>`, `<cdp_prep>` with one `<ds>` per
+data source in DS order, and `<database>`. Each parameter is one line
+`\t\t<name>value</name>`, each CDP item one line
+`\t\t\t<name>value</name>`, as for classic archives:
+
+| CF | `<params>` elements, in order |
+|---|---|
+| `HWPREDICT`, `MHWPREDICT` | `hw_alpha`, `hw_beta`, `dependent_rra_idx` |
+| `SEASONAL`, `DEVSEASONAL` | `seasonal_gamma`, `seasonal_smooth_idx`, `smoothing_window` (only under the version rule of HW-3), `dependent_rra_idx` |
+| `DEVPREDICT` | `dependent_rra_idx` |
+| `FAILURES` | `delta_pos`, `delta_neg`, `window_len`, `failure_threshold`, `dependent_rra_idx` |
+
+Each `<cdp_prep>` `<ds>` starts with `primary_value` and
+`secondary_value`, for every CF, classic or Holt-Winters, and continues:
+
+| CF | Further `<ds>` elements, in order |
+|---|---|
+| `HWPREDICT`, `MHWPREDICT` | `intercept`, `last_intercept`, `slope`, `last_slope`, `nan_count`, `last_nan_count` |
+| `SEASONAL`, `DEVSEASONAL` | `seasonal`, `last_seasonal`, `init_flag` (`DEVSEASONAL` uses the same names for its deviation slots) |
+| `DEVPREDICT` | none |
+| `FAILURES` | `history` |
+
+No Holt-Winters archive prints `<xff>`, `<value>` or
+`<unknown_datapoints>`. Note that `FAILURES` gives `window_len` before
+`failure_threshold`, the reverse of `info`.
+
+Value forms. Doubles use RRDtool's own `%0.10e` (`format-strings.md`
+FS-52: `-0` prints `0.0000000000e+00`, a subnormal 1.5e-310 prints
+`0.0150000000e-308`, the locale is ignored), with `inf` and `-inf`. A NaN
+prints `NaN` in `<cdp_prep>` but `nan` in `<params>`, for any NaN on every
+build; this also holds for a classic `<xff>` (defect, reproduce; no
+vector holds a NaN parameter). Integers are unsigned 64-bit decimal.
+`<history>` has no quotes: each of the *w* bytes from byte 0 of the DS's
+CDP record, newest first as in HW-3, written as a decimal integer, with
+no separator. A file written by `create`, `update`, `tune` or `restore`
+holds only bytes 0 and 1 (`restore.md` RS-26), so the text is one digit
+per byte (`11100` in the probe of `hwfail`). For other bytes, macOS arm64
+and Linux x86_64 print the byte as signed (`-1` for `0xff`, `-128` for
+`0x80`) and Linux aarch64 as unsigned (`255`, `128`) (platform specific;
+should, not pinned). `dump` prints *w* bytes for any *w*: `0` gives
+`<history></history>`, and *w* from 29 to 80 continue through the record,
+including the bytes of `primary_value` and `secondary_value`; above 80 it
+reads the bytes that follow the record. A replacement must not read
+outside the record; for *w* above 28 it should fail with an error (defect
+in the reference; not pinned).
+
+The `<database>` section is as for a classic archive (`time-spec.md`
+TS-71 comments, rows oldest first from the row after `cur_row`, one `<v>`
+per DS, the slot of each row derived from `last_update`, the archive's
+`pdp_per_row` and step, unknowns as `NaN`). No comment is specific to
+Holt-Winters archives. The `<version>` element shows the stored version
+text, so a file with Holt-Winters archives may say `0003`.
+
+Vectors: `001`, `003`, `005`, `007`, `009`, `011`, `013` and `015`, for
+the same files as HW-3; all eight are the same bytes on Linux x86_64 and
+aarch64 (`expected/hw.linux-x86_64.vectors` holds no `info` or `dump`
+case).
 
 ## 2. Update: runs of one PDP
 
@@ -340,6 +477,16 @@ archives already match (vectors `164` to `167`).
   (HW-21 keeps *I* and *T*).
 - Which words 8 and 9 of DEVPREDICT and FAILURES hold after runs: frozen
   by the vectors, not specified.
+- HW-18 and the version rule of HW-3: in probes, `update` of a file whose
+  version is below 4 (by the HW-3 rule) ignored the stored
+  `smoothing_window` and smoothed as if it were 0.05. A `0003` file
+  holding 0.5, and an implicit `HWPREDICT` group (stored 0) with a
+  seasonal period of 40, both gave the same bytes as the same file at
+  `0004` holding 0.05, and differed from it at 0.5 or 0. The vectors do
+  not see this: every `0003` input has a period below 40, where 0.05
+  gives *h* = 0. HW-18's statement that an implicit definition is never
+  smoothed holds only for periods below 40; this needs vectors and an
+  HW-18 revision before an implementation relies on it.
 
 - HW-2: the exact derivation of the initial `seasonal_smooth_idx`. It
   could not be settled black-box: it is stable for a given file name but
