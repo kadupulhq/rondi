@@ -40,8 +40,10 @@ or the old update path was read.
   Task 6 also probed the dependency links black-box, patching the link
   of one or two archives in the committed inputs: 262 runs (68
   single-link variants, 194 DEVPREDICT by FAILURES pairs) matched
-  RRDtool in output, exit status and bytes. Task 6b's 264 random series
-  matched after the HW-12 and HW-12a fixes.
+  RRDtool in output, exit status and bytes. The Task 6 review ran 264
+  random series on all 22 `hw` inputs: 253 matched, and the 11 that did
+  not (all `hwnan`) were specified and fixed in Task 6b, whose reruns on
+  `hwnan` and `mhwsm10` matched 288 of 288.
 - Review: separate sessions, black-box only.
 
 ## Commits (`git log 47cca1f..HEAD`)
