@@ -54,7 +54,10 @@ string to double").
 
 Rondi code derived from it:
 
-- `crates/rondi/src/rrd_number.rs`
+- In `crates/rondi/src/rrd_number.rs`, only the decimal conversion
+  `parse_rrd_decimal`, the wrappers `parse_rrd_number` and `rrd_strtodbl`
+  that call it, and their special-spelling helper `parse_special`. The rest
+  of that file (the `strtol` family) is not derived from it.
 - `crates/rondi-cli/src/cparse.rs`
 
 Upstream notice:

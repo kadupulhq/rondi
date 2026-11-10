@@ -46,7 +46,7 @@ skipped, and in what they do with text after the number.
 |---|---|
 | `update` readings of `GAUGE`, `ABSOLUTE`, `DCOUNTER`, `DDERIVE` | `update.md` UP-10, UP-11, UP-17 |
 | `update` time text, `:` form | `update.md` UP-8; NM-4 |
-| `COUNTER` and `DERIVE` differences | `update.md` UP-12, UP-16; NM-5 |
+| `COUNTER` and `DERIVE` differences | `update.md` UP-12, UP-16; NM-5, NM-7 |
 | `create` DS minimum and maximum | `create.md` CR-20, CR-23, CR-25 |
 | `create` RRA `xff` and Holt-Winters parameters | `create.md` CR-23, CR-24 |
 | `restore` doubles | `restore.md` RS-37 to RS-39a |
@@ -95,7 +95,17 @@ are accumulated before the division. Text after the number fails with
 **NM-5** (black-box; must). The difference of two `COUNTER` or `DERIVE`
 readings is formed exactly as decimal text and then converted by NM-1, as
 `update.md` UP-16 specifies, with its 2³² − 1 and 2⁶⁴ wrap constants. The
-`update` vectors pin it; this file adds nothing.
+`update` vectors pin it; NM-7 settles one case UP-16 leaves open.
+
+**NM-7** (black-box; must). When both `DERIVE` texts are negative, the
+difference has the sign of the true difference reading − stored text:
+`-3` after `-5` gives 2, `-5` after `-3` gives −2, `-007` after `-0012`
+gives 5, and `-0` after `-7` gives 7. Only two negative texts of equal
+magnitude produce the `-0` text of UP-16. Leading zeros never change the
+value, and digit strings longer than 20 digits are subtracted exactly
+before the conversion: `-1` after `-123456789012345678901234567` gives
+1.2345678901e+26 (RRDtool 1.11.0 on macOS arm64, step-1 `DERIVE`, two
+updates, stored value read with `rrdtool dump`).
 
 ## 4. `tune --minimum` and `--maximum`
 

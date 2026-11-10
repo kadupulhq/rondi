@@ -25,6 +25,14 @@ Counts by file (97 Rust files):
 
 The 22 files under `crates/rondi-cli/src/help/` are RRDtool help text kept byte-exact under D2 and are not counted above. `main.rs` also holds the D3 rrdcached client functions, and `rrd_number.rs` also holds the D3 decimal parser; each is counted once, under its unremediated part.
 
+### Maintainer disposition (2026-11-10)
+
+This disposition answers the re-audit at `c568603`.
+
+- `rrd_diff`, the COUNTER and DERIVE difference routine in `crates/rondi/src/rrd_number.rs`, is replaced clean-room in the pull request that adds this subsection. The new `decimal_text_difference` in `crates/rondi/src/update/amount.rs` was written from `docs/compatibility/update.md` UP-16 and `docs/compatibility/numbers.md` NM-5 and NM-7 without reading the old body, and `THIRD-PARTY-NOTICES.md` now attributes only the decimal-conversion functions of `rrd_number.rs` to the BSD parser.
+- Under decision D1, the ruling that the license history of code merged in the GPL period is not a release blocker, the `tune` header options and the `xport` and `graphv` writers in `crates/rondi-cli/src/main.rs`, and `crates/rondi/src/rrd_binary.rs`, are scheduled for respecification and rewrite in 0.2. They do not block 0.1.0.
+- `scripts/check-provenance.py` tracks those two files again in its `LEGACY` list and names them on every run until they are rewritten.
+
 ### Module table
 
 "Pre-policy lines" counts lines whose `git blame` author date is before 2026-10-14, the day `AGENTS.md` and `docs/PROVENANCE.md` were added. Blame attributes some blank lines and braces in rewritten files to older commits, so small counts in clean-room files are noise; the files named below were checked by reading.
