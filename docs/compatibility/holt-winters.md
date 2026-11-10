@@ -299,8 +299,11 @@ rewrites the rows does not change the coefficient the next PDP uses.
 CDP slot 6 (`init_flag`) starts at 1 (HW-1). When an archive's current row
 becomes 0 and its counter is below 4, the counter increases by one and the
 archive *triggers*. When the counter is 4 and the current row becomes the
-archive's `seasonal_smooth_idx`, the archive triggers. The counter is the
-same for every DS.
+archive's `seasonal_smooth_idx`, the archive triggers. There is one counter
+per archive: the slot of the first DS. The slots of the other DSs are never
+changed by `update` (vector `058`, and a two-DS series of 12 one-PDP
+arguments crossing row 0 several times, which RRDtool and a first-DS-only
+model leave byte-identical).
 
 **HW-18** (black-box; must). Smoothing pass. When either archive has
 triggered on any PDP of an `update` command (arguments given together
