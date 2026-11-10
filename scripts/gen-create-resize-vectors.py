@@ -448,6 +448,19 @@ def build_inputs(rrdtool, tmp):
     # Crafted windows above 28: window_len (FAILURES parameter 4) patched.
     for w in (29, 40):
         made["hw"][f"hww{w}"] = patch_param(made["hw"]["hww28"], 4, 4, w)
+    # Stage 5 inputs (HW-12): hwimp's definitions with a NaN alpha or beta
+    # set by tune (HW-31), so learning makes the intercept or the slope
+    # unknown.
+    for name, opt in (("hwimpna", "--alpha"), ("hwimpnb", "--beta")):
+        make(
+            "hw",
+            name,
+            [
+                cr("-b", "1000000000", "-s", "10", *g, "RRA:AVERAGE:0.5:1:10",
+                   "RRA:HWPREDICT:12:0.1:0.01:4"),
+                ["tune", "in.rrd", opt, "nan"],
+            ],
+        )
     return made
 
 
@@ -1175,6 +1188,33 @@ def hw_cases():
                 expect="clean-error",
                 note="HW-5",
             )
+
+    # Stage 5 (HW-12, HW-12a). An intercept or slope made unknown by a NaN
+    # parameter, with and without a gap.
+    for name in ("hwnan", "hwimpna", "hwimpnb"):
+        add("update", f"{name}.rrd", *wave(40), inputs=[name])
+        add("update", f"{name}.rrd", *wave(40, gap=(10, 17)), inputs=[name])
+    # Multiplicative division by a value not above 0: a level driven below
+    # 0 (the reviewer's series), a first value below and at 0, coefficients
+    # at or below 0, and a negative first season, whose SEASONAL mean is
+    # then below 0 when it is smoothed.
+    def readings(values):
+        return [f"{1000000010 + 10 * i}:{v}" for i, v in enumerate(values)]
+
+    add("update", "mhwsm10.rrd",
+        *readings([*range(97, 24, -3), *["U"] * 30, 40]), inputs=["mhwsm10"])
+    add("update", "mhwimp.rrd", *readings([-5, 3, 4, -2, 6, *[10, 20, 40, 20] * 6]),
+        inputs=["mhwimp"])
+    add("update", "mhwimp.rrd", *readings([0, 3, 4, 2, *[10, 20, 40, 20] * 6]),
+        inputs=["mhwimp"])
+    add("update", "mhwimp.rrd",
+        *readings([[10, -20, 40, 0][i % 4] + i // 4 for i in range(40)]), inputs=["mhwimp"])
+    add("update", "mhwsm10.rrd", *readings([10, *[-5 - k % 3 for k in range(29)]]),
+        inputs=["mhwsm10"])
+    # A negative first season, then a gap, so the pass at row 0 finds every
+    # SEASONAL row known and their mean below 0.
+    add("update", "mhwsm10.rrd", *readings([10, *[-5, -6, -7] * 3, *["U"] * 8]),
+        inputs=["mhwsm10"])
     return c
 
 

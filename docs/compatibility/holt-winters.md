@@ -231,7 +231,8 @@ deviation), α and β the prediction archive's `hw_alpha` and `hw_beta`,
 period (the SEASONAL row count), and *blend*(*w*, *a*, *b*) =
 *w*·*a* + (1 − *w*)·*b* with the rounding of HW-19. For `HWPREDICT`,
 *a* ⊖ *b* = *a* − *b* and *a* ⊗ *b* = *a* + *b*; for `MHWPREDICT`,
-*a* ⊖ *b* = *a* / *b* and *a* ⊗ *b* = *a* × *b*.
+*a* ⊖ *b* = *a* / *b* when *b* > 0 and unknown otherwise (HW-12a), and
+*a* ⊗ *b* = *a* × *b*.
 
 **HW-11** (black-box; must). Row positions. Every Holt-Winters archive
 advances its own current row by one per PDP and writes that row
@@ -241,15 +242,26 @@ choice put them (CR-46), so position 0 of the season is not tied to time.
 
 **HW-12** (black-box; must). Prediction and learning. Let *s* = *σ* and
 *d* = *δ*, the values prefetched by the previous PDP (HW-16), and set
-*n'* = *n*.
+*n'* = *n*. The first case that applies is taken. Besides the prediction
+*p* that the prediction archive writes, each case gives the prediction
+*p̂* that the deviation (HW-13) and the failure check (HW-14) use, or
+says there is none.
 
-1. If *I* is unknown (no state yet): when *x* is known, *I* = *I'* = *x*,
-   *T* = *T'* = 0 and *n* = *n'* = 1 (*n* may have grown in runs, HW-21). The prediction *p* is unknown, and the new
-   coefficient is *s'* = *x* ⊖ *I* (so 0 or 1 for the first value; unknown
-   when *x* is unknown).
-2. Else if *s* is unknown (the first season): *p* is unknown, *I'* = *I*,
-   *T'* = *T*, *I* and *T* are unchanged, and *s'* = *x* ⊖ *I*.
-3. Otherwise let *base* = *I* + *n*·*T* (an fma, HW-19) and *p* =
+1. If *I* is unknown: when *x* is known, *I* = *I'* = *x*, *T* = *T'* = 0
+   and *n* = *n'* = 1 (*n* may have grown in runs, HW-21); *p* is
+   unknown, *p̂* = *x* ⊗ *s* (unknown when *s* is), and the new
+   coefficient is *s'* = *blend*(γs, *x* ⊖ *I*, *s*) with the new *I*
+   when *s* is known, and *s'* = *x* ⊖ *I* when it is not (so 0, or 1 for
+   a positive first value of `MHWPREDICT`). When *x* is unknown, *I'* = *I*
+   and *T'* = *T*; *I*, *T* and *n* are unchanged, *p* is unknown, there
+   is no *p̂*, and *s'* = *s*.
+2. Else if *T* is unknown: *p* is unknown and there is no *p̂*; *I'* = *I*
+   and *T'* = *T*; *I*, *T* and *n* are unchanged, known *x* or not; *s'*
+   is unknown when *x* is known and *s* when *x* is unknown.
+3. Else if *s* is unknown (the first season): *p* is unknown and there is
+   no *p̂*; *I'* = *I*, *T'* = *T*; *I*, *T* and *n* are unchanged, and
+   *s'* = *x* ⊖ *I*.
+4. Otherwise let *base* = *I* + *n*·*T* (an fma, HW-19) and *p* = *p̂* =
    *base* ⊗ *s*; set *I'* = *I* and *T'* = *T*. When *x* is known:
    *I* = *blend*(α, *x* ⊖ *s*, *base*), then *T* = *blend*(β, *I* − *I'*,
    *T'*), then *s'* = *blend*(γs, *x* ⊖ *I*, *s*) with the new *I*, and
@@ -259,16 +271,55 @@ choice put them (CR-46), so position 0 of the season is not tied to time.
    `060`; the replayed model also matches per-PDP recordings with gaps,
    which the vectors freeze only in runs, section 3).
 
-**HW-13** (black-box; must). Deviation. With the *p* of HW-12: when *x* is
-unknown, *d'* = *d*; else when *p* is unknown, *d'* is unknown; else when
-*d* is unknown, *d'* = |*x* − *p*|; otherwise *d'* = *blend*(γd,
-|*x* − *p*|, *d*). The deviation is |*x* − *p*| for `MHWPREDICT` too.
+Case 1 tests the value of *I*, not whether the file ever had state: an
+intercept made unknown by learning (a NaN α, which `tune` accepts,
+HW-31, or *s* ≤ 0 under HW-12a) restarts the level from the next known
+value as a new file or `tune --aberrant-reset` does, except that the
+season rows it already holds stay and are blended. With a NaN α, a known
+*x* in case 4 makes *I*, *T* and *s'* unknown, and the next known *x*
+takes case 1, so the two cases alternate. A NaN β alone makes *T*
+unknown while *I* stays known, after which every PDP takes case 2: the
+prediction stays unknown and *I* and *T* do not change again (vectors
+`205` to `210`; probes that restored files with each of *I*, *T*, *s* and
+*d* unknown, 0, negative, very large and infinite, in additive and
+multiplicative groups).
+
+**HW-12a** (black-box; must). Multiplicative division. For `MHWPREDICT`,
+*a* ⊖ *b* is unknown whenever *b* is not greater than 0 (negative, 0 or
+−0), and otherwise *a* / *b*; *a* ⊗ *b* is the plain product. This makes
+these results unknown, with everything else as in HW-12 to HW-18:
+
+- *x* ⊖ *s* with *s* ≤ 0 in case 4: *I* and then *T* are unknown, as is
+  *s'*; *n* = 1 and *I'*, *T'* are set as usual. *p* = *base* × *s* is
+  still written, and the deviation and failure check use it.
+- *x* ⊖ *I* with *I* ≤ 0 (the new *I* in cases 1 and 4, the kept one in
+  case 3): *s'* is unknown; *I* and *T* keep the values computed. So a first value of 0 or below gives
+  an unknown first coefficient, and a level that learning drives to 0 or
+  below gives unknown coefficients from then on, while *p*, *d'* and the
+  rows of the other archives are still computed.
+- The smoothing pass (HW-18) with a SEASONAL mean *m* ≤ 0: every smoothed
+  SEASONAL row of that DS becomes unknown; *I* still becomes *I* + *m*.
+
+`HWPREDICT` is unaffected: its ⊖ is a subtraction for every sign
+(30 restored states with *I*, *T*, *s* and *x* negative, 0 and −0 matched
+the plain formulas). The reviewer's reproduction, `mhwsm10` given 97, 94,
+… 25, then 30 unknown PDPs and then 40, one PDP each, ends with *p* =
+−72.05, *I* = −36.10 and *s'* unknown (vectors `211` to `215`; `216` is a smoothing pass with *m* < 0).
+
+**HW-13** (black-box; must). Deviation. With the *p̂* of HW-12: when
+there is no *p̂*, *d'* is unknown, even when *x* is unknown and *d* known;
+else when *x* is unknown, *d'* = *d*; else when *d* is unknown,
+*d'* = |*x* − *p̂*|; otherwise *d'* = *blend*(γd, |*x* − *p̂*|, *d*). An
+unknown *p̂* makes *d'* unknown through the arithmetic. The deviation is
+|*x* − *p̂*| for `MHWPREDICT` too.
 
 **HW-14** (black-box; must). Failures. Let δ₊, δ₋ be FAILURES
 `delta_pos` and `delta_neg`, *w* its `window_len` and *k* its
-`failure_threshold`. The PDP is a violation (1) when *p* and *d* are
-known and either *x* is unknown or *x* > *p* + δ₊·*d* or
-*x* < *p* − δ₋·*d* (fma on fused platforms); a value exactly on a bound is
+`failure_threshold`. The PDP is a violation (1) when *d* is known and
+either *x* is unknown or *x* > *p̂* + δ₊·*d* or *x* < *p̂* − δ₋·*d* (fma on
+fused platforms); comparisons with an unknown *p̂*, or when HW-12 gives no
+*p̂*, are false, so an unknown *x* with a known *d* is a violation in every
+case of HW-12. A value exactly on a bound is
 not a violation (vectors `062` and `064` are on a bound, `063` and `065`
 just outside it). Otherwise it is 0. The FAILURES
 CDP holds the last *w* results as bytes from byte 0 of the CDP, newest
@@ -282,7 +333,7 @@ written; *secondary_value* is unchanged:
 
 | Archive | Row value |
 |---|---|
-| `HWPREDICT`, `MHWPREDICT` | *p* (unknown while HW-12 cases 1 and 2 apply) |
+| `HWPREDICT`, `MHWPREDICT` | *p* (unknown while HW-12 cases 1 to 3 apply) |
 | `SEASONAL` | *s'* |
 | `DEVSEASONAL` | *d'* |
 | `DEVPREDICT` | *d* (the deviation used, before this PDP's update) |
@@ -349,8 +400,8 @@ SEASONAL and DEVSEASONAL rows are smoothed:
   order) / *P*; each row becomes its smoothed value − *m*, and the
   prediction archive's *I* becomes *I* + *m*.
 - SEASONAL, `MHWPREDICT`: *m* as above; each row becomes its smoothed
-  value / *m*, and *I* becomes *I* + *m* (added, not multiplied; defect,
-  reproduce).
+  value ⊖ *m* (unknown when *m* ≤ 0, HW-12a), and *I* becomes *I* + *m*
+  (added, not multiplied; defect, reproduce).
 - DEVSEASONAL: each row becomes its smoothed value; nothing else changes.
 
 A command of one argument per PDP therefore smooths right after the
@@ -543,7 +594,10 @@ multi-source, failure-bound, smoothing and run series, and `tune` them
 with every option, valid and invalid. Cases `181` to `204` add files
 byte-patched by the generator: version changes (HW-3, HW-18 at *P* = 40),
 NaN parameters (HW-4), failure windows of 1 and 28, and crafted windows
-of 29 and 40 (HW-5, expectation `clean-error`).
+of 29 and 40 (HW-5, expectation `clean-error`). Cases `205` to `210`
+update `hwnan` and two copies of `hwimp` given `tune --alpha nan` and
+`tune --beta nan` (`hwimpna`, `hwimpnb`; HW-12), and `211` to `216` give
+multiplicative groups values and levels at or below 0 (HW-12a).
 
 Sections 2 and 3 were checked with a black-box model, a script outside the
 repository written from these rules and `update.md` UP-10 and UP-19 to
