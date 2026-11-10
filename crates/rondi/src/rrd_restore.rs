@@ -409,7 +409,7 @@ fn convert_double(token: &str, errno: &mut i32) -> Result<f64, BadDouble> {
         }
         let mut written = 0_i32;
         while let Some(digit @ b'0'..=b'9') = bytes.get(at) {
-            // The reference accumulates into a C int, which wraps.
+            // The exponent wraps as a 32-bit signed integer.
             written = written
                 .wrapping_mul(10)
                 .wrapping_add(i32::from(digit - b'0'));

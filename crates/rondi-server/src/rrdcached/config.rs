@@ -49,7 +49,7 @@ impl LogLevel {
 
 /// A `-w`, `-f` or `-z` value in seconds.
 ///
-/// The reference keeps these in a C `int`, so values past `i32::MAX` wrap
+/// rrdcached wraps values past `i32::MAX` to a 32-bit signed integer
 /// before its startup warnings compare them. [`Interval::as_c_int`] gives
 /// that wrapped value; timers use [`Interval::timer_seconds`] instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -124,7 +124,7 @@ pub async fn run(prepared: PreparedServer) -> Result<(), Box<dyn std::error::Err
             accepted = listener.accept() => {
                 let (stream, _) = match accepted {
                     Ok(accepted) => accepted,
-                    // listen_thread_main logs a failed accept(2) and keeps
+                    // rrdcached logs a failed accept(2) and keeps
                     // listening. The pause stops an
                     // exhausted descriptor table from spinning the loop.
                     Err(error) => {
