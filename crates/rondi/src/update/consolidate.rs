@@ -1,7 +1,7 @@
 //! Consolidation of PDP runs into archive rows (UP-26 to UP-30, UP-32).
 
 use super::RrdUpdateSummary;
-use super::holt_winters::{Group, Seasons, consolidate_group};
+use super::holt_winters::{Group, GroupRows, Seasons, consolidate_group};
 use super::pdp::Run;
 use crate::holt_winters::Role;
 use crate::rrd_binary::{RrdArchiveInfo, RrdCdpPrepInfo, cf_conv_error, rrd_mul_add, rrd_nan};
@@ -278,7 +278,7 @@ fn write_rows(
 
 /// The current row after `count` row writes from `current` in an archive
 /// of `rows` rows (UP-30), without stepping through them.
-fn advance_rows(current: u64, rows: u64, count: u64) -> u64 {
+pub(super) fn advance_rows(current: u64, rows: u64, count: u64) -> u64 {
     if count == 0 || rows == 0 {
         return current;
     }
@@ -385,6 +385,47 @@ pub(crate) fn consolidate_run(
     )
 }
 
+/// Writes what one Holt-Winters archive does with a run: its spans of rows
+/// in order, or a move of its current row without writing.
+#[allow(clippy::too_many_arguments)]
+fn write_group_rows(
+    index: usize,
+    archive: &mut RrdArchiveInfo,
+    rows_in_file: u64,
+    rows: &mut GroupRows,
+    run: &Run,
+    step: u64,
+    early_first_row: bool,
+    rows_out: &mut Vec<RowRange>,
+    mut summaries: Option<&mut Vec<RrdUpdateSummary>>,
+) -> Result<(), RowPastEnd> {
+    archive.current_row = advance_rows(archive.current_row, archive.rows, rows.skipped);
+    // Compatibility: a Holt-Winters row takes one PDP, so its rows are
+    // printed like those of a one-PDP-per-row classic archive.
+    // Provenance: specification (docs/compatibility/update.md UP-31, UP-32).
+    let total: u64 = rows.spans.iter().map(|span| span.count).sum();
+    let times = PrintedTimes::new(run, step, 1, total, early_first_row);
+    let mut done = 0;
+    for span in std::mem::take(&mut rows.spans) {
+        let first = done;
+        write_rows(
+            index,
+            archive,
+            rows_in_file,
+            &span.values,
+            span.count,
+            |i| match first + i {
+                0 => times.opening(),
+                j => times.following(j),
+            },
+            rows_out,
+            summaries.as_deref_mut(),
+        )?;
+        done += span.count;
+    }
+    Ok(())
+}
+
 /// Consolidates one run into every archive, in archive order (UP-28). This
 /// is the only entry point the update loop uses.
 ///
@@ -417,10 +458,6 @@ pub(crate) fn consolidate_all(
         }
         None => Vec::new(),
     };
-    // Compatibility: a Holt-Winters row takes one PDP, so it is printed at
-    // the end of that PDP's step, like a one-PDP-per-row classic row.
-    // Provenance: specification (docs/compatibility/update.md UP-31, UP-32).
-    let hw_times = PrintedTimes::new(run, step, 1, 1, early_first_row);
     let mut stopped = None;
     for (index, (archive, &kind)) in archives.iter_mut().zip(kinds).enumerate() {
         let fit = rows_in_file.get(index).copied().unwrap_or(u64::MAX);
@@ -440,13 +477,14 @@ pub(crate) fn consolidate_all(
             ArchiveKind::HoltWinters(_) if archive.rows == 0 => Ok(()),
             ArchiveKind::HoltWinters(_) => {
                 match group_rows.iter_mut().find(|row| row.archive == index) {
-                    Some(row) => write_rows(
+                    Some(row) => write_group_rows(
                         index,
                         archive,
                         fit,
-                        &std::mem::take(&mut row.values),
-                        1,
-                        |_| hw_times.opening(),
+                        row,
+                        run,
+                        step,
+                        early_first_row,
                         rows_out,
                         summaries.as_deref_mut(),
                     ),

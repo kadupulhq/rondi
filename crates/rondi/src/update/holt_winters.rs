@@ -1,11 +1,11 @@
 //! Holt-Winters archives in `update`: the six archive types learn together,
-//! one PDP at a time (docs/compatibility/holt-winters.md HW-10 to HW-17,
-//! HW-19).
+//! one PDP or run at a time, and a smoothing pass may follow the command
+//! (docs/compatibility/holt-winters.md HW-10 to HW-21).
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
-use super::consolidate::{ArchiveKind, next_row};
+use super::consolidate::{ArchiveKind, RowRange, advance_rows, next_row};
 use super::pdp::Run;
 use crate::holt_winters::{MAX_WINDOW_LEN, Role, cdp, param};
 use crate::rrd_binary::{RrdArchiveInfo, RrdCdpPrepInfo, RrdInfo, VALUE_LEN, rrd_mul_add, rrd_nan};
@@ -63,13 +63,11 @@ impl Group {
         })
     }
 
-    /// Whether every archive's `dependent_rra_idx` names the archive its
-    /// type depends on: the prediction archive names SEASONAL, the season
-    /// archives name the prediction archive, and DEVPREDICT and FAILURES
-    /// name DEVSEASONAL.
-    // Interim (Task 6): RRDtool follows the stored links (vectors 037 to
-    // 046); until Rondi does, a file whose links differ is refused.
-    pub fn linked_by_type(&self, archives: &[RrdArchiveInfo]) -> bool {
+    /// Whether the prediction archive's `dependent_rra_idx` names SEASONAL
+    /// and the season archives' name the prediction archive. Rondi updates
+    /// only such files; the links of DEVPREDICT and FAILURES may name any
+    /// archive (see [`Group::dependent`]).
+    pub fn season_links_match_types(&self, archives: &[RrdArchiveInfo]) -> bool {
         let names = |index: Option<usize>, target: Option<usize>| match (index, target) {
             (Some(index), Some(target)) => {
                 archives[index].param_u64(param::DEPENDENT) == target as u64
@@ -80,8 +78,19 @@ impl Group {
         names(Some(self.prediction), self.seasonal)
             && names(self.seasonal, Some(self.prediction))
             && names(self.dev_seasonal, Some(self.prediction))
-            && names(self.dev_predict, self.dev_seasonal)
-            && names(self.failures, self.dev_seasonal)
+    }
+
+    /// The archive that the `dependent_rra_idx` of archive `index` names,
+    /// when it is in range.
+    // Compatibility: DEVPREDICT and FAILURES read the archive their stored
+    // dependent_rra_idx names, whatever its type, not the DEVSEASONAL
+    // archive found by type.
+    // Provenance: black-box compatibility test (vectors 037 to 046, and
+    // hwimp with the DEVPREDICT and FAILURES links patched to every index).
+    fn dependent(archives: &[RrdArchiveInfo], index: usize) -> Option<usize> {
+        usize::try_from(archives[index].param_u64(param::DEPENDENT))
+            .ok()
+            .filter(|&dependent| dependent < archives.len())
     }
 }
 
@@ -168,50 +177,133 @@ impl Seasons {
             deviation: load(group.dev_seasonal)?,
         })
     }
+}
 
-    /// Whether a smoothing pass after the command would change any row:
-    /// an archive whose half-width is above 0 and whose rows are all known.
-    // Compatibility: the window fraction is the stored smoothing_window for
-    // a version of 4 or more and 0.05 otherwise; the half-width is
-    // trunc(f·P / 2); an archive holding an unknown row is not smoothed.
-    // Interim (Task 6): used only to refuse a command that needs the pass.
-    // Provenance: specification (docs/compatibility/holt-winters.md HW-18).
-    pub fn pass_changes_rows(
-        &self,
-        group: &Group,
-        archives: &[RrdArchiveInfo],
-        version: &str,
-    ) -> bool {
-        let stored = crate::rrd_binary::version_number(version.as_bytes()) >= 4;
-        [
-            (group.seasonal, &self.seasonal),
-            (group.dev_seasonal, &self.deviation),
-        ]
-        .into_iter()
-        .any(|(index, store)| {
-            let Some(index) = index else {
-                return false;
-            };
-            let archive = &archives[index];
-            let fraction = if stored {
-                archive.param_f64(param::SMOOTHING_WINDOW)
-            } else {
-                0.05
-            };
-            let half_width = (fraction * archive.rows as f64 / 2.0).trunc();
-            let rows_loaded = store.values.len() as u64 / store.sources.max(1) as u64;
-            half_width >= 1.0
-                && rows_loaded == archive.rows
-                && store.values.iter().all(|value| !value.is_nan())
-        })
+/// The half-width *h* of the smoothing window of season archive `archive`,
+/// when the pass smooths it: *h* ≥ 1 and the window no wider than 2P + 1.
+// Compatibility: the window fraction is the stored smoothing_window for a
+// version that reads as 4 or more and 0.05 otherwise; h = trunc(f·P / 2).
+// Provenance: specification (docs/compatibility/holt-winters.md HW-18).
+// Compatibility: a fraction above 2, NaN or negative occurs only in a
+// crafted file; such an archive is left unsmoothed, so the pass stays
+// linear in P.
+// Provenance: specification (docs/compatibility/holt-winters.md HW-18 does
+// not cover fractions above 1; Rondi's choice).
+fn half_width(archive: &RrdArchiveInfo, version: &str) -> Option<u64> {
+    let fraction = if crate::rrd_binary::version_number(version.as_bytes()) >= 4 {
+        archive.param_f64(param::SMOOTHING_WINDOW)
+    } else {
+        0.05
+    };
+    let half = (fraction * archive.rows as f64 / 2.0).trunc();
+    (half >= 1.0 && half <= archive.rows as f64).then_some(half as u64)
+}
+
+/// The smoothing pass of an `update` command (HW-18): smooths the SEASONAL
+/// and DEVSEASONAL rows in `seasons`, moves the SEASONAL mean into the
+/// prediction archive's intercept, and queues every smoothed row, one range
+/// per row, in `rows_out`. Prints nothing. Called once, after the last
+/// argument of a command that succeeded and whose season counters
+/// triggered.
+// Compatibility: each row becomes the centred circular running mean of
+// 2h + 1 rows, summed from rows −h … h for row 0 and then by subtracting
+// row i − h − 1 and adding row i + h; the sums read the rows as they were
+// before the pass. SEASONAL then has its mean m removed (subtracted, or
+// divided for MHWPREDICT) and the intercept gains m (added for both). An
+// archive holding an unknown for any DS is left unchanged for every DS.
+// Provenance: specification (docs/compatibility/holt-winters.md HW-18).
+pub(crate) fn smooth(
+    group: &Group,
+    archives: &mut [RrdArchiveInfo],
+    seasons: &mut Seasons,
+    version: &str,
+    rows_out: &mut Vec<RowRange>,
+) {
+    let model = Model {
+        multiplicative: group.multiplicative,
+    };
+    for (index, store, seasonal) in [
+        (group.seasonal, &mut seasons.seasonal, true),
+        (group.dev_seasonal, &mut seasons.deviation, false),
+    ] {
+        let Some(index) = index else { continue };
+        let archive = &archives[index];
+        let period = archive.rows;
+        let Some(half) = half_width(archive, version) else {
+            continue;
+        };
+        // Every row must lie in the file and be known.
+        let sources = store.sources;
+        let complete = sources > 0
+            && store.values.len() as u64 == period.saturating_mul(sources as u64)
+            && store.values.iter().all(|value| !value.is_nan());
+        if !complete {
+            continue;
+        }
+        let period = period as usize;
+        let half = half as usize;
+        let width = (2 * half + 1) as f64;
+        let at = |row: usize, ds: usize| store.values[row * sources + ds];
+        let mut smoothed = vec![0.0; store.values.len()];
+        for ds in 0..sources {
+            // Row −h is row P − (h mod P), and so on, circularly.
+            let wrap = |offset: isize| offset.rem_euclid(period as isize) as usize;
+            let mut sum = 0.0;
+            for offset in -(half as isize)..=half as isize {
+                sum += at(wrap(offset), ds);
+            }
+            smoothed[ds] = sum / width;
+            for row in 1..period {
+                sum -= at(wrap(row as isize - half as isize - 1), ds);
+                sum += at(wrap(row as isize + half as isize), ds);
+                smoothed[row * sources + ds] = sum / width;
+            }
+            if seasonal {
+                let mut total = 0.0;
+                for row in 0..period {
+                    total += smoothed[row * sources + ds];
+                }
+                let mean = total / period as f64;
+                for row in 0..period {
+                    let value = &mut smoothed[row * sources + ds];
+                    *value = model.remove(*value, mean);
+                }
+                if let Some(prep) = archives[group.prediction].cdp_prep.get_mut(ds) {
+                    prep.set_f64(cdp::INTERCEPT, prep.word_f64(cdp::INTERCEPT) + mean);
+                }
+            }
+        }
+        store.values = smoothed;
+        rows_out.extend(
+            store
+                .values
+                .chunks(sources)
+                .enumerate()
+                .map(|(row, values)| RowRange {
+                    archive: index,
+                    first_row: row as u64,
+                    count: 1,
+                    values: values.to_vec(),
+                }),
+        );
     }
 }
 
-/// The row one Holt-Winters archive writes for a PDP, one value per DS.
+/// `count` rows of the same values, one per DS.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct GroupRow {
-    pub archive: usize,
+pub(crate) struct Span {
     pub values: Vec<f64>,
+    pub count: u64,
+}
+
+/// What one Holt-Winters archive does with a run: the rows it writes after
+/// its current row, in order, or (`skipped`) how many rows its current row
+/// advances without writing or printing any.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GroupRows {
+    pub archive: usize,
+    pub spans: Vec<Span>,
+    pub skipped: u64,
 }
 
 /// *blend*(*w*, *a*, *b*) = *w*·*a* + (1 − *w*)·*b*, fused where the
@@ -368,53 +460,137 @@ fn record_failure(prep: &mut RrdCdpPrepInfo, window: u64, threshold: u64, violat
     if ones >= threshold { 1.0 } else { 0.0 }
 }
 
-/// Advances the season counter of a season archive whose next row is
-/// `row`; true when the archive triggers a smoothing pass.
+/// Advances the season counter of a season archive whose current row moves
+/// through the `count` rows from `first` on; true when the archive
+/// triggers a smoothing pass.
 // Compatibility: the counter counts passes through row 0 up to 4; from then
-// on the smoothing index triggers.
-// Provenance: specification (docs/compatibility/holt-winters.md HW-17).
+// on the smoothing index triggers. A run follows each row it reaches.
+// Provenance: specification (docs/compatibility/holt-winters.md HW-17,
+// HW-21).
 // Compatibility: the archive has one counter, the first DS's entry; the
 // other entries keep their value (vector 058 leaves the second DS at 1).
 // Provenance: black-box compatibility test (vector 058, hw2ds).
-fn count_season(archive: &mut RrdArchiveInfo, row: u64) -> bool {
+fn count_season(archive: &mut RrdArchiveInfo, first: u64, count: u64) -> bool {
+    let rows = archive.rows;
     let smooth_at = archive.param_u64(param::SMOOTH_IDX);
+    // At most `rows` positions, all distinct, so each row is reached at
+    // most once and the order of row 0 and the smoothing index does not
+    // matter.
+    let reached = |row: u64| {
+        row < rows
+            && (count >= rows
+                || (u128::from(row) + u128::from(rows) - u128::from(first)) % u128::from(rows)
+                    < u128::from(count))
+    };
     let Some(prep) = archive.cdp_prep.first_mut() else {
         return false;
     };
+    if count == 0 {
+        return false;
+    }
     let counter = prep.word_u64(cdp::INIT_FLAG);
-    if row == 0 && counter < 4 {
+    if reached(0) && counter < 4 {
         prep.set_u64(cdp::INIT_FLAG, counter + 1);
         true
     } else {
-        counter == 4 && row == smooth_at
+        counter == 4 && reached(smooth_at)
     }
 }
 
-/// Processes a run of one PDP for every Holt-Winters archive of `group`:
-/// updates their CDP state and the season rows, and returns the row each
-/// archive writes, in archive order. Rows are not queued and current rows
-/// do not move; the caller writes each row at its archive's place.
-/// `triggered` is set when a season counter reaches a smoothing point.
-/// The run must hold one PDP.
+/// Stores the value of PDP `pdp` of a run of `len` into words 8 and 9: a
+/// lone PDP sets *primary_value*, a pair sets *primary_value* and then
+/// *secondary_value*.
+// Provenance: specification (docs/compatibility/holt-winters.md HW-15,
+// HW-20).
+// Compatibility: DEVPREDICT and FAILURES store their pair the same way.
+// Provenance: black-box compatibility test (hwimp, a run of two PDPs).
+fn store_result(prep: &mut RrdCdpPrepInfo, pdp: u64, len: u64, value: f64) {
+    let slot = if len >= 2 && pdp == 1 {
+        cdp::SECONDARY
+    } else {
+        cdp::PRIMARY
+    };
+    prep.set_f64(slot, value);
+}
+
+/// Every archive of `group`, in archive order, with nothing written yet.
+fn empty_rows(group: &Group) -> Vec<GroupRows> {
+    let mut rows: Vec<GroupRows> = [
+        Some(group.prediction),
+        group.seasonal,
+        group.dev_seasonal,
+        group.dev_predict,
+        group.failures,
+    ]
+    .into_iter()
+    .flatten()
+    .map(|archive| GroupRows {
+        archive,
+        spans: Vec::new(),
+        skipped: 0,
+    })
+    .collect();
+    rows.sort_by_key(|row| row.archive);
+    rows
+}
+
+fn rows_of(rows: &mut [GroupRows], archive: Option<usize>) -> Option<&mut GroupRows> {
+    rows.iter_mut().find(|row| Some(row.archive) == archive)
+}
+
+/// Processes a run for every Holt-Winters archive of `group`: updates their
+/// CDP state and the season rows, and returns what each archive writes, in
+/// archive order. Current rows do not move; the caller writes each
+/// archive's rows at its place. `triggered` is set when a season counter
+/// reaches a smoothing point.
 pub(crate) fn consolidate_group(
     group: &Group,
     archives: &mut [RrdArchiveInfo],
     seasons: &mut Seasons,
     run: &Run,
     triggered: &mut bool,
-) -> Vec<GroupRow> {
-    // Interim (Task 6): runs of two or more PDPs are refused before
-    // consolidation; removing that pre-check without handling them here
-    // fails this assertion in tests.
-    debug_assert_eq!(run.len, 1, "Holt-Winters runs hold one PDP");
+) -> Vec<GroupRows> {
+    let mut rows = empty_rows(group);
+    match run.len {
+        0 => {}
+        1 | 2 => {
+            for pdp in 0..run.len {
+                learn_pdp(group, archives, seasons, run, pdp, &mut rows, triggered);
+            }
+        }
+        _ => skip_run(group, archives, seasons, run, &mut rows, triggered),
+    }
+    rows
+}
+
+/// PDP `pdp` (0 or 1) of a run of one or two PDPs of `run.values`.
+// Compatibility: a lone PDP writes the season rows and prefetches the row
+// after the one written; a pair writes no season row, keeps each new
+// coefficient and deviation only in words 8 and 9, and prefetches two rows
+// ahead.
+// Provenance: specification (docs/compatibility/holt-winters.md HW-11 to
+// HW-17, HW-20).
+fn learn_pdp(
+    group: &Group,
+    archives: &mut [RrdArchiveInfo],
+    seasons: &mut Seasons,
+    run: &Run,
+    pdp: u64,
+    rows: &mut [GroupRows],
+    triggered: &mut bool,
+) {
     let model = Model {
         multiplicative: group.multiplicative,
     };
-    // Each archive writes the row after its current one (HW-11).
-    let next = |index: Option<usize>| {
-        index.map(|index| next_row(archives[index].current_row, archives[index].rows))
+    let lone = run.len == 1;
+    // This PDP reaches the row pdp + 1 after the current one (HW-11).
+    let reached = |index: Option<usize>| {
+        index.map(|index| {
+            let archive = &archives[index];
+            advance_rows(archive.current_row, archive.rows, pdp + 1)
+        })
     };
-    let (seasonal_row, deviation_row) = (next(group.seasonal), next(group.dev_seasonal));
+    let (seasonal_row, deviation_row) = (reached(group.seasonal), reached(group.dev_seasonal));
     let param = |index: Option<usize>, slot: usize| {
         index.map_or_else(rrd_nan, |index| archives[index].param_f64(slot))
     };
@@ -431,8 +607,13 @@ pub(crate) fn consolidate_group(
             archive.param_u64(param::THRESHOLD),
         )
     });
-
-    let mut rows: Vec<GroupRow> = [
+    let dev_predict_source = group
+        .dev_predict
+        .and_then(|index| Group::dependent(archives, index));
+    let failures_source = group
+        .failures
+        .and_then(|index| Group::dependent(archives, index));
+    let mut values: Vec<(Option<usize>, Vec<f64>)> = [
         Some(group.prediction),
         group.seasonal,
         group.dev_seasonal,
@@ -440,16 +621,11 @@ pub(crate) fn consolidate_group(
         group.failures,
     ]
     .into_iter()
-    .flatten()
-    .map(|archive| GroupRow {
-        archive,
-        values: Vec::with_capacity(run.values.len()),
-    })
+    .map(|index| (index, Vec::with_capacity(run.values.len())))
     .collect();
-    rows.sort_by_key(|row| row.archive);
     let mut put = |archive: Option<usize>, value: f64| {
-        if let Some(row) = rows.iter_mut().find(|row| Some(row.archive) == archive) {
-            row.values.push(value);
+        if let Some((_, row)) = values.iter_mut().find(|(index, _)| *index == archive) {
+            row.push(value);
         }
     };
 
@@ -466,12 +642,13 @@ pub(crate) fn consolidate_group(
         let mut level = Level::read(prep);
         let (prediction, season) = learn(&mut level, x, s, alpha, beta, gamma, model);
         level.write(prep);
-        prep.set_f64(cdp::PRIMARY, prediction);
+        store_result(prep, pdp, run.len, prediction);
         put(Some(group.prediction), prediction);
 
         let deviation = deviate(x, prediction, d, gamma_dev);
-        // Rows go to the season store, then the next row is prefetched
-        // (HW-15, HW-16).
+        // A lone PDP writes its row to the season store before the prefetch
+        // reads the row after it (HW-15, HW-16); a pair reads two rows
+        // ahead and writes no row (HW-20).
         for (index, row, store, value, used) in [
             (
                 group.seasonal,
@@ -492,30 +669,62 @@ pub(crate) fn consolidate_group(
                 continue;
             };
             let archive = &mut archives[index];
-            store.set(row, ds, value);
-            let ahead = store.get(next_row(row, archive.rows), ds);
+            if lone {
+                store.set(row, ds, value);
+                put(Some(index), value);
+            }
+            let ahead = store.get(advance_rows(row, archive.rows, run.len), ds);
             if let Some(prep) = archive.cdp_prep.get_mut(ds) {
                 prep.set_f64(cdp::LAST_SEASONAL, used);
                 prep.set_f64(cdp::SEASONAL, ahead);
-                prep.set_f64(cdp::PRIMARY, value);
+                store_result(prep, pdp, run.len, value);
             }
-            put(Some(index), value);
         }
-        if let Some(prep) = group
-            .dev_predict
-            .and_then(|index| archives[index].cdp_prep.get_mut(ds))
-        {
-            prep.set_f64(cdp::PRIMARY, d);
-            put(group.dev_predict, d);
+        // Compatibility: DEVPREDICT writes word 3 of the archive its link
+        // names, after this PDP's prediction and season updates: the
+        // deviation used when that is DEVSEASONAL, the coefficient used for
+        // SEASONAL, the last intercept for the prediction archive, and the
+        // stored word otherwise (0 in vectors 037 to 046).
+        // Provenance: black-box compatibility test (vectors 037 to 046;
+        // hwimp with the DEVPREDICT link patched to each archive).
+        if let Some(index) = group.dev_predict {
+            let used = dev_predict_source
+                .and_then(|source| archives[source].cdp_prep.get(ds))
+                .map_or_else(rrd_nan, |prep| prep.word_f64(cdp::LAST_SEASONAL));
+            if let Some(prep) = archives[index].cdp_prep.get_mut(ds) {
+                store_result(prep, pdp, run.len, used);
+                put(Some(index), used);
+            }
         }
-        if let Some(prep) = group
-            .failures
-            .and_then(|index| archives[index].cdp_prep.get_mut(ds))
-        {
-            let violated = violates(x, prediction, d, delta_pos, delta_neg);
-            let flag = record_failure(prep, window, threshold, violated);
-            prep.set_f64(cdp::PRIMARY, flag);
-            put(group.failures, flag);
+        // Compatibility: FAILURES checks the value against the prediction
+        // only when the archive its link names itself links to the
+        // prediction archive; the deviation is that archive's word 3 after
+        // this PDP's updates (DEVSEASONAL's deviation used, SEASONAL's
+        // coefficient used, a DEVPREDICT's stored word). Otherwise it stores
+        // the PDP value and keeps its history.
+        // Provenance: black-box compatibility test (vectors 037 to 046;
+        // hwimp, hwfail and hwsw0 with the DEVPREDICT and FAILURES links
+        // patched to each archive).
+        if let Some(index) = group.failures {
+            let band = failures_source
+                .filter(|&source| Group::dependent(archives, source) == Some(group.prediction))
+                .map(|source| {
+                    archives[source]
+                        .cdp_prep
+                        .get(ds)
+                        .map_or_else(rrd_nan, |prep| prep.word_f64(cdp::LAST_SEASONAL))
+                });
+            if let Some(prep) = archives[index].cdp_prep.get_mut(ds) {
+                let flag = match band {
+                    Some(d) => {
+                        let violated = violates(x, prediction, d, delta_pos, delta_neg);
+                        record_failure(prep, window, threshold, violated)
+                    }
+                    None => x,
+                };
+                store_result(prep, pdp, run.len, flag);
+                put(Some(index), flag);
+            }
         }
     }
 
@@ -524,10 +733,119 @@ pub(crate) fn consolidate_group(
         (group.dev_seasonal, deviation_row),
     ] {
         if let (Some(index), Some(row)) = (index, row) {
-            *triggered |= count_season(&mut archives[index], row);
+            *triggered |= count_season(&mut archives[index], row, 1);
+            if let (false, Some(rows)) = (lone, rows_of(rows, Some(index))) {
+                rows.skipped += 1;
+            }
         }
     }
-    rows
+    for (index, values) in values {
+        if values.is_empty() {
+            continue;
+        }
+        if let Some(rows) = rows_of(rows, index) {
+            rows.spans.push(Span { values, count: 1 });
+        }
+    }
+}
+
+/// A run of three or more PDPs, whose value is ignored.
+// Compatibility: each archive moves min(m, rows) rows: unknown prediction
+// and DEVPREDICT rows, 0 in FAILURES, the season archives' rows unchanged;
+// the level and slope stay, the NaN counts grow by m and m − 1, the
+// failure history clears, and the season archives prefetch rows r0 + m and
+// r0 + m + 1.
+// Provenance: specification (docs/compatibility/holt-winters.md HW-21).
+// Compatibility: the season archives write and print no row for the run;
+// DEVPREDICT's words 8 and 9 become unknown and FAILURES' 0, also when
+// their links name other archives.
+// Provenance: black-box compatibility test (hwimp and hwsw0, runs of three
+// and five PDPs).
+fn skip_run(
+    group: &Group,
+    archives: &mut [RrdArchiveInfo],
+    seasons: &Seasons,
+    run: &Run,
+    rows: &mut [GroupRows],
+    triggered: &mut bool,
+) {
+    let len = run.len;
+    let sources = run.values.len();
+    let written = |archive: &RrdArchiveInfo| len.min(archive.rows);
+
+    let prediction = &mut archives[group.prediction];
+    for prep in prediction.cdp_prep.iter_mut().take(sources) {
+        prep.set_u64(
+            cdp::NAN_COUNT,
+            prep.word_u64(cdp::NAN_COUNT).wrapping_add(len),
+        );
+        prep.set_u64(
+            cdp::LAST_NAN_COUNT,
+            prep.word_u64(cdp::LAST_NAN_COUNT).wrapping_add(len - 1),
+        );
+        prep.set_f64(cdp::PRIMARY, rrd_nan());
+        prep.set_f64(cdp::SECONDARY, rrd_nan());
+    }
+    let count = written(prediction);
+    if let Some(rows) = rows_of(rows, Some(group.prediction)) {
+        rows.spans.push(Span {
+            values: vec![rrd_nan(); sources],
+            count,
+        });
+    }
+
+    for (index, store) in [
+        (group.seasonal, &seasons.seasonal),
+        (group.dev_seasonal, &seasons.deviation),
+    ] {
+        let Some(index) = index else { continue };
+        let archive = &mut archives[index];
+        let (current, period) = (archive.current_row, archive.rows);
+        let last = advance_rows(current, period, len);
+        let after = next_row(last, period);
+        for (ds, prep) in archive.cdp_prep.iter_mut().enumerate().take(sources) {
+            prep.set_f64(cdp::LAST_SEASONAL, store.get(last, ds));
+            prep.set_f64(cdp::SEASONAL, store.get(after, ds));
+        }
+        let count = written(archive);
+        *triggered |= count_season(archive, next_row(current, period), count);
+        if let Some(rows) = rows_of(rows, Some(index)) {
+            rows.skipped = count;
+        }
+    }
+
+    for (index, value) in [(group.dev_predict, rrd_nan()), (group.failures, 0.0)] {
+        let Some(index) = index else { continue };
+        let archive = &mut archives[index];
+        let window = archive.param_u64(param::WINDOW_LEN).min(MAX_WINDOW_LEN) as usize;
+        let failures = Some(index) == group.failures;
+        for prep in archive.cdp_prep.iter_mut().take(sources) {
+            if failures {
+                clear_history(prep, window);
+            }
+            prep.set_f64(cdp::PRIMARY, value);
+            prep.set_f64(cdp::SECONDARY, value);
+        }
+        let count = written(archive);
+        if let Some(rows) = rows_of(rows, Some(index)) {
+            rows.spans.push(Span {
+                values: vec![value; sources],
+                count,
+            });
+        }
+    }
+}
+
+/// Sets the first `window` bytes of the CDP entry, the failure history, to
+/// zero.
+// Provenance: specification (docs/compatibility/holt-winters.md HW-21).
+fn clear_history(prep: &mut RrdCdpPrepInfo, window: usize) {
+    let mut bytes: Vec<u8> = prep.words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    bytes[..window].fill(0);
+    let words = bytes.as_chunks::<8>().0;
+    for (slot, chunk) in words.iter().enumerate().take(window.div_ceil(8)) {
+        prep.set_u64(slot, u64::from_le_bytes(*chunk));
+    }
 }
 
 #[cfg(test)]
@@ -591,14 +909,19 @@ mod tests {
             .collect()
     }
 
-    /// An additive group with P = 4 and every weight 0.5, in archives 0 to 4.
+    /// An additive group with P = 4 and every weight 0.5, in archives 0 to 4,
+    /// each linked to the archive its type depends on.
     fn additive_group() -> Vec<RrdArchiveInfo> {
         vec![
             archive(
                 "HWPREDICT",
                 8,
                 0,
-                &[(param::ALPHA, f(0.5)), (param::BETA, f(0.5))],
+                &[
+                    (param::ALPHA, f(0.5)),
+                    (param::BETA, f(0.5)),
+                    (param::DEPENDENT, 1),
+                ],
                 cdp_entry(&[
                     (cdp::INTERCEPT, f(10.0)),
                     (cdp::LAST_INTERCEPT, f(9.0)),
@@ -630,7 +953,7 @@ mod tests {
                     (cdp::INIT_FLAG, 1),
                 ]),
             ),
-            archive("DEVPREDICT", 8, 0, &[], cdp_entry(&[])),
+            archive("DEVPREDICT", 8, 0, &[(param::DEPENDENT, 2)], cdp_entry(&[])),
             archive(
                 "FAILURES",
                 8,
@@ -640,6 +963,7 @@ mod tests {
                     (param::DELTA_NEG, f(2.0)),
                     (param::WINDOW_LEN, 9),
                     (param::THRESHOLD, 7),
+                    (param::DEPENDENT, 2),
                 ],
                 cdp_entry(&[(0, 0)]),
             ),
@@ -657,6 +981,14 @@ mod tests {
                 sources: 1,
             },
         }
+    }
+
+    /// The values of the one row an archive writes for a lone PDP.
+    fn lone(rows: &GroupRows) -> Vec<f64> {
+        assert_eq!(rows.skipped, 0);
+        assert_eq!(rows.spans.len(), 1, "{rows:?}");
+        assert_eq!(rows.spans[0].count, 1);
+        rows.spans[0].values.clone()
     }
 
     fn one_pdp(start: i64, value: f64) -> Run {
@@ -707,10 +1039,8 @@ mod tests {
         // base = 10 + 1·1 = 11, p = 11 + 2 = 13; I = blend(0.5, 12, 11),
         // T = blend(0.5, 1.5, 1), s' = blend(0.5, 2.5, 2),
         // d' = blend(0.5, |14 − 13|, 1).
-        let values: Vec<(usize, Vec<f64>)> = written
-            .iter()
-            .map(|row| (row.archive, row.values.clone()))
-            .collect();
+        let values: Vec<(usize, Vec<f64>)> =
+            written.iter().map(|row| (row.archive, lone(row))).collect();
         assert_eq!(
             values,
             vec![
@@ -787,12 +1117,12 @@ mod tests {
         assert_eq!(level.word_f64(cdp::LAST_INTERCEPT), 14.0);
         assert_eq!(level.word_f64(cdp::SLOPE), 0.0);
         assert_eq!(level.word_f64(cdp::LAST_SLOPE), 0.0);
-        assert!(written[0].values[0].is_nan());
+        assert!(lone(&written[0])[0].is_nan());
         // s' = x − I = 0 for the additive model.
-        assert_eq!(written[1].values, vec![0.0]);
-        assert!(written[2].values[0].is_nan());
-        assert!(written[3].values[0].is_nan());
-        assert_eq!(written[4].values, vec![0.0]);
+        assert_eq!(lone(&written[1]), vec![0.0]);
+        assert!(lone(&written[2])[0].is_nan());
+        assert!(lone(&written[3])[0].is_nan());
+        assert_eq!(lone(&written[4]), vec![0.0]);
     }
 
     #[test]
@@ -856,9 +1186,413 @@ mod tests {
             vec![1, 1, 1, 1, 1, 1, 1, 0, 0, 1]
         );
         // Seven of the nine bytes are 1.
-        assert_eq!(written[4].values, vec![1.0]);
+        assert_eq!(lone(&written[4]), vec![1.0]);
         assert_eq!(failures.value.to_bits(), failures.words[0]);
         assert_eq!(failures.unknown_datapoints, failures.words[1]);
+    }
+
+    /// The additive group with P = 5 and both season archives at row 1.
+    fn period_five_group() -> (Vec<RrdArchiveInfo>, Seasons) {
+        let mut archives = additive_group();
+        for index in [1, 2] {
+            archives[index].rows = 5;
+            archives[index].current_row = 1;
+        }
+        let rows = seasons(&[7.0, 8.0, 9.0, 10.0, 11.0], &[5.0, 6.0, 7.0, 8.0, 9.0]);
+        (archives, rows)
+    }
+
+    fn run_of(len: u64, value: f64) -> Run {
+        Run {
+            start: 1_000_000_000,
+            len,
+            end: 1_000_000_000 + (len * STEP) as i64,
+            values: vec![value],
+        }
+    }
+
+    #[test]
+    fn run_of_two_prefetches_two_ahead() {
+        let (mut archives, mut rows) = period_five_group();
+        // The newest failure result is 1; two shifts move it to byte 2.
+        archives[4].cdp_prep[0].set_u64(0, 1);
+        let group = Group::find(&kinds(&archives)).unwrap();
+        let mut triggered = false;
+        let written = consolidate_group(
+            &group,
+            &mut archives,
+            &mut rows,
+            &run_of(2, 14.0),
+            &mut triggered,
+        );
+
+        // PDP 1 as in single_pdp_learns_like_hw_12: p = 13, I = 11.5,
+        // T = 1.25, s' = 2.25, d' = 1; its prefetch reads row 1 + 1 + 2 = 4.
+        // PDP 2: base = 12.75, p = 12.75 + 11, I = blend(0.5, 3, 12.75),
+        // T = blend(0.5, I − 11.5, 1.25), s' = blend(0.5, 14 − I, 11).
+        let level = &archives[0].cdp_prep[0];
+        assert_eq!(level.primary_value, 13.0);
+        assert_eq!(level.secondary_value, 23.75);
+        assert_eq!(level.word_f64(cdp::INTERCEPT), 7.875);
+        assert_eq!(level.word_f64(cdp::LAST_INTERCEPT), 11.5);
+        assert_eq!(level.word_f64(cdp::SLOPE), -1.1875);
+        let predictions: Vec<f64> = written[0].spans.iter().map(|span| span.values[0]).collect();
+        assert_eq!(predictions, vec![13.0, 23.75]);
+
+        let seasonal = &archives[1].cdp_prep[0];
+        // After the run slot 2 holds row r0 + 4 = 0 and slot 3 the second
+        // PDP's coefficient, row 4.
+        assert_eq!(seasonal.word_f64(cdp::SEASONAL), 7.0);
+        assert_eq!(seasonal.word_f64(cdp::LAST_SEASONAL), 11.0);
+        assert_eq!(seasonal.primary_value, 2.25);
+        assert_eq!(seasonal.secondary_value, 8.5625);
+        let deviation = &archives[2].cdp_prep[0];
+        assert_eq!(deviation.word_f64(cdp::SEASONAL), 5.0);
+        assert_eq!(deviation.word_f64(cdp::LAST_SEASONAL), 9.0);
+        // The season rows are unchanged and nothing is written to them.
+        assert_eq!(rows.seasonal.values, vec![7.0, 8.0, 9.0, 10.0, 11.0]);
+        assert_eq!(rows.deviation.values, vec![5.0, 6.0, 7.0, 8.0, 9.0]);
+        for index in [1, 2] {
+            assert!(written[index].spans.is_empty());
+            assert_eq!(written[index].skipped, 2);
+        }
+        // DEVPREDICT writes the deviation each PDP used.
+        let dev_rows: Vec<f64> = written[3].spans.iter().map(|span| span.values[0]).collect();
+        assert_eq!(dev_rows, vec![1.0, 9.0]);
+        assert_eq!(archives[3].cdp_prep[0].primary_value, 1.0);
+        assert_eq!(archives[3].cdp_prep[0].secondary_value, 9.0);
+        let failures = &archives[4].cdp_prep[0];
+        assert_eq!(
+            crate::holt_winters::failure_history(failures, 9),
+            vec![0, 0, 1, 0, 0, 0, 0, 0, 0]
+        );
+        assert!(!triggered);
+    }
+
+    #[test]
+    fn run_of_many_ignores_value() {
+        let outcome = |value: f64| {
+            let (mut archives, mut rows) = period_five_group();
+            for archive in &mut archives {
+                archive.rows = 5;
+            }
+            archives[4].cdp_prep[0].set_u64(0, 0x0101_0001_0100_0101);
+            archives[4].cdp_prep[0].set_u64(1, 0x01);
+            let group = Group::find(&kinds(&archives)).unwrap();
+            let mut triggered = false;
+            let written = consolidate_group(
+                &group,
+                &mut archives,
+                &mut rows,
+                &run_of(7, value),
+                &mut triggered,
+            );
+            (archives, rows, written, triggered)
+        };
+        let (archives, rows, written, triggered) = outcome(14.0);
+        let (unknown, _, unknown_written, _) = outcome(rrd_nan());
+        assert_eq!(format!("{archives:?}"), format!("{unknown:?}"));
+        assert_eq!(format!("{written:?}"), format!("{unknown_written:?}"));
+
+        // K = min(7, 5) = 5 rows in every archive.
+        let nan_bits = rrd_nan().to_bits();
+        for (index, bits) in [(0, nan_bits), (3, nan_bits), (4, 0)] {
+            assert_eq!(written[index].spans.len(), 1);
+            assert_eq!(written[index].spans[0].count, 5);
+            assert_eq!(written[index].spans[0].values[0].to_bits(), bits);
+        }
+        for index in [1, 2] {
+            assert!(written[index].spans.is_empty());
+            assert_eq!(written[index].skipped, 5);
+        }
+        let level = &archives[0].cdp_prep[0];
+        assert_eq!(level.word_f64(cdp::INTERCEPT), 10.0);
+        assert_eq!(level.word_f64(cdp::LAST_INTERCEPT), 9.0);
+        assert_eq!(level.word_f64(cdp::SLOPE), 1.0);
+        assert_eq!(level.word_f64(cdp::LAST_SLOPE), 0.5);
+        assert_eq!(level.word_u64(cdp::NAN_COUNT), 1 + 7);
+        assert_eq!(level.word_u64(cdp::LAST_NAN_COUNT), 1 + 6);
+        assert!(level.primary_value.is_nan() && level.secondary_value.is_nan());
+        // Slot 3 is row (1 + 7) mod 5 = 3 and slot 2 the row after it.
+        let seasonal = &archives[1].cdp_prep[0];
+        assert_eq!(seasonal.word_f64(cdp::LAST_SEASONAL), 10.0);
+        assert_eq!(seasonal.word_f64(cdp::SEASONAL), 11.0);
+        let deviation = &archives[2].cdp_prep[0];
+        assert_eq!(deviation.word_f64(cdp::LAST_SEASONAL), 8.0);
+        assert_eq!(deviation.word_f64(cdp::SEASONAL), 9.0);
+        assert_eq!(rows.seasonal.values, vec![7.0, 8.0, 9.0, 10.0, 11.0]);
+        // Words 8 and 9 of the season archives are unchanged.
+        assert!(seasonal.primary_value.is_nan());
+        let failures = &archives[4].cdp_prep[0];
+        assert_eq!(
+            crate::holt_winters::failure_history(failures, 9),
+            vec![0; 9]
+        );
+        assert_eq!(
+            (failures.primary_value, failures.secondary_value),
+            (0.0, 0.0)
+        );
+        let dev_predict = &archives[3].cdp_prep[0];
+        assert!(dev_predict.primary_value.is_nan() && dev_predict.secondary_value.is_nan());
+        // Five rows from row 2 pass row 0: the counter goes from 1 to 2.
+        assert!(triggered);
+        assert_eq!(seasonal.word_u64(cdp::INIT_FLAG), 2);
+    }
+
+    #[test]
+    fn run_crossing_no_smoothing_point_does_not_trigger() {
+        let (mut archives, mut rows) = period_five_group();
+        let group = Group::find(&kinds(&archives)).unwrap();
+        let mut triggered = false;
+        // Rows 2 and 3 only.
+        consolidate_group(
+            &group,
+            &mut archives,
+            &mut rows,
+            &run_of(2, 1.0),
+            &mut triggered,
+        );
+        assert!(!triggered);
+        // From row 1, three rows reach 2, 3 and 4; the counter at 4 waits
+        // for the smoothing index 2.
+        for index in [1, 2] {
+            archives[index].current_row = 1;
+            archives[index].cdp_prep[0].set_u64(cdp::INIT_FLAG, 4);
+        }
+        consolidate_group(
+            &group,
+            &mut archives,
+            &mut rows,
+            &run_of(3, 1.0),
+            &mut triggered,
+        );
+        assert!(triggered);
+        assert_eq!(archives[1].cdp_prep[0].word_u64(cdp::INIT_FLAG), 4);
+    }
+
+    /// The centred circular mean of `rows` with half-width `h`, summed
+    /// directly.
+    fn centred(rows: &[f64], h: usize) -> Vec<f64> {
+        let p = rows.len();
+        (0..p)
+            .map(|i| {
+                (0..=2 * h)
+                    .map(|k| rows[(i + p * h + k - h) % p])
+                    .sum::<f64>()
+                    / (2 * h + 1) as f64
+            })
+            .collect()
+    }
+
+    fn close(a: &[f64], b: &[f64]) -> bool {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(x, y)| (x - y).abs() <= 1e-12 * y.abs().max(1.0))
+    }
+
+    #[test]
+    fn smoothing_pass_follows_hw_18() {
+        // P = 4, window 0.5 at version 0004: h = 1.
+        let mut archives = additive_group();
+        for index in [1, 2] {
+            archives[index].param_words[param::SMOOTHING_WINDOW] = f(0.5);
+        }
+        let group = Group::find(&kinds(&archives)).unwrap();
+        let seasonal = [1.0, 2.0, 4.0, 9.0];
+        let deviation = [3.0, 1.0, 2.0, 6.0];
+        let mut rows = seasons(&seasonal, &deviation);
+        let mut out = Vec::new();
+        smooth(&group, &mut archives, &mut rows, "0004", &mut out);
+
+        let smoothed = centred(&seasonal, 1);
+        let mean = smoothed.iter().sum::<f64>() / 4.0;
+        let expected: Vec<f64> = smoothed.iter().map(|v| v - mean).collect();
+        assert!(
+            close(&rows.seasonal.values, &expected),
+            "{:?}",
+            rows.seasonal.values
+        );
+        assert!(close(&rows.deviation.values, &centred(&deviation, 1)));
+        let intercept = archives[0].cdp_prep[0].word_f64(cdp::INTERCEPT);
+        assert!(close(&[intercept], &[10.0 + mean]));
+        // Every row of both archives is queued once, in row order; the
+        // prefetched coefficients stay.
+        let queued: Vec<(usize, u64)> = out.iter().map(|r| (r.archive, r.first_row)).collect();
+        assert_eq!(
+            queued,
+            vec![
+                (1, 0),
+                (1, 1),
+                (1, 2),
+                (1, 3),
+                (2, 0),
+                (2, 1),
+                (2, 2),
+                (2, 3)
+            ]
+        );
+        assert!(out.iter().all(|r| r.count == 1));
+        assert_eq!(archives[1].cdp_prep[0].word_f64(cdp::SEASONAL), 2.0);
+
+        // MHWPREDICT divides by the mean and still adds it to the intercept.
+        let mut archives = additive_group();
+        archives[0].consolidation = "MHWPREDICT".into();
+        archives[0].raw_consolidation = b"MHWPREDICT".to_vec();
+        for index in [1, 2] {
+            archives[index].param_words[param::SMOOTHING_WINDOW] = f(0.5);
+        }
+        let group = Group::find(&kinds(&archives)).unwrap();
+        let mut rows = seasons(&seasonal, &deviation);
+        smooth(&group, &mut archives, &mut rows, "0004", &mut Vec::new());
+        let expected: Vec<f64> = smoothed.iter().map(|v| v / mean).collect();
+        assert!(close(&rows.seasonal.values, &expected));
+        let intercept = archives[0].cdp_prep[0].word_f64(cdp::INTERCEPT);
+        assert!(close(&[intercept], &[10.0 + mean]));
+
+        // Version 0003 uses 0.05: h = trunc(0.1) = 0, nothing changes.
+        let mut archives = additive_group();
+        for index in [1, 2] {
+            archives[index].param_words[param::SMOOTHING_WINDOW] = f(0.5);
+        }
+        let mut rows = seasons(&seasonal, &deviation);
+        let mut out = Vec::new();
+        smooth(&group, &mut archives, &mut rows, "0003", &mut out);
+        assert!(out.is_empty());
+        assert_eq!(rows.seasonal.values, seasonal.to_vec());
+    }
+
+    #[test]
+    fn one_unknown_ds_blocks_smoothing_for_all() {
+        let mut archives = additive_group();
+        for archive in &mut archives {
+            let second = archive.cdp_prep[0].clone();
+            archive.cdp_prep.push(second);
+        }
+        for index in [1, 2] {
+            archives[index].param_words[param::SMOOTHING_WINDOW] = f(0.5);
+        }
+        let group = Group::find(&kinds(&archives)).unwrap();
+        // Row-major, two DSs: DS 1 of SEASONAL row 2 is unknown.
+        let seasonal = [1.0, 5.0, 2.0, 6.0, 4.0, rrd_nan(), 9.0, 8.0];
+        let deviation = [3.0, 1.0, 1.0, 2.0, 2.0, 3.0, 6.0, 4.0];
+        let mut rows = seasons(&seasonal, &deviation);
+        rows.seasonal.sources = 2;
+        rows.deviation.sources = 2;
+        let mut out = Vec::new();
+        smooth(&group, &mut archives, &mut rows, "0004", &mut out);
+        // SEASONAL is left alone for both DSs, and so is the intercept.
+        let bits = |values: &[f64]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&rows.seasonal.values), bits(&seasonal));
+        assert_eq!(archives[0].cdp_prep[0].word_f64(cdp::INTERCEPT), 10.0);
+        assert_eq!(archives[0].cdp_prep[1].word_f64(cdp::INTERCEPT), 10.0);
+        // DEVSEASONAL is judged on its own rows and smoothed for both.
+        assert!(out.iter().all(|range| range.archive == 2));
+        assert_eq!(out.len(), 4);
+        let ds0: Vec<f64> = rows.deviation.values.iter().step_by(2).copied().collect();
+        let ds1: Vec<f64> = rows
+            .deviation
+            .values
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .copied()
+            .collect();
+        assert!(close(&ds0, &centred(&[3.0, 1.0, 2.0, 6.0], 1)));
+        assert!(close(&ds1, &centred(&[1.0, 2.0, 3.0, 4.0], 1)));
+    }
+
+    #[test]
+    fn dev_predict_and_failures_follow_their_links() {
+        let temp = tempfile::tempdir().unwrap();
+        // DEVPREDICT names SEASONAL (archive 2), FAILURES the AVERAGE
+        // archive (0).
+        let path = patched(
+            temp.path(),
+            "links",
+            &[
+                (param_offset(4, param::DEPENDENT), 2),
+                (param_offset(5, param::DEPENDENT), 0),
+            ],
+        );
+        let arguments: Vec<String> = (0..14)
+            .map(|i| {
+                format!(
+                    "{}:{}",
+                    1_000_000_010 + 10 * i,
+                    [10, 20, 40, 20][i % 4] + i / 4
+                )
+            })
+            .collect();
+        let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        let (rows, result) = update_rrd_text(&path, None, &arguments, false);
+        result.unwrap();
+        let of = |name: &str| -> Vec<f64> {
+            rows.iter()
+                .filter(|row| row.consolidation == name)
+                .map(|row| row.values[0])
+                .collect()
+        };
+        // FAILURES stores each value; DEVPREDICT the coefficient SEASONAL
+        // used, which is its row of one season (four PDPs) before.
+        let values: Vec<f64> = arguments
+            .iter()
+            .map(|a| a.split(':').nth(1).unwrap().parse().unwrap())
+            .collect();
+        assert_eq!(of("FAILURES"), values);
+        let (seasonal, dev_predict) = (of("SEASONAL"), of("DEVPREDICT"));
+        assert!(dev_predict[..4].iter().all(|v| v.is_nan()));
+        assert_eq!(dev_predict[4..], seasonal[..10]);
+        let info = crate::inspect_rrd_file(&path).unwrap();
+        let failures = &info.archives[5].cdp_prep[0];
+        assert_eq!(
+            crate::holt_winters::failure_history(failures, 9),
+            vec![0; 9]
+        );
+        assert_eq!(failures.primary_value, 23.0);
+
+        // FAILURES names DEVPREDICT, which names the prediction archive, so
+        // the values are checked, against DEVPREDICT's word 3 (0) as the
+        // deviation: every value off the prediction is a violation.
+        let path = patched(
+            temp.path(),
+            "chain",
+            &[
+                (param_offset(4, param::DEPENDENT), 1),
+                (param_offset(5, param::DEPENDENT), 4),
+            ],
+        );
+        let (rows, result) = update_rrd_text(&path, None, &arguments, false);
+        result.unwrap();
+        let failures: Vec<f64> = rows
+            .iter()
+            .filter(|row| row.consolidation == "FAILURES")
+            .map(|row| row.values[0])
+            .collect();
+        // From PDP 5 on each is a violation; the seventh (PDP 11) reaches
+        // the threshold.
+        let mut expected = vec![0.0; 10];
+        expected.extend([1.0; 4]);
+        assert_eq!(failures, expected);
+        let info = crate::inspect_rrd_file(&path).unwrap();
+        let history = crate::holt_winters::failure_history(&info.archives[5].cdp_prep[0], 9);
+        // The ten PDPs after the first season all have a prediction.
+        assert_eq!(history, vec![1; 9]);
+
+        // A prediction link to another type is refused before any write.
+        let path = patched(
+            temp.path(),
+            "pred",
+            &[(param_offset(1, param::DEPENDENT), 3)],
+        );
+        let before = std::fs::read(&path).unwrap();
+        let (rows, result) = update_rrd_text(&path, None, &arguments, false);
+        assert!(
+            matches!(result, Err(StoreError::RrdUnsupported(_))),
+            "{result:?}"
+        );
+        assert!(rows.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     /// Row ranges as (first row, count, value bits) and summaries as
