@@ -948,13 +948,16 @@ def compute_cases():
 def hw_cases():
     c = []
 
-    # Rondi does not implement Holt-Winters archives yet: every command
-    # that reads or writes their state is refused (expectation
-    # `unsupported`); fetch already works. Promote cases to `same` with the
-    # implementation.
+    # Rondi implements info, dump, fetch, update and updatev of files with
+    # Holt-Winters archives (expectation `same`). It still refuses tune of
+    # such files (`unsupported`, holt-winters.md HW-36); promote those cases
+    # with the implementation. Explicit expectations (`clean-error`,
+    # `divergent`) are kept as given.
+    implemented = {"info", "dump", "fetch", "update", "updatev"}
+
     def add(*args, inputs=(), expect=None, note="-"):
         if expect is None:
-            expect = "same" if args[0] == "fetch" else "unsupported"
+            expect = "same" if args[0] in implemented else "unsupported"
             note = "-" if expect == "same" else "HW-unsupported"
         c.append((expect, note, list(inputs), list(args)))
 
