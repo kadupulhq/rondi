@@ -80,3 +80,48 @@ fn rrdtool_reproduces_hw_vectors_and_rondi_matches_it() {
     common::require_oracle();
     spec_vectors::replay_oracle(&suite());
 }
+
+/// Each Holt-Winters `tune` option on a file with the archive it tunes is
+/// refused by its long name, as rrdcached's TUNE does, and the file is left
+/// unchanged (HW-36).
+#[test]
+fn tune_refuses_holt_winters_options_by_long_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let rondi = temp.path().join("rrdtool");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &rondi).unwrap();
+    let input =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/hw/inputs/hwimp.rrd");
+    let original = std::fs::read(&input).unwrap();
+    let path = temp.path().join("hwimp.rrd");
+    for (option, value, long) in [
+        ("-x", "0.5", "alpha"),
+        ("-y", "0.5", "beta"),
+        ("-z", "0.5", "gamma"),
+        ("-v", "0.5", "gamma-deviation"),
+        ("-s", "0.5", "smoothing-window"),
+        ("-S", "0.5", "smoothing-window-deviation"),
+        ("-p", "2", "deltapos"),
+        ("-n", "2", "deltaneg"),
+        ("-w", "5", "window-length"),
+        ("-f", "3", "failure-threshold"),
+        ("-b", "x", "aberrant-reset"),
+    ] {
+        std::fs::write(&path, &original).unwrap();
+        let output = Command::new(&rondi)
+            .arg("tune")
+            .arg(&path)
+            .args([option, value])
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{option}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            format!("ERROR: --{long} is not supported by Rondi\n"),
+            "{option}"
+        );
+        assert!(
+            std::fs::read(&path).unwrap() == original,
+            "{option} changed the file"
+        );
+    }
+}

@@ -563,9 +563,12 @@ whose first DS was reset).
 
 **HW-36** (black-box; should). Rondi does not yet implement these options
 on files with Holt-Winters archives (`tune-modify.md` TM-60). Until it
-does it refuses them with an error and leaves the file unchanged; in
-particular `--aberrant-reset` on such a file is refused rather than
-accepted without effect. The value checks that fail before any archive
+does it refuses them and leaves the file unchanged: after the value
+checks, the CLI and rrdcached's `TUNE` both report
+`--<long option> is not supported by Rondi` (for example
+`--alpha is not supported by Rondi`) when the file has the archive the
+option tunes. In particular `--aberrant-reset` on such a file is refused
+rather than accepted without effect. The value checks that fail before any archive
 is read (HW-31 to HW-33) and the effects on files without Holt-Winters
 archives already match (vectors `164` to `167`).
 
