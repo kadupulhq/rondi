@@ -594,6 +594,16 @@ archives already match (vectors `164` to `167`).
   these, and Rondi refuses an `update` on such a file before writing
   anything.
 
+- Holt-Winters archives with more than one PDP per row. `create` gives
+  every Holt-Winters archive one PDP per row, but `restore` stores the
+  `<pdp_per_row>` of an edited dump. No vector pins how RRDtool updates
+  such a file; Rondi writes one row per PDP, so it refuses an `update`
+  on such a file before writing anything (test
+  `hw_archive_with_several_pdps_per_row_is_refused_untouched`). The
+  same holds for a group without exactly one prediction archive and at
+  most one archive of each other type. Each of these refusals says
+  "… not supported by Rondi" and leaves the file unchanged.
+
 - Whether a gap of many PDPs ever resets the model: none observed for gaps
   of single unknown PDPs up to 7 with *P* = 5, nor for runs of 43 PDPs
   (HW-21 keeps *I* and *T*).

@@ -554,6 +554,20 @@ fn holt_winters_group(info: &RrdInfo, kinds: &[ArchiveKind]) -> Result<Option<Gr
                 .into(),
         )
     })?;
+    // Compatibility: `rrdtool create` gives every Holt-Winters archive one
+    // PDP per row; another count comes only from a restored, edited dump.
+    // Rondi models one row per PDP, so it refuses such a file before
+    // writing anything instead of storing rows RRDtool would not.
+    // Provenance: specification (docs/compatibility/holt-winters.md, update
+    // refusals).
+    if kinds.iter().zip(&info.archives).any(|(kind, archive)| {
+        matches!(kind, ArchiveKind::HoltWinters(_)) && archive.pdp_per_row != 1
+    }) {
+        return Err(StoreError::RrdUnsupported(
+            "Holt-Winters archives with more than one PDP per row are not supported by Rondi"
+                .into(),
+        ));
+    }
     // Compatibility: a FAILURES window above 28 (only in a crafted file)
     // fails the update before anything is written, where RRDtool would
     // overwrite the CDP state beyond the history.

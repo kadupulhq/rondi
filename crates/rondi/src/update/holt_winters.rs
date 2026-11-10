@@ -1816,6 +1816,31 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
+    #[test]
+    fn hw_archive_with_several_pdps_per_row_is_refused_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        // Each Holt-Winters archive of hwimp (1 to 5) in turn, with two PDPs
+        // per row, as a restored, edited dump can give it.
+        for archive in 1..6 {
+            let path = patched(
+                temp.path(),
+                &format!("pdp2-{archive}"),
+                &[(rows_offset(archive) + 8, 2)],
+            );
+            let before = std::fs::read(&path).unwrap();
+            let (rows, result) =
+                update_rrd_text(&path, None, &["1000000010:10", "1000000020:20"], false);
+            match &result {
+                Err(StoreError::RrdUnsupported(message)) => {
+                    assert!(message.contains("PDP per row"), "{message}")
+                }
+                other => panic!("archive {archive}: {other:?}"),
+            }
+            assert!(rows.is_empty());
+            assert_eq!(std::fs::read(&path).unwrap(), before);
+        }
+    }
+
     /// Row ranges as (first row, count, value bits) and summaries as
     /// (time, value bits).
     type Writes = (Vec<(u64, u64, Vec<u64>)>, Vec<(i64, Vec<u64>)>);
