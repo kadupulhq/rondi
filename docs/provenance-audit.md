@@ -1,5 +1,121 @@
 # Provenance audit
 
+## Re-audit at c568603 (2026-11-10)
+
+An independent re-audit of `origin/main` at `c568603`, made against `AGENTS.md`, `CLAUDE.md` and `docs/PROVENANCE.md`. The auditor had no part in the earlier work and read no RRDtool C source. Evidence is the current tree, `git log --follow` and `git blame` of each file, the workstream records in `docs/provenance/`, and the specifications in `docs/compatibility/`. The maintainer decisions D1 (license history of code merged in the GPL period is not a release blocker), D2 (help text stays byte-exact), D3 (MIT rrdcached client and BSD decimal parser kept with attribution) and the decision to set aside history remediation are taken as given and are not findings. This is engineering provenance hygiene, not a legal opinion.
+
+### Verdict
+
+Not release-ready. The clean-room rewrites cover most of the tree: 75 of the 97 Rust files under `crates/*/src` and `fuzz/src` were written from the specifications after the policy landed, and every rule they cite exists. Two files still contain port-era code that the earlier audit's conclusions do not account for:
+
+- `crates/rondi/src/rrd_number.rs` keeps `rrd_diff`, the COUNTER difference routine. The earlier audit identified it as a reproduction of RRDtool's GPL big-integer subtraction, separate from the BSD decimal parser. D3 and `THIRD-PARTY-NOTICES.md` attribute the whole file to the BSD parser, so this function is neither remediated nor correctly attributed, and the clean-room `update/amount.rs` calls it.
+- `crates/rondi-cli/src/main.rs` keeps command handlers and output writers that were never respecified or rewritten. The earlier audit rated them Review with "reword citations; no rewrite needed". The rewording is incomplete, and parts of the code still quote C expressions and use RRDtool's internal names (details below).
+
+Until these are remediated, the README statement that Rondi "is implemented from documentation, behavioral specifications and black-box tests" does not hold for those parts.
+
+Counts by file (97 Rust files):
+
+| Classification | Files |
+|---|---:|
+| Clean-room (spec-derived, with provenance comments or a workstream record) | 75 |
+| Kept with attribution (D3) | 1 |
+| Independent and low risk (Rondi's own store, helpers, harness) | 18 |
+| Still a port that needs remediation | 2 |
+| Port status unsettled without the C: human review | 1 |
+
+The 22 files under `crates/rondi-cli/src/help/` are RRDtool help text kept byte-exact under D2 and are not counted above. `main.rs` also holds the D3 rrdcached client functions, and `rrd_number.rs` also holds the D3 decimal parser; each is counted once, under its unremediated part.
+
+### Module table
+
+"Pre-policy lines" counts lines whose `git blame` author date is before 2026-10-14, the day `AGENTS.md` and `docs/PROVENANCE.md` were added. Blame attributes some blank lines and braces in rewritten files to older commits, so small counts in clean-room files are noise; the files named below were checked by reading.
+
+| Path | Classification | Evidence | Action |
+|---|---|---|---|
+| `crates/rondi/src/rpn/` (`mod.rs`, `parse.rs`, `eval.rs`, `compute.rs`, `calendar.rs`, `ordering.rs`, `tests.rs`), `numeric_cast.rs` | Clean-room | Created by `265fae3` ("reimplement the RPN engine from the behavioral spec") and `f7096ee` (COMPUTE, record `docs/provenance/compute-ds-clean-room.md`); 34 `Provenance:` comments; cites `rpn.md` and CP rules; no pre-policy lines | None |
+| `crates/rondi/src/time/` (6 files) | Clean-room | Created by `f0f7a0b` from `time-spec.md`; TS rules cited; libc references describe observable C-library behavior, not RRDtool internals | None |
+| `crates/rondi/src/graph/` (4 files), `crates/rondi/src/layout/` (5 files) | Clean-room | Created by `211e1ce` and `52f79fe` from GR rules; 51 `Provenance:` comments; `im` appears twice in `graph/data.rs` as a variable name | None |
+| `crates/rondi/src/format_value/` (9 files) | Clean-room | Created by `50c14c2` from `format-strings.md` and black-box runs; no pre-policy lines | None |
+| `crates/rondi/src/update/` (6 files), `crates/rondi/src/holt_winters.rs` | Clean-room | Records `update-clean-room.md`, `holt-winters-clean-room.md`, `holt-winters-impl.md`; UP, CP and HW rules cited; 72 `Provenance:` comments. `update/amount.rs` calls the legacy `rrd_diff` (see `rrd_number.rs`), which the update record lists as an exposure | None in these files; see `rrd_number.rs` |
+| `crates/rondi/src/tune_modify.rs` | Clean-room | Created by `e9e7772` from `tune-modify.md`; 35 TM rules; 11 `Provenance:` comments | None |
+| `crates/rondi/src/rrd_create.rs`, `rrd_definitions.rs`, `rrd_resize.rs` | Clean-room | Rewritten by `7356fd5` from `create.md` and `resize.md`; the 128 pre-policy lines blame shows are imports, constants and braces | None |
+| `crates/rondi/src/rrd_restore.rs`, `rrd_restore/tests.rs`, `xml_reader.rs` | Clean-room | Rewritten by `1fbe553` and the reader rewrite from `restore.md`; `parse_tag_*` strings are required error text (RS rules); `expect_element` shares a name with a removed legacy helper, which is a generic name | None |
+| `crates/rondi-cli/src/frontend/` (4 files), `graph_args.rs`, `print_format.rs`, `rrdcached.rs` | Clean-room | Created by `6bd0989`, `9cb5d22`, `b87bef5`, `50c14c2`, `12e70d4` from `cli.md`, `pipe-mode.md`, `graph.md`, `format-strings.md`, `rrdcached-daemon.md`; no pre-policy lines. `rrdcached.rs` carries the `rrdcached -h` usage text (D2) | None |
+| `crates/rondi-server/src/rrdcached/` (22 files) | Clean-room | Created by `12e70d4` and `a9df197` from `rrdcached.md` and `rrdcached-daemon.md`; RC and RCD rules cited. `commands.rs` carries the `HELP` tables (D2). `fetch.rs` prints `rrd_fetch_r failed:`, which is observable reply text | None |
+| `crates/rondi-cli/src/cparse.rs` | Kept with attribution (D3) | BSD decimal conversion with the notice header; 214 of 221 lines from `579a4fb` ("optparse port"); the rest are libc wrappers | None beyond D3 |
+| `crates/rondi/src/storage.rs`, `consolidation.rs`, `data_source.rs`, `format.rs`, `import_export.rs`, `queries.rs`, `lib.rs`, `compatibility.rs`, `safe_fs.rs` | Independent, low risk | Rondi's own store, snapshot format and filesystem helpers; no RRDtool counterpart in structure or naming | None |
+| `crates/rondi/src/vdef.rs` | Independent, low risk | Conventional statistics; the qsort comparator and FMA choice reproduce observed results and are now specified by GR-100 and GR-101 (`3c32c80`, `d8388ce`) with `Provenance:` comments | None |
+| `crates/rondi-server/src/lib.rs` | Independent, low risk | JSON API and accept loop only; the old C line citation is gone | None |
+| `fuzz/src/lib.rs` and the six `fuzz/src/cli/**` include stubs | Independent, low risk | Harness code; the stubs `include!` CLI sources and ship nothing | None |
+| `crates/rondi/src/rrd_number.rs` | Still a port (part) | The decimal parser is D3. `rrd_diff` (lines 175 to 256) keeps the RRDtool function name and a C macro name (`LAST_DS_LEN`), works on a space-filled byte buffer with manual index arithmetic and a ten's-complement pass, and 80 of its 82 lines come from `6d70fab` ("parse update arguments with a port of rrd_update.c"). The earlier audit called it GPL-derived; `THIRD-PARTY-NOTICES.md` names the whole file as BSD-derived | UP-16 already specifies the counter difference; reimplement it from UP-16 it in a fresh context; or, if counsel prefers, correct the notice. Blocks release |
+| `crates/rondi-cli/src/main.rs` | Still a port (part) | 4,527 of 5,767 lines predate the policy and 1,274 are last touched by commits titled as ports (#56 486 lines, #70 341, the `rrd_client.c` address parser 155, #64 116, `rrd_modify` port 45, #68 32, #69 24, #73 24). See "main.rs findings" below. The rrdcached client functions are D3; the PNG renderer is independent | Specify and rewrite the tune header options and the xport/graphv writers; give the remaining port-era handlers a human pass. Blocks release |
+| `crates/rondi/src/rrd_binary.rs` | Human review | 1,777 of 1,996 lines predate the policy; 383 lines are last touched by port-titled commits (`18cf4ae` "ports of rrd_create.c and rrd_open.c" 141, `a2ae7e9` "like rrd_format.c" 108). The `.rrd` layout and open errors are format-dictated or observable; fetch archive choice is documented in `rrdfetch(1)`. There is no `Provenance:` comment and no specification for the open checks, `first`/`last`, or `dump`. Comments still name `dst_conv` and quote `last_up % (pdp_cnt * pdp_step)` | Decide by human comparison, or specify open, fetch, first and dump and rewrite. Fix before 0.2 |
+
+#### main.rs findings
+
+- Tune header options (`rrdtool_tune`, `tune_scan_rra_op`, `tune_scan_heartbeat`, `tune_scan_pair`, `tune_scan_name`, lines 4012 to 4438). The doc comments quote C calls with C local names and a C macro, for example ``/// `sscanf(spec, "%u:%c%u", &idx, &sign, &number) == 3`.`` and ``DS_NAM_FMT``; the code calls `libc::sscanf` with RRDtool's format strings. A comment cites `handle_modify`. Most of these lines come from `579a4fb` (#70, "parse every command's options with the optparse port") and `57198df` ("port rrd_modify DS and RRA changes"). `tune-modify.md` states that it does not cover the header-only options, so there is no specification to implement from.
+- Xport and graphv output (`format_xport_addprints`, `format_xport_xmljson`, `format_xport_sv`, `GraphInfo`, `prepare_graph_image`, about lines 1444 to 1913 and 2830 to 3135). The function names follow RRDtool's xport writer names, the writer takes a C-style flag bitmask, the graph image is held in a variable named `im` (80 occurrences in the file), and legends carry `gdes_index`. These lines come mostly from `9b3a758` (#56, "port graph script parsing, data preparation and RPN"). The output format itself is dictated by the XML and JSON shapes, and `graph.md` specifies it, so a rewrite from the specification is practical.
+- Residual narration: line 3160 still carries a bare C line citation (`// RRDtool (updatev) and :679 (update).`; the same remnant is in `crates/rondi-cli/tests/rrdtool_command_options.rs:381`); line 764 says "Reuse the existing C port"; line 3937 describes RRDtool's "file statics"; line 4637 names `get_path` (inside the D3 client code). `scripts/check-provenance.py` does not catch the bare `:679` form.
+- Unaffected parts: the rrdcached client functions (D3); the PNG renderer (`render_graph_png`, `draw_*`), which has no RRDtool counterpart; and handlers whose logic now delegates to clean-room modules.
+
+### Spec and provenance consistency
+
+- `python3 -I scripts/check-provenance.py` exits 0 with no output. Its `LEGACY` set is empty. It became empty because the C citations were reworded, not because `main.rs` and `rrd_binary.rs` were replaced, so the checker no longer tracks any unremediated module.
+- Every rule ID cited in `crates/*/src`, `crates/*/tests` and `fuzz/` appears in a specification (0 missing), and no source file names a missing `docs/compatibility/*.md`. Spot checks found the definitions of GR-101, UP-38, RC-55, TM-57, CLI-24, RS-62, CR-61, HW-36, FS-34, RZ-1, PM-15, NM-1, TS-1, CP-9 and RCD-4. Each specification is cited by at least three source modules.
+- The only module path named in a specification or record that no longer exists is `crates/rondi/src/graph.rs` in `docs/provenance/compute-ds-clean-room.md`, which records history and is correct as such.
+- Workstream records exist for COMPUTE, numbers, update and Holt-Winters. The record requirement (`4be2fd9`, 2026-11-09) postdates the time, RPN, restore, tune, create/resize, CLI, format, rrdcached, layout and graph engine workstreams, whose only record is the status text in the earlier audit below. `9cb5d22` (list) landed after the requirement without a record.
+- Narration grep over `crates/*/src` and `fuzz/src` (`\.c\b`, `line [0-9]+`, `rrd_[a-z_]+\(\)`, `ported`, `port of`, `mirrors`, `translat`, `disassembl`): no `.c` file names outside the notice headers and `syslog.h` in the rrdcached usage text; `line N` only in required libxml2 and restore error text; `mirrors` only in `layout/legend.rs`, where it means geometric mirroring of legend items; no `ported`, `port of`, `translat` or `disassembl` in source comments. A wider grep for `upstream`, `the C`, `glibc` and `libc` found mostly descriptions of observable C-library behavior, which the policy allows, plus the `main.rs` and `rrd_binary.rs` remnants above. `docs/COMPATIBILITY_DEFECTS.md` RD-018 still calls the XML reader "the libxml2 port".
+
+### Distribution
+
+- `cargo package --list --allow-dirty --offline` for `rondi`, `rondi-cli` and `rondi-server` includes `LICENSE-MIT`, `LICENSE-APACHE`, `COPYRIGHT` and `LICENSE-GPL-2.0` in each, and `THIRD-PARTY-NOTICES.md` in `rondi` and `rondi-cli`, the two crates with D3 code. `rondi-server` has no D3 code. The help text ships in `rondi-cli` under `src/help/`. The crate copies match the root files (`cargo test -p rondi --test crate_license_files` passes).
+- Every crate inherits `license = "MIT OR Apache-2.0"` from the workspace; `fuzz/Cargo.toml` sets the same and `publish = false`.
+- The root README matches the tree except for the two blockers above. The crate READMEs for `rondi`, `rondi-cli` and `rondi-server` still end with "RRDtool's code is not relicensed by this project", the sentence the root README dropped, and the `rondi` and `rondi-cli` crate READMEs do not mention `THIRD-PARTY-NOTICES.md` although those crates contain D3 code.
+- `COPYRIGHT` and `LICENSE-GPL-2.0` are described as third-party attribution in the README and CHANGELOG. Nothing in the tree claims that Rondi is GPL-licensed. The GPL sentence in the help text describes RRDtool and is part of the D2 text. `docs/ROADMAP.md` (licensing risk 6) says any module found derived from RRDtool code keeps RRDtool's terms, which now applies to `rrd_diff`.
+- `COPYRIGHT` reproduces only RRDtool's notice (Tobias Oetiker). The rrdcached usage text in `rondi-cli/src/rrdcached.rs` carries a different copyright line (Florian octo Forster and Kevin Brintnall), and the rrdcached `HELP` tables in `rondi-server/src/rrdcached/commands.rs` come from the daemon, which the earlier audit records as GPL-2.0-only. Neither `COPYRIGHT` nor `THIRD-PARTY-NOTICES.md` mentions them.
+
+### Verbatim text
+
+- The D2 text: `crates/rondi-cli/src/help/*.txt`, the usage banner and notice in `frontend/mod.rs`, the inline help copies in `main.rs` (`rrdtool_create_help`, `rrdtool_last_help`, the `flushcached` usage), the alias usage strings in `frontend/mod.rs`, the `rrdcached -h` text in `rrdcached.rs`, and the `HELP` tables in `rondi-server/src/rrdcached/commands.rs`.
+- Outside D2: `main.rs` `rrdproxy_mode` reproduces the banner and usage text of Cacti's `rrdtool-proxy.php` ("RRDtool Proxy Server v1.2.17, Copyright (C) 2004-YYYY The Cacti Group" and its option list). Cacti is a separate project, not RRDtool; this text is not covered by D2 and has no notice.
+- The other long literals are error and diagnostic text that tests compare byte for byte (for example the restore `parse_tag_*` messages, the libxml2 messages, the Cairo failure text and the format-string errors). They are required compatibility output. No copied prose was found in comments.
+
+### Remaining items
+
+Blocks release:
+
+1. `crates/rondi/src/rrd_number.rs` `rrd_diff`: an unremediated port of a GPL routine, misattributed to the BSD notice, called by the clean-room update path.
+2. `crates/rondi-cli/src/main.rs`: the tune header-option handling (copied C expressions, no specification) and the xport/graphv writers (RRDtool internal names, written in the #56 port) need a specification and a fresh implementation. The rest of the port-era lines need a human pass.
+
+Fix before 0.2:
+
+3. `crates/rondi/src/rrd_binary.rs`: resolve the human review below; specify open checks, `first`/`last` and `dump`, and add provenance comments for the fetch and info paths.
+4. Attribution for verbatim text outside RRDtool's notice: the rrdcached usage and `HELP` text (different copyright holders, GPL-2.0-only source) and the Cacti `rrdtool-proxy.php` text.
+5. Crate READMEs: drop "RRDtool's code is not relicensed by this project" and link `THIRD-PARTY-NOTICES.md` from the `rondi` and `rondi-cli` READMEs.
+6. `scripts/check-provenance.py`: catch bare `:NNN` line citations, and track the files in items 1 to 3 (for example in `LEGACY`) until they are replaced. Remove the `:679` remnants when the code around them is rewritten.
+7. `docs/COMPATIBILITY_DEFECTS.md` RD-018 "libxml2 port" wording.
+
+Note only:
+
+8. No workstream records for the workstreams merged before `4be2fd9`, or for the list rewrite (`9cb5d22`); their only record is the earlier audit's status text. The auditor could not check the session transcripts those statuses rely on.
+9. The help text is duplicated between `help/*.txt` and inline strings in `main.rs`.
+10. `rrd_restore.rs` `expect_element` shares a name with a removed legacy helper; the name is generic and the restore rewrite reports no exposure.
+11. `im` and `gdes_index` naming in `main.rs`, `print_format.rs` and `graph/data.rs` follow RRDtool's internal vocabulary.
+12. The `rondi` crate ships `COPYRIGHT` and `LICENSE-GPL-2.0` although it contains no RRDtool help text; harmless, but its README could say why.
+
+### Human and legal review
+
+1. `rrd_diff`: confirm its origin and license, then choose between a clean-room rewrite (recommended, about 80 lines with existing vectors) and corrected attribution.
+2. `main.rs` port-era sections: decide the rewrite scope beyond the tune options and xport/graphv writers.
+3. `rrd_binary.rs`: its port status cannot be settled without the C. Someone permitted to read RRDtool's `rrd_open`, `rrd_fetch`, `rrd_first` and `rrd_dump` should compare structure, or the paths should be respecified and rewritten.
+4. rrdcached usage and `HELP` text: confirm that D2 covers text from a GPL-2.0-only file with its own copyright holders, and what notice it needs.
+5. Cacti `rrdtool-proxy.php` banner and usage: keep with a notice or drop byte parity.
+
+### Method
+
+Executed at `c568603` on branch `docs/provenance-reaudit`: per-file `git blame --line-porcelain` with author dates and commit summaries, `git log --follow` per file, the narration grep above, a rule-ID cross-check of all source and test files against `docs/compatibility/*.md`, `python3 -I scripts/check-provenance.py`, `cargo package --list` for the three crates, and `cargo test -p rondi --test crate_license_files`. Read in full or in part: `main.rs` (the tune, update, fetch, restore, xport and graphv sections), `rrd_binary.rs` (open, fetch, first, info helpers), `rrd_number.rs`, `vdef.rs`, `rondi-server/src/lib.rs`, the rrdcached usage and `HELP` text, the license files, the READMEs and `THIRD-PARTY-NOTICES.md`. Clean-room files were judged from their history, records, provenance comments, function names and a grep for C signals, not line by line. No RRDtool C source was opened.
+
+## Earlier audit at 0fd0cf8 (history, unchanged)
+
 This audit identifies Rondi code that appears to derive from the RRDtool 1.11.0 C implementation rather than from independent design. It is engineering provenance hygiene, not a legal conclusion. Similarity alone does not prove copying: a behavior-compatible reimplementation of a file format, protocol, and command line will share names, constants, error text, and edge-case behavior with the original for legitimate reasons. The findings below separate those reasons from implementation expression that the project cannot currently show was independently written.
 
 Audited revision: `origin/main` at `0fd0cf8`. Reference: RRDtool 1.11.0 release tarball, used only for side-by-side similarity assessment. This report contains no RRDtool source expression.
