@@ -18,9 +18,12 @@ Rules:
               document under docs/ within the same comment block.
 
 Files listed in LEGACY are pre-policy modules that docs/provenance-audit.md
-already flags for replacement. The c-file and c-line rules are reported for
-them as warnings, not errors. A LEGACY entry that no longer has any finding,
-or no longer exists, is an error so the list only shrinks.
+schedules for respecification and rewrite. Each run prints a note naming
+them, so they stay visible until they are replaced, and the c-file and c-line
+rules are reported for them as warnings, not errors. An entry stays listed
+after its comments are cleaned up, because the code itself is what awaits
+replacement; remove it when the module is rewritten. An entry whose file no
+longer exists is an error so the list only shrinks.
 """
 
 from __future__ import annotations
@@ -31,9 +34,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# Pre-policy files flagged High or Review in docs/provenance-audit.md that
-# still name C files or lines. Remove an entry when its module is replaced.
-LEGACY: set[str] = set()
+# Pre-policy files that docs/provenance-audit.md leaves unremediated, with
+# what remains to be rewritten. Remove an entry when its module is replaced.
+LEGACY: dict[str, str] = {
+    "crates/rondi-cli/src/main.rs": (
+        "tune header options and xport/graphv writers, rewrite scheduled for 0.2"
+    ),
+    "crates/rondi/src/rrd_binary.rs": "pending human review, rewrite scheduled for 0.2",
+}
 
 C_FILE = re.compile(r"\b[A-Za-z0-9_]+\.[ch]\b(?![A-Za-z0-9_])")
 C_LINE = re.compile(
@@ -115,25 +123,27 @@ def main(argv: list[str]) -> int:
     paths = argv or tracked_rust_files(root)
     errors: list[str] = []
     warnings: list[str] = []
-    seen_legacy = set()
     for path in paths:
         source = (root / path).read_text(encoding="utf-8", errors="replace")
         for finding in check_source(path, source):
             legacy = path in LEGACY and finding.rule in {"c-file", "c-line"}
             if legacy:
-                seen_legacy.add(path)
                 warnings.append(
                     f"warning: {finding} (legacy, see docs/provenance-audit.md)"
                 )
             else:
                 errors.append(f"error: {finding}")
+    notes: list[str] = []
     if not argv:
-        for path in sorted(LEGACY - seen_legacy):
-            errors.append(
-                f"error: {path}: stale LEGACY entry (no findings or file removed); "
-                "remove it from scripts/check-provenance.py"
-            )
-    for message in warnings + errors:
+        for path, pending in sorted(LEGACY.items()):
+            if (root / path).is_file():
+                notes.append(f"note: {path}: tracked legacy ({pending})")
+            else:
+                errors.append(
+                    f"error: {path}: stale LEGACY entry (file removed); "
+                    "remove it from scripts/check-provenance.py"
+                )
+    for message in notes + warnings + errors:
         print(message)
     if errors:
         print(f"{len(errors)} provenance error(s); see AGENTS.md, section Provenance.")

@@ -93,8 +93,8 @@ translated pseudocode.
   not name an accepted source (`black-box ...`,
   `reference-source-inspection ...` with a `docs/` reference, `specification
   ...`, or a manual page such as `rrdcached(1)`). Pre-policy modules still
-  awaiting replacement are listed in its `LEGACY` set and only warn; remove an
-  entry when the module is replaced.
+  awaiting replacement are listed in its `LEGACY` table, named in a note on
+  every run, and only warn; remove an entry when the module is replaced.
 - Each clean-room workstream adds a record to
   [`docs/provenance/`](provenance/README.md) saying who worked in the
   investigation and implementation contexts and what each one read.
