@@ -83,9 +83,12 @@ fn micros(usec: u64) -> f64 {
 pub(crate) fn plan(last: Time, new: Time, step: u64) -> StepPlan {
     let step_secs = step_secs(step);
 
+    // Compatibility: the microsecond difference is taken in wrapping
+    // 64-bit integers before it becomes a double, which matters once a
+    // microsecond count is too large for a double to hold exactly.
     // Provenance: specification (docs/compatibility/update.md UP-14).
     let interval = new.secs.saturating_sub(last.secs) as f64
-        + (new.usec as f64 - last.usec as f64) / MICROS_PER_SECOND;
+        + (new.usec as i64).wrapping_sub(last.usec as i64) as f64 / MICROS_PER_SECOND;
 
     let t0 = step_start(last.secs, step_secs);
     let t1 = step_start(new.secs, step_secs);
