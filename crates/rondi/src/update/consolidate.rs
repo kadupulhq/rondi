@@ -436,6 +436,8 @@ pub(crate) fn consolidate_all(
                 rows_out,
                 summaries.as_deref_mut(),
             ),
+            // An archive without rows has nothing to write (UP-28).
+            ArchiveKind::HoltWinters(_) if archive.rows == 0 => Ok(()),
             ArchiveKind::HoltWinters(_) => {
                 match group_rows.iter_mut().find(|row| row.archive == index) {
                     Some(row) => write_rows(

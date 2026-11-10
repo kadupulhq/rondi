@@ -62,13 +62,13 @@ impl Group {
             multiplicative,
         })
     }
-}
 
-impl Group {
     /// Whether every archive's `dependent_rra_idx` names the archive its
     /// type depends on: the prediction archive names SEASONAL, the season
     /// archives name the prediction archive, and DEVPREDICT and FAILURES
     /// name DEVSEASONAL.
+    // Interim (Task 6): RRDtool follows the stored links (vectors 037 to
+    // 046); until Rondi does, a file whose links differ is refused.
     pub fn linked_by_type(&self, archives: &[RrdArchiveInfo]) -> bool {
         let names = |index: Option<usize>, target: Option<usize>| match (index, target) {
             (Some(index), Some(target)) => {
@@ -168,14 +168,13 @@ impl Seasons {
             deviation: load(group.dev_seasonal)?,
         })
     }
-}
 
-impl Seasons {
     /// Whether a smoothing pass after the command would change any row:
     /// an archive whose half-width is above 0 and whose rows are all known.
     // Compatibility: the window fraction is the stored smoothing_window for
     // a version of 4 or more and 0.05 otherwise; the half-width is
     // trunc(f·P / 2); an archive holding an unknown row is not smoothed.
+    // Interim (Task 6): used only to refuse a command that needs the pass.
     // Provenance: specification (docs/compatibility/holt-winters.md HW-18).
     pub fn pass_changes_rows(
         &self,
@@ -280,7 +279,6 @@ impl Level {
 // level; otherwise the level, slope and coefficient are smoothed, and an
 // unknown value projects the trend one step further.
 // Provenance: specification (docs/compatibility/holt-winters.md HW-12, HW-19).
-#[allow(clippy::too_many_arguments)]
 fn learn(
     level: &mut Level,
     x: f64,
@@ -397,7 +395,7 @@ fn count_season(archive: &mut RrdArchiveInfo, row: u64) -> bool {
 /// archive writes, in archive order. Rows are not queued and current rows
 /// do not move; the caller writes each row at its archive's place.
 /// `triggered` is set when a season counter reaches a smoothing point.
-/// Runs of other lengths are refused before consolidation and give no rows.
+/// The run must hold one PDP.
 pub(crate) fn consolidate_group(
     group: &Group,
     archives: &mut [RrdArchiveInfo],
@@ -405,9 +403,10 @@ pub(crate) fn consolidate_group(
     run: &Run,
     triggered: &mut bool,
 ) -> Vec<GroupRow> {
-    if run.len != 1 {
-        return Vec::new();
-    }
+    // Interim (Task 6): runs of two or more PDPs are refused before
+    // consolidation; removing that pre-check without handling them here
+    // fails this assertion in tests.
+    debug_assert_eq!(run.len, 1, "Holt-Winters runs hold one PDP");
     let model = Model {
         multiplicative: group.multiplicative,
     };
@@ -1086,5 +1085,31 @@ mod tests {
                 assert_eq!(std::fs::read(&path).unwrap(), before, "{name}");
             }
         }
+
+        // SEASONAL claims 2^61 + 4 rows; with one DS the size check wraps
+        // and passes (UP-38). Its row 3 is current and the file holds 24 of
+        // its rows, so the 21st PDP writes row 24, outside the file.
+        let path = patched(temp.path(), "up38", &[(rows_offset(2), 4 + (1 << 61))]);
+        let before = std::fs::read(&path).unwrap();
+        let arguments: Vec<String> = (1..=30)
+            .map(|i| format!("{}:{}", 1_000_000_000 + 10 * i, (i * 7) % 11))
+            .collect();
+        let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        let (rows, result) = update_rrd_text(&path, None, &arguments, false);
+        let error = result.unwrap_err().to_string();
+        assert!(error.starts_with("writing rrd: "), "{error}");
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(after.len(), before.len());
+        let info = crate::inspect_rrd_file(&path).unwrap();
+        // The failing argument's time is not stored.
+        assert_eq!(info.last_update, 1_000_000_200);
+        let current: Vec<u64> = info.archives.iter().map(|a| a.current_row).collect();
+        // Archives before SEASONAL advanced for the failing PDP, SEASONAL
+        // advanced to the row outside the file, later archives did not.
+        assert_eq!(current, vec![6, 0, 24, 2, 8, 1]);
+        // 20 PDPs print six rows each; the failing one prints the AVERAGE,
+        // HWPREDICT and the outside row's first value.
+        assert_eq!(rows.len(), 20 * 6 + 3);
+        assert_eq!(rows.last().unwrap().consolidation, "SEASONAL");
     }
 }
