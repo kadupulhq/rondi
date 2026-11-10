@@ -1267,6 +1267,11 @@ fn c_atoi(field: &[u8]) -> i64 {
     i64::from(crate::rrd_number::c_strtol(&text, 10).0 as i32)
 }
 
+/// The version text read as C `atoi`.
+pub(crate) fn version_number(field: &[u8]) -> i64 {
+    c_atoi(field)
+}
+
 /// The strerror text for an I/O error.
 pub(crate) fn rrd_strerror(error: &std::io::Error) -> String {
     match error.raw_os_error() {

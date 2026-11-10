@@ -1,19 +1,19 @@
 # id	expect	note	inputs	args... (tab separated)
-000-hwimp-rrd	unsupported	HW-unsupported	hwimp	info	hwimp.rrd
+000-hwimp-rrd	same	HW-unsupported	hwimp	info	hwimp.rrd
 001-hwimp-rrd	unsupported	HW-unsupported	hwimp	dump	hwimp.rrd
-002-mhwimp-rrd	unsupported	HW-unsupported	mhwimp	info	mhwimp.rrd
+002-mhwimp-rrd	same	HW-unsupported	mhwimp	info	mhwimp.rrd
 003-mhwimp-rrd	unsupported	HW-unsupported	mhwimp	dump	mhwimp.rrd
-004-hwexp-rrd	unsupported	HW-unsupported	hwexp	info	hwexp.rrd
+004-hwexp-rrd	same	HW-unsupported	hwexp	info	hwexp.rrd
 005-hwexp-rrd	unsupported	HW-unsupported	hwexp	dump	hwexp.rrd
-006-hwsw0-rrd	unsupported	HW-unsupported	hwsw0	info	hwsw0.rrd
+006-hwsw0-rrd	same	HW-unsupported	hwsw0	info	hwsw0.rrd
 007-hwsw0-rrd	unsupported	HW-unsupported	hwsw0	dump	hwsw0.rrd
-008-hwsw5-rrd	unsupported	HW-unsupported	hwsw5	info	hwsw5.rrd
+008-hwsw5-rrd	same	HW-unsupported	hwsw5	info	hwsw5.rrd
 009-hwsw5-rrd	unsupported	HW-unsupported	hwsw5	dump	hwsw5.rrd
-010-hwpdp3-rrd	unsupported	HW-unsupported	hwpdp3	info	hwpdp3.rrd
+010-hwpdp3-rrd	same	HW-unsupported	hwpdp3	info	hwpdp3.rrd
 011-hwpdp3-rrd	unsupported	HW-unsupported	hwpdp3	dump	hwpdp3.rrd
-012-hw2ds-rrd	unsupported	HW-unsupported	hw2ds	info	hw2ds.rrd
+012-hw2ds-rrd	same	HW-unsupported	hw2ds	info	hw2ds.rrd
 013-hw2ds-rrd	unsupported	HW-unsupported	hw2ds	dump	hw2ds.rrd
-014-hwrun-rrd	unsupported	HW-unsupported	hwrun	info	hwrun.rrd
+014-hwrun-rrd	same	HW-unsupported	hwrun	info	hwrun.rrd
 015-hwrun-rrd	unsupported	HW-unsupported	hwrun	dump	hwrun.rrd
 016-hwrun-rrd-hwpredict-s-1000000000-e-10000	same	-	hwrun	fetch	hwrun.rrd	HWPREDICT	-s	1000000000	-e	1000000300
 017-hwrun-rrd-seasonal-s-1000000000-e-100000	same	-	hwrun	fetch	hwrun.rrd	SEASONAL	-s	1000000000	-e	1000000300
@@ -186,17 +186,17 @@
 184-hwp40v4-rrd-1000001450-30	unsupported	HW-unsupported	hwp40v4	update	hwp40v4.rrd	1000001450:30
 185-hwx40v3-rrd-1000001010-10-1000001020-20-	unsupported	HW-unsupported	hwx40v3	update	hwx40v3.rrd	1000001010:10	1000001020:20	1000001030:40	1000001040:20	1000001050:11	1000001060:21	1000001070:41	1000001080:21	1000001090:12	1000001100:22	1000001110:42	1000001120:22	1000001130:13	1000001140:23	1000001150:43	1000001160:23	1000001170:14	1000001180:24	1000001190:44	1000001200:24	1000001210:15	1000001220:25	1000001230:45	1000001240:25	1000001250:16	1000001260:26	1000001270:46	1000001280:26	1000001290:17	1000001300:27	1000001310:47	1000001320:27	1000001330:18	1000001340:28	1000001350:48	1000001360:28	1000001370:19	1000001380:29	1000001390:49	1000001400:29	1000001410:20	1000001420:30	1000001430:50	1000001440:30	1000001450:21	1000001460:31	1000001470:51	1000001480:31	1000001490:22	1000001500:32	1000001510:52	1000001520:32	1000001530:23	1000001540:33	1000001550:53	1000001560:33	1000001570:24	1000001580:34	1000001590:54	1000001600:34
 186-hwx40v3-rrd-1000001450-30	unsupported	HW-unsupported	hwx40v3	update	hwx40v3.rrd	1000001450:30
-187-hwsw5v3-rrd	unsupported	HW-unsupported	hwsw5v3	info	hwsw5v3.rrd
+187-hwsw5v3-rrd	same	HW-unsupported	hwsw5v3	info	hwsw5v3.rrd
 188-hwsw5v3-rrd	unsupported	HW-unsupported	hwsw5v3	dump	hwsw5v3.rrd
-189-hwimpv4-rrd	unsupported	HW-unsupported	hwimpv4	info	hwimpv4.rrd
+189-hwimpv4-rrd	same	HW-unsupported	hwimpv4	info	hwimpv4.rrd
 190-hwimpv4-rrd	unsupported	HW-unsupported	hwimpv4	dump	hwimpv4.rrd
-191-hwp40v4-rrd	unsupported	HW-unsupported	hwp40v4	info	hwp40v4.rrd
+191-hwp40v4-rrd	same	HW-unsupported	hwp40v4	info	hwp40v4.rrd
 192-hwp40v4-rrd	unsupported	HW-unsupported	hwp40v4	dump	hwp40v4.rrd
-193-hwnan-rrd	unsupported	HW-unsupported	hwnan	info	hwnan.rrd
+193-hwnan-rrd	same	HW-unsupported	hwnan	info	hwnan.rrd
 194-hwnan-rrd	unsupported	HW-unsupported	hwnan	dump	hwnan.rrd
-195-hww1-rrd	unsupported	HW-unsupported	hww1	info	hww1.rrd
+195-hww1-rrd	same	HW-unsupported	hww1	info	hww1.rrd
 196-hww1-rrd	unsupported	HW-unsupported	hww1	dump	hww1.rrd
-197-hww28-rrd	unsupported	HW-unsupported	hww28	info	hww28.rrd
+197-hww28-rrd	same	HW-unsupported	hww28	info	hww28.rrd
 198-hww28-rrd	unsupported	HW-unsupported	hww28	dump	hww28.rrd
 199-hww29-rrd	clean-error	HW-5	hww29	info	hww29.rrd
 200-hww29-rrd	clean-error	HW-5	hww29	dump	hww29.rrd

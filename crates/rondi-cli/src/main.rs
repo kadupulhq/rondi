@@ -3766,6 +3766,7 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             archive.consolidation.as_str(),
             "AVERAGE" | "MIN" | "MAX" | "LAST"
         ) && rondi::cf_conv_error(&archive.raw_consolidation).is_none()
+            && rondi::holt_winters::Role::from_cf(&archive.raw_consolidation).is_none()
     }) {
         return Err("rrdtool info output for this consolidation type is not implemented".into());
     }
@@ -3818,6 +3819,23 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         writeln!(out, "rra[{index}].rows = {}", archive.rows)?;
         writeln!(out, "rra[{index}].cur_row = {}", archive.current_row)?;
         writeln!(out, "rra[{index}].pdp_per_row = {}", archive.pdp_per_row)?;
+        // Compatibility: a Holt-Winters archive prints its own parameter and
+        // CDP keys instead of xff and the classic CDP lines.
+        // Provenance: specification (docs/compatibility/holt-winters.md HW-3).
+        if let Some(fields) = rondi::holt_winters::info_fields(archive, &info.version)? {
+            for (key, value) in fields {
+                write!(out, "rra[{index}].{key} = ")?;
+                match value {
+                    rondi::holt_winters::InfoValue::Float(v) => {
+                        write!(out, "{}", format_info_float(v))?;
+                    }
+                    rondi::holt_winters::InfoValue::Uint(v) => write!(out, "{v}")?,
+                    rondi::holt_winters::InfoValue::Text(t) => out.extend_from_slice(&t),
+                }
+                out.push(b'\n');
+            }
+            continue;
+        }
         writeln!(out, "rra[{index}].xff = {}", format_rrd_float(archive.xff))?;
         for (ds_index, prep) in archive.cdp_prep.iter().enumerate() {
             writeln!(

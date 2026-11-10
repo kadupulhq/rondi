@@ -113,6 +113,98 @@ pub fn failure_history(prep: &RrdCdpPrepInfo, window_len: u64) -> Vec<u8> {
         .collect()
 }
 
+/// One value of an `info` line for a Holt-Winters archive.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InfoValue {
+    Float(f64),
+    Uint(u64),
+    Text(Vec<u8>),
+}
+
+/// The largest FAILURES window `info` can print (HW-5).
+pub const MAX_WINDOW_LEN: u64 = 28;
+
+/// The `info` lines of a Holt-Winters archive after `pdp_per_row`, as
+/// `(key suffix after "rra[i].", value)` pairs; `None` for a classic archive.
+/// `version` is the file's version text. Fails for a FAILURES window above 28.
+///
+/// Compatibility: parameter keys, then per-DS CDP keys, in the HW-3 order;
+/// `smoothing_window` appears only when the version reads as 4 or more.
+/// Provenance: specification (docs/compatibility/holt-winters.md HW-3, HW-5).
+pub fn info_fields(
+    archive: &RrdArchiveInfo,
+    version: &str,
+) -> Result<Option<Vec<(String, InfoValue)>>, String> {
+    use InfoValue::{Float, Text, Uint};
+    let Some(role) = Role::from_cf(&archive.raw_consolidation) else {
+        return Ok(None);
+    };
+    let window_len = archive.param_u64(param::WINDOW_LEN);
+    if role == Role::Failures && window_len > MAX_WINDOW_LEN {
+        return Err(format!(
+            "FAILURES window length {window_len} exceeds {MAX_WINDOW_LEN}"
+        ));
+    }
+    let shows_window = crate::rrd_binary::version_number(version.as_bytes()) >= 4;
+    let mut out: Vec<(String, InfoValue)> = Vec::new();
+    let mut put = |key: String, value: InfoValue| out.push((key, value));
+    match role {
+        Role::Prediction { .. } => {
+            put("alpha".into(), Float(archive.param_f64(param::ALPHA)));
+            put("beta".into(), Float(archive.param_f64(param::BETA)));
+        }
+        Role::Seasonal | Role::DevSeasonal => {
+            put("gamma".into(), Float(archive.param_f64(param::GAMMA)));
+            if shows_window {
+                put(
+                    "smoothing_window".into(),
+                    Float(archive.param_f64(param::SMOOTHING_WINDOW)),
+                );
+            }
+        }
+        Role::DevPredict => {}
+        Role::Failures => {
+            put(
+                "delta_pos".into(),
+                Float(archive.param_f64(param::DELTA_POS)),
+            );
+            put(
+                "delta_neg".into(),
+                Float(archive.param_f64(param::DELTA_NEG)),
+            );
+            put(
+                "failure_threshold".into(),
+                Uint(archive.param_u64(param::THRESHOLD)),
+            );
+            put("window_length".into(), Uint(window_len));
+        }
+    }
+    for (ds, prep) in archive.cdp_prep.iter().enumerate() {
+        let key = |name: &str| format!("cdp_prep[{ds}].{name}");
+        match role {
+            Role::Prediction { .. } => {
+                put(key("intercept"), Float(prep.word_f64(cdp::INTERCEPT)));
+                put(key("slope"), Float(prep.word_f64(cdp::SLOPE)));
+                put(key("NaN_count"), Uint(prep.word_u64(cdp::NAN_COUNT)));
+            }
+            Role::Seasonal => put(key("seasonal"), Float(prep.word_f64(cdp::SEASONAL))),
+            Role::DevSeasonal => put(key("deviation"), Float(prep.word_f64(cdp::SEASONAL))),
+            Role::DevPredict => {}
+            Role::Failures => {
+                let mut text = vec![b'"'];
+                text.extend(
+                    failure_history(prep, window_len)
+                        .iter()
+                        .map(|&byte| if byte == 1 { b'1' } else { b'0' }),
+                );
+                text.push(b'"');
+                put(key("history"), Text(text));
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
