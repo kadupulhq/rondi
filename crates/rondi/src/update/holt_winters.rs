@@ -179,9 +179,19 @@ impl Seasons {
     }
 }
 
-/// The half-width *h* of the smoothing window of season archive `archive`,
-/// when the pass smooths it: 1 ≤ *h* < P, so the window is narrower than
-/// 2P + 1.
+/// How the smoothing pass treats one season archive.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Window {
+    /// The centred running mean of 2*h* + 1 rows, 1 ≤ *h* < P.
+    Half(u64),
+    /// The x86_64 treatment of an out-of-range half-width (HW-18a).
+    #[cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+    Rotate,
+}
+
+/// The smoothing window of season archive `archive`, when the pass smooths
+/// it: 1 ≤ *h* < P, so the window is narrower than 2P + 1, or, on x86_64
+/// only, the rotation of HW-18a.
 // Compatibility: the window fraction is the stored smoothing_window for a
 // version that reads as 4 or more and 0.05 otherwise; h = trunc(f·P / 2).
 // Provenance: specification (docs/compatibility/holt-winters.md HW-18).
@@ -191,14 +201,38 @@ impl Seasons {
 // and 2.5), so Rondi diverges there; fractions in (1, 2) match it.
 // Provenance: specification (docs/compatibility/holt-winters.md HW-18 does
 // not cover fractions above 1; Rondi's choice).
-fn half_width(archive: &RrdArchiveInfo, version: &str) -> Option<u64> {
+// Compatibility: on x86_64 only, f·P / 2 that is NaN or at most −2^63
+// rotates the rows instead (HW-18a); other platforms leave them unsmoothed.
+// Provenance: black-box compatibility test (vector 205 and the HW-18a
+// probes in docs/compatibility/holt-winters.md).
+fn window(archive: &RrdArchiveInfo, version: &str) -> Option<Window> {
     let fraction = if crate::rrd_binary::version_number(version.as_bytes()) >= 4 {
         archive.param_f64(param::SMOOTHING_WINDOW)
     } else {
         0.05
     };
     let half = (fraction * archive.rows as f64 / 2.0).trunc();
-    (half >= 1.0 && half < archive.rows as f64).then_some(half as u64)
+    if half >= 1.0 && half < archive.rows as f64 {
+        return Some(Window::Half(half as u64));
+    }
+    #[cfg(target_arch = "x86_64")]
+    if half.is_nan() || half <= -(2f64.powi(63)) {
+        return Some(Window::Rotate);
+    }
+    None
+}
+
+/// The rows of HW-18a: row *i* takes the value of row *i* − *k* (mod P),
+/// *k* = 2^63 mod P, except row *k*, which becomes 0.
+fn rotated(rows: &[f64], sources: usize, period: usize) -> Vec<f64> {
+    let k = ((1u128 << 63) % period as u128) as usize;
+    let mut out = vec![0.0; rows.len()];
+    for row in (0..period).filter(|&row| row != k) {
+        let from = (row + period - k) % period;
+        out[row * sources..(row + 1) * sources]
+            .copy_from_slice(&rows[from * sources..(from + 1) * sources]);
+    }
+    out
 }
 
 /// The smoothing pass of an `update` command (HW-18): smooths the SEASONAL
@@ -231,7 +265,7 @@ pub(crate) fn smooth(
         let Some(index) = index else { continue };
         let archive = &archives[index];
         let period = archive.rows;
-        let Some(half) = half_width(archive, version) else {
+        let Some(window) = window(archive, version) else {
             continue;
         };
         // Every row must lie in the file and be known.
@@ -243,22 +277,27 @@ pub(crate) fn smooth(
             continue;
         }
         let period = period as usize;
-        let half = half as usize;
-        let width = (2 * half + 1) as f64;
         let at = |row: usize, ds: usize| store.values[row * sources + ds];
-        let mut smoothed = vec![0.0; store.values.len()];
+        let mut smoothed = match window {
+            Window::Half(_) => vec![0.0; store.values.len()],
+            Window::Rotate => rotated(&store.values, sources, period),
+        };
         for ds in 0..sources {
-            // Row −h is row P − (h mod P), and so on, circularly.
-            let wrap = |offset: isize| offset.rem_euclid(period as isize) as usize;
-            let mut sum = 0.0;
-            for offset in -(half as isize)..=half as isize {
-                sum += at(wrap(offset), ds);
-            }
-            smoothed[ds] = sum / width;
-            for row in 1..period {
-                sum -= at(wrap(row as isize - half as isize - 1), ds);
-                sum += at(wrap(row as isize + half as isize), ds);
-                smoothed[row * sources + ds] = sum / width;
+            if let Window::Half(half) = window {
+                let half = half as usize;
+                let width = (2 * half + 1) as f64;
+                // Row −h is row P − (h mod P), and so on, circularly.
+                let wrap = |offset: isize| offset.rem_euclid(period as isize) as usize;
+                let mut sum = 0.0;
+                for offset in -(half as isize)..=half as isize {
+                    sum += at(wrap(offset), ds);
+                }
+                smoothed[ds] = sum / width;
+                for row in 1..period {
+                    sum -= at(wrap(row as isize - half as isize - 1), ds);
+                    sum += at(wrap(row as isize + half as isize), ds);
+                    smoothed[row * sources + ds] = sum / width;
+                }
             }
             if seasonal {
                 let mut total = 0.0;
@@ -1604,12 +1643,55 @@ mod tests {
         // P = 4: f = 1.99 gives h = 3; f = 2 would give h = P and is left
         // unsmoothed, as are NaN and negative fractions.
         let mut archive = additive_group().remove(1);
-        for (fraction, half) in [(0.5, Some(1)), (1.99, Some(3)), (2.0, None), (-1.0, None)] {
+        let half = |h| Some(Window::Half(h));
+        for (fraction, expected) in [(0.5, half(1)), (1.99, half(3)), (2.0, None), (-1.0, None)] {
             archive.param_words[param::SMOOTHING_WINDOW] = f(fraction);
-            assert_eq!(half_width(&archive, "0004"), half, "{fraction}");
+            assert_eq!(window(&archive, "0004"), expected, "{fraction}");
         }
-        archive.param_words[param::SMOOTHING_WINDOW] = f(rrd_nan());
-        assert_eq!(half_width(&archive, "0004"), None);
+        // f·P / 2 NaN or at most −2^63 rotates on x86_64 only (HW-18a);
+        // +inf and a fraction just above −2^62 (P = 4) stay unsmoothed.
+        let rotate = cfg!(target_arch = "x86_64").then_some(Window::Rotate);
+        for (fraction, expected) in [
+            (f64::NAN, rotate),
+            (-f64::NAN, rotate),
+            (f64::NEG_INFINITY, rotate),
+            (-(2f64.powi(62)), rotate),
+            (-1e308, rotate),
+            (-(2f64.powi(62)) + 1024.0, None),
+            (f64::INFINITY, None),
+            (1e308, None),
+        ] {
+            archive.param_words[param::SMOOTHING_WINDOW] = f(fraction);
+            assert_eq!(window(&archive, "0004"), expected, "{fraction}");
+        }
+    }
+
+    #[test]
+    fn rotation_follows_hw_18a() {
+        // 2^63 mod P: 0 for P = 8, 1 for P = 7, 3 for P = 5, 8 for P = 12.
+        // Row k becomes 0 and row i takes row i − k, as RRDtool on x86_64
+        // gives for vector 205 and the P = 5, 7 and 12 probes.
+        let rows = [11.0, 0.0, 10.0, 30.0, 10.0, 1.0, 11.0, 31.0];
+        assert_eq!(
+            rotated(&rows, 1, 8),
+            [0.0, 0.0, 10.0, 30.0, 10.0, 1.0, 11.0, 31.0]
+        );
+        let rows = [27.0, 0.0, -22.0, 9.0, 42.0, -35.0, -32.0];
+        assert_eq!(
+            rotated(&rows, 1, 7),
+            [-32.0, 0.0, 0.0, -22.0, 9.0, 42.0, -35.0]
+        );
+        let rows = [-8.0, -22.0, 9.0, 42.0, -35.0];
+        assert_eq!(rotated(&rows, 1, 5), [9.0, 42.0, -35.0, 0.0, -22.0]);
+        let rows: Vec<f64> = (0..12).map(f64::from).collect();
+        let expected = [4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 0.0, 1.0, 2.0, 3.0];
+        assert_eq!(rotated(&rows, 1, 12), expected);
+        // Rows move with all their sources.
+        let rows = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0];
+        assert_eq!(
+            rotated(&rows, 2, 5),
+            [5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 0.0, 0.0, 3.0, 4.0]
+        );
     }
 
     #[test]

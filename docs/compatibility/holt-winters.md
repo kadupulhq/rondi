@@ -282,7 +282,9 @@ season rows it already holds stay and are blended. With a NaN α, a known
 takes case 1, so the two cases alternate. A NaN β alone makes *T*
 unknown while *I* stays known, after which every PDP takes case 2: the
 prediction stays unknown and *I* and *T* do not change again (vectors
-`205` to `210`; probes that restored files with each of *I*, *T*, *s* and
+`205` to `210`, where `205` also differs on x86_64 because of the NaN
+smoothing windows of `hwnan`, HW-18a; probes that restored files with
+each of *I*, *T*, *s* and
 *d* unknown, 0, negative, very large and infinite, in additive and
 multiplicative groups).
 
@@ -412,6 +414,30 @@ Divergence (HW-18, documented). With a smoothing window *f* ≥ 2, which
 only crafted files can hold because `tune -s` caps *f* at 1, RRDtool
 still smooths and gives a result Rondi does not reproduce. Rondi leaves
 such archives unsmoothed.
+
+**HW-18a** (black-box; must, platform specific). Out-of-range windows on
+x86_64. On Linux x86_64, when *f*·*P* / 2 is NaN (of either sign) or at
+most −2^63 (including −∞), the pass of HW-18 still runs for that archive
+but does not average: with *k* = 2^63 mod *P*, row *i* takes the value
+row *i* − *k* (mod *P*) held before the pass, and row *k* takes a value
+that is not a row (0 for *P* = 8 and 12; a tiny subnormal for *P* = 5 and
+7, which Rondi writes as 0). SEASONAL then has its mean removed and added
+to *I* exactly as in HW-18, and DEVSEASONAL rows are only moved. The
+unknown-row rule of HW-18 still holds the pass back. On macOS arm64 and
+Linux aarch64 these windows leave the archive unsmoothed, as does +∞ or
+any value of 2^64 or more on every build. Values between −2^63 and −1
+crash RRDtool on x86_64 or give rows Rondi does not reproduce (divergence,
+documented; Rondi leaves them unsmoothed). Evidence: vector `205`
+(`hwnan`, whose stored windows are NaN; RRDtool's x86_64 intercept is
+3.075e+01 after 40 updates against 2.7e+01 on arm64, and the bytes first
+differ at the first pass after one season), and probes on `hwnan` with
+α, β and both γ set to 0.5 and the windows set to NaN, −NaN, −∞, −1e308
+and −2^62 (*f*·*P* / 2 = −2^63), each matching NaN, and to 0, +∞,
+1e308 and −2^62 + 1024, each unsmoothed; and on fresh *P* = 5, 7 and 12
+files given `tune -s nan -S nan`, compared with the same files given
+`tune -s 0 -S 0`. One `update` command per argument for 40 arguments,
+dumped after each, matched RRDtool on x86_64 in every probe except that
+row *k* value for *P* = 5 and 7.
 
 A command of one argument per PDP therefore smooths right after the
 triggering PDP. The vectors `066` to `069` (*h* = 1 additive, *h* = 2
@@ -686,6 +712,6 @@ damaged file whose season row lies past the end does not fail there; this
 is unpinned, because RRDtool rejects the truncated files that would show
 it.
 
-The `hw.linux-x86_64` overrides for cases `205` to `216` are pending
-(the oracle container was unavailable); the x86_64 CI job will
-arbitrate.
+The `hw.linux-x86_64` overrides for cases `205` to `216` were recorded in
+the `rondi-oracle:x86_64` image; `205`, `211`, `214` and `215` differ from
+arm64; `205` differs by HW-18a.
