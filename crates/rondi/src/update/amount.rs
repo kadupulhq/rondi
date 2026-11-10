@@ -232,9 +232,19 @@ mod tests {
 
     #[test]
     fn counter_long_difference_rounds_by_rs38() {
+        // Compatibility: the conversion rounds with the platform's
+        // multiply-add (restore.md RS-39), fused on aarch64 only.
+        // Provenance: black-box compatibility test (RRDtool 1.11.0 on macOS
+        // arm64, Linux aarch64 and Linux x86_64, step-1 COUNTER 0 then this
+        // reading, stored value read from the file).
+        let expected = if cfg!(target_arch = "aarch64") {
+            1.234567890123457e22
+        } else {
+            1.2345678901234568e22
+        };
         assert_eq!(
             run(DsKind::Counter, "0", "12345678901234567890123"),
-            Ok(Some(1.234567890123457e22))
+            Ok(Some(expected))
         );
     }
 
