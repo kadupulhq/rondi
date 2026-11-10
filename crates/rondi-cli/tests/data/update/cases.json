@@ -11,6 +11,16 @@
    "RRA:MAX:0.5:5:2",
    "RRA:LAST:0.5:1:1"
   ],
+  "carry": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:600:U:U",
+   "DS:b:ABSOLUTE:600:U:U",
+   "RRA:AVERAGE:0.5:1:5",
+   "RRA:LAST:0.5:2:3"
+  ],
   "cf": [
    "--start",
    "1000000000",
@@ -50,6 +60,16 @@
    "DS:c:COUNTER:600:U:U",
    "RRA:AVERAGE:0.5:1:5"
   ],
+  "curhigh": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:600:U:U",
+   "RRA:AVERAGE:0.5:1:3",
+   "RRA:AVERAGE:0.5:2:3",
+   "RRA:LAST:0.5:1:4"
+  ],
   "dcn": [
    "--start",
    "1000000000",
@@ -66,6 +86,38 @@
    "300",
    "DS:d:DERIVE:600:U:U",
    "RRA:AVERAGE:0.5:1:5"
+  ],
+  "dmg": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:600:U:U",
+   "DS:b:GAUGE:600:U:U",
+   "DS:c:ABSOLUTE:15:U:U",
+   "RRA:AVERAGE:0.5:1:3",
+   "RRA:LAST:0.5:1:4"
+  ],
+  "dmgfirst": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:600:U:U",
+   "RRA:AVERAGE:0.5:1:3",
+   "RRA:AVERAGE:0.5:2:3",
+   "RRA:MAX:0.5:1:2"
+  ],
+  "dmgshort": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:600:U:U",
+   "DS:b:GAUGE:600:U:U",
+   "DS:c:ABSOLUTE:15:U:U",
+   "RRA:AVERAGE:0.5:1:3",
+   "RRA:LAST:0.5:1:4"
   ],
   "fp10": [
    "--start",
@@ -332,6 +384,18 @@
    "RRA:AVERAGE:0.5:4:3",
    "RRA:LAST:0.5:4:3"
   ],
+  "wide": [
+   "--start",
+   "1000000000",
+   "--step",
+   "10",
+   "DS:a:GAUGE:1000000000000:U:U",
+   "DS:b:ABSOLUTE:1000000000000:U:U",
+   "RRA:AVERAGE:0.5:1:3",
+   "RRA:AVERAGE:0.5:3:2",
+   "RRA:MAX:0.5:2:2",
+   "RRA:LAST:0.5:5:4"
+  ],
   "xff": [
    "--start",
    "1000000000",
@@ -355,6 +419,56 @@
    "RRA:MAX:0.5:2:5",
    "RRA:LAST:0.5:2:5",
    "RRA:MIN:0.5:2:5"
+  ]
+ },
+ "seed_patches": {
+  "curhigh": [
+   {
+    "field": "cur_row",
+    "archive": 0,
+    "value": "7"
+   },
+   {
+    "field": "cur_row",
+    "archive": 1,
+    "value": "6"
+   },
+   {
+    "field": "cur_row",
+    "archive": 2,
+    "value": "18446744073709551615"
+   }
+  ],
+  "dmg": [
+   {
+    "field": "rows",
+    "archive": 1,
+    "value": "2305843009213693956"
+   },
+   {
+    "field": "cur_row",
+    "archive": 1,
+    "value": "2"
+   }
+  ],
+  "dmgfirst": [
+   {
+    "field": "rows",
+    "archive": 0,
+    "value": "2305843009213693955"
+   },
+   {
+    "field": "cur_row",
+    "archive": 0,
+    "value": "1000"
+   }
+  ],
+  "dmgshort": [
+   {
+    "field": "rows",
+    "archive": 1,
+    "value": "5"
+   }
   ]
  },
  "cases": [
@@ -3501,6 +3615,692 @@
      "updatev",
      "t.rrd",
      "1000004976.250857:241244.3:954594.182426:981342"
+    ]
+   ]
+  },
+  {
+   "id": "rate-dcounter-signs",
+   "rules": [
+    "UP-17"
+   ],
+   "expect": "same",
+   "seed": "dcn",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000300:3:3",
+     "1000000600:-5:-5",
+     "1000000900:-3:-3",
+     "1000001200:1:1",
+     "1000001500:0:0",
+     "1000001800:-2:-2",
+     "1000002100:-0:-0",
+     "1000002400:5:5",
+     "1000002700:3:3",
+     "1000003000:3:3"
+    ]
+   ]
+  },
+  {
+   "id": "carry-nan-split",
+   "rules": [
+    "UP-25"
+   ],
+   "expect": "same",
+   "seed": "carry",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003:1:1",
+     "1000000027:inf:-inf",
+     "1000000033:2:2"
+    ]
+   ]
+  },
+  {
+   "id": "carry-nan-state",
+   "rules": [
+    "UP-25"
+   ],
+   "expect": "same",
+   "seed": "carry",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000003:1:1",
+     "1000000027.5:inf:5"
+    ]
+   ]
+  },
+  {
+   "id": "time-beyond-range",
+   "rules": [
+    "UP-8",
+    "UP-9"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000003:1"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "9223372036854775807:U"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "inf:U"
+    ]
+   ]
+  },
+  {
+   "id": "time-beyond-range-v",
+   "rules": [
+    "UP-8",
+    "UP-32"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "9.22337203685478e18:U"
+    ]
+   ]
+  },
+  {
+   "id": "time-saturated",
+   "rules": [
+    "UP-8"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1e19:U"
+    ]
+   ]
+  },
+  {
+   "id": "time-nan",
+   "rules": [
+    "UP-8",
+    "UP-9"
+   ],
+   "expect": "same",
+   "seed": "g1",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "nan:1"
+    ]
+   ]
+  },
+  {
+   "id": "lead-rounded-w",
+   "rules": [
+    "UP-20",
+    "UP-22",
+    "UP-32"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003.0000012:1:1",
+     "41000000000:5:5"
+    ]
+   ]
+  },
+  {
+   "id": "lead-huge-low",
+   "rules": [
+    "UP-20",
+    "UP-22",
+    "UP-32"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "10000000000000000:5:7"
+    ]
+   ]
+  },
+  {
+   "id": "lead-huge-high",
+   "rules": [
+    "UP-20",
+    "UP-22",
+    "UP-32"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "10000000000000010:5:7"
+    ]
+   ]
+  },
+  {
+   "id": "steps-wrap-2p31m1-split",
+   "rules": [
+    "UP-20",
+    "UP-22",
+    "UP-23",
+    "UP-32",
+    "UP-37"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "22474836474:5:7"
+    ]
+   ]
+  },
+  {
+   "id": "steps-wrap-2p31-split",
+   "rules": [
+    "UP-20",
+    "UP-22",
+    "UP-23",
+    "UP-32",
+    "UP-37"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "22474836484:5:7"
+    ]
+   ]
+  },
+  {
+   "id": "steps-wrap-2p31p1-split",
+   "rules": [
+    "UP-20",
+    "UP-22",
+    "UP-23",
+    "UP-32",
+    "UP-37"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "22474836494:5:7"
+    ]
+   ]
+  },
+  {
+   "id": "steps-wrap-2p32m1-split",
+   "rules": [
+    "UP-20",
+    "UP-22",
+    "UP-23",
+    "UP-32",
+    "UP-37"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "43949672954:5:7"
+    ]
+   ]
+  },
+  {
+   "id": "steps-wrap-2p32-split",
+   "rules": [
+    "UP-20",
+    "UP-22",
+    "UP-23",
+    "UP-32",
+    "UP-37"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "43949672964:5:7"
+    ]
+   ]
+  },
+  {
+   "id": "steps-wrap-2p32p1-split",
+   "rules": [
+    "UP-20",
+    "UP-22",
+    "UP-23",
+    "UP-32",
+    "UP-37"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "43949672974:5:7"
+    ]
+   ]
+  },
+  {
+   "id": "steps-wrap-2p33p1-split",
+   "rules": [
+    "UP-20",
+    "UP-22",
+    "UP-23",
+    "UP-32",
+    "UP-37"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "86899345934:5:7"
+    ]
+   ]
+  },
+  {
+   "id": "steps-wrap-2p31m1-whole",
+   "rules": [
+    "UP-20",
+    "UP-21",
+    "UP-23",
+    "UP-32",
+    "UP-37"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "22474836480:5:7"
+    ]
+   ]
+  },
+  {
+   "id": "steps-wrap-2p31-whole",
+   "rules": [
+    "UP-20",
+    "UP-21",
+    "UP-23",
+    "UP-32",
+    "UP-37"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "22474836490:5:7"
+    ]
+   ]
+  },
+  {
+   "id": "steps-wrap-2p31p1-whole",
+   "rules": [
+    "UP-20",
+    "UP-21",
+    "UP-23",
+    "UP-32",
+    "UP-37"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "22474836500:5:7"
+    ]
+   ]
+  },
+  {
+   "id": "steps-wrap-2p32m1-whole",
+   "rules": [
+    "UP-20",
+    "UP-21",
+    "UP-23",
+    "UP-32",
+    "UP-37"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "43949672960:5:7"
+    ]
+   ]
+  },
+  {
+   "id": "steps-wrap-2p32-whole",
+   "rules": [
+    "UP-20",
+    "UP-21",
+    "UP-23",
+    "UP-32",
+    "UP-37"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "43949672970:5:7"
+    ]
+   ]
+  },
+  {
+   "id": "steps-wrap-2p32p1-whole",
+   "rules": [
+    "UP-20",
+    "UP-21",
+    "UP-23",
+    "UP-32",
+    "UP-37"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "43949672980:5:7"
+    ]
+   ]
+  },
+  {
+   "id": "steps-wrap-2p33p1-whole",
+   "rules": [
+    "UP-20",
+    "UP-21",
+    "UP-23",
+    "UP-32",
+    "UP-37"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "86899345940:5:7"
+    ]
+   ]
+  },
+  {
+   "id": "steps-wrap-2p31-unknown",
+   "rules": [
+    "UP-21",
+    "UP-23",
+    "UP-37"
+   ],
+   "expect": "same",
+   "seed": "wide",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1"
+    ],
+    [
+     "updatev",
+     "t.rrd",
+     "22474836490:U:U"
+    ]
+   ]
+  },
+  {
+   "id": "damaged-short",
+   "rules": [
+    "UP-38"
+   ],
+   "expect": "same",
+   "seed": "dmgshort",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1:1"
+    ]
+   ]
+  },
+  {
+   "id": "damaged-rows-whole",
+   "rules": [
+    "UP-38"
+   ],
+   "expect": "same",
+   "seed": "dmg",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1:1:1",
+     "1000000037:5:-5:7",
+     "1000000050:9:9:9"
+    ],
+    [
+     "update",
+     "t.rrd",
+     "1000000060:1:1:1"
+    ]
+   ]
+  },
+  {
+   "id": "damaged-rows-split-first",
+   "rules": [
+    "UP-38"
+   ],
+   "expect": "same",
+   "seed": "dmg",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003:1:1:1",
+     "1000000012:2:2:2",
+     "1000000047.25:5:-5:7"
+    ]
+   ]
+  },
+  {
+   "id": "damaged-rows-split-specials",
+   "rules": [
+    "UP-38"
+   ],
+   "expect": "same",
+   "seed": "dmg",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003:1:1:1",
+     "1000000012:2:2:2",
+     "1000000047.5:inf:-5:U"
+    ]
+   ]
+  },
+  {
+   "id": "damaged-rows-split-second",
+   "rules": [
+    "UP-38"
+   ],
+   "expect": "same",
+   "seed": "dmg",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003:1:1:1",
+     "1000000033.5:5:-5:3"
+    ]
+   ]
+  },
+  {
+   "id": "damaged-rows-first-archive",
+   "rules": [
+    "UP-38"
+   ],
+   "expect": "same",
+   "seed": "dmgfirst",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000003:1",
+     "1000000047:5"
+    ]
+   ]
+  },
+  {
+   "id": "damaged-rows-update",
+   "rules": [
+    "UP-38"
+   ],
+   "expect": "same",
+   "seed": "dmg",
+   "steps": [
+    [
+     "update",
+     "t.rrd",
+     "1000000010:1:1:1",
+     "1000000020:2:2:2"
+    ]
+   ]
+  },
+  {
+   "id": "rows-current-high",
+   "rules": [
+    "UP-30"
+   ],
+   "expect": "same",
+   "seed": "curhigh",
+   "steps": [
+    [
+     "updatev",
+     "t.rrd",
+     "1000000010:1",
+     "1000000020:2",
+     "1000000030:3"
     ]
    ]
   }

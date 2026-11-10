@@ -3236,6 +3236,17 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
         }
         let template = template.as_ref().map(|names| names.join(":"));
         let arguments = samples.iter().map(String::as_str).collect::<Vec<_>>();
+        if !verbose {
+            return rondi::with_rrd_locking(&locking, || {
+                rondi::update_rrd_text_quiet(
+                    &filename,
+                    template.as_deref(),
+                    &arguments,
+                    skip_past_updates,
+                )
+            })
+            .map_err(|error| rrd_update_error(&filename, error));
+        }
         let (summaries, result) = rondi::with_rrd_locking(&locking, || {
             update_rrd_text(
                 &filename,
@@ -3244,23 +3255,21 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                 skip_past_updates,
             )
         });
-        if verbose {
-            // RRDtool's update reports the rows written before a failure too.
-            println!("return_value = {}", if result.is_ok() { 0 } else { -1 });
-            let names = inspect_rrd(filename_text)
-                .map(|info| info.data_sources)
-                .unwrap_or_default();
-            for summary in summaries {
-                for (source, value) in names.iter().zip(summary.values) {
-                    println!(
-                        "[{}]RRA[{}][{}]DS[{}] = {}",
-                        summary.timestamp,
-                        summary.consolidation,
-                        summary.pdp_per_row,
-                        source.name,
-                        format_rrd_scientific(value)
-                    );
-                }
+        // RRDtool's update reports the rows written before a failure too.
+        println!("return_value = {}", if result.is_ok() { 0 } else { -1 });
+        let names = inspect_rrd(filename_text)
+            .map(|info| info.data_sources)
+            .unwrap_or_default();
+        for summary in summaries {
+            for (source, value) in names.iter().zip(summary.values) {
+                println!(
+                    "[{}]RRA[{}][{}]DS[{}] = {}",
+                    summary.timestamp,
+                    summary.consolidation,
+                    summary.pdp_per_row,
+                    source.name,
+                    format_rrd_scientific(value)
+                );
             }
         }
         return result.map_err(|error| rrd_update_error(&filename, error));

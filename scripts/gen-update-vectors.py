@@ -10,6 +10,8 @@ pins.
         Run every case against the reference rrdtool and rewrite cases.json
         and expected/update.vectors. Seed files under inputs/ are created
         only when missing, so a rerun on the same platform changes nothing.
+        The seeds in SEED_PATCHES have header words changed after `create`
+        to model damaged files; cases.json lists those patches.
 
     python3 scripts/gen-update-vectors.py --reseed [--rrdtool PATH]
         Recreate every seed file first. `create` picks a random current row,
@@ -567,6 +569,112 @@ def random_cases():
 
 
 # --------------------------------------------------------------------------
+# Later cases. They follow the random cases so that the earlier case list
+# keeps its order.
+
+LATER_SEEDS = {
+    # A GAUGE and an ABSOLUTE for infinite amounts.
+    "carry": ["--start", "1000000000", "--step", "10",
+              "DS:a:GAUGE:600:U:U", "DS:b:ABSOLUTE:600:U:U",
+              "RRA:AVERAGE:0.5:1:5", "RRA:LAST:0.5:2:3"],
+    # Heartbeats long enough for gaps of 2^33 steps.
+    "wide": ["--start", "1000000000", "--step", "10",
+             "DS:a:GAUGE:1000000000000:U:U", "DS:b:ABSOLUTE:1000000000000:U:U",
+             "RRA:AVERAGE:0.5:1:3", "RRA:AVERAGE:0.5:3:2", "RRA:MAX:0.5:2:2",
+             "RRA:LAST:0.5:5:4"],
+    # Damaged files; SEED_PATCHES changes them after `create`.
+    "dmg": ["--start", "1000000000", "--step", "10",
+            "DS:a:GAUGE:600:U:U", "DS:b:GAUGE:600:U:U", "DS:c:ABSOLUTE:15:U:U",
+            "RRA:AVERAGE:0.5:1:3", "RRA:LAST:0.5:1:4"],
+    "dmgshort": ["--start", "1000000000", "--step", "10",
+                 "DS:a:GAUGE:600:U:U", "DS:b:GAUGE:600:U:U",
+                 "DS:c:ABSOLUTE:15:U:U", "RRA:AVERAGE:0.5:1:3",
+                 "RRA:LAST:0.5:1:4"],
+    "dmgfirst": ["--start", "1000000000", "--step", "10", "DS:a:GAUGE:600:U:U",
+                 "RRA:AVERAGE:0.5:1:3", "RRA:AVERAGE:0.5:2:3",
+                 "RRA:MAX:0.5:1:2"],
+    "curhigh": ["--start", "1000000000", "--step", "10", "DS:a:GAUGE:600:U:U",
+                "RRA:AVERAGE:0.5:1:3", "RRA:AVERAGE:0.5:2:3",
+                "RRA:LAST:0.5:1:4"],
+}
+
+# (field, archive, value) written after `create`: `rows` is the row count in
+# the archive definition, `cur_row` the archive's current-row word. A row
+# count of k + 2^61 makes the header's implied file size wrap back to the
+# real size, so the file opens although the archive claims more rows than
+# the file holds.
+SEED_PATCHES = {
+    "dmg": [("rows", 1, 4 + 2**61), ("cur_row", 1, 2)],
+    "dmgshort": [("rows", 1, 5)],
+    "dmgfirst": [("rows", 0, 3 + 2**61), ("cur_row", 0, 1000)],
+    "curhigh": [("cur_row", 0, 7), ("cur_row", 1, 6),
+                ("cur_row", 2, 2**64 - 1)],
+}
+
+# Gaps of k steps around the 32-bit limits of the step count.
+STEP_GAPS = [("2p31m1", 2**31 - 1), ("2p31", 2**31), ("2p31p1", 2**31 + 1),
+             ("2p32m1", 2**32 - 1), ("2p32", 2**32), ("2p32p1", 2**32 + 1),
+             ("2p33p1", 2**33 + 1)]
+
+LATER_CASES = [
+    # DCOUNTER rejects a change whose sign differs from the new reading's;
+    # DDERIVE accepts every change.
+    ("rate-dcounter-signs", ["UP-17"], "same", "dcn",
+     [V("1000000300:3:3", "1000000600:-5:-5", "1000000900:-3:-3",
+        "1000001200:1:1", "1000001500:0:0", "1000001800:-2:-2",
+        "1000002100:-0:-0", "1000002400:5:5", "1000002700:3:3",
+        "1000003000:3:3")]),
+    # A known infinite amount whose carried share is NaN.
+    ("carry-nan-split", ["UP-25"], "same", "carry",
+     [V("1000000003:1:1", "1000000027:inf:-inf", "1000000033:2:2")]),
+    ("carry-nan-state", ["UP-25"], "same", "carry",
+     [U("1000000003:1:1", "1000000027.5:inf:5")]),
+    # Times at and beyond the range of whole seconds.
+    ("time-beyond-range", ["UP-8", "UP-9"], "same", "g1",
+     [U("1000000003:1"), U("9223372036854775807:U"), U("inf:U")]),
+    ("time-beyond-range-v", ["UP-8", "UP-32"], "same", "g1",
+     [V("9.22337203685478e18:U")]),
+    ("time-saturated", ["UP-8"], "same", "g1", [U("1e19:U")]),
+    ("time-nan", ["UP-8", "UP-9"], "same", "g1", [U("nan:1")]),
+    # lead comes from W, so it changes when W is rounded.
+    ("lead-rounded-w", ["UP-20", "UP-22", "UP-32"], "same", "wide",
+     [V("1000000003.0000012:1:1", "41000000000:5:5")]),
+    ("lead-huge-low", ["UP-20", "UP-22", "UP-32"], "same", "wide",
+     [V("1000000003:1:1"), V("10000000000000000:5:7")]),
+    ("lead-huge-high", ["UP-20", "UP-22", "UP-32"], "same", "wide",
+     [V("1000000003:1:1"), V("10000000000000010:5:7")]),
+    *[(f"steps-wrap-{label}-split",
+       ["UP-20", "UP-22", "UP-23", "UP-32", "UP-37"], "same", "wide",
+       [V("1000000003:1:1"), V(f"{1000000004 + 10 * k}:5:7")])
+      for label, k in STEP_GAPS],
+    *[(f"steps-wrap-{label}-whole",
+       ["UP-20", "UP-21", "UP-23", "UP-32", "UP-37"], "same", "wide",
+       [V("1000000010:1:1"), V(f"{1000000010 + 10 * k}:5:7")])
+      for label, k in STEP_GAPS],
+    ("steps-wrap-2p31-unknown", ["UP-21", "UP-23", "UP-37"], "same", "wide",
+     [V("1000000010:1:1"), V(f"{1000000010 + 10 * 2**31}:U:U")]),
+    # Damaged files.
+    ("damaged-short", ["UP-38"], "same", "dmgshort", [V("1000000010:1:1:1")]),
+    ("damaged-rows-whole", ["UP-38"], "same", "dmg",
+     [V("1000000010:1:1:1", "1000000037:5:-5:7", "1000000050:9:9:9"),
+      U("1000000060:1:1:1")]),
+    ("damaged-rows-split-first", ["UP-38"], "same", "dmg",
+     [V("1000000003:1:1:1", "1000000012:2:2:2", "1000000047.25:5:-5:7")]),
+    ("damaged-rows-split-specials", ["UP-38"], "same", "dmg",
+     [V("1000000003:1:1:1", "1000000012:2:2:2", "1000000047.5:inf:-5:U")]),
+    ("damaged-rows-split-second", ["UP-38"], "same", "dmg",
+     [V("1000000003:1:1:1", "1000000033.5:5:-5:3")]),
+    ("damaged-rows-first-archive", ["UP-38"], "same", "dmgfirst",
+     [V("1000000003:1", "1000000047:5")]),
+    ("damaged-rows-update", ["UP-38"], "same", "dmg",
+     [U("1000000010:1:1:1", "1000000020:2:2:2")]),
+    # Stored current rows at or past the row count.
+    ("rows-current-high", ["UP-30"], "same", "curhigh",
+     [V("1000000010:1", "1000000020:2", "1000000030:3")]),
+]
+
+
+# --------------------------------------------------------------------------
 
 def run_case(rrdtool, seed_bytes, steps, now):
     work = tempfile.mkdtemp(prefix="rondi-update-")
@@ -637,6 +745,20 @@ def folded(sections):
     return out
 
 
+def patched(data, patches):
+    """Applies SEED_PATCHES entries (create.md section 10 layout)."""
+    data = bytearray(data)
+    ds_count = int.from_bytes(data[24:32], "little")
+    rra_count = int.from_bytes(data[32:40], "little")
+    rra_defs = 128 + 120 * ds_count
+    cur_rows = rra_defs + 120 * rra_count + 16 + 112 * ds_count + 80 * ds_count * rra_count
+    for field, archive, value in patches:
+        offset = {"rows": rra_defs + 120 * archive + 24,
+                  "cur_row": cur_rows + 8 * archive}[field]
+        data[offset:offset + 8] = value.to_bytes(8, "little")
+    return bytes(data)
+
+
 def create_seed(rrdtool, name, args):
     work = tempfile.mkdtemp(prefix="rondi-update-seed-")
     try:
@@ -646,6 +768,7 @@ def create_seed(rrdtool, name, args):
             data = handle.read()
     finally:
         shutil.rmtree(work)
+    data = patched(data, SEED_PATCHES.get(name, []))
     with open(os.path.join(DATA, "inputs", f"{name}.rrd"), "wb") as handle:
         handle.write(data)
 
@@ -663,8 +786,8 @@ def main():
         sys.exit(f"expected RRDtool 1.11.0, found {banner[:40]!r}")
 
     random_seeds, random_list = random_cases()
-    seeds = {**SEEDS, **random_seeds}
-    cases = CASES + random_list
+    seeds = {**SEEDS, **random_seeds, **LATER_SEEDS}
+    cases = CASES + random_list + LATER_CASES
     ids = [case[0] for case in cases]
     if len(ids) != len(set(ids)):
         sys.exit("duplicate case id")
@@ -678,6 +801,11 @@ def main():
                 create_seed(options.rrdtool, name, args)
         manifest = {
             "seeds": {name: args for name, args in sorted(seeds.items())},
+            "seed_patches": {
+                name: [{"field": field, "archive": archive, "value": str(value)}
+                       for field, archive, value in patches]
+                for name, patches in sorted(SEED_PATCHES.items())
+            },
             "cases": [
                 {"id": case_id, "rules": rules, "expect": expect, "seed": seed,
                  "steps": steps}

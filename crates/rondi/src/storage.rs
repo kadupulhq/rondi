@@ -4,7 +4,8 @@ use crate::format::{
 };
 use crate::import_export::{decode_snapshot, encode_snapshot};
 use crate::queries::fetch_retained;
-use crate::rrd_binary::{RrdInfo, fetch_rrd_file, inspect_path, update_rrd_file};
+use crate::rrd_binary::{RrdInfo, fetch_rrd_file, inspect_path};
+use crate::update::update_rrd_file;
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
