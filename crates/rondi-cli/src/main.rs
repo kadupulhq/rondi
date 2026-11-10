@@ -4121,7 +4121,10 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                             let bound = if text == "U" {
                                 RrdTuneBound::Unbounded
                             } else {
-                                let value = cparse::rrd_strtodbl(&text, None).ok()?;
+                                // Compatibility: the value converts as restore.md
+                                // RS-38 with the platform's multiply-add (RS-39).
+                                // Provenance: black-box; see docs/compatibility/numbers.md.
+                                let value = rondi::parse_rrd_number(&text)?;
                                 if value.is_nan() {
                                     RrdTuneBound::Unbounded
                                 } else {
@@ -4211,9 +4214,28 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     let Some(name) = tune_scan_name(value) else {
                         return Err("invalid argument for aberrant-reset".into());
                     };
-                    // reset_aberrant_coefficients does nothing without
-                    // Holt-Winters archives.
                     ds_match(&current_names, &name)?;
+                    // Without Holt-Winters archives the reset changes
+                    // nothing. With them it would rewrite their state,
+                    // which Rondi does not implement (tune-modify.md
+                    // TM-60), so refuse rather than report success.
+                    if let Some(archive) = info.archives.iter().find(|archive| {
+                        matches!(
+                            archive.consolidation.as_str(),
+                            "HWPREDICT"
+                                | "MHWPREDICT"
+                                | "SEASONAL"
+                                | "DEVSEASONAL"
+                                | "DEVPREDICT"
+                                | "FAILURES"
+                        )
+                    }) {
+                        return Err(format!(
+                            "consolidation function {} is not supported by Rondi",
+                            archive.consolidation
+                        )
+                        .into());
+                    }
                 }
                 't' => newstep = cparse::atoi(value),
                 _ => {}

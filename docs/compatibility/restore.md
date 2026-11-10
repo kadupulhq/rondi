@@ -441,6 +441,9 @@ infinity. Zero times a power of ten is NaN only when the power used in step 7
 overflows: `0e400` stores 0 (no set bit of 400 needs more than 10^256) while
 `0e600` stores NaN (black-box, both checked against the pinned build).
 
+[`numbers.md`](numbers.md) lists every other reader that uses this
+conversion (NM-2).
+
 **RS-39** (black-box; must, platform specific). Step 2's multiply-add is
 fused (one rounding) on macOS arm64 and Linux aarch64 and is a separate
 multiply and add on Linux x86_64. The two differ in the last bits for long

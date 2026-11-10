@@ -493,7 +493,9 @@ other rules apply), with exit status 0.
 Holt-Winters archives (`HWPREDICT`, `MHWPREDICT`, `SEASONAL`,
 `DEVSEASONAL`, `DEVPREDICT`, `FAILURES`) with its own
 `... not supported by Rondi` error and leaves the file unchanged. The
-reference accepts them. This specification does not describe their effect.
+reference accepts them. This specification does not describe their effect;
+[`holt-winters.md`](holt-winters.md) section 4 describes the
+Holt-Winters options.
 
 ## Summary by class
 

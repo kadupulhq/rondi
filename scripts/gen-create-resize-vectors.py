@@ -28,6 +28,7 @@ Resize output is deterministic for a frozen input and kept as is.
 
 import argparse
 import os
+import random
 import shutil
 import struct
 import subprocess
@@ -156,7 +157,7 @@ def legacy_v1(b):
 
 def build_inputs(rrdtool, tmp):
     """Returns {suite: {name: bytes}}."""
-    made = {"create": {}, "resize": {}, "compute": {}}
+    made = {"create": {}, "resize": {}, "compute": {}, "hw": {}, "numbers": {}}
 
     def make(suite, name, steps, post=None):
         d = os.path.join(tmp, f"{suite}-{name}")
@@ -194,6 +195,7 @@ def build_inputs(rrdtool, tmp):
            "RRA:AVERAGE:0.5:1:10", "RRA:AVERAGE:0.5:4:5"),
         up(series(1000000000, 60, 24, lambda i, t: f"{t}:{100 + i}:{200 + i}"))])
     made["create"]["text"] = b"not an rrd file\n"
+    make("numbers", "gauge", [cr(*B, "DS:x:GAUGE:120:U:U", "RRA:LAST:0.5:1:2")])
 
     make("resize", "base", [
         cr("-b", "1000000000", "-s", "60", "DS:a:GAUGE:120:U:U", "DS:b:COUNTER:120:U:U",
@@ -249,6 +251,127 @@ def build_inputs(rrdtool, tmp):
                                   "DS:Avg:COMPUTE:Duration,Requests,0,EQ,1,Requests,IF,/",
                                   "RRA:AVERAGE:0.5:1:10", "RRA:AVERAGE:0.5:3:4")])
 
+    # Holt-Winters inputs (docs/compatibility/holt-winters.md). Each is
+    # created fresh by the reference; created files carry a random current
+    # row and a name-dependent smoothing index (HW-2), so they are frozen.
+    g = ["DS:x:GAUGE:20:U:U"]
+
+    def hw(name, *defs, ds=g, updates=()):
+        make(
+            "hw",
+            name,
+            [cr("-b", "1000000000", "-s", "10", *ds, *defs)]
+            + ([up(list(updates))] if updates else []),
+        )
+
+    def wave(count, start=1000000010, spike=None, gap=None):
+        out = []
+        for i in range(count):
+            t = start + 10 * i
+            if gap and gap[0] <= i < gap[1]:
+                v = "U"
+            elif spike and spike[0] <= i < spike[1]:
+                v = "500"
+            else:
+                v = str([10, 20, 40, 20][i % 4] + i // 4)
+            out.append(f"{t}:{v}")
+        return out
+
+    hw("hwimp", "RRA:AVERAGE:0.5:1:10", "RRA:HWPREDICT:12:0.1:0.01:4")
+    hw("mhwimp", "RRA:AVERAGE:0.5:1:10", "RRA:MHWPREDICT:12:0.1:0.01:4")
+    hw(
+        "hwexp",
+        "RRA:AVERAGE:0.5:1:10",
+        "RRA:HWPREDICT:12:0.2:0.05:4:3",
+        "RRA:SEASONAL:4:0.3:2",
+        "RRA:DEVSEASONAL:4:0.4:2",
+        "RRA:DEVPREDICT:12:4",
+        "RRA:FAILURES:12:3:5:4",
+    )
+    hw(
+        "hwsw0",
+        "RRA:HWPREDICT:12:0.1:0.01:4:2",
+        "RRA:SEASONAL:4:0.1:1:smoothing-window=0",
+        "RRA:DEVSEASONAL:4:0.1:1:smoothing-window=0",
+        "RRA:DEVPREDICT:12:4",
+        "RRA:FAILURES:12:7:9:4",
+    )
+    hw(
+        "hwsw5",
+        "RRA:HWPREDICT:24:0.1:0.01:8:2",
+        "RRA:SEASONAL:8:0.1:1:smoothing-window=0.5",
+        "RRA:DEVSEASONAL:8:0.1:1:smoothing-window=0.5",
+        "RRA:DEVPREDICT:24:4",
+        "RRA:FAILURES:24:7:9:4",
+    )
+    hw(
+        "hw2ds",
+        "RRA:HWPREDICT:12:0.1:0.01:4",
+        ds=["DS:x:GAUGE:20:U:U", "DS:y:COUNTER:20:U:U"],
+    )
+    hw("hwrun", "RRA:AVERAGE:0.5:1:10", "RRA:HWPREDICT:12:0.1:0.01:4", updates=wave(30))
+    hw(
+        "hwpdp3",
+        "RRA:AVERAGE:0.5:3:10",
+        "RRA:HWPREDICT:12:0.1:0.01:4:3",
+        "RRA:SEASONAL:4:0.1:2",
+        "RRA:DEVSEASONAL:4:0.1:2",
+        "RRA:DEVPREDICT:12:4",
+        "RRA:FAILURES:12:7:9:4",
+    )
+
+    # Stage 2 inputs (holt-winters.md section 2 and 3).
+    def explicit(
+        cf, period, alpha, beta, gamma, window, failures="RRA:FAILURES:60:3:5:3"
+    ):
+        return [
+            f"RRA:{cf}:60:{alpha}:{beta}:{period}:2",
+            f"RRA:SEASONAL:{period}:{gamma}:1:smoothing-window={window}",
+            f"RRA:DEVSEASONAL:{period}:{gamma}:1:smoothing-window={window}",
+            "RRA:DEVPREDICT:60:3",
+            failures,
+        ]
+
+    hw("hwtie", *explicit("HWPREDICT", 4, 0.5, 0.5, 0.5, 0, "RRA:FAILURES:60:1:1:3"))
+    hw("hwsm10", *explicit("HWPREDICT", 10, 0.37, 0.13, 0.21, 0.3))
+    hw("mhwsm10", *explicit("MHWPREDICT", 10, 0.37, 0.13, 0.21, 0.4))
+    # Stage 3 inputs (holt-winters.md section 4): two sources with state,
+    # the same file after a reset of one source and more updates, and a
+    # file without Holt-Winters archives.
+    two = ["DS:x:GAUGE:1000:U:U", "DS:y:GAUGE:1000:U:U"]
+    tune_defs = [
+        "RRA:AVERAGE:0.5:1:10",
+        "RRA:HWPREDICT:40:0.37:0.13:6:3",
+        "RRA:SEASONAL:6:0.21:2:smoothing-window=0.5",
+        "RRA:DEVSEASONAL:6:0.29:2:smoothing-window=0.5",
+        "RRA:DEVPREDICT:40:4",
+        "RRA:FAILURES:40:3:5:4",
+    ]
+
+    hw("hwtune", *tune_defs, ds=two, updates=[hw_pair(i) for i in range(20)])
+    make(
+        "hw",
+        "hwreset",
+        [
+            cr("-b", "1000000000", "-s", "10", *two, *tune_defs),
+            up([hw_pair(i) for i in range(20)]),
+            ["tune", "in.rrd", "--aberrant-reset", "x"],
+        ],
+    )
+    hw("hwnone", "RRA:AVERAGE:0.5:1:10", updates=wave(6))
+    spikes = [f"{1000000010 + 10 * i}:500:300" for i in range(20, 23)]
+    hw("hwfail", *tune_defs, ds=two, updates=[hw_pair(i) for i in range(20)] + spikes)
+    hw(
+        "hwpart",
+        "RRA:HWPREDICT:20:0.37:0.13:4:2",
+        "RRA:SEASONAL:4:0.21:1",
+        updates=wave(6),
+    )
+    hw(
+        "hwruns",
+        *explicit("HWPREDICT", 5, 0.37, 0.13, 0.21, 0),
+        ds=["DS:x:GAUGE:1000:U:U"],
+    )
     return made
 
 
@@ -263,6 +386,13 @@ def build_inputs(rrdtool, tmp):
 #   divergent    a documented divergence (note names it); Rondi still differs
 #   clean-error  RRDtool crashes or hangs; Rondi fails with ERROR: instead
 #   undefined    RRDtool is nondeterministic; Rondi exits 0 or 1
+
+def hw_pair(i):
+    """A reading for the two-source Holt-Winters inputs, step i."""
+    x = 50 + 20 * (i % 6 == 1) + i * 0.37 + (i * 7 % 5) / 3
+    y = 30 + (i * 3 % 7) + 5 * (i % 6 == 4)
+    return f"{1000000010 + 10 * i}:{x:.3f}:{y}"
+
 
 def create_cases():
     c = []
@@ -739,7 +869,420 @@ def compute_cases():
     return c
 
 
-SUITES = {"create": create_cases, "resize": resize_cases, "compute": compute_cases}
+def hw_cases():
+    c = []
+
+    # Rondi does not implement Holt-Winters archives yet: every command
+    # that reads or writes their state is refused (expectation
+    # `unsupported`); fetch already works. Promote cases to `same` with the
+    # implementation.
+    def add(*args, inputs=(), expect=None, note="-"):
+        if expect is None:
+            expect = "same" if args[0] == "fetch" else "unsupported"
+            note = "-" if expect == "same" else "HW-unsupported"
+        c.append((expect, note, list(inputs), list(args)))
+
+    def wave(count, start=1000000010, spike=None, gap=None, step=10):
+        out = []
+        for i in range(count):
+            t = start + step * i
+            if gap and gap[0] <= i < gap[1]:
+                v = "U"
+            elif spike and spike[0] <= i < spike[1]:
+                v = "500"
+            else:
+                v = str([10, 20, 40, 20][i % 4] + i // 4)
+            out.append(f"{t}:{v}")
+        return out
+
+    names = ["hwimp", "mhwimp", "hwexp", "hwsw0", "hwsw5", "hwpdp3"]
+    # Reading fresh files (HW-1).
+    for name in names + ["hw2ds", "hwrun"]:
+        add("info", f"{name}.rrd", inputs=[name])
+        add("dump", f"{name}.rrd", inputs=[name])
+    for cf in ["HWPREDICT", "SEASONAL", "DEVSEASONAL", "DEVPREDICT", "FAILURES"]:
+        add(
+            "fetch",
+            "hwrun.rrd",
+            cf,
+            "-s",
+            "1000000000",
+            "-e",
+            "1000000300",
+            inputs=["hwrun"],
+        )
+    add(
+        "fetch",
+        "hwrun.rrd",
+        "AVERAGE",
+        "-s",
+        "1000000000",
+        "-e",
+        "1000000300",
+        inputs=["hwrun"],
+    )
+    # Updates (stage 2 of the specification). One command per sequence; the
+    # resulting file pins every archive and every CDP slot.
+    for name in names:
+        add("update", f"{name}.rrd", *wave(1), inputs=[name])
+        add("update", f"{name}.rrd", *wave(5), inputs=[name])
+        add("update", f"{name}.rrd", *wave(40), inputs=[name])
+        add("update", f"{name}.rrd", *wave(40, spike=(20, 26)), inputs=[name])
+        add("update", f"{name}.rrd", *wave(40, gap=(10, 17)), inputs=[name])
+    add("update", "hwimp.rrd", *wave(12, step=25), inputs=["hwimp"])
+    add("update", "hwimp.rrd", *wave(12, step=35), inputs=["hwimp"])
+    add(
+        "update",
+        "hwimp.rrd",
+        "1000000010:5",
+        "1000000200:6",
+        "1000000210:7",
+        inputs=["hwimp"],
+    )
+    add(
+        "update",
+        "hwimp.rrd",
+        *[f"{1000000010 + 10 * i}:{i % 3}" for i in range(40)],
+        inputs=["hwimp"],
+    )
+    add(
+        "update",
+        "hwimp.rrd",
+        *[f"{1000000010 + 10 * i}:-{i}" for i in range(20)],
+        inputs=["hwimp"],
+    )
+    add(
+        "update",
+        "mhwimp.rrd",
+        *[f"{1000000010 + 10 * i}:0" for i in range(12)],
+        inputs=["mhwimp"],
+    )
+    add(
+        "update",
+        "hw2ds.rrd",
+        *[f"{1000000010 + 10 * i}:{(i * 7) % 11}:{i * i * 30}" for i in range(40)],
+        inputs=["hw2ds"],
+    )
+    add("update", "hwrun.rrd", *wave(20, start=1000000310), inputs=["hwrun"])
+    add("updatev", "hwimp.rrd", *wave(10), inputs=["hwimp"])
+    add("updatev", "hwexp.rrd", *wave(10), inputs=["hwexp"])
+
+    # Stage 2: failure bounds. With alpha = beta = gamma = 0.5 and these
+    # integers every value is an exact binary fraction; after them the
+    # prediction is 15.558929443359375 and the deviation 1.39453125, so
+    # the next value is placed on, just inside or just outside a bound.
+    tie = [10, 20, 40, 20, 12, 22, 42, 22, 14, 24, 44, 24]
+    pred, dev = 15.558929443359375, 1.39453125
+    for x in (
+        pred + 2 * dev,
+        pred + 2 * dev + 2**-10,
+        pred - 2 * dev,
+        pred - 2 * dev - 2**-10,
+    ):
+        args = [f"{1000000010 + 10 * i}:{v}" for i, v in enumerate([*tie, x])]
+        add("update", "hwtie.rrd", *args, inputs=["hwtie"])
+
+    # Stage 2: smoothing passes, additive (half-width 1) and multiplicative
+    # (half-width 2), with and without unknown values, all in one command.
+    def season(count, period, gaps=()):
+        out = []
+        for i in range(count):
+            high = 25 * ((i % period) in (3, 4, 5))
+            v = f"{50 + high + (i * 37 % 11) / 4 + 0.2 * i:.3f}"
+            out.append(f"{1000000010 + 10 * i}:{'U' if i in gaps else v}")
+        return out
+
+    for name in ("hwsm10", "mhwsm10"):
+        add("update", f"{name}.rrd", *season(60, 10), inputs=[name])
+        gaps = (13, 20, 21, 22, *range(33, 40))
+        add("update", f"{name}.rrd", *season(60, 10, gaps), inputs=[name])
+    # Stage 2b: runs of 2, 3 and 5 PDPs after three seasons.
+    base = season(15, 5)
+    for k in (2, 3, 5):
+        for v in ("77.5", "U"):
+            arg = f"{1000000150 + 10 * k}:{v}"
+            add("update", "hwruns.rrd", *base, arg, inputs=["hwruns"])
+
+    # Stage 3: tune options, their checks and failures.
+    def tune(name, *args, **kwargs):
+        add("tune", f"{name}.rrd", *args, inputs=[name], **kwargs)
+
+    for opt in ("--alpha", "--beta", "--gamma", "--gamma-deviation"):
+        for v in ("0.5", "0", "1", "1.5", "0.999999", "0.5x", "x", "nan", "inf"):
+            tune("hwtune", opt, v)
+    for opt in ("--smoothing-window", "--smoothing-window-deviation"):
+        for v in ("0", "1", "0.25", "1.5", "-0.5", "x"):
+            tune("hwtune", opt, v)
+    for opt in ("--deltapos", "--deltaneg"):
+        for v in ("3.5", "0.1", "0.05", "0", "-1", "x", "1x"):
+            tune("hwtune", opt, v)
+    for opt in ("--window-length", "--failure-threshold"):
+        for v in ("1", "28", "0", "29", "3.7", "x", "9"):
+            tune("hwtune", opt, v)
+    for args in (
+        ["-x", "0.5"],
+        ["-p", "3"],
+        ["--failure-threshold", "3"],
+        ["--failure-threshold", "9", "--window-length", "9"],
+        ["--aberrant-reset", "x"],
+        ["--aberrant-reset", "y"],
+        ["-b", "x", "-b", "y"],
+        ["--aberrant-reset", "zz"],
+        ["--aberrant-reset", ""],
+        ["--alpha", "0.5", "--beta", "2"],
+        ["--window-length", "50", "--alpha", "0.5"],
+        ["--alpha", "0.5", "--alpha", "0.25"],
+    ):
+        tune("hwtune", *args)
+    # The range check fails before any archive is looked at, so Rondi
+    # already matches: the heartbeat is written, then the error.
+    tune("hwtune", "-h", "x:900", "--gamma", "2", expect="same", note="-")
+    for args in (["--alpha", "0.5"], ["-p", "3"], ["--aberrant-reset", "x"]):
+        tune("hwnone", *args, expect="same", note="-")
+    for args in (["-s", "0.5"], ["-S", "0.5"]):
+        tune("hwnone", *args)
+    tune("hwimp", "--gamma-deviation", "0.5")
+    tune("mhwimp", "--aberrant-reset", "x")
+    # A file with a failure history: setting the window or threshold, even
+    # to its current value, clears it; other options and a reset of one
+    # source keep the rest.
+    for args in (
+        ["--failure-threshold", "3"],
+        ["--window-length", "5"],
+        ["--deltapos", "3"],
+        ["--aberrant-reset", "x"],
+    ):
+        tune("hwfail", *args)
+    # Only HWPREDICT and SEASONAL: the DEVSEASONAL and FAILURES options fail.
+    for args in (
+        ["--gamma", "0.5"],
+        ["--gamma-deviation", "0.5"],
+        ["-S", "0.5"],
+        ["-p", "3"],
+    ):
+        tune("hwpart", *args)
+    # A reset source holds back smoothing for the other source.
+    later = [hw_pair(i) for i in range(20, 45)]
+    add("update", "hwreset.rrd", *later, inputs=["hwreset"])
+    return c
+
+
+def number_literals():
+    """Deterministic 17-digit decimal literals spread over the double range."""
+    rng = random.Random(20261109)
+    out = []
+    for _ in range(40):
+        digits = "".join(rng.choice("0123456789") for _ in range(17))
+        point = rng.randrange(1, 17)
+        sign = rng.choice(["", "-"])
+        out.append(
+            f"{sign}{digits[:point]}.{digits[point:]}e{rng.randrange(-330, 309)}"
+        )
+    return out
+
+
+def numbers_cases():
+    c = []
+
+    def add(*args, inputs=("gauge",), expect="same", note="-"):
+        c.append((expect, note, list(inputs), list(args)))
+
+    def reading(text):
+        add("update", "gauge.rrd", f"1000000001:{text}")
+
+    # Special spellings, recognized only at the start (update.md UP-11).
+    for text in (
+        "nan",
+        "NaN",
+        "-nan",
+        "nanx",
+        "inf",
+        "-inf",
+        "INF",
+        "infinity",
+        "-Infinityx",
+        "Inf5",
+        "+inf",
+        "+nan",
+        "xnan",
+        "xinf",
+        "U",
+        "Ux",
+    ):
+        reading(text)
+    # Accepted forms and syntax failures (restore.md RS-38 steps 1 to 5, 9).
+    for text in (
+        "0",
+        "-0",
+        "+5",
+        " 5",
+        "  -5",
+        "5.",
+        ".5",
+        "-.5",
+        "1e",
+        "1e+",
+        "1e-",
+        "5e2",
+        "5E2",
+        "-5e-2",
+        "+.5e+2",
+        "007",
+        "0.000",
+        "",
+        "-",
+        "+",
+        ".",
+        "e5",
+        ".e5",
+        "--5",
+        "+-5",
+        "5x",
+        "5 ",
+        "0x10",
+        "1,5",
+        "1_0",
+        "5e2e2",
+        "5.5.5",
+    ):
+        reading(text)
+    # Exponent limits: written exponent minus fraction digits (RS-38 step 6).
+    for text in (
+        "1e1024",
+        "1e1025",
+        "1e-1021",
+        "1e-1022",
+        "0.1e-1020",
+        "0.1e-1021",
+        "10e-1022",
+        "1.5e1023",
+        "1e309",
+        "1e308",
+        "1e-400",
+        "0e400",
+        "0e600",
+        "0e1024",
+        "1" + "0" * 400,
+        "0." + "0" * 1020 + "1",
+        "0." + "0" * 1021 + "1",
+    ):
+        reading(text)
+    # Rounding of the accumulator and of the scaling (RS-38 steps 2 and 7,
+    # RS-39 for the platform's multiply-add).
+    for text in (
+        "71.037",
+        "0.1",
+        "0.3",
+        "1.1",
+        "2.675",
+        "1000000003.4",
+        "0.123456789012345678",
+        "0.77921045355292324",
+        "1.2345678901234567890123",
+        "3.141592653589793238462643383279",
+        "9007199254740993",
+        "9007199254740995",
+        "18446744073709551616",
+        "123456789012345678901234567890",
+        "1.7976931348623157e308",
+        "1.7976931348623158e308",
+        "1.7976931348623159e308",
+        "2.2250738585072014e-308",
+        "2.2250738585072011e-308",
+        "4.9406564584124654e-324",
+        "2.4703282292062328e-324",
+        "5e-324",
+        "1e-320",
+        "0.000001",
+        "1000000.000001",
+    ):
+        reading(text)
+    for text in number_literals():
+        reading(text)
+    # Epoch-sized times with fractions (update.md UP-8).
+    for t in (
+        "1000000003.4",
+        "1000000002.9999999",
+        "1000000001.000001",
+        "1000000001.0000005",
+        "1000000001.9999995",
+        "1000000001.123456789",
+        "1000000001.",
+        "1000000001e0",
+        "1.000000001e9",
+        "100000000.15e1",
+        "1000000001.5e0",
+        "+1000000001.25",
+        "1000000001.0000000000000000001",
+        "1000000001x",
+        "1000000001 ",
+    ):
+        add("update", "gauge.rrd", f"{t}:1")
+    # tune --minimum and --maximum (numbers.md NM-6).
+    for text in (
+        "U",
+        "Ux",
+        "U ",
+        "UNKN",
+        "Ue",
+        "UE",
+        "U5",
+        "UU",
+        "U-",
+        "U.",
+        "U+",
+        "u",
+        "5",
+        "5x",
+        "5u",
+        "5U",
+        "5E5",
+        "5e5x",
+        "5-3",
+        "5+",
+        "5e+",
+        "5.5.5",
+        "0x10",
+        "+.5e+2x",
+        "-0",
+        "nan",
+        "inf",
+        "-inf",
+        " 5",
+        "",
+        "e5",
+        ".",
+        "1e-1021",
+        "1e-1022",
+        "1e1024",
+        "1e1025",
+        "0e600",
+        "71.037",
+        "1234567890123456789012345678901234567890",
+        "0.77921045355292324",
+    ):
+        add("tune", "gauge.rrd", "-i", f"x:{text}")
+    # The value is cut to 40 characters before it is converted.
+    for text in (
+        "0." + "0" * 37 + "1",
+        "0." + "0" * 38 + "1",
+        "1" * 45,
+        "5" * 40 + "x",
+        "1234567890123456789012345678901234567",
+    ):
+        add("tune", "gauge.rrd", "-i", f"x:{text}")
+    for text in ("U", "5x", "UU", "nan", "-0", "1e1024"):
+        add("tune", "gauge.rrd", "-a", f"x:{text}")
+    return c
+
+
+SUITES = {
+    "create": create_cases,
+    "resize": resize_cases,
+    "compute": compute_cases,
+    "hw": hw_cases,
+    "numbers": numbers_cases,
+}
 
 
 # --------------------------------------------------------------------------
