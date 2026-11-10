@@ -185,7 +185,7 @@ fn list_matches_reference() {
     ]);
 }
 
-// bad_format_imginfo: the image is written, then the
+// A bad --imginfo format: the image is written, then the
 // format is checked and nothing is printed.
 #[test]
 fn graph_imginfo_format_errors() {

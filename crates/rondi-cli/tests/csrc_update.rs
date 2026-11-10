@@ -1,5 +1,5 @@
 #![cfg(unix)]
-//! Repros from the RRDtool line-by-line review. Each test runs the same
+//! Update repros. Each test runs the same
 //! command sequence against pinned RRDtool and the Rondi alias, starting from
 //! one upstream-created file so the randomized initial row cannot differ, and
 //! compares stdout, stderr, exit status and the final file bytes.
@@ -85,7 +85,8 @@ const TWO_GAUGE: &[&str] = &[
     "RRA:AVERAGE:0.5:1:5",
 ];
 
-// A3: parse_ds reports the remainder of the argument after the extra colon.
+// A3: the extra-data message quotes the rest of the argument after the
+// extra colon (update.md UP-7).
 #[test]
 fn a3_extra_data_message_reports_remaining_text() {
     assert_same(
@@ -94,8 +95,9 @@ fn a3_extra_data_message_reports_remaining_text() {
     );
 }
 
-// A5: update_pdp_prep treats any value whose first byte is 'U' as unknown,
-// and nothing else (lowercase u/unknown go to RRDtool's number parser and fail).
+// A5: any reading whose first byte is 'U' is unknown, and nothing else is
+// (lowercase u/unknown go to RRDtool's number parser and fail; update.md
+// UP-10).
 #[test]
 fn a5_unknown_is_first_byte_uppercase_u() {
     assert_same(
@@ -120,8 +122,8 @@ fn a6_partial_conversion_messages() {
     );
 }
 
-// A7: a sample that fails in update_pdp_prep has already replaced last_ds of
-// earlier data sources in the mapped header; the next COUNTER delta uses it.
+// A7: a sample that fails on a later data source has already replaced
+// last_ds of the earlier ones; the next COUNTER delta uses it (UP-34).
 #[test]
 fn a7_failed_sample_leaves_earlier_last_ds() {
     assert_same(
@@ -203,9 +205,10 @@ fn a10_skip_past_updates_precedes_value_validation() {
     );
 }
 
-// A11: COUNTER/DERIVE use a digit scan with "not a simple ... integer" text;
-// an empty value passes it, and RRDtool's counter difference accepts up to LAST_DS_LEN digits
-// and turns longer values into unknown without an error.
+// A11: COUNTER/DERIVE readings must be digits, with "not a simple ...
+// integer" text otherwise; an empty value passes that check, and a reading
+// longer than 30 characters gives an unknown amount without an error
+// (UP-12, UP-16).
 #[test]
 fn a11_counter_digit_scan_and_lengths() {
     assert_same(
@@ -236,8 +239,8 @@ fn a11_counter_digit_scan_and_lengths() {
     );
 }
 
-// A12: RRDtool's counter difference takes the sign from any '-' before the first digit, so "-0"
-// is negative.
+// A12: the counter difference takes the sign from any '-' before the first
+// digit, so "-0" is negative (UP-16).
 #[test]
 fn a12_derive_negative_zero_sign() {
     assert_same(
@@ -260,10 +263,10 @@ fn a12_derive_negative_zero_sign() {
     );
 }
 
-// A13: RRDtool's counter difference converts the decimal difference with RRDtool's decimal parser's digit
-// accumulation, which is not correctly rounded above 2^53.
+// A13: the counter difference is converted by RRDtool's decimal parser,
+// which is not correctly rounded above 2^53 (UP-16, restore.md RS-38).
 #[test]
-fn a13_counter_delta_uses_rrd_strtod_rounding() {
+fn a13_counter_delta_uses_rrdtool_decimal_rounding() {
     assert_same(
         &[
             "--start",
@@ -329,7 +332,7 @@ fn a15_updatev_rrdcached_address_handling() {
     );
 }
 
-// A16: parse_template rejects more names than data sources.
+// A16: a template with more names than data sources is rejected (UP-4).
 #[test]
 fn a16_template_longer_than_ds_count() {
     assert_same(
@@ -345,7 +348,7 @@ fn a16_template_longer_than_ds_count() {
     );
 }
 
-// A17: at-style timestamp errors from get_time_from_reading.
+// A17: at-style timestamp errors in update arguments (UP-8).
 #[test]
 fn a17_at_style_time_errors() {
     assert_same(
@@ -366,7 +369,7 @@ fn a17_at_style_time_errors() {
 
 // A18: RRDtool's decimal parser skips C isspace (including \v) and lets the int exponent wrap.
 #[test]
-fn a18_rrd_strtod_whitespace_and_exponent_wrap() {
+fn a18_decimal_parser_whitespace_and_exponent_wrap() {
     assert_same(
         &[
             "--start",
@@ -383,10 +386,10 @@ fn a18_rrd_strtod_whitespace_and_exponent_wrap() {
     );
 }
 
-// A19: get_time_from_reading converts a time past 2^63 to time_t out of
-// range. aarch64 saturates and leaves a huge
-// unknown_sec; x86_64 stores LONG_MIN and rejects the update. Separately,
-// calculate_elapsed_steps returns the step count as int.
+// A19: a time past 2^63 is out of the time_t range. aarch64 saturates and
+// leaves a huge unknown_sec; x86_64 stores LONG_MIN and rejects the
+// update. Separately, the elapsed step count keeps only its low 32 bits
+// (UP-37).
 #[test]
 fn a19_huge_times_follow_the_cpu_and_wrap_elapsed_steps() {
     let create: &[&str] = &[

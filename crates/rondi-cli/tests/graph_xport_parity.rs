@@ -116,9 +116,9 @@ fn xport_prints_negative_zero_without_a_sign() {
     }
 }
 
-// A numeric constant that is_numeric rejects (`1e3`, `+5`, `inf`) is parsed
-// as a constant, so XPORT has no source series for it. The pinned build reads
-// gdes[-1] there and fails with garbage, so only Rondi's result is checked:
+// A numeric constant RRDtool does not take as a number (`1e3`, `+5`, `inf`)
+// is parsed as a constant, so XPORT has no source series for it. The
+// pinned build then fails with garbage, so only Rondi's result is checked:
 // the constant is not a column and never exports another element's data.
 #[test]
 fn xport_of_a_non_numeric_looking_constant_exports_nothing() {
@@ -152,7 +152,7 @@ fn xport_of_a_non_numeric_looking_constant_exports_nothing() {
     }
 }
 
-// RRDtool data_calc adds the normalized shift to time_t start and end,
+// RRDtool adds the normalized shift to the time_t start and end,
 // which wraps for a shift near the type's limits.
 #[test]
 fn shift_by_a_huge_offset_wraps_like_rrdtool() {
@@ -323,9 +323,10 @@ fn graph_args(
     args
 }
 
-// RRDtool print_calc keeps one magnitude across PRINT and GPRINT: the
+// RRDtool keeps one magnitude across PRINT and GPRINT: the
 // first %S (or any %s) sets it, later %S values reuse it, and a zero %S
-// result leaves it unset. auto_scale divides by powers of --base.
+// result leaves it unset. Scaling divides by powers of --base
+// (format-strings.md FS-16, FS-23).
 #[test]
 fn print_si_magnitude_is_shared_and_honors_base() {
     let Some(fixture) = fixture() else { return };

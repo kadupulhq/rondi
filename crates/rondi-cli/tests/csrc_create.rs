@@ -33,11 +33,12 @@ fn create_args<'a>(definitions: &[&'a str]) -> Vec<&'a str> {
     args
 }
 
-// B3, B5: parseDS matches DS_RE and parseGENERIC_DS scans min and max with
-// "%18[^:]:%18[^:]", ignoring what follows; parseRRA splits with strtok_r, which skips empty fields, and
-// reads the CF with "%19[A-Z]".
+// B3, B5: the DS word grammar (create.md CR-17); min and max read as
+// fields of up to 18 characters with what follows ignored (CR-20); RRA fields split
+// at `:` with empty fields dropped (CR-26) and the CF read as at most 19
+// upper-case letters (CR-27).
 #[test]
-fn b3_b5_definition_grammar_matches_parse_ds_and_parse_rra() {
+fn b3_b5_definition_grammar_matches_rrdtool() {
     let Some(sides) = common::Sides::new(&[], &[]) else {
         return;
     };
@@ -62,7 +63,7 @@ fn b3_b5_definition_grammar_matches_parse_ds_and_parse_rra() {
 // B4: error texts for malformed DS and RRA definitions, including the
 // later error replacing the first.
 #[test]
-fn b4_definition_errors_use_rrd_create_texts() {
+fn b4_definition_errors_use_rrdtool_texts() {
     let Some(sides) = common::Sides::new(&[], &[]) else {
         return;
     };
@@ -115,7 +116,7 @@ fn b4_definition_errors_use_rrd_create_texts() {
 // B6: xff goes through RRDtool's number parser, not a correctly
 // rounded parser.
 #[test]
-fn b6_xff_bits_match_rrd_strtod() {
+fn b6_xff_bits_match_rrdtool_decimal_conversion() {
     let Some(sides) = common::Sides::new(&[], &[]) else {
         return;
     };
@@ -125,11 +126,12 @@ fn b6_xff_bits_match_rrd_strtod() {
     }
 }
 
-// B7: write_rrd writes "-" to stdout, creates
-// `<name>XXXXXX` beside the target without creating directories, and chmods
-// a new file to 0644 whatever the umask.
+// B7: the target `-` writes the file to stdout (CR-63); otherwise the file
+// is written to a temporary file beside the target, without creating
+// directories, and renamed over it (CR-61), and a new file gets mode 0644
+// whatever the umask (CR-64).
 #[test]
-fn b7_write_rrd_filesystem_behavior_matches_upstream() {
+fn b7_output_file_behavior_matches_upstream() {
     let Some(sides) = common::Sides::new(&[], &[]) else {
         return;
     };
@@ -192,8 +194,9 @@ fn b8_no_overwrite_text_matches_upstream() {
     sides.assert_same_file("o.rrd");
 }
 
-// B9: --template memcpy()s ds_def and rra_def and keeps version 0003 unless
-// a command-line DS needs 0005.
+// B9: --template copies the template's DS and RRA definitions byte for
+// byte (CR-49) and keeps version 0003 unless a command-line DS needs 0005
+// (CR-37).
 #[test]
 fn b9_template_copies_definitions_verbatim() {
     let Some(sides) = common::Sides::new(
@@ -242,10 +245,10 @@ fn b9_template_copies_definitions_verbatim() {
 // B10: RRDtool's file open checks nothing beyond the cookies,
 // version and lengths, so files with a NaN xff, cur_row past row_cnt, an
 // empty DS name or a version 0001/0002 header (whose live head is a time_t)
-// open, read and update. Zero steps are covered separately: RRDtool divides
-// by them.
+// open, read and update. Zero steps are covered separately: commands that
+// divide by the step misbehave on them.
 #[test]
-fn b10_rrd_open_accepts_what_it_does_not_check() {
+fn b10_open_accepts_what_it_does_not_check() {
     let Some(sides) = common::Sides::new(
         &[
             &[
@@ -336,9 +339,10 @@ fn b10_rrd_open_accepts_what_it_does_not_check() {
     }
 }
 
-// B10, zero step: RRDtool's file open opens it, then RRDtool divides by the step, which
-// traps on x86_64 and reads garbage on aarch64. Rondi opens it for `info`,
-// `lastupdate` and `last`, and refuses the dividing commands with an error.
+// B10, zero step: RRDtool opens the file, but a command that divides by the
+// step crashes on x86_64 and prints garbage on aarch64. Rondi opens it for
+// `info`, `lastupdate` and `last`, and refuses the dividing commands with an
+// error.
 #[test]
 fn b10_zero_step_opens_and_never_divides() {
     let Some(sides) = common::Sides::new(

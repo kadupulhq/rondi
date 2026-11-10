@@ -501,7 +501,7 @@ infinities are present (`vdef-22`: `-inf` on macOS, `inf` on Linux).
   unless `S` exceeds 2^24 seconds. With `S = 1000000010`, a window of
   `S + 32` averages two samples from the first row, while `S + 33` leaves
   the first row unknown (`alias_modes.rs`,
-  `rrdtool_xport_trend_duration_rounding_matches_rrd_strtod`). [bb]
+  `rrdtool_xport_trend_duration_rounding_matches_rrdtool`). [bb]
 - `TREND` includes unknown samples, so one unknown makes the result
   unknown. `TRENDNAN` skips them and gives unknown only when all are
   unknown.

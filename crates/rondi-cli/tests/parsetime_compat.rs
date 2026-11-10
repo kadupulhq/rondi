@@ -1,5 +1,5 @@
 #![cfg(unix)]
-//! Differential checks of the `RRDtool` port. Every case runs pinned
+//! Differential checks of the at-style time parser. Every case runs pinned
 //! RRDtool and the Rondi alias with the same arguments and TZ, then compares
 //! stdout, stderr and exit status.
 
@@ -146,8 +146,8 @@ fn time_of_day_and_date_forms() {
         "noon yesterday",
         "teatime tomorrow",
         "midnight sun",
-        // tod() after a date reads whatever token follows, and the NUMBER
-        // case keeps its year sentinel when no year is given.
+        // A time of day after a date takes whatever token follows, and a
+        // date without a year keeps the year sentinel (time-spec.md TS-26).
         "01/02/2003 pm",
         "01/02/2003 +1d",
         "12:00 Jan 1",
@@ -166,8 +166,9 @@ fn numeric_epoch_reference_with_offset() {
     fx.assert_create_start("UTC", "1000000000+1d");
     fx.assert_create_start("UTC", "1000000000 + 1 day");
     fx.assert_create_start("UTC", "1000000000+1h-30min 5s");
-    // localtime_r() keeps tm_isdst of the epoch; the day offset is then
-    // normalized with that flag, so the result is one hour later in summer.
+    // The epoch reference keeps its daylight-saving flag; the day offset is
+    // then normalized with that flag, so the result is one hour later in
+    // summer (TS-47).
     fx.assert_create_start("America/New_York", "1041397200+180d");
 }
 
@@ -176,8 +177,8 @@ fn calendar_offsets_accumulate_before_a_single_mktime() {
     let Some(fx) = fixture() else { return };
     fx.assert_create_start("UTC", "Jan 31 2003 10:00 +1mon-1mon");
     fx.assert_create_start("UTC", "May 31 2003 10:00 -1mon-1mon");
-    // Seconds/minutes/hours are added after mktime, so their position among
-    // day offsets matters across a DST change.
+    // Seconds/minutes/hours are added after the calendar conversion, so their
+    // position among day offsets matters across a DST change (TS-43, TS-49).
     fx.assert_create_start("America/New_York", "Apr 7 2003 03:30 -1h-1d");
 }
 
@@ -289,9 +290,8 @@ fn fetch_leading_sign_offset_without_reference() {
 #[test]
 fn relative_range_keeps_the_anchor_dst_flag() {
     let Some(fx) = fixture() else { return };
-    // RRDtool's start and end parsing calls localtime_r() on the anchor and does not
-    // reset tm_isdst before mktime(), so end-1d across a DST change is
-    // exactly 86400 s.
+    // The relative end keeps the anchor's daylight-saving flag, so end-1d
+    // across a DST change is exactly 86400 s (TS-57).
     fx.assert_same(
         "America/New_York",
         &[
