@@ -278,13 +278,13 @@ fn interval_timestamp(start: i64, index: usize, step: u64) -> Result<i64, VdefEr
 }
 
 fn rrd_qsort_compatible(values: &mut [f64]) {
-    // Compatibility: RRDtool sorts PERCENT and PERCENTNAN values with the
-    // host C library's qsort. With infinities present its comparisons are
-    // not a strict weak order, so the result depends on that qsort and a
-    // Rust sort gives different results (rpn.md, "Ordering used by SORT,
-    // MEDIAN, PERCENT and PREDICTPERC", vdef-22). Unknown values sort
-    // first, and an infinity compares by the libc's isinf sign.
-    // Provenance: black-box compatibility test
+    // Compatibility: PERCENT and PERCENTNAN order their values with the
+    // platform qsort. With infinities present the comparison is not a strict
+    // weak order, so the result depends on that qsort and a Rust sort gives
+    // different results (graph.md GR-101; rpn.md, "Ordering used by SORT,
+    // MEDIAN, PERCENT and PREDICTPERC"). Unknown values sort first, and an
+    // infinity compares by the libc's isinf sign.
+    // Provenance: black-box compatibility test, see graph.md GR-101
     // (vdef_percentiles_with_infinities_match_pinned_rrdtool_qsort).
     unsafe extern "C" fn compare(
         left: *const libc::c_void,
