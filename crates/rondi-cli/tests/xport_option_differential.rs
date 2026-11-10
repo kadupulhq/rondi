@@ -107,7 +107,7 @@ macro_rules! repro {
     };
 }
 
-// optparse accepts attached and clustered option arguments.
+// Attached and clustered option arguments are accepted.
 repro!(
     attached_long_option_value,
     ["--maxrows=20", "@DEF@", "XPORT:x"]

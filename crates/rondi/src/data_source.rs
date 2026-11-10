@@ -42,8 +42,8 @@ pub(crate) fn apply_gauge_update(db: &mut DatabaseFile, update: &Update) -> Resu
         update.value,
     )?;
     if elapsed > db.config.heartbeat {
-        // RRDtool process_pdp_st discards the whole closing PDP, including
-        // seconds that earlier updates made known, when interval > heartbeat.
+        // RRDtool discards the whole closing PDP, including seconds that
+        // earlier updates made known, when interval > heartbeat.
         db.known_seconds = 0;
         db.weighted_sum = 0.0;
     }

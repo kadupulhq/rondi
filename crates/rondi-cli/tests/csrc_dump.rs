@@ -4,11 +4,11 @@
 #[macro_use]
 mod common;
 
-// RRDtool CB_FMTS formats values with its number formatter ("%0.10e"): fmtflt
+// dump prints values as `%0.10e` with RRDtool's own number formatter, which
 // rounds by its own scaling, drops the sign of -0 and prints subnormals
-// without normalizing them.
+// without normalizing them (format-strings.md FS-52).
 #[test]
-fn dump_values_use_rrd_snprintf() {
+fn dump_values_use_rrdtool_number_formatter() {
     let Some(sides) = common::Sides::new(
         &[
             &[

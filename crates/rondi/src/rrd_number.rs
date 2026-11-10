@@ -1,3 +1,7 @@
+// The decimal conversion in this file derives from RRDtool 1.11.0's string-to-double
+// source file, which is BSD-licensed (Copyright (C) 2002 Michael Ringgaard). See
+// THIRD-PARTY-NOTICES.md for the copyright notice and license text.
+
 //! Numeric conversion used by RRDtool's update path.
 
 /// Parse a decimal using the conversion algorithm in RRDtool 1.11's

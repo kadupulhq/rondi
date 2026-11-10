@@ -563,7 +563,7 @@ fn trend(cursor: &Cursor<'_>, window: i64, row: &Row, skip_unknown: bool) -> f64
     // a window slightly over one step averages two samples from the first
     // row.
     // Provenance: black-box compatibility test
-    // (alias_modes::rrdtool_xport_trend_duration_rounding_matches_rrd_strtod)
+    // (alias_modes::rrdtool_xport_trend_duration_rounding_matches_rrdtool)
     // and probes; see "TREND and TRENDNAN" in docs/compatibility/rpn.md.
     let warm_up = f64::from(((window as f32) / (cursor.step as f32)).ceil());
     let end = cursor.window_end(row.time);

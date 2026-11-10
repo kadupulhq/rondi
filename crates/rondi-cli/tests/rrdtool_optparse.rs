@@ -145,7 +145,7 @@ fn each<T: std::fmt::Debug>(cases: &[T], test: impl Fn(&T)) {
     );
 }
 
-// RRDtool main(): pipe mode arguments.
+// Pipe mode arguments (pipe-mode.md).
 #[test]
 fn pipe_workdir_argument() {
     check(&["-", "sub"], b"last b.rrd\n");
@@ -161,8 +161,8 @@ fn dash_with_two_arguments_is_an_unknown_function() {
     check(&["-", "a", "b"], b"last a.rrd\n");
 }
 
-// RRDtool would chroot as root, but HAVE_GETEUID is never defined,
-// so root also gets a plain chdir. The CI container runs as root.
+// RRDtool does not chroot to the pipe-mode directory even as root: root
+// also gets a plain chdir. The CI container runs as root.
 #[test]
 fn pipe_workdir_is_chdir_even_for_root() {
     if !pinned_rrdtool_available() {
@@ -259,7 +259,7 @@ fn pipe_unterminated_space_line() {
     pipe(b"last a.rrd\n   ");
 }
 
-// fgetslong() reads raw bytes, so a non-UTF-8 byte does not end the session.
+// Pipe mode reads raw bytes, so a non-UTF-8 byte does not end the session.
 #[test]
 fn pipe_non_utf8_line_keeps_session() {
     pipe(b"last \xff.rrd\nlast a.rrd\n");
@@ -371,7 +371,7 @@ fn graph_status(extra: &[&str]) {
 }
 
 // RRDtool option table, each option's validation text, and
-// optparse forms.
+// option forms.
 #[test]
 fn graph_option_table() {
     let cases: &[&[&str]] = &[
@@ -555,7 +555,7 @@ fn graph_option_placement() {
 }
 
 // A pipe line with 100k words or one 100k-letter option cluster parses in
-// linear time; upstream recurses once per skipped word.
+// linear time.
 #[test]
 fn long_pipe_lines() {
     let mut line =

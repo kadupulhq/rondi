@@ -15,12 +15,12 @@ const COMMANDS: &[&[&str]] = &[
     &["resize", "0", "GROW", "1"],
 ];
 
-// B11 and fuzz C5: RRDtool (open), 434 (mmap), 465-470 (cookie, float
-// cookie, version), 471-497 (header pieces) and 538-541 (file length). The
+// B11 and fuzz C5: each failure in the order RRDtool checks the file: open,
+// map, cookie, float cookie, version, header pieces and file length. The
 // i386 seed has its float cookie at offset 12, so it fails on the float
 // cookie before its 32-bit counts are read.
 #[test]
-fn b11_open_failures_use_rrd_open_texts() {
+fn b11_open_failures_use_rrdtool_texts() {
     let Some(sides) = common::Sides::new(
         &[&[
             "create",

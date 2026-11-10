@@ -196,7 +196,7 @@ fn create_without_start_uses_ten_seconds_ago() {
 }
 
 #[test]
-fn create_arguments_parse_like_handle_request_create() {
+fn create_arguments_parse_like_rrdcached() {
     let Some(work) = Work::new() else { return };
     const D: &str = " DS:a:GAUGE:120:U:U RRA:AVERAGE:0.5:1:5";
     let sessions = [
@@ -248,7 +248,7 @@ fn create_arguments_parse_like_handle_request_create() {
 }
 
 #[test]
-fn fetch_times_parse_like_handle_request_fetch_parse() {
+fn fetch_times_parse_like_rrdcached() {
     let Some(work) = Work::new() else { return };
     let sessions: [&[u8]; 12] = [
         b"FETCH a.rrd AVERAGE x 1000000600\n",
@@ -304,7 +304,7 @@ fn fetch_times_parse_like_handle_request_fetch_parse() {
 }
 
 #[test]
-fn fetch_columns_select_like_handle_request_fetch_parse() {
+fn fetch_columns_select_like_rrdcached() {
     let Some(work) = Work::new() else { return };
     let sessions: [&[u8]; 8] = [
         b"FETCH a.rrd AVERAGE 1000000000 1000000600 x x\n",
@@ -400,8 +400,8 @@ fn list_names_entries_relative_to_the_listed_path() {
 #[test]
 fn empty_file_name_names_the_base_directory() {
     let Some(work) = Work::new() else { return };
-    // Two spaces leave an empty file field, which get_abs_path turns into
-    // "<base>/", inside -b by check_file_access's string test.
+    // Two spaces leave an empty file field, which the daemon resolves to
+    // "<base>/"; that path passes the -b check, which compares strings.
     let sessions: [&[u8]; 14] = [
         b"UPDATE  1000000300:1:2\n",
         b"INFO  \n",
@@ -462,7 +462,7 @@ fn nul_separates_fields_like_a_space() {
 }
 
 #[test]
-fn tune_parses_options_like_rrd_tune_r() {
+fn tune_parses_options_like_rrdtool() {
     let Some(work) = Work::new() else { return };
     let sessions: [&[u8]; 27] = [
         b"TUNE a.rrd 2 tune -h\n",

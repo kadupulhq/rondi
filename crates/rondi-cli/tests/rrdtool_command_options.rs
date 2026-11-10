@@ -1,5 +1,5 @@
 #![cfg(unix)]
-//! Differential tests for each command's optparse table, positional checks
+//! Differential tests for each command's option table, positional checks
 //! and usage text. Each case runs
 //! pinned RRDtool 1.11.0 and the Rondi alias in copies of one scratch
 //! directory and compares output, status and the bytes of `a.rrd`.
@@ -204,7 +204,7 @@ fn lastupdate_and_info_options() {
     ]);
 }
 
-// Any optparse result outside the table prints usage.
+// Any option outside the table prints usage.
 #[test]
 fn dump_options() {
     each(&[

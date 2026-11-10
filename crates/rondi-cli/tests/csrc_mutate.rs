@@ -20,10 +20,11 @@ const BASE: &[&str] = &[
 ];
 
 // D2: RRDtool checks the reserved name, the argument count, the
-// action and the row count in that order, parses both numbers with
-// strtol(..., 0) and ignores trailing text; the RRA checks follow the open.
+// action and the row count in that order, parses both numbers like C
+// strtol with base 0 and ignores trailing text; the RRA checks follow the
+// open (resize.md RZ-3, RZ-4).
 #[test]
-fn d2_resize_argument_checks_follow_c_order_and_text() {
+fn d2_resize_argument_checks_follow_rrdtool_order_and_text() {
     let Some(sides) = common::Sides::new(&[BASE], &[]) else {
         return;
     };
@@ -87,12 +88,13 @@ const SOURCE: &[&[&str]] = &[
     &["dump", "s.rrd", "s.xml"],
 ];
 
-// D1: RRDtool's resize opens resize.rrd with create-and-truncate semantics, so an
-// existing file is truncated and replaced upstream; the copy matches RRDtool, including the
-// warning for a version 0001 file whose output is sized for a time_t live
-// head and the zero-filled output left behind by an unsupported version.
+// D1: resize opens resize.rrd with create-and-truncate semantics, so an
+// existing file is truncated and replaced (RZ-12); the copy matches
+// RRDtool, including the warning for a version 0001 file whose output is
+// sized for a time_t live head (RZ-17) and the zero-filled output left
+// behind by an unsupported version (RZ-14, RZ-18).
 #[test]
-fn d1_resize_writes_resize_rrd_like_rrd_resize() {
+fn d1_resize_writes_resize_rrd_like_rrdtool() {
     let Some(sides) = common::Sides::new(SOURCE, &[]) else {
         return;
     };
@@ -135,10 +137,11 @@ fn d7_restore_accepts_short_options() {
     assert_same_restored(&sides, "s.rrd");
 }
 
-// D9: get_xml_double converts with RRDtool's number parser,
-// whose result can differ from correctly rounded parsing in the last bits.
+// D9: restore converts numbers with RRDtool's number parser (restore.md
+// RS-38), whose result can differ from correctly rounded parsing in the
+// last bits.
 #[test]
-fn d9_restore_numbers_use_rrd_strtod() {
+fn d9_restore_numbers_use_rrdtool_decimal_conversion() {
     let rows = [
         "1.4507475627e-193",
         "8.2380098498e+188",
@@ -166,7 +169,7 @@ fn d9_restore_numbers_use_rrd_strtod() {
     assert_same_restored(&sides, "out.rrd");
 }
 
-// D10: write_file writes the target "-" to stdout.
+// D10: restore writes the target "-" to stdout.
 #[test]
 fn d10_restore_dash_target_writes_stdout() {
     let Some(sides) = common::Sides::new(SOURCE, &[]) else {
@@ -186,12 +189,12 @@ fn d10_restore_dash_target_writes_stdout() {
     assert!(common::masked_rrd(&ro.stdout) == common::masked_rrd(&up.stdout));
 }
 
-// D11 and fuzz C6: the pull parser matches tags case-insensitively
-// (xmlStrcasecmp), keeps the first white-space-delimited word of a text node
-// (get_xml_text), treats any text containing "nan" or "inf" as special,
-// reads integers with strtoul/strtoll base 0 (get_xml_ulong, get_xml_time_t),
-// leaves missing fields zero, accepts any version and rejects unknown tags,
-// each with RRDtool's text.
+// D11 and fuzz C6: restore matches tags case-insensitively (RS-13),
+// keeps the first white-space-delimited word of a text node, treats any
+// text containing "nan" or "inf" as special (RS-37), reads integers
+// like C strtoul/strtoll with base 0 (RS-34, RS-35), leaves missing fields
+// zero (RS-24), accepts any version and rejects unknown tags, each with
+// RRDtool's text.
 #[test]
 fn d11_restore_xml_reading_matches_the_pull_parser() {
     let Some(sides) = common::Sides::new(SOURCE, &[]) else {
@@ -283,8 +286,8 @@ fn assert_same_restore(sides: &common::Sides, name: &str, xml: &[u8]) {
     assert_same_restored(sides, &target);
 }
 
-// get_xml_ulong and get_xml_time_t fail on any
-// errno after strtoul/strtoll. FreeBSD-derived libcs set EINVAL when nothing
+// Integer fields fail on any errno that the C library's strtoul/strtoll
+// leave set. FreeBSD-derived libcs set EINVAL when nothing
 // converts, so there a non-numeric or empty integer field is an error;
 // glibc leaves errno alone and the field reads as 0.
 #[test]
@@ -326,11 +329,11 @@ fn restore_skips_a_utf8_byte_order_mark() {
 }
 
 // Content after </rrd> is a libxml2 parse error ("Extra content at the end
-// of the document"), raised when the reader pushes the chunk holding it. A
-// named file reaches that chunk while still inside the last RRA, so the
-// reader fails mid-archive, keeps walking and parse_tag_rra trips over the
-// next row; stdin arrives a line at a time and fails only after </rra>,
-// leaving the error set on a parse that succeeds, so the file is written.
+// of the document"), raised when the reader reaches the input chunk holding
+// it. A named file reaches that chunk while still inside the last RRA, so
+// the restore fails mid-archive and then also on the next row; stdin
+// arrives a line at a time and fails only after </rra>, leaving the error
+// set on a parse that succeeds, so the file is written (RS-59).
 // Trailing white space and comments are allowed.
 #[test]
 fn restore_rejects_content_after_the_root_element() {
@@ -355,9 +358,9 @@ fn restore_rejects_content_after_the_root_element() {
     }
 }
 
-// The "line"/"ling" numbers are xmlTextReaderGetParserLineNumber: how far
+// The "line"/"ling" numbers are libxml2's parser line number: how far
 // the parser has consumed, which depends on where each 512-byte chunk (or
-// stdin line) ends and on the reader pushing more input before it hands
+// stdin line) ends and on the reader reading ahead before it hands
 // out a node's only text child. Every value in the dump is made invalid in
 // turn so each lands at a different place relative to those boundaries.
 #[test]
@@ -452,10 +455,10 @@ fn restore_reports_libxml2_parse_errors() {
     }
 }
 
-// Deliberate divergence: get_xml_text loops on `xmlTextReaderRead` for as
-// long as it returns nonzero, so a parse error that leaves the reader on a
+// Deliberate divergence: a parse error that leaves the reader on a
 // comment or white space (an end-tag mismatch on the next stdin line) makes
-// RRDtool spin forever. Rondi gives up and reports the libxml2 error.
+// RRDtool retry forever (restore.md RS-15a). Rondi gives up and reports the
+// libxml2 error.
 #[test]
 fn restore_stops_where_rrdtool_spins_after_a_parse_error() {
     let Some(sides) = common::Sides::new(SOURCE, &[]) else {
@@ -486,9 +489,9 @@ fn restore_stops_where_rrdtool_spins_after_a_parse_error() {
     assert!(!sides.ro.join("spin.rrd").exists());
 }
 
-// An RRA without rows reaches a random row modulo 0. On
-// aarch64 the division yields 0, the row rotation's malloc size wraps and fails; on
-// x86-64 RRDtool dies with SIGFPE, which Rondi does not imitate.
+// An RRA without rows (restore.md RS-63): on aarch64 RRDtool fails with an
+// allocation error; on x86-64 it dies with SIGFPE, which Rondi does not
+// imitate.
 #[test]
 fn restore_rejects_an_empty_database() {
     let Some(sides) = common::Sides::new(SOURCE, &[]) else {
@@ -513,8 +516,9 @@ fn restore_rejects_an_empty_database() {
     assert!(!sides.ro.join("emptydb.rrd").exists());
 }
 
-// write_file opens the target O_WRONLY|O_CREAT,
-// adding O_EXCL without -f, with mode 0666, and writes it in place.
+// restore writes the target in place: it creates a missing target with
+// mode 0666 less the umask, fails on an existing one without -f, and keeps
+// the inode with -f (RS-54, RS-55, RS-57).
 #[test]
 fn restore_writes_the_target_in_place() {
     use std::os::unix::fs::MetadataExt;
@@ -549,8 +553,8 @@ fn restore_writes_the_target_in_place() {
     assert_eq!(mode(&sides.ro), 0o600);
 }
 
-// D12, an intentional divergence: write_file does not truncate, so restoring
-// over a longer file keeps its tail in RRDtool. Rondi truncates the target
+// D12, an intentional divergence: RRDtool does not truncate, so restoring
+// over a longer file keeps its tail (RS-56). Rondi truncates the target
 // to the restored length.
 #[test]
 fn d12_restore_over_a_longer_file_truncates_it() {

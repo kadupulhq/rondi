@@ -16,6 +16,7 @@ include = [
     "/LICENSE-APACHE",
     "/LICENSE-GPL-2.0",
     "/LICENSE-MIT",
+    "/THIRD-PARTY-NOTICES.md",
 ]
 
 [lints]
