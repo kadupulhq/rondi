@@ -48,7 +48,7 @@ The audits behind #86 to #98 left these differences open. Each is tracked in the
 | Legend `coords` under `--zoom` on Linux | RD-006 | Reported |
 | `graph`, `graphv`, `xport` and rrdcached `FETCH` stop at 10 million rows | RD-017 | Checked for `xport`; the others read from code |
 | `graph`, `graphv` and `xport` with `--daemon` send `FLUSH` per file, where RRDtool sends one `FETCH` per DEF | RD-025 | Checked against GR-37 (no vectors) |
-| Holt-Winters archives are refused by `create`, `update`, `info` and `tune`; COMPUTE sources only by `tune` | RD-001, RD-004 | Checked for `create`, `update` and `info`; `tune` read from code |
+| Holt-Winters archives are refused by `create` and `tune`; COMPUTE sources only by `tune` | RD-001, RD-004 | Checked for `create`; `tune` read from code. `info`, `dump` and `update` are implemented (`holt-winters.md`) |
 | rrdcached may drop requests sent just before a half-close; Rondi answers them | RD-015 | Reported (timing-dependent) |
 
 ## Intentional differences

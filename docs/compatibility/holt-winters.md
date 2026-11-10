@@ -2,6 +2,8 @@
 
 Status: complete for create-time state (section 1), `info` and `dump`
 output (section 1a), `update` (sections 2 and 3) and `tune` (section 4).
+Rondi implements `info`, `dump` and `update` for these archives; `create`
+and `tune` still refuse them (CR-80, HW-36).
 `fetch` and `restore` of these archives are covered by the vectors and by
 the specifications of those commands, not restated here.
 
@@ -304,7 +306,9 @@ these results unknown, with everything else as in HW-12 to HW-18:
 (30 restored states with *I*, *T*, *s* and *x* negative, 0 and −0 matched
 the plain formulas). The reviewer's reproduction, `mhwsm10` given 97, 94,
 … 25, then 30 unknown PDPs and then 40, one PDP each, ends with *p* =
-−72.05, *I* = −36.10 and *s'* unknown (vectors `211` to `215`; `216` is a smoothing pass with *m* < 0).
+−72.05, *I* = −36.10 and *s'* unknown (vector `211` is that series;
+`212` to `215` are the other multiplicative cases, and `216` is a
+smoothing pass with *m* < 0).
 
 **HW-13** (black-box; must). Deviation. With the *p̂* of HW-12: when
 there is no *p̂*, *d'* is unknown, even when *x* is unknown and *d* known;
@@ -403,6 +407,11 @@ SEASONAL and DEVSEASONAL rows are smoothed:
   value ⊖ *m* (unknown when *m* ≤ 0, HW-12a), and *I* becomes *I* + *m*
   (added, not multiplied; defect, reproduce).
 - DEVSEASONAL: each row becomes its smoothed value; nothing else changes.
+
+Divergence (HW-18, documented). With a smoothing window *f* ≥ 2, which
+only crafted files can hold because `tune -s` caps *f* at 1, RRDtool
+still smooths and gives a result Rondi does not reproduce. Rondi leaves
+such archives unsmoothed.
 
 A command of one argument per PDP therefore smooths right after the
 triggering PDP. The vectors `066` to `069` (*h* = 1 additive, *h* = 2
@@ -564,14 +573,35 @@ archives already match (vectors `164` to `167`).
 
 - Dependency indexes that name an archive of the wrong type (for example
   `RRA:DEVPREDICT:12:4` when archive 4 is the `DEVPREDICT` itself, as in
-  the `hwsw0` and `hwsw5` inputs) are accepted by `create`. The rows such
-  archives write are frozen by vectors `037` to `046` but not specified.
+  the `hwsw0` and `hwsw5` inputs) are accepted by `create`, and
+  `rrdtool create` can produce a misnumbered index, so these files are
+  not only crafted. For the DEVPREDICT and FAILURES archives the
+  behavior is now pinned and implemented (vectors `037` to `046`, test
+  `dev_predict_and_failures_follow_their_links`):
+  - DEVPREDICT writes word 3 of the archive its link names, read after
+    the PDP's prediction and season updates: the deviation used for
+    DEVSEASONAL, the coefficient used for SEASONAL, `last_intercept` for
+    the prediction archive, and whatever word 3 holds for a classic
+    archive, itself or FAILURES.
+  - FAILURES checks values only when the archive its link names itself
+    links back to the prediction archive, with that archive's word 3 as
+    the deviation. Linked anywhere else, it stores the PDP value, sets
+    *primary_value* to it and keeps its history.
+  - In runs of three or more PDPs (HW-21) DEVPREDICT writes unknown and
+    FAILURES writes 0 whatever the link.
+  Still open: a wrong-type link on the prediction, SEASONAL or
+  DEVSEASONAL archive also changes RRDtool's results. No vector pins
+  these, and Rondi refuses an `update` on such a file before writing
+  anything.
 
 - Whether a gap of many PDPs ever resets the model: none observed for gaps
   of single unknown PDPs up to 7 with *P* = 5, nor for runs of 43 PDPs
   (HW-21 keeps *I* and *T*).
-- Which words 8 and 9 of DEVPREDICT and FAILURES hold after runs: frozen
-  by the vectors, not specified.
+- Words 8 and 9 after runs are settled (not open): a run of two stores
+  the first and second PDP's result in all five archives; a run of three
+  or more sets the prediction and DEVPREDICT words to unknown and the
+  FAILURES words to 0, and leaves the season archives' unchanged (HW-20,
+  HW-21; vectors `052` to `054`, `072` to `075`).
 
 - HW-2: the exact derivation of the initial `seasonal_smooth_idx`. It
   could not be settled black-box: it is stable for a given file name but
@@ -618,6 +648,30 @@ values RRDtool converts from its readings (`restore.md` RS-38's digit loop
 is not correctly rounded, so a few three-decimal readings differ from a
 correctly rounded parse in the last bit). Every `tune` case's
 status, error text and changed fields were checked against section 4,
-and the probes behind it were run on all three builds. Until Rondi
-implements these archives, the cases that read or write their state are
-expected to be refused; the `fetch` cases already match.
+and the probes behind it were run on all three builds. Rondi implements `info`, `dump`, `fetch` and `update` for these archives:
+111 cases are `same`, 6 are `clean-error` (`info`, `dump` and `update` on the
+crafted files with window lengths above 28, HW-5) and none is `divergent`. The 100 `tune` cases
+stay `unsupported` (HW-36).
+
+Black-box evidence for the dependency links: the probes
+patched the dependency index of one or two archives in the committed
+inputs (`hwimp`, `hwfail`, `hwsw0`, `hww28`) and ran `updatev`, `dump` and
+`info` on RRDtool and Rondi, for one command and one command per
+argument, with runs of 2, 3 and 5 PDPs and spikes. All 262 runs (68
+single-link variants and 194 DEVPREDICT by FAILURES link pairs) matched
+in output, exit status and file bytes. A further 264 random series on all
+22 `hw` inputs matched except 11 that involve NaN parameters, which were
+then specified (HW-12, HW-12a) and fixed.
+
+Damaged files (documented divergences). When SEASONAL rows run past the
+file's end into later archives' bytes, RRDtool reads the overlapping bytes
+and then fails. Rondi treats past-end rows as unknown and fails with the
+`writing rrd` error of `update.md` UP-38. The moves of season archives in
+runs (HW-20, HW-21) are not checked against the row count either, so a
+damaged file whose season row lies past the end does not fail there; this
+is unpinned, because RRDtool rejects the truncated files that would show
+it.
+
+The `hw.linux-x86_64` overrides for cases `205` to `216` are pending
+(the oracle container was unavailable); the x86_64 CI job will
+arbitrate.
