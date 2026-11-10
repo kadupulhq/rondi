@@ -29,9 +29,9 @@ About 12,400 lines of Rust (38 percent of non-test source) are rated High: modul
 | `crates/rondi/src/rrd_binary.rs` | Review | 1,963 | Update path replaced by the clean-room `update/` module; format reader is format-dictated |
 | `crates/rondi-server/src/lib.rs` | Replaced | 5,203 | rrdcached handlers, queue and journal replaced by the clean-room `rrdcached/` protocol modules; the JSON API remains |
 | `crates/rondi/src/xml_reader.rs` | Replaced | 1,958 | Modelled libxml2 internals; replaced by a clean-room rewrite from `docs/compatibility/restore.md` and black-box runs |
-| `crates/rondi-cli/src/main.rs` (rest except renderer) | Review | ~4,735 | Command handlers with C line citations; rrdcached client ported from an MIT-licensed C file |
-| `crates/rondi/src/rrd_number.rs` | Review | 451 | Number parsing algorithm from a BSD-licensed C file |
-| `crates/rondi-cli/src/cparse.rs` | Review | 217 | Same as above |
+| `crates/rondi-cli/src/main.rs` (rest except renderer) | Review | ~4,735 | Command handlers with C line citations; rrdcached client ported from an MIT-licensed C file; kept with attribution (D3) |
+| `crates/rondi/src/rrd_number.rs` | Kept with attribution (D3) | 451 | Number parsing algorithm from a BSD-licensed C file; see `THIRD-PARTY-NOTICES.md` |
+| `crates/rondi-cli/src/cparse.rs` | Kept with attribution (D3) | 217 | Same as above |
 | `crates/rondi/src/rrdc_proto.rs` | Removed | 116 | Two small field-codec ports; replaced by `rrdcached/protocol.rs` |
 | `crates/rondi/src/vdef.rs` | Low | 513 | Standard statistics; compiler contraction emulation documented |
 | `crates/rondi/src/storage.rs`, `consolidation.rs`, `data_source.rs`, `format.rs`, `import_export.rs`, `lib.rs`, `queries.rs`, `compatibility.rs`, `safe_fs.rs` | Low | 2,143 | Rondi's own store and helpers |
@@ -213,12 +213,14 @@ Risk tiers:
 - `rrdcached_mode` option parsing: option letters are public (category 2); messages category 1. Several citations to the C read-options routine. Status: removed with the daemon-layer rewrite; the `rrdcached` personality is now `crates/rondi-cli/src/rrdcached.rs`. Its usage text is the recorded `rrdcached -h` output (opt-001) and stays under the help-text FLAG below.
 - Command handlers (`rrdtool_create`, `rrdtool_fetch`, `rrdtool_graph`, `rrdtool_xport`, `rrdtool_update_impl`, `rrdtool_tune`, `rrdtool_restore`, `rrdtool_dump`, `rrdtool_info`, `rrdtool_first`, `rrdtool_last`, `rrdtool_resize`, `rrdtool_list`): each cites the C option table line. Mostly category 1. Reword citations; no rewrite needed beyond the optparse change.
 - rrdcached client (`rrdcached_client_path`, `translate_rrdcached_file_command`, `connect_rrdcached`, `split_rrdcached_network_address`): documented as ports of the client C file, which is MIT licensed. Category 1 for path and address rules. Remediation: confirm attribution needs; specify address and path rules from the `rrdcached` and `rrdtool` man pages.
+- Status: kept with attribution (D3), see THIRD-PARTY-NOTICES.md
 - Xport and graph number formatting (`format_graph_numeric`, `parse_graph_numeric_format`, `format_xport_*`): mostly category 1 and 2 (XML and JSON shapes). Keep.
 
 **`crates/rondi/src/rrd_number.rs` and `crates/rondi-cli/src/cparse.rs`**
 
 - `rrd_strtodbl`, `parse_rrd_decimal` and the `rrd_strtod` wrappers reproduce the C decimal conversion because its operation order is observable in epoch-sized fractional values (category 1). The C source is BSD-licensed (Michael Ringgaard), not GPL. `rrd_diff` reproduces the GPL big-integer subtraction used for COUNTER deltas (category 3 arithmetic, category 1 precision). `c_strtol`, `c_strtoul_errno` follow libc contracts (category 1).
 - Remediation: keep, with the BSD attribution question flagged; specify the decimal conversion as an arithmetic recipe.
+- Status: kept with attribution (D3), see THIRD-PARTY-NOTICES.md
 
 **`crates/rondi/src/rrdc_proto.rs`**
 
@@ -282,7 +284,7 @@ A clean-room process is the stronger form of each rewrite: one person writes the
 
 1. License history. The workspace was declared GPL-2.0-or-later with the RRDtool FLOSS exception on 2026-10-07 (`de820e9`) and relicensed to `MIT OR Apache-2.0` on 2026-10-14 (`36346a8`). Most self-described ports (#54, #56, #59, #63, #64, #68, #69, #70, #72, #73, #91) landed between or around those dates. Legal should determine what license covers code written while the project was declared GPL and described as ported.
 2. README statement. The README says Rondi "ports behavior and code from RRDtool 1.11.0" and that RRDtool's code "is not relicensed by this project". That statement and the crate `license = "MIT OR Apache-2.0"` metadata conflict for any file that contains RRDtool code. Until resolved, the published crates' license metadata may be inaccurate.
-3. Mixed-origin C files. Several reference files are not under RRDtool's plain GPL header: the client library (MIT), the decimal parser (BSD), the time parser (BSD-style with GPL modifications), the snprintf implementation (Powell and Weiss permissive grant with RRDtool header), and the bundled option parser (no notice in the RRDtool copy). The daemon file is GPL-2.0 only. Legal should confirm the applicable terms for each before rewrite priority is final.
+3. Mixed-origin C files. Several reference files are not under RRDtool's plain GPL header: the client library (MIT, kept with attribution under D3), the decimal parser (BSD, kept with attribution under D3), the time parser (BSD-style with GPL modifications), the snprintf implementation (Powell and Weiss permissive grant with RRDtool header), and the bundled option parser (no notice in the RRDtool copy). The daemon file is GPL-2.0 only. Legal should confirm the applicable terms for each before rewrite priority is final.
 4. Verbatim text. `crates/rondi-cli/src/help/*.txt`, `RRDCACHED_HELP`, and `RRDCACHED_COMMAND_TABLE` reproduce RRDtool output text, including a copyright banner. Decide whether byte-exact help output is a requirement worth carrying under a separate notice.
 5. libxml2 modelling. The `xml_reader.rs` that reproduced libxml2 internals has been replaced by a clean-room reader (see its entry above), which prints libxml2's diagnostic text as observable output. What remains is whether the replaced module, which is still in the git history, created attribution obligations under libxml2's MIT license.
 6. FLAG items where independent reconstruction is uncertain: the time parser's months-or-minutes guess and normalization order; RPN undefined-window results; `tune` candidate RRA selection order; restore error ordering; graph layout pixel arithmetic. Each can be specified from observation, but the current knowledge came from reading the C, so a clean-room author would need the observed spec handed over rather than rediscovering it.
