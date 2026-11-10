@@ -1250,8 +1250,8 @@ fn verbose_update_reports_rrdtool_row_times() {
     );
     rondi::update_rrd_raw_values_verbose(&path, 1_000_000_005, &[Some("1")]).unwrap();
     let rows = rondi::update_rrd_raw_values_verbose(&path, 1_000_000_045, &[Some("2")]).unwrap();
-    // write_to_rras derives each row time from a step count it decrements
-    // while writing, so RRDtool reports 40 and 50 rather than 30 and 40.
+    // RRDtool reports the row times of this update as 40 and 50 rather
+    // than 30 and 40 (update.md UP-32).
     assert_eq!(
         rows.iter()
             .map(|row| (row.timestamp, row.values[0]))
@@ -1381,7 +1381,7 @@ fn create_parses_ds_bounds_like_rrdtool() {
 }
 
 #[test]
-fn trailing_bytes_after_the_archives_are_accepted_like_rrd_open() {
+fn trailing_bytes_after_the_archives_are_accepted_like_rrdtool() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("trailing.rrd");
     create_single_source(
@@ -1512,8 +1512,8 @@ fn update_with_zero_pdp_per_row_is_an_error_instead_of_a_division_panic() {
 }
 
 // RRDtool 1.11.0 on the same file: `first` prints 1000000010, and a fetch
-// that ends before the archive pads with NaN rows. A fetch that reaches the
-// archive takes `% row_cnt` with a zero row count, which is undefined in C.
+// that ends before the archive pads with NaN rows. A fetch that reaches
+// the zero-row archive has no defined result.
 #[test]
 fn zero_row_archive_first_and_out_of_range_fetch_match_rrdtool() {
     let temp = tempfile::tempdir().unwrap();

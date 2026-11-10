@@ -82,7 +82,7 @@ rrdtool tune /tmp/sample.rrd --heartbeat traffic_in:600 --minimum traffic_in:0
 printf 'update /tmp/sample.rrd --template traffic_in:traffic_out 1700003640:100:200\nquit\n' | rrdtool -
 ```
 
-For supported basic data sources, `tune` also accepts `--maximum`, `--data-source-type`, and `--data-source-rename`, and the `rrd_modify` operations that add, delete or resize data sources and archives:
+For supported basic data sources, `tune` also accepts `--maximum`, `--data-source-type`, and `--data-source-rename`, and the operations that add, delete or resize data sources and archives:
 
 ```sh
 rrdtool tune /tmp/sample.rrd DS:errors:COUNTER:600:0:U RRA#0:+100
@@ -155,4 +155,4 @@ Rondi is licensed under either the MIT License or the Apache License, Version 2.
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in Rondi by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
 
-Rondi is an independent implementation that is compatible with RRDtool 1.11.0, copyright Tobias Oetiker and contributors, which is licensed under GPL-2.0-or-later with the RRDtool FLOSS License Exception. Compatibility comes from documentation, behavioral specifications and black-box comparison with RRDtool 1.11.0 ([PROVENANCE](https://github.com/kadupulhq/rondi/blob/main/docs/PROVENANCE.md)). RRDtool's own notice and exception text are reproduced unchanged in [COPYRIGHT](COPYRIGHT), and the GPL version 2 text in [LICENSE-GPL-2.0](LICENSE-GPL-2.0). RRDtool's code is not relicensed by this project, and the verbatim RRDtool help text Rondi prints keeps its upstream notice.
+Rondi is an independent, behavior-compatible implementation of RRDtool 1.11.0, copyright Tobias Oetiker and contributors, which is licensed under GPL-2.0-or-later with the RRDtool FLOSS License Exception. Rondi is implemented from documentation, behavioral specifications and black-box tests against RRDtool 1.11.0 ([PROVENANCE](https://github.com/kadupulhq/rondi/blob/main/docs/PROVENANCE.md)). Two parts derive from RRDtool files that carry their own permissive licenses: the rrdcached client path and address handling, from the MIT-licensed client library, and the decimal number conversion, from a BSD-licensed file. They are kept with their upstream notices in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). The help text Rondi prints is RRDtool's, reproduced byte for byte, and keeps its upstream notice. RRDtool's own notice and exception text are reproduced unchanged in [COPYRIGHT](COPYRIGHT), and the GPL version 2 text in [LICENSE-GPL-2.0](LICENSE-GPL-2.0).

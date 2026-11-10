@@ -1,6 +1,6 @@
 #![cfg(unix)]
-//! Differentials for the graph data engine (`data_fetch`, RRDtool's data reduction,
-//! `data_calc`, `rpn_calc` and `vdef_calc`) against pinned RRDtool 1.11.0.
+//! Differentials for the graph data engine (DEF fetch, data reduction,
+//! CDEF and VDEF evaluation) against pinned RRDtool 1.11.0.
 
 mod common;
 
@@ -116,13 +116,13 @@ fn rpn_and_vdef_accumulators_round_like_the_pinned_build() {
     }
 }
 
-// RRDtool key reused fetches by gdes_fetch_key
-// (the reuse cache). The lookup uses the requested step and the insert the
-// reduced one, cf_reduce defaults to AVERAGE whether or not reduce= was
-// given, the DS name is not part of the key, and %d keeps only the low 32
-// bits of the window.
+// RRDtool reuses an earlier DEF's fetch when the key matches (graph.md
+// GR-98). The lookup uses the requested step and the stored entry the
+// reduced one, the reduce CF defaults to AVERAGE whether or not reduce= was
+// given, the DS name is not part of the key, and only the low 32
+// bits of the window are compared.
 #[test]
-fn data_fetch_reuses_fetches_by_the_c_key() {
+fn def_fetches_are_reused_by_key() {
     let Some(sides) = sides() else { return };
     for line in [
         "xport -s 1700000000 -e 1700003000 --step 3600 DEF:x=t.rrd:a:AVERAGE:step=300 DEF:y=t.rrd:a:AVERAGE:step=3600 XPORT:x XPORT:y",
@@ -170,8 +170,8 @@ fn cdef_over_disjoint_windows_fails_the_allocation() {
     }
 }
 
-// data_fetch reads the local file when rrdc_connect
-// fails but leaves its error set, so rrdtool prints the result and then
+// A DEF reads the local file when the daemon connection
+// fails but the error stays set, so rrdtool prints the result and then
 // fails. RRDtool connects to the image-wide daemon first and stops
 // there, and an ALLOW_MISSING_DS fallback clears the pending error.
 #[test]

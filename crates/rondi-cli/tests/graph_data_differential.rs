@@ -1,7 +1,7 @@
 #![cfg(unix)]
 //! Differential tests for the graph element parser (`graph`),
-//! per-element data preparation (`data_fetch`, `data_calc`, `vdef_calc`,
-//! `print_calc`) and the RPN calculator against pinned RRDtool 1.11.0.
+//! per-element data preparation (DEF fetch, CDEF and VDEF evaluation,
+//! PRINT values) and the RPN calculator against pinned RRDtool 1.11.0.
 
 #[macro_use]
 mod common;
@@ -210,8 +210,8 @@ fn xport_accepts_graph_elements_and_applies_shift() {
     );
 }
 
-// data_calc substitutes VDEF values into CDEFs and
-// rejects CDEFs without DEF or CDEF inputs.
+// VDEF values substitute into CDEFs, and CDEFs without DEF or CDEF
+// inputs are rejected.
 #[test]
 fn vdef_values_substitute_into_cdefs() {
     let Some(f) = fixture() else { return };
@@ -228,11 +228,11 @@ fn vdef_values_substitute_into_cdefs() {
     );
 }
 
-// parseArguments and newGraphDescription:
+// Element grammar (graph.md sections 4 to 6):
 // escaped colons, kept quotes, key=value fields, colours on XPORT,
 // legend truncation, forward references, vname reuse and error texts.
 #[test]
-fn element_grammar_matches_rrd_graph_helper() {
+fn element_grammar_matches_rrdtool() {
     let Some(f) = fixture() else { return };
     let def = "DEF:x=@A@:x:AVERAGE";
     let long_legend = format!("XPORT:x:{}", "L".repeat(300));
@@ -272,10 +272,10 @@ fn element_grammar_matches_rrd_graph_helper() {
     );
 }
 
-// rpn_parse and rpn_calc, including the operand
+// RPN parsing and evaluation (rpn.md), including the operand
 // order, count conversions and error texts.
 #[test]
-fn rpn_edge_cases_match_rrd_rpncalc() {
+fn rpn_edge_cases_match_rrdtool() {
     let Some(f) = fixture() else { return };
     check_all(
         [
@@ -312,8 +312,8 @@ fn rpn_edge_cases_match_rrd_rpncalc() {
     );
 }
 
-// OP_PREDICTPERC interpolates `val += deltay * deltax` and the MIN/MAX
-// family keep whichever signed zero the C comparisons leave.
+// PREDICTPERC interpolates between the two nearest samples, and the MIN/MAX
+// family keeps whichever signed zero RRDtool's comparisons leave (rpn.md).
 #[test]
 fn predictperc_and_signed_zero_match() {
     let Some(f) = fixture() else { return };
@@ -346,9 +346,9 @@ fn predictperc_and_signed_zero_match() {
     }));
 }
 
-// print_calc and vdef_calc (6017) read each
+// PRINT and VDEF read each
 // source at its own fetch window and step; the image step is
-// max(step, (end-start)/width).
+// max(step, (end-start)/width) (graph.md GR-47, GR-49).
 #[test]
 fn prints_use_each_source_window_and_width_step() {
     let Some(f) = fixture() else { return };
@@ -392,11 +392,11 @@ fn prints_use_each_source_window_and_width_step() {
     check_all(cases.iter().map(|args| f.assert_same_prints(args)));
 }
 
-// print_calc formatters: strftime on DEF data uses the last VDEF time,
+// PRINT formatters: strftime on DEF data uses the last VDEF time,
 // valstrftime uses gmtime and valstrfduration follows RRDtool's
-// duration formatter; HW CFs average like AVERAGE.
+// duration formatter; HW CFs average like AVERAGE (format-strings.md).
 #[test]
-fn print_formatters_match_print_calc() {
+fn print_formatters_match_rrdtool() {
     let Some(f) = fixture() else { return };
     check_all(
         [
@@ -453,12 +453,12 @@ fn print_formatters_match_print_calc() {
     );
 }
 
-// timestamp_to_tm truncates any in-range value to
-// seconds; GPRINT formats into the legend buffer with snprintf(FMT_LEG_LEN
-// - 2) for numbers and snprintf(FMT_LEG_LEN) for the `%.0f` fallback
-// , while PRINT allocates.
+// valstrftime truncates any in-range value to seconds (format-strings.md
+// FS-31); GPRINT text is cut to a fixed legend length, one length for
+// numbers and another for the `%.0f` fallback (FS-24), while PRINT text
+// is not cut.
 #[test]
-fn print_and_gprint_text_lengths_match_print_calc() {
+fn print_and_gprint_text_lengths_match_rrdtool() {
     let Some(f) = fixture() else { return };
     check_all(
         [
@@ -489,8 +489,8 @@ fn print_and_gprint_text_lengths_match_print_calc() {
     );
 }
 
-// graph_paint stops after print_calc when nothing is
-// drawn: no image, 0x0 and only print lines.
+// A graph that draws nothing computes its prints only: no image, 0x0 and
+// only print lines (graph.md GR-4).
 #[test]
 fn print_only_graph_is_not_rendered() {
     let Some(f) = fixture() else { return };
@@ -507,12 +507,11 @@ fn print_only_graph_is_not_rendered() {
     ]);
 }
 
-// graph_paint_timestring pushes graph_left..
-// graph_end after graph_size_location (3561), value_min/value_max after
-// data_proc (1365), si_unit (578) and expand_range (613), and the legend
-// loop (3430) pushes legend[n]/coords[n] from leg_place (2115).
+// graphv reports graph_left..graph_end, value_min/value_max and the
+// legend[n]/coords[n] keys as RRDtool lays out the image (graph.md GR-60
+// to GR-73).
 #[test]
-fn graphv_layout_keys_match_graph_paint_timestring() {
+fn graphv_layout_keys_match_rrdtool() {
     let Some(f) = fixture() else { return };
     let line = "LINE1:x#ff0000:foo";
     check_all(
@@ -547,10 +546,10 @@ fn graphv_layout_keys_match_graph_paint_timestring() {
     );
 }
 
-// Value range options feed data_proc and expand_range (ALTAUTOSCALE*, rigid,
-// allow_shrink).
+// Value range options (ALTAUTOSCALE*, rigid, allow_shrink; graph.md GR-70
+// to GR-73).
 #[test]
-fn graphv_value_range_matches_data_proc_and_expand_range() {
+fn graphv_value_range_matches_rrdtool() {
     let Some(f) = fixture() else { return };
     let line = "LINE1:x#ff0000";
     check_all(
@@ -573,10 +572,11 @@ fn graphv_value_range_matches_data_proc_and_expand_range() {
     );
 }
 
-// leg_place: control codes, \\t, \\g trimming, line
-// breaking at the image width, TEXTALIGN and the legend directions.
+// Legend placement: control codes, \\t, \\g trimming, line
+// breaking at the image width, TEXTALIGN and the legend directions
+// (graph.md GR-65, GR-66).
 #[test]
-fn graphv_legend_placement_matches_leg_place() {
+fn graphv_legend_placement_matches_rrdtool() {
     let Some(f) = fixture() else { return };
     let long = "L".repeat(30);
     let many: Vec<String> = (0..12)
@@ -720,7 +720,7 @@ fn start_daemon(dir: &Path, socket: &Path) -> Child {
     child
 }
 
-// data_fetch reads a DEF through its own `daemon=`
+// A DEF reads through its own `daemon=`
 // address; cached updates must be visible to both implementations.
 #[test]
 fn def_daemon_reads_through_rondi_rrdcached() {

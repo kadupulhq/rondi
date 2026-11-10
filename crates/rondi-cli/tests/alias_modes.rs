@@ -163,7 +163,7 @@ fn rrdcached_option_parsing_matches_pinned_daemon() {
         &["-h", "-f", "10", "-w", "20"],
         &["-U", "rondi-no-such-user"],
         &["-G", "rondi-no-such-group"],
-        // strtoul skips leading space and accepts a sign before the id.
+        // The id is read like C strtoul: leading space and a sign are accepted.
         &["-U", " +0", "-h"],
         &["-G", "+0", "-h"],
         &["-o", "/rondi-no-such-directory/rrdcached.log"],
@@ -1417,7 +1417,7 @@ fn rrdtool_update_fractional_timestamps_match_upstream_byte_for_byte() {
 }
 
 #[test]
-fn rrdtool_update_uses_rrd_strtod_rounding_for_epoch_fractions() {
+fn rrdtool_update_uses_rrdtool_decimal_rounding_for_epoch_fractions() {
     if !Command::new("rrdtool")
         .arg("--version")
         .output()
@@ -1483,7 +1483,7 @@ fn rrdtool_update_uses_rrd_strtod_rounding_for_epoch_fractions() {
 }
 
 #[test]
-fn rrdtool_update_special_values_and_exponent_range_follow_rrd_strtod() {
+fn rrdtool_update_special_values_and_exponent_range_follow_rrdtool() {
     if !Command::new("rrdtool")
         .arg("--version")
         .output()
@@ -2957,7 +2957,7 @@ fn rrdtool_xport_prediction_matches_mixed_resolution_history() {
 }
 
 #[test]
-fn rrdtool_xport_rpn_numeric_literals_follow_rrd_strtod() {
+fn rrdtool_xport_rpn_numeric_literals_follow_rrdtool() {
     if !Command::new("rrdtool")
         .arg("--version")
         .output()
@@ -3048,7 +3048,7 @@ fn rrdtool_xport_rpn_numeric_literals_follow_rrd_strtod() {
 }
 
 #[test]
-fn rrdtool_xport_trend_duration_rounding_matches_rrd_strtod() {
+fn rrdtool_xport_trend_duration_rounding_matches_rrdtool() {
     if !Command::new("rrdtool")
         .arg("--version")
         .output()
@@ -4442,7 +4442,7 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
             alias.as_path(),
             path,
             &[&format!("--legend-direction={direction}")],
-            // leg_place puts both on one row without \\l, and reversing
+            // Both entries share one row without \\l, and reversing
             // the direction only swaps rows.
             &["LINE1:x#ff0000:first\\l", "LINE1:x#0000ff:second\\l"],
         );
@@ -4452,7 +4452,7 @@ fn rrdtool_graphv_xml_json_and_graph_file_match_xport_subset() {
             String::from_utf8_lossy(&result.stderr)
         );
     }
-    // C reverses vertical row positions, preserving order within a row.
+    // RRDtool reverses vertical row positions, preserving order within a row.
     // Compare the same-row case with the oracle, then exercise two rows.
     for (case, elements) in [
         (
@@ -8206,7 +8206,7 @@ fn graph_and_xport_shift_match_ordered_upstream_calculations() {
         vec!["SHIFT:x: -5", "XPORT:x:X"],
         vec!["SHIFT:x:-0", "XPORT:x:X"],
         vec!["SHIFT:x:010", "XPORT:x:X"],
-        // strtol saturates out-of-range input and getLong still accepts it.
+        // An out-of-range offset saturates and is still accepted.
         vec!["SHIFT:x:99999999999999999999", "XPORT:x:X"],
         vec!["SHIFT:x:-99999999999999999999", "XPORT:x:X"],
         vec!["SHIFT:x:20", "SHIFT:x:-10", "XPORT:x:X"],
@@ -8235,8 +8235,8 @@ fn graph_and_xport_shift_match_ordered_upstream_calculations() {
         "PRINT:after:%s:strftime",
     ];
     assert_eq!(compare("graphv", &elements), Some(0));
-    // getLong rejects an empty, sign-only, partially numeric, or
-    // non-decimal offset; parse_shift rejects bad targets and offsets.
+    // An empty, sign-only, partially numeric, or non-decimal offset is
+    // rejected, as are bad targets (graph.md GR-55).
     for invalid in [
         "SHIFT:absent:10",
         "SHIFT:x:",
@@ -8584,8 +8584,8 @@ fn png_gprint_legends_match_literal_comments_and_suppression() {
             );
         }
     }
-    // leg_place separates the fragments of a row, so two comments do not
-    // render like one joined comment; follow the oracle's relation.
+    // RRDtool places the fragments of a row separately, so two comments do
+    // not render like one joined comment; follow the oracle's relation.
     let split = ["LINE1:x#0000ff", "COMMENT:Left", "COMMENT:Right\\c"];
     let combined = ["LINE1:x#0000ff", "COMMENT:LeftRight\\c"];
     let mut equality = Vec::new();
@@ -9024,9 +9024,9 @@ fn graph_base_utc_and_shared_si_units_match_rrdtool() {
     }
 }
 
-/// print_calc checks the format after rewriting its first "%S" to "%s", so
-/// graph errors quote the rewritten text; RRDtool checks first and
-/// quotes the format as given.
+/// RRDtool checks the format after rewriting its first "%S" to "%s"
+/// (format-strings.md FS-8), so graph errors quote the rewritten text;
+/// RRDtool checks first and quotes the format as given.
 #[test]
 fn invalid_percent_s_print_formats_report_upstream_error_text() {
     let pinned = Command::new("rrdtool")

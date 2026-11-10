@@ -232,6 +232,7 @@ Risk tiers:
 
 - 25 test files carry 152 C file mentions and 89 C line citations in comments; several `csrc_*` test files label cases with internal function names and describe the C control flow that produces each result. Test code compares outputs and is category 1. The comments are a provenance record of reference-source inspection. Remediation: reword comments to state the observed behaviour and the pinned-binary version; keep the assertions.
 - `docs/rrd-source-notes.md` describes the internal control flow of C functions in prose (update path, restore walk, daemon handlers) and states that `rondi::time` "ports `rrd_parsetime.c` directly". `docs/COMPATIBILITY_DEFECTS.md`, `docs/ROADMAP.md` and `docs/compatibility.md` repeat port claims. Remediation: convert into behavioural specs; keep version pins and upstream URLs for traceability.
+- Status: the W6 reword sweep restated test comments as observed behavior with the specification rule that pins each, renamed tests whose names embedded internal C function names, and replaced `docs/rrd-source-notes.md` with an index of the compatibility rules. Comments in `crates/rondi/src/update/`, `rrd_binary.rs`, `rondi-cli/src/main.rs` and `rondi-server/src/rrdcached/service.rs` were left for a later pass while another branch changes those files. `docs/COMPATIBILITY_DEFECTS.md`, `docs/ROADMAP.md` and `docs/compatibility.md` were not part of the sweep.
 
 ### Low
 
@@ -244,17 +245,17 @@ Risk tiers:
 
 These are places where Rondi reproduces C implementation accidents rather than specified behaviour. Each should become an explicit, observed specification or be dropped.
 
-| Location | Quirk | Observable? | Recommendation |
-|---|---|---|---|
-| `rrd_modify.rs` `REALLOC_ZERO_FAILS` | glibc `realloc(ptr, 0)` returning NULL | Error text for a zero-DS edge case | Specify the observed error per platform, or reject the input with Rondi's own message |
-| `rrd_restore.rs` empty-database branch | modulo-by-zero result on aarch64; x86_64 traps | Error text on aarch64 | Specify "restore of an RRA with zero rows fails" with one message |
-| `rpn.rs` MEDIAN and PERCENT windows | reads above the stack top | Result values in a malformed case | Specify observed result or reject the expression |
-| `rpn.rs` `qsort`, `vdef.rs` `rrd_qsort_compatible` | host `qsort` tie order for NaN and signed zero | Sorted output order | Specify the order explicitly from observation |
-| `rrd_create.rs` `mkstemp` | C temp-name alphabet | Not observable after rename | Use an ordinary unique temp name |
-| `optparse.rs` `ERRMSG_SIZE` | 48-byte error buffer truncation | Error text for long option names | Specify truncation length from observation |
-| `rrd_modify.rs` comment near line 945 | uninitialised definition bytes before an error | Not observable after error | Do not reproduce |
-| `main.rs` `c_double_to_int` | x86 vs aarch64 out-of-range conversion | Graph geometry for extreme values | Specify per-target result or clamp |
-| `rondi-server/src/lib.rs` `cache_tree_*` | AVL height for `STATS TreeDepth` | Yes | Specify as balanced-tree height; implementation may stay |
+| Location | Quirk | Observable? | Recommendation | Current module and rule |
+|---|---|---|---|---|
+| `rrd_modify.rs` `REALLOC_ZERO_FAILS` | glibc `realloc(ptr, 0)` returning NULL | Error text for a zero-DS edge case | Specify the observed error per platform, or reject the input with Rondi's own message | Removed with `rrd_modify.rs`. `tune_modify.rs` reports the reference's allocation error from a black-box test; `docs/compatibility/tune-modify.md` TM-57 |
+| `rrd_restore.rs` empty-database branch | modulo-by-zero result on aarch64; x86_64 traps | Error text on aarch64 | Specify "restore of an RRA with zero rows fails" with one message | Replaced. `rrd_restore.rs` (clean-room) fails with one message on every platform; `docs/compatibility/restore.md` RS-62, RS-63 |
+| `rpn.rs` MEDIAN and PERCENT windows | reads above the stack top | Result values in a malformed case | Specify observed result or reject the expression | Replaced by `rpn/eval.rs`. A negative count fails with `RPN stack underflow`; `docs/compatibility/rpn.md`, "Undefined reference behavior" |
+| `rpn.rs` `qsort`, `vdef.rs` `rrd_qsort_compatible` | host `qsort` tie order for NaN and signed zero | Sorted output order | Specify the order explicitly from observation | `rpn/ordering.rs` uses the host `qsort` as `docs/compatibility/rpn.md`, "Ordering used by SORT, MEDIAN, PERCENT and PREDICTPERC", specifies; `vdef.rs` `rrd_qsort_compatible` remains, pinned by `vdef_percentiles_with_infinities_match_pinned_rrdtool_qsort`, with no graph.md rule for its comparison yet |
+| `rrd_create.rs` `mkstemp` | C temp-name alphabet | Not observable after rename | Use an ordinary unique temp name | Removed with the old `rrd_create.rs`. The clean-room `rrd_create.rs` uses its own unique temporary name; `docs/compatibility/create.md` CR-61 |
+| `optparse.rs` `ERRMSG_SIZE` | 48-byte error buffer truncation | Error text for long option names | Specify truncation length from observation | Removed with `optparse.rs`. `frontend/options.rs` cuts option errors to 47 bytes as observed; `docs/compatibility/cli.md` CLI-24 |
+| `rrd_modify.rs` comment near line 945 | uninitialised definition bytes before an error | Not observable after error | Do not reproduce | Removed with `rrd_modify.rs`. `tune_modify.rs` reports the error and leaves the file unchanged; `docs/compatibility/tune-modify.md` TM-18 |
+| `main.rs` `c_double_to_int` | x86 vs aarch64 out-of-range conversion | Graph geometry for extreme values | Specify per-target result or clamp | Still in `main.rs` for the PNG surface size under `--zoom`; other conversions use `numeric_cast.rs`. `docs/compatibility/graph.md` GR-81, `docs/compatibility/format-strings.md` FS-26 |
+| `rondi-server/src/lib.rs` `cache_tree_*` | AVL height for `STATS TreeDepth` | Yes | Specify as balanced-tree height; implementation may stay | Replaced by `rondi-server/src/rrdcached/depth.rs`; `docs/compatibility/rrdcached.md` RC-55 specifies `TreeDepth` as the height of a height-balanced tree |
 
 ## Prioritized remediation order
 
@@ -274,7 +275,7 @@ Effort is the non-test line count to rewrite. "Pinned by" lists tests that alrea
 | 9 | `main.rs` `print_calc`, `strfduration`, `time_clean` (done) | ~410 | `graph_data_differential.rs`, `number_format_differential.rs` | GPRINT and duration format spec from `rrdgraph_graph` |
 | 10 | `rrd_snprintf.rs` (done) | ~600 | `number_format_differential.rs` (2), `csrc_dump.rs` (1), in-module tests | Conversion recipe plus a larger differential corpus |
 | 11 | `rrd_binary.rs` update path (done) | ~1,000 | `csrc_update.rs` (17), `rrdtool_differential.rs` (7), `rrd_binary_probe.rs` (30) | Consolidation spec |
-| 12 | Test comments and `docs/rrd-source-notes.md` | comments only | n/a | Reword to observed behaviour |
+| 12 | Test comments and `docs/rrd-source-notes.md` (done, except the files listed under Tests and documentation) | comments only | n/a | Reword to observed behaviour |
 
 The order puts pure-GPL, self-declared ports with existing differential coverage first. `rrd_modify.rs` is second despite thin coverage because it is self-declared and recently added (#91); its tests must grow before the rewrite. `time.rs`, `optparse.rs` and `rrd_snprintf.rs` are later because their C origins carry permissive notices whose effect needs legal input before the rewrite cost is justified.
 
@@ -283,7 +284,7 @@ A clean-room process is the stronger form of each rewrite: one person writes the
 ## Areas requiring human or legal review
 
 1. License history. The workspace was declared GPL-2.0-or-later with the RRDtool FLOSS exception on 2026-10-07 (`de820e9`) and relicensed to `MIT OR Apache-2.0` on 2026-10-14 (`36346a8`). Most self-described ports (#54, #56, #59, #63, #64, #68, #69, #70, #72, #73, #91) landed between or around those dates. Legal should determine what license covers code written while the project was declared GPL and described as ported.
-2. README statement. The README says Rondi "ports behavior and code from RRDtool 1.11.0" and that RRDtool's code "is not relicensed by this project". That statement and the crate `license = "MIT OR Apache-2.0"` metadata conflict for any file that contains RRDtool code. Until resolved, the published crates' license metadata may be inaccurate.
+2. README statement. The README says Rondi "ports behavior and code from RRDtool 1.11.0" and that RRDtool's code "is not relicensed by this project". That statement and the crate `license = "MIT OR Apache-2.0"` metadata conflict for any file that contains RRDtool code. Until resolved, the published crates' license metadata may be inaccurate. Status: the README now describes Rondi as behavior-compatible and implemented from documentation, specifications and black-box tests, with the two permissively licensed derived parts kept with attribution in `THIRD-PARTY-NOTICES.md` (D3); it no longer states that it ports RRDtool code.
 3. Mixed-origin C files. Several reference files are not under RRDtool's plain GPL header: the client library (MIT, kept with attribution under D3), the decimal parser (BSD, kept with attribution under D3), the time parser (BSD-style with GPL modifications), the snprintf implementation (Powell and Weiss permissive grant with RRDtool header), and the bundled option parser (no notice in the RRDtool copy). The daemon file is GPL-2.0 only. Legal should confirm the applicable terms for each before rewrite priority is final.
 4. Verbatim text. `crates/rondi-cli/src/help/*.txt`, `RRDCACHED_HELP`, and `RRDCACHED_COMMAND_TABLE` reproduce RRDtool output text, including a copyright banner. Decide whether byte-exact help output is a requirement worth carrying under a separate notice.
 5. libxml2 modelling. The `xml_reader.rs` that reproduced libxml2 internals has been replaced by a clean-room reader (see its entry above), which prints libxml2's diagnostic text as observable output. What remains is whether the replaced module, which is still in the git history, created attribution obligations under libxml2's MIT license.

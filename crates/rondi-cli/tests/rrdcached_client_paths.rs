@@ -77,7 +77,7 @@ fn tcp_case(
 }
 
 #[test]
-fn remote_client_strips_paths_like_rrd_client_c() {
+fn remote_client_strips_paths_like_rrdtool() {
     if !available() {
         return;
     }
@@ -85,8 +85,9 @@ fn remote_client_strips_paths_like_rrd_client_c() {
     let directory = std::fs::canonicalize(temporary.path()).unwrap();
     let alias = directory.join("rrdtool");
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
-    // get_path uses a string prefix, not a filesystem-component boundary,
-    // and removes every leading slash left after stripping that prefix.
+    // The base directory is stripped as a string prefix, not at a
+    // filesystem-component boundary, and every leading slash left after
+    // stripping it is removed.
     for (filename, strip) in [
         ("/client/data/a.rrd", Some("/client/data")),
         ("/client/data///a b.rrd", Some("/client/data/")),
@@ -140,7 +141,7 @@ fn unix_case(
 }
 
 #[test]
-fn local_client_resolves_paths_like_rrd_client_c() {
+fn local_client_resolves_paths_like_rrdtool() {
     if !available() {
         return;
     }
@@ -207,11 +208,11 @@ fn daemon_file_commands_share_upstream_path_translation() {
     }
 }
 
-/// RRDtool `client_connect` treats anything without a `unix:` prefix
-/// or leading slash as a network address, and `connect_network` reports
-/// parse and resolver failures in its own words.
+/// RRDtool treats an address without a `unix:` prefix or leading slash as
+/// a network address, and reports parse and resolver failures in its own
+/// words.
 #[test]
-fn daemon_address_errors_match_rrd_client_c() {
+fn daemon_address_errors_match_rrdtool() {
     if !available() {
         return;
     }

@@ -78,10 +78,10 @@ fn rra_def(index: usize) -> usize {
     STAT_HEAD + DS_DEF + index * RRA_DEF
 }
 
-// the type and consolidation function name checks set an error for a name they do not know and
-// return -1. info and dump print everything through their default branches
-// and exit 1 with the last such error; fetch does the same when the bad CF
-// belongs to an RRA it did not pick; tune -h never converts the type.
+// An unknown type or consolidation function name sets an error without
+// stopping the command: info and dump print every field anyway and exit 1
+// with the last such error; fetch does the same when the bad CF belongs to
+// an RRA it did not pick; tune -h never converts the type.
 #[test]
 fn unknown_type_and_cf_names_report_conversion_errors() {
     let Some(sides) = fixture() else {
@@ -127,7 +127,7 @@ fn unknown_type_and_cf_names_report_conversion_errors() {
 
 // fetch's own message when no RRA serves the CF.
 #[test]
-fn fetch_without_matching_rra_uses_rrd_fetch_message() {
+fn fetch_without_matching_rra_uses_fetch_message() {
     let Some(sides) = fixture() else {
         return;
     };
@@ -138,7 +138,7 @@ fn fetch_without_matching_rra_uses_rrd_fetch_message() {
 // row_cnt of 2^61 + 10 adds the same 80 bytes as 10 and the file opens.
 // update then runs into the end of the file at write time.
 #[test]
-fn huge_row_count_wraps_like_rrd_open() {
+fn huge_row_count_wraps_on_open() {
     let Some(sides) = fixture() else {
         return;
     };
@@ -168,7 +168,7 @@ fn huge_row_count_wraps_like_rrd_open() {
 // pdp_cnt * pdp_step wraps too: 2^62 + 2 PDPs of 300 s is 600 s, and
 // 2^64 - 1 PDPs is -300 s, which first and dump use as they are.
 #[test]
-fn huge_pdp_count_wraps_like_rrd_first_and_dump() {
+fn huge_pdp_count_wraps_in_first_and_dump() {
     let Some(sides) = fixture() else {
         return;
     };
@@ -179,15 +179,15 @@ fn huge_pdp_count_wraps_like_rrd_first_and_dump() {
     sides.assert_same(&["first", "t.rrd"]);
 }
 
-// Two billion steps ahead, write_to_rras would store a billion rows into the
+// Two billion steps ahead, RRDtool would store a billion rows into the
 // damaged archive; writing stops at the end of the file instead, and Rondi
 // must stop queuing rows there too rather than allocate for all of them.
 #[test]
 fn huge_row_count_update_stops_at_end_of_file() {
-    // last_up is mid-PDP, so the update first closes that PDP on its own.
-    // With rra_ptr at 9 the write past the end comes in that pass, which
-    // returns before the remaining PDPs touch the prep areas; at 8 it comes
-    // in the main pass.
+    // last_up is mid-PDP, so the update first closes that PDP on its own
+    // (update.md UP-22). With rra_ptr at 9 the write past the end comes
+    // while closing it, before the remaining PDPs touch the prep areas; at
+    // 8 it comes while the remaining PDPs are written.
     for current_row in [8_u64, 9] {
         let Some(sides) = fixture() else {
             return;

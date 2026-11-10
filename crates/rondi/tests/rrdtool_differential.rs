@@ -483,8 +483,9 @@ fn seeded_random_updates_match_rrdtool_byte_for_byte() {
                 String::from_utf8_lossy(&updated.stderr)
             );
             for (argument, (_, _, values)) in arguments.iter().zip(chunk) {
-                // get_time_from_reading converts the text to a double and
-                // derives microseconds from it, which can differ by one.
+                // The time text is converted to a double and the
+                // microseconds derived from it, which can differ by one
+                // (numbers.md NM-4).
                 let (time_text, _) = argument.split_once(':').unwrap();
                 let time = rondi::parse_rrd_number(time_text).unwrap();
                 let seconds = time.floor();
@@ -511,10 +512,10 @@ fn seeded_random_updates_match_rrdtool_byte_for_byte() {
 }
 
 /// DCOUNTER/DDERIVE samples that are infinite, NaN, or not numbers, in every
-/// ordered pair and across multi-step spans. update_pdp_prep converts the
-/// sample and the previous one only when the previous is known, so text that
-/// does not convert is accepted after an unknown sample and fails one update
-/// later.
+/// ordered pair and across multi-step spans. The sample and the previous
+/// one are converted only when the previous is known, so text that does
+/// not convert is accepted after an unknown sample and fails one update
+/// later (update.md UP-17).
 #[test]
 fn dcounter_dderive_special_samples_match_rrdtool_byte_for_byte() {
     use std::io::Write;
@@ -755,8 +756,8 @@ fn batch_update_matches_one_rrdtool_update_call() {
     }
 }
 
-/// update_pdp_prep stores DCOUNTER text unconverted after an unknown sample
-/// and strncpy cuts it at 29 bytes, even inside a multibyte character.
+/// DCOUNTER text is stored unconverted after an unknown sample and cut at
+/// 29 bytes, even inside a multibyte character (update.md UP-13, UP-17).
 #[test]
 fn multibyte_last_ds_is_cut_at_29_bytes_like_rrdtool() {
     if !Command::new("rrdtool")

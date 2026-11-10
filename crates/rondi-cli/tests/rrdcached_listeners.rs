@@ -325,8 +325,8 @@ fn rrdcached_valid_permission_clears_an_earlier_option_error_like_upstream() {
         let root = run.join("data");
         std::fs::create_dir_all(&root).unwrap();
         let socket = run.join("rrdcached.sock");
-        // read_options stores each permission's result in its one status,
-        // so the valid PING clears both the -w error and the unknown FOO.
+        // The daemon keeps one status for all permission options, so the
+        // valid PING clears both the -w error and the unknown FOO.
         let mut child = Command::new(daemon(name, &run))
             .args(["-g", "-B", "-b", root.to_str().unwrap(), "-w", "bad"])
             .args(["-P", "FOO,PING", "-l"])

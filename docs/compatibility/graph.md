@@ -954,6 +954,45 @@ errors end with an empty line. Provenance: black-box compatibility test
 (`rpn_differential` VDEF parameter lexing) and probes of each form on the
 pinned macOS and Linux aarch64 oracles.
 
+**GR-100** (bb; compat, platform-specific). VDEF arithmetic. The pinned
+builds do not all round each multiply and add separately: some products
+are fused with the following add (rounded once), and which ones differs by
+platform. Let *y* be the known (finite) values, *i* the index of each in
+the series (unknown rows keep their index, so gaps count), *n* the number
+of known values and *fma(a, b, c)* the once-rounded *a*·*b* + *c*. The
+multiply-add of update.md UP-35 is fused on macOS arm64 and Linux aarch64
+and separately rounded on x86_64; it is written *ma* below.
+
+- `AVERAGE` and `TOTAL` sum the values starting from +0, so a series of
+  only `-0` values sums to +0. `TOTAL` is that sum times the step.
+- `STDEV` is the population deviation √(Σ(*y* − avg)² / *n*). On Linux
+  aarch64 each square is fused with the running sum,
+  *s* = fma(*d*, *d*, *s*); on macOS arm64 and on x86_64 the square is
+  rounded before the add.
+- `LSLSLOPE`, `LSLINT` and `LSLCORREL` accumulate Σ*i* and Σ*y* by plain
+  addition, Σ*iy* = *ma*(*i*, *y*, Σ*iy*) and Σ*yy* = *ma*(*y*, *y*, Σ*yy*),
+  and Σ*ii* by adding *i*² computed as an unsigned 64-bit integer (wrapping)
+  and then converted to a double.
+- The slope is (Σ*i*·Σ*y* − *n*·Σ*iy*) / (Σ*i*·Σ*i* − *n*·Σ*ii*). On
+  Linux aarch64 the Σ*i* products are rounded and the *n* products fused:
+  fma(−Σ*iy*, *n*, Σ*i*·Σ*y*) / fma(−Σ*ii*, *n*, Σ*i*·Σ*i*). On macOS
+  arm64 it is the reverse: *ma*(Σ*i*, Σ*y*, −(*n*·Σ*iy*)) /
+  *ma*(Σ*i*, Σ*i*, −(*n*·Σ*ii*)). On x86_64 nothing is fused, so both
+  forms give the same result.
+- The intercept is *ma*(−slope, Σ*i*, Σ*y*) / *n*.
+- The correlation is (Σ*iy* − Σ*i*·Σ*y*/*n*) /
+  √((Σ*ii* − Σ*i*·Σ*i*/*n*)·(Σ*yy* − Σ*y*·Σ*y*/*n*)), every operation
+  rounded separately on every platform.
+
+The differences are in the last bits, which `PRINT` and `GPRINT` show only
+for cancellation-sensitive data. Provenance: black-box compatibility test
+(`vdef_differential.rs` `vdef_aggregates_match_pinned_rrdtool_graphv`,
+whose series are chosen so that each summation order and rounding is
+visible in the printed values, on the macOS arm64 and Linux oracles) and the
+unit tests of `crates/rondi/src/vdef.rs`
+(`negative_zero_sums_start_from_positive_zero`,
+`least_squares_uses_series_indices_including_unknown_gaps`).
+
 ## 7. Drawing elements
 
 **GR-50** (doc, bb; compat).

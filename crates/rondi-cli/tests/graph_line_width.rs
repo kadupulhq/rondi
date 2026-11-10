@@ -1,6 +1,6 @@
 #![cfg(unix)]
-//! A LINE width found by fuzzing. RRDtool (newGraphDescription,
-//! PARSE_LINEWIDTH) only rejects negative widths; Cairo strokes the rest.
+//! A LINE width found by fuzzing. RRDtool only rejects negative widths;
+//! Cairo strokes the rest (graph.md GR-50).
 
 use std::os::unix::fs::symlink;
 use std::process::{Command, Stdio};

@@ -1,5 +1,5 @@
 #![cfg(unix)]
-//! Differential tests for RRDtool's graph option parser: optparse
+//! Differential tests for RRDtool's graph option parser: option
 //! forms and the full long-option table with each option's validation.
 //! Each test compares the pinned RRDtool 1.11.0 executable with the Rondi
 //! alias on identical arguments in TZ=UTC. PNG bytes are never compared;
@@ -190,8 +190,9 @@ fn args(items: &[&str]) -> Vec<String> {
     items.iter().map(ToString::to_string).collect()
 }
 
-// RRDtool uses optparse_long: `--opt=value`, attached short values,
-// bundled flags, `--`, and options before the filename are all accepted.
+// `--opt=value`, attached short values,
+// bundled flags, `--`, and options before the filename are all accepted
+// (graph.md GR-10 to GR-15).
 #[test]
 fn graph_options_use_optparse_semantics() {
     let Some(f) = fixture() else { return };
@@ -272,7 +273,7 @@ fn graph_options_use_optparse_semantics() {
 // Options emitted by Kadupul lib/rrd.php (lines 1117-1331, 2642-2714) plus the
 // rest of the RRDtool long-option table.
 #[test]
-fn graph_accepts_the_full_rrd_graph_option_table() {
+fn graph_accepts_every_documented_option() {
     let Some(f) = fixture() else { return };
     let p = "PRINT:x:AVERAGE:%6.2lf";
     let cases: Vec<Vec<String>> = [
@@ -396,9 +397,10 @@ fn png_dimension_limit_applies_before_data_processing() {
     assert_eq!(xml.status.code(), Some(0));
 }
 
-// graph_cairo_setup sizes the surface as int(ximg * zoom) and image_info
-// reports (long)(zoom * ximg), while graphv's image_width stays unscaled.
-// A surface cairo cannot create or write fails the save after image_info.
+// The written image is int(width * zoom) pixels wide and image_info
+// reports (long)(zoom * width), while graphv's image_width stays
+// unscaled (graph.md GR-81). A surface cairo cannot create or write fails
+// the save after image_info.
 #[test]
 fn zoom_scales_the_written_image_and_image_info() {
     let Some(f) = fixture() else { return };
@@ -437,8 +439,8 @@ fn zoom_scales_the_written_image_and_image_info() {
     f.assert_all_same_output(&cases);
 }
 
-// An infinite --upper-limit or --lower-limit makes si_unit's magfact infinite,
-// so calc_horizontal_grid sees a NaN scaled range and graph_paint stops
+// An infinite --upper-limit or --lower-limit makes the SI magnitude
+// infinite, and RRDtool then abandons the graph
 // without an error: no file, no output, exit 0. --logarithmic is left out
 // because the pinned build loops forever there.
 #[test]

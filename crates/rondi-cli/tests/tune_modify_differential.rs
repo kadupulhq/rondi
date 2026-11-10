@@ -135,7 +135,7 @@ fn fixtures() -> Option<common::Sides> {
             .chain(std::iter::once("1000003037:3000:20:400:120:4".to_owned())),
     );
     // Ten archives, eight of them AVERAGE with tied pdp and row counts, so
-    // the qsort in find_candidate_rras has to order equal candidates.
+    // the candidate archives for resampling include equal ones.
     let ties = [
         "create",
         "ties.rrd",
@@ -223,7 +223,7 @@ fn fixtures() -> Option<common::Sides> {
 // grown rows are back-filled from other archives, and the
 // CDP of an added archive is rebuilt.
 #[test]
-fn tune_modify_rewrites_files_like_rrd_modify() {
+fn tune_modify_rewrites_files_like_rrdtool() {
     let Some(sides) = fixtures() else {
         return;
     };
@@ -287,7 +287,7 @@ fn tune_modify_rewrites_files_like_rrd_modify() {
 // RRDtool's tune: --step stretches every archive
 // before the other changes, and must divide the old step.
 #[test]
-fn tune_modify_step_stretches_like_rrd_modify() {
+fn tune_modify_step_stretches_like_rrdtool() {
     let Some(sides) = fixtures() else {
         return;
     };
@@ -312,7 +312,7 @@ fn tune_modify_step_stretches_like_rrd_modify() {
 // adding a DS refuses a name that is already taken. The archive-less result matches too, though RRDtool's own
 // info and dump abort on it, so only the bytes are compared there.
 #[test]
-fn tune_modify_errors_match_rrd_modify() {
+fn tune_modify_errors_match_rrdtool() {
     let Some(sides) = fixtures() else {
         return;
     };
@@ -339,8 +339,8 @@ fn tune_modify_errors_match_rrd_modify() {
     assert_same_tune(&sides, "fresh.rrd", 299, &["DELRRA:0", "DELRRA:1"], false);
 }
 
-// A DS definition that fails to parse does not stop add_dss: upstream
-// writes the definition's uninitialized bytes and then reports the error.
+// A DS definition that fails to parse does not stop the tune: RRDtool
+// writes unspecified bytes for that definition and then reports the error.
 // Rondi reports the same error and leaves the file as it was. COMPUTE
 // data sources and Holt-Winters archives stay refused, as in create.
 #[test]
@@ -393,7 +393,7 @@ fn tune_modify_refuses_without_writing_where_upstream_writes_garbage() {
     }
 }
 
-// write_rrd writes a temporary file, gives it the old
+// tune writes a temporary file, gives it the old
 // file's mode and renames it over the old name.
 #[test]
 fn tune_modify_keeps_the_file_mode_and_replaces_the_inode() {
