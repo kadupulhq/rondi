@@ -434,6 +434,14 @@ pub fn replay_oracle(suite: &Suite) {
             continue;
         }
         let reference = suite.observe(&oracle, &upstream, &case);
+        // A recorded crash of the reference (a `clean-error` case such as
+        // HW-5's window over 28) reads memory past the record it describes,
+        // so whether it crashes depends on how RRDtool was built: the
+        // coverage job's build exits 0 on case 202. Rondi's clean error is
+        // still checked by `replay_rondi`.
+        if case.expect == Expect::CleanError && section(&vectors[&case.id], "status") == b"signal" {
+            continue;
+        }
         failures.extend(
             check(&case, Expect::Same, &reference, &vectors[&case.id])
                 .map(|failure| format!("[rrdtool] {failure}")),
