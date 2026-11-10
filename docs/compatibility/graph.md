@@ -993,6 +993,45 @@ unit tests of `crates/rondi/src/vdef.rs`
 (`negative_zero_sums_start_from_positive_zero`,
 `least_squares_uses_series_indices_including_unknown_gaps`).
 
+**GR-101** (bb; compat, platform-specific). VDEF `PERCENT` and
+`PERCENTNAN` over data that holds unknown or infinite values. Let *p* be
+the parameter and *v* the series values in time order.
+
+- `PERCENTNAN` first drops the unknown values; `PERCENT` keeps them. If no
+  value is left the result is unknown.
+- The remaining *m* values are sorted by the comparison of rpn.md
+  ("Ordering used by SORT, MEDIAN, PERCENT and PREDICTPERC"), and the result
+  is the value at zero-based position round(*p*·(*m* − 1)/100), halves
+  rounded away from zero. For finite values this is the ordinary ascending
+  order: `9,3,7,1,8,2,6,4,5,10` gives 1, 3, 6, 8, 10 for *p* of 0, 25, 50,
+  75, 100. Unknown values sort first, so for `PERCENT` the series
+  `UNKN,1` gives unknown for *p* of 0 and 25 and 1 above, while
+  `PERCENTNAN` gives 1 everywhere.
+- With an infinity present that comparison is not a consistent order, so
+  the sorted sequence depends on the platform's `qsort` and a different
+  sort algorithm gives different results. Rondi therefore calls the
+  platform's `qsort` with that comparison. Observed on macOS arm64 for
+  two-value series (the result for *p* of 0 and 100 is the sorted pair): the
+  pair comes out in the reverse of the input order whenever either value is
+  infinite (`1,INF` gives `inf, 1`; `INF,1` gives `1, inf`; `NEGINF,1` gives
+  `1, -inf`; `1,NEGINF` gives `-inf, 1`; `NEGINF,INF` gives `inf, -inf`;
+  `INF,NEGINF` gives `-inf, inf`). Longer series are pinned by example:
+  `NEGINF,1,2` is read in the order `1, 2, -inf`; `3,INF,2,1,4` gives 1, 2,
+  inf, 3, 4 for *p* of 0, 25, 50, 75, 100; `INF,NEGINF,1,2,3` gives
+  1, 2, 3, -inf, inf; and `UNKN,INF,NEGINF,2,1` gives unknown, 1, 2, -inf,
+  inf under `PERCENT` and 1, 2, -inf, -inf, inf under `PERCENTNAN`.
+- On glibc the classification of `-inf` differs (rpn.md), so the results
+  with a negative infinity differ from the macOS ones (vector `vdef-22`).
+
+Provenance: black-box compatibility test, probes of each series above with
+`graphv` and `PRINT:<vname>:%.0lf` on the pinned macOS arm64 oracle (every
+value printed above is its output); the unit tests of
+`crates/rondi/src/vdef.rs` (`percentile_nan_and_finite_semantics_are_distinct`,
+`percentile_comparator_follows_the_libc_isinf_sign`) and
+`vdef_percentiles_with_infinities_match_pinned_rrdtool_qsort` in
+`crates/rondi-cli/tests/vdef_differential.rs`. The Linux claim comes from the
+existing `vdef-22` record, not from a new probe.
+
 ## 7. Drawing elements
 
 **GR-50** (doc, bb; compat).

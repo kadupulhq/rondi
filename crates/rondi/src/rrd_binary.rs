@@ -36,8 +36,8 @@ pub(crate) fn rrd_nan() -> f64 {
 /// contract this pattern into a fused multiply-add on aarch64, which always
 /// has the instruction, while baseline x86_64 builds round the product first
 /// because the compiler may not assume FMA hardware there. Callers pass the
-/// exact operand split the pinned build's disassembly shows, since only one
-/// product of an `a * b - c * d` expression is fused.
+/// operand split observed from the pinned build's output (update.md UP-35),
+/// since only one product of an `a * b - c * d` expression is fused.
 #[inline]
 pub(crate) fn rrd_mul_add(a: f64, b: f64, c: f64) -> f64 {
     #[cfg(target_arch = "aarch64")]
@@ -128,8 +128,8 @@ pub fn parse_rrd_scaled_duration(text: &str, divisor: u64) -> Result<u64, StoreE
 }
 
 /// RRDtool's duration parser: a bare count is not scaled; a
-/// suffixed duration must divide evenly. As in C, `strtoul` saturates and the
-/// suffix multiplication wraps.
+/// suffixed duration must divide evenly. A count beyond 2^64-1 saturates and
+/// the suffix multiplication wraps modulo 2^64 (create.md CR-13).
 pub(crate) fn rrd_scaled_duration(token: &str, divisor: u64) -> Result<u64, &'static str> {
     let bytes = token.as_bytes();
     if !bytes.first().is_some_and(u8::is_ascii_digit) {

@@ -43,7 +43,7 @@ Each behavior change below merged to `main` with differential tests against RRDt
 - #95: rrdcached request handlers (CREATE, FETCH/FETCHBIN, HELP, SUSPEND/RESUME, LIST, TUNE, empty names, NUL separators) match RRDtool 1.11.0; the half-close race is recorded as RD-015.
 - #96: `--daemon` addresses parse as RRDtool 1.11.0 does (bare hosts use port 42217), `tune` re-parses its permuted argv, and `rrdtool fetch` streams past 10 million rows (the collected paths keep the limit as RD-017).
 - #97: rrdcached `-b`, `-P`, `-p`, default logging, and SIGUSR1, SIGUSR2 and SIGHUP match RRDtool 1.11.0.
-- #98: restore matches RRDtool 1.11.0 for integer field errors, a byte order mark, trailing content and libxml2 error text (RD-018 lists what does not match). #98 did this with a port of libxml2 2.9.14's `xmlTextReader`; that module has since been replaced by a clean-room reader (see [provenance-audit.md](provenance-audit.md)).
+- #98: restore matches RRDtool 1.11.0 for integer field errors, a byte order mark, trailing content and libxml2 error text (RD-018 lists what does not match). #98 did this with code derived from libxml2 2.9.14's `xmlTextReader`; that module has since been replaced by a clean-room reader (see [provenance-audit.md](provenance-audit.md)).
 
 - #100: Rondi is licensed `MIT OR Apache-2.0`; no behavior change.
 
@@ -214,7 +214,7 @@ Nothing. No `crate-type` in `crates/*/Cargo.toml`; no FFI, no headers (READ-ONLY
 - Argc/argv entry points reuse the CLI option parser so behavior is identical, including `optind` reset.
 - Allocate `rrd_info_t` lists and fetch buffers with `libc::malloc`, so `rrd_info_free` and `rrd_freemem` (which call `free`) work.
 - `rrd_open` and `rrd_t` exposure sits on the layout descriptor from the format section. It is the hardest part; start with an error stub and inventory which consumers call it (`nm -D --undefined-only`).
-- License: Rondi is `MIT OR Apache-2.0`, while upstream `librrd` is GPL-2.0-or-later with the FLOSS exception. Parts of Rondi translate RRDtool C source, so the terms a Rondi `librrd` can ship under need the owner's confirmation. This is not legal advice.
+- License: Rondi is `MIT OR Apache-2.0`, while upstream `librrd` is GPL-2.0-or-later with the FLOSS exception. Some modules predate the clean-room policy and are still being audited for provenance (see [provenance-audit.md](provenance-audit.md)), so the terms a Rondi `librrd` can ship under need the owner's confirmation. This is not legal advice.
 
 ### Effort
 
@@ -340,7 +340,7 @@ RRDProxy (RD-008) is a Cacti protocol, not part of RRDtool. Track it outside thi
 3. **Platform-dependent output.** NaN bits, `qsort` order, FMA contraction, double-to-integer casts, `realloc(p, 0)`, `strtoll` errno and the libxml2 version differ by compiler, CPU or libc. [compatibility.md](compatibility.md#platform-notes) lists the cases Rondi reproduces. Mitigation: generate expectations from the matching upstream build for each target; never write them by hand.
 4. **Time and locale.** `rrd_parsetime` and RPN calendar operators depend on `TZ`, DST tables, and `LC_TIME`. CI images often lack locales. Mitigation: a fixed locale and tzdata version in the CI image, and a frozen "now" in tests.
 5. **Dropping per-update sync.** Matching upstream removed a durability guarantee Rondi used to give. Say so in the release notes.
-6. **Licensing.** Rondi is `MIT OR Apache-2.0`. The author audit found no contributor besides the maintainer and Dependabot, so no other consent is needed for Rondi-authored code. Code translated from RRDtool keeps RRDtool's GPL-2.0-or-later plus FLOSS exception terms upstream; whether that is compatible with the dual license is for the owner to confirm.
+6. **Licensing.** Rondi is `MIT OR Apache-2.0`. The author audit found no contributor besides the maintainer and Dependabot, so no other consent is needed for Rondi-authored code. Any module the provenance audit finds derived from RRDtool's code keeps RRDtool's GPL-2.0-or-later plus FLOSS exception terms; whether that is compatible with the dual license is for the owner to confirm.
 7. **32-bit `time_t`.** Some 32-bit distributions moved to 64-bit `time_t`, which changes `live_head_t`. Measure upstream per distribution build; do not assume (READ-ONLY concern).
 8. **Undefined upstream behavior.** `ROLL` above count 3 reads past the RPN stack, and mixed-resolution CDEFs read outside RRDtool's buffers near the ends of a range (RD-005). Do not chase results that depend on stray memory; document the deviation. This is the only class of difference the goal allows, together with the safety deviations already recorded as ID-001 to ID-003, RD-016 and RD-017.
 9. **Hosted-runner cost.** GitHub-hosted runners limit long fuzz and benchmark jobs. Run those on a schedule with a time limit, or add a runner later by a separate decision.

@@ -2380,10 +2380,10 @@ fn render_graph_png(
     Ok(output)
 }
 
-/// C's `(int)` conversion of a double as the pinned build compiles it. An
-/// out-of-range or NaN value is undefined behaviour in C: aarch64 FCVTZS
-/// saturates and maps NaN to 0 like Rust's `as`, while x86-64 CVTTSD2SI
-/// returns the minimum ("integer indefinite").
+/// Converts a double to a 32-bit integer as the pinned build does. An
+/// out-of-range or NaN value is platform dependent: aarch64 saturates and
+/// maps NaN to 0, like Rust's `as`, while x86-64 returns the type's minimum
+/// (format-strings.md FS-26, rpn.md).
 fn c_double_to_int(value: f64) -> i32 {
     if cfg!(target_arch = "x86_64") && !(-2_147_483_648.0..2_147_483_648.0).contains(&value) {
         return i32::MIN;
@@ -2391,7 +2391,7 @@ fn c_double_to_int(value: f64) -> i32 {
     value as i32
 }
 
-/// C's `(long)` conversion of a double; see [`c_double_to_int`].
+/// The 64-bit counterpart of [`c_double_to_int`].
 fn c_double_to_long(value: f64) -> i64 {
     if cfg!(target_arch = "x86_64")
         && !(-9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0).contains(&value)
@@ -3334,8 +3334,8 @@ fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std
                         })
                         .or_else(|| data_sources.get(value_index).map(|source| source.kind.as_str()))
                         .unwrap_or("GAUGE");
-                    // update_pdp_prep converts DCOUNTER/DDERIVE text only when
-                    // the previous sample is known; the library decides.
+                    // For DCOUNTER and DDERIVE the library decides whether the
+                    // text converts, so no error is raised here (update.md UP-17).
                     if matches!(source_index, "DCOUNTER" | "DDERIVE") {
                         return Ok(None);
                     }
@@ -4516,7 +4516,7 @@ fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .into());
     };
     let directory = PathBuf::from(directory);
-    // rrdc_connect treats an empty address as none.
+    // An empty address means no daemon (cli.md CLI-30).
     if let Some(address) = daemon
         .clone()
         .or_else(|| std::env::var("RRDCACHED_ADDRESS").ok())
@@ -4585,10 +4585,8 @@ fn rrdcached_time_value(
         .ok_or_else(|| format!("invalid rrdcached {verb} response").into())
 }
 
-// The rrdcached client functions below (`rrdcached_client_path`,
-// `translate_rrdcached_file_command`, `connect_rrdcached`,
-// `split_rrdcached_network_address`) derive from RRDtool 1.11.0's client library
-// source file, which is MIT-licensed (Copyright (C) 2008-2013 Florian octo
+// The rrdcached client helpers below derive from RRDtool 1.11.0's client
+// library source file, which is MIT-licensed (Copyright (C) 2008-2013 Florian octo
 // Forster). See THIRD-PARTY-NOTICES.md for the copyright notice and license text.
 /// Chooses the path sent to the daemon, as RRDtool 1.11.0 does. A local
 /// daemon receives a canonical absolute path; a remote daemon receives its

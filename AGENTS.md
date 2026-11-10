@@ -101,9 +101,10 @@ licensing uncertainty by cosmetically rewriting code.
 ### Existing code
 
 Code written before this policy is being audited; results go in
-docs/provenance-audit.md. Legacy modules and notes whose documentation says
-they port RRDtool C (for example, parts of `docs/rrd-source-notes.md`) are
-flagged for that audit, not endorsed as a model for new work.
+docs/provenance-audit.md. Legacy modules whose documentation says they port
+RRDtool C are flagged for that audit, not endorsed as a model for new work.
+`docs/rrd-source-notes.md` is an index of the implementation-neutral rules in
+`docs/compatibility/`; its earlier text survives only in repository history.
 
 ### Contributor checklist
 
