@@ -6,8 +6,21 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-10
+
+First release. Rondi is a behavior-compatible implementation of RRDtool
+1.11.0, written from documentation, the behavioral specifications in
+`docs/compatibility/` and black-box tests against the pinned RRDtool. The
+provenance of each part is recorded in `docs/provenance-audit.md`.
+
+### Known limitations
+
+- `create` and `tune` refuse Holt-Winters archives, and `update` refuses Holt-Winters layouts it does not model, leaving the file unchanged. Holt-Winters `create` and `tune` are planned for 0.2.
+- The `tune` header options, the `xport` and `graphv` writers in `rondi-cli` and parts of `rrd_binary.rs` predate the clean-room process and are scheduled for respecification and rewrite in 0.2 (see the 2026-11-10 re-audit in `docs/provenance-audit.md`).
+
 ### Added
 
+- `COMPUTE` data sources, specified in `docs/compatibility/compute.md` (#144).
 - `info`, `dump` and `update` handle Holt-Winters archives (`HWPREDICT`, `MHWPREDICT`, `SEASONAL`, `DEVSEASONAL`, `DEVPREDICT`, `FAILURES`) as RRDtool 1.11.0 does, from `docs/compatibility/holt-winters.md`. `update` refuses Holt-Winters groups it does not model and leaves the file unchanged. `rondi::holt_winters` exposes `Role` and `info_fields`.
 - `tune` performs the structure operations `DEL:`, `DS:`, `DELRRA:`, `RRA#n:[+-=]rows`, `RRA:` and `--step` (#91).
 - Criterion fetch and graph calculation benchmarks for 120-row and 7,200-row archives (#79).
@@ -15,6 +28,8 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ### Changed
 
+- Reimplemented clean-room from behavioral specifications, replacing the earlier code: RPN (#109), `create` and `resize` (#114), `restore` (#115), at-style time parsing (#116), option scanning, dispatch and pipe mode (#120), PRINT/GPRINT, duration and dump number formatting (#121), the rrdcached daemon, protocol, cache and journal (#122, #124), graph options, layout and engine (#125, #128, #141), `list` (#143), `update` and `updatev` (#151), and the COUNTER and DERIVE difference (#157).
+- The rrdcached client path and address handling and the decimal number conversion derive from permissively licensed RRDtool files and carry their notices in `THIRD-PARTY-NOTICES.md` (#152).
 - `RrdCdpPrepInfo` gains a crate-private field holding the raw CDP words, so code outside the crate can no longer build it with a struct literal (breaking API change).
 - `tune` structure changes are reimplemented in `tune_modify.rs` from `docs/compatibility/tune-modify.md`, replacing the earlier `rrd_modify.rs`. `modify_rrd_file` now takes a list of `RrdStructureOp` values (breaking API change).
 - Rondi is licensed `MIT OR Apache-2.0`. `COPYRIGHT` carries RRDtool's unmodified notice as third-party attribution, and the license text that notice refers to is in `LICENSE-GPL-2.0` (#100).
