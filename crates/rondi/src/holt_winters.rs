@@ -205,6 +205,115 @@ pub fn info_fields(
     Ok(Some(out))
 }
 
+/// The `<params>` lines of a Holt-Winters archive in `dump`, each ready to
+/// write (tab-indented, newline-terminated); `None` for a classic archive.
+/// Doubles print as `%0.10e` with `nan` for an unknown (`<params>` spells it
+/// differently from `<cdp_prep>`). Fails for a FAILURES window above 28.
+///
+/// Compatibility: parameter elements in the HW-4 order; `smoothing_window`
+/// only under the version rule of HW-3.
+/// Provenance: specification (docs/compatibility/holt-winters.md HW-4, HW-5).
+pub fn dump_params(archive: &RrdArchiveInfo, version: &str) -> Result<Option<String>, String> {
+    use crate::rrd_binary::format_rrd_float as f;
+    let Some(role) = Role::from_cf(&archive.raw_consolidation) else {
+        return Ok(None);
+    };
+    let window_len = archive.param_u64(param::WINDOW_LEN);
+    if role == Role::Failures && window_len > MAX_WINDOW_LEN {
+        return Err(format!(
+            "FAILURES window length {window_len} exceeds {MAX_WINDOW_LEN}"
+        ));
+    }
+    let shows_window = crate::rrd_binary::version_number(version.as_bytes()) >= 4;
+    let dep = archive.param_u64(param::DEPENDENT);
+    let mut out = String::new();
+    let mut put = |name: &str, value: String| {
+        out.push_str(&format!("\t\t<{name}>{value}</{name}>\n"));
+    };
+    match role {
+        Role::Prediction { .. } => {
+            put("hw_alpha", f(archive.param_f64(param::ALPHA)));
+            put("hw_beta", f(archive.param_f64(param::BETA)));
+            put("dependent_rra_idx", dep.to_string());
+        }
+        Role::Seasonal | Role::DevSeasonal => {
+            put("seasonal_gamma", f(archive.param_f64(param::GAMMA)));
+            put(
+                "seasonal_smooth_idx",
+                archive.param_u64(param::SMOOTH_IDX).to_string(),
+            );
+            if shows_window {
+                put(
+                    "smoothing_window",
+                    f(archive.param_f64(param::SMOOTHING_WINDOW)),
+                );
+            }
+            put("dependent_rra_idx", dep.to_string());
+        }
+        Role::DevPredict => put("dependent_rra_idx", dep.to_string()),
+        Role::Failures => {
+            put("delta_pos", f(archive.param_f64(param::DELTA_POS)));
+            put("delta_neg", f(archive.param_f64(param::DELTA_NEG)));
+            put("window_len", window_len.to_string());
+            put(
+                "failure_threshold",
+                archive.param_u64(param::THRESHOLD).to_string(),
+            );
+            put("dependent_rra_idx", dep.to_string());
+        }
+    }
+    Ok(Some(out))
+}
+
+/// The role-specific `<cdp_prep>` `<ds>` lines after `secondary_value`
+/// (tab-indented, newline-terminated); `None` for a classic archive.
+///
+/// Compatibility: element names and order of HW-4; the history prints each
+/// byte as a decimal integer with no separator, signed except on Linux
+/// aarch64.
+/// Provenance: specification (docs/compatibility/holt-winters.md HW-4).
+pub fn dump_cdp(archive: &RrdArchiveInfo, prep: &RrdCdpPrepInfo) -> Option<String> {
+    use crate::rrd_binary::format_rrd_value as f;
+    let role = Role::from_cf(&archive.raw_consolidation)?;
+    let mut out = String::new();
+    let mut put = |name: &str, value: String| {
+        out.push_str(&format!("\t\t\t<{name}>{value}</{name}>\n"));
+    };
+    match role {
+        Role::Prediction { .. } => {
+            put("intercept", f(prep.word_f64(cdp::INTERCEPT)));
+            put("last_intercept", f(prep.word_f64(cdp::LAST_INTERCEPT)));
+            put("slope", f(prep.word_f64(cdp::SLOPE)));
+            put("last_slope", f(prep.word_f64(cdp::LAST_SLOPE)));
+            put("nan_count", prep.word_u64(cdp::NAN_COUNT).to_string());
+            put(
+                "last_nan_count",
+                prep.word_u64(cdp::LAST_NAN_COUNT).to_string(),
+            );
+        }
+        Role::Seasonal | Role::DevSeasonal => {
+            put("seasonal", f(prep.word_f64(cdp::SEASONAL)));
+            put("last_seasonal", f(prep.word_f64(cdp::LAST_SEASONAL)));
+            put("init_flag", prep.word_u64(cdp::INIT_FLAG).to_string());
+        }
+        Role::DevPredict => {}
+        Role::Failures => {
+            let history: String = failure_history(prep, archive.param_u64(param::WINDOW_LEN))
+                .iter()
+                .map(|&byte| {
+                    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+                    let shown = i32::from(byte);
+                    #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
+                    let shown = i32::from(byte as i8);
+                    shown.to_string()
+                })
+                .collect();
+            put("history", history);
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

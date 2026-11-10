@@ -921,6 +921,7 @@ pub fn dump_rrd_open_file_bytes(
             archive.consolidation.as_str(),
             "AVERAGE" | "MIN" | "MAX" | "LAST"
         ) && cf_conv_error(&archive.raw_consolidation).is_none()
+            && crate::holt_winters::Role::from_cf(&archive.raw_consolidation).is_none()
     }) {
         return Err(StoreError::RrdUnsupported(
             "rrdtool dump currently supports AVERAGE/MIN/MAX/LAST archives only".into(),
@@ -1012,7 +1013,12 @@ pub fn dump_rrd_open_file_bytes(
         )
         .unwrap();
         out.extend_from_slice(b"\t\t<params>\n");
-        writeln!(out, "\t\t<xff>{}</xff>", format_rrd_float(archive.xff)).unwrap();
+        match crate::holt_winters::dump_params(archive, &info.version)
+            .map_err(|message| rrd_error(&message))?
+        {
+            Some(params) => out.extend_from_slice(params.as_bytes()),
+            None => writeln!(out, "\t\t<xff>{}</xff>", format_rrd_float(archive.xff)).unwrap(),
+        }
         out.extend_from_slice(b"\t\t</params>\n\t\t<cdp_prep>\n");
         for prep in &archive.cdp_prep {
             out.extend_from_slice(b"\t\t\t<ds>\n");
@@ -1028,13 +1034,18 @@ pub fn dump_rrd_open_file_bytes(
                 format_rrd_value(prep.secondary_value)
             )
             .unwrap();
-            writeln!(out, "\t\t\t<value>{}</value>", format_rrd_value(prep.value)).unwrap();
-            writeln!(
-                out,
-                "\t\t\t<unknown_datapoints>{}</unknown_datapoints>",
-                prep.unknown_datapoints
-            )
-            .unwrap();
+            match crate::holt_winters::dump_cdp(archive, prep) {
+                Some(state) => out.extend_from_slice(state.as_bytes()),
+                None => {
+                    writeln!(out, "\t\t\t<value>{}</value>", format_rrd_value(prep.value)).unwrap();
+                    writeln!(
+                        out,
+                        "\t\t\t<unknown_datapoints>{}</unknown_datapoints>",
+                        prep.unknown_datapoints
+                    )
+                    .unwrap();
+                }
+            }
             out.extend_from_slice(b"\t\t\t</ds>\n");
         }
         out.extend_from_slice(b"\t\t</cdp_prep>\n\t\t<database>\n");
@@ -1083,7 +1094,7 @@ pub fn dump_rrd_open_file_bytes(
     Ok(out)
 }
 
-fn format_rrd_value(value: f64) -> String {
+pub(crate) fn format_rrd_value(value: f64) -> String {
     if value.is_nan() {
         "NaN".to_owned()
     } else {
@@ -1097,7 +1108,7 @@ fn format_rrd_optional(value: Option<f64>) -> String {
 
 // Dump writes values with RRDtool's own printf, which drops the sign of -0
 // and leaves subnormals unnormalized.
-fn format_rrd_float(value: f64) -> String {
+pub(crate) fn format_rrd_float(value: f64) -> String {
     crate::format_value::data_value(value)
 }
 
