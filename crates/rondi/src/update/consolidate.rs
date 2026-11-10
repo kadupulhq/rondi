@@ -1,18 +1,11 @@
 //! Consolidation of PDP runs into archive rows (UP-26 to UP-30, UP-32).
 
 use super::RrdUpdateSummary;
+use super::holt_winters::{Group, Seasons, consolidate_group};
 use super::pdp::Run;
+use crate::holt_winters::Role;
 use crate::rrd_binary::{RrdArchiveInfo, RrdCdpPrepInfo, cf_conv_error, rrd_mul_add, rrd_nan};
 use crate::storage::StoreError;
-
-const HOLT_WINTERS_CFS: [&[u8]; 6] = [
-    b"HWPREDICT",
-    b"MHWPREDICT",
-    b"SEASONAL",
-    b"DEVSEASONAL",
-    b"DEVPREDICT",
-    b"FAILURES",
-];
 
 /// A classic consolidation function.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,12 +18,13 @@ pub(crate) enum Cf {
 
 /// How an archive consumes runs of PDPs.
 ///
-/// Holt-Winters kinds are added as further variants; they receive each
-/// `Run` and process its PDPs one at a time, in time order, with their own
-/// row pointer.
+/// Holt-Winters archives are coupled PDP by PDP across archives, so they
+/// are consolidated together by [`consolidate_group`], each still with its
+/// own row pointer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ArchiveKind {
     Classic(Cf),
+    HoltWinters(Role),
 }
 
 impl ArchiveKind {
@@ -41,13 +35,10 @@ impl ArchiveKind {
             b"MIN" => Cf::Min,
             b"MAX" => Cf::Max,
             b"LAST" => Cf::Last,
-            raw if HOLT_WINTERS_CFS.contains(&raw) => {
-                return Err(StoreError::RrdUnsupported(format!(
-                    "Holt-Winters consolidation function {} is not supported by Rondi",
-                    String::from_utf8_lossy(raw)
-                )));
-            }
             raw => {
+                if let Some(role) = Role::from_cf(raw) {
+                    return Ok(ArchiveKind::HoltWinters(role));
+                }
                 let message = cf_conv_error(raw).unwrap_or_default();
                 return Err(StoreError::Rrd(
                     String::from_utf8_lossy(&message).into_owned(),
@@ -212,7 +203,7 @@ impl PrintedTimes {
 pub(crate) struct RowPastEnd;
 
 /// The row UP-30 writes after `current` in an archive of `rows` rows.
-fn next_row(current: u64, rows: u64) -> u64 {
+pub(super) fn next_row(current: u64, rows: u64) -> u64 {
     let next = current.wrapping_add(1);
     if next >= rows { 0 } else { next }
 }
@@ -319,7 +310,9 @@ pub(crate) fn consolidate_run(
     rows_out: &mut Vec<RowRange>,
     mut summaries: Option<&mut Vec<RrdUpdateSummary>>,
 ) -> Result<(), RowPastEnd> {
-    let ArchiveKind::Classic(cf) = kind;
+    let ArchiveKind::Classic(cf) = kind else {
+        return Ok(());
+    };
     // One PDP and one accumulator per data source; the zips below rely on it.
     debug_assert_eq!(run.values.len(), archive.cdp_prep.len());
     if archive.rows == 0 || run.len == 0 {
@@ -395,9 +388,11 @@ pub(crate) fn consolidate_run(
 /// Consolidates one run into every archive, in archive order (UP-28). This
 /// is the only entry point the update loop uses.
 ///
-/// Holt-Winters archives are coupled PDP by PDP across archives; their later
-/// handler takes the whole run for all of its archives here, rather than per
-/// archive.
+/// `hw` carries the file's Holt-Winters archives, their season rows and
+/// whether a season counter triggered. The group's state changes for the
+/// whole run before any row is written, as every classic archive's does;
+/// each Holt-Winters row is then written at its archive's place in archive
+/// order. Without `hw`, Holt-Winters archives are left alone.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn consolidate_all(
     archives: &mut [RrdArchiveInfo],
@@ -408,6 +403,7 @@ pub(crate) fn consolidate_all(
     rows_in_file: &[u64],
     rows_out: &mut Vec<RowRange>,
     mut summaries: Option<&mut Vec<RrdUpdateSummary>>,
+    hw: Option<(&Group, &mut Seasons, &mut bool)>,
 ) -> Result<(), RowPastEnd> {
     // Provenance: specification (docs/compatibility/update.md UP-38). Every
     // archive's CDP state changes for the run, but rows are written archive
@@ -415,6 +411,16 @@ pub(crate) fn consolidate_all(
     // current rows of later archives unwritten.
     debug_assert_eq!(archives.len(), kinds.len());
     let current_rows: Vec<u64> = archives.iter().map(|archive| archive.current_row).collect();
+    let mut group_rows = match hw {
+        Some((group, seasons, triggered)) => {
+            consolidate_group(group, archives, seasons, run, triggered)
+        }
+        None => Vec::new(),
+    };
+    // Compatibility: a Holt-Winters row takes one PDP, so it is printed at
+    // the end of that PDP's step, like a one-PDP-per-row classic row.
+    // Provenance: specification (docs/compatibility/update.md UP-31, UP-32).
+    let hw_times = PrintedTimes::new(run, step, 1, 1, early_first_row);
     let mut stopped = None;
     for (index, (archive, &kind)) in archives.iter_mut().zip(kinds).enumerate() {
         let fit = rows_in_file.get(index).copied().unwrap_or(u64::MAX);
@@ -430,6 +436,21 @@ pub(crate) fn consolidate_all(
                 rows_out,
                 summaries.as_deref_mut(),
             ),
+            ArchiveKind::HoltWinters(_) => {
+                match group_rows.iter_mut().find(|row| row.archive == index) {
+                    Some(row) => write_rows(
+                        index,
+                        archive,
+                        fit,
+                        &std::mem::take(&mut row.values),
+                        1,
+                        |_| hw_times.opening(),
+                        rows_out,
+                        summaries.as_deref_mut(),
+                    ),
+                    None => Ok(()),
+                }
+            }
         };
         if result.is_err() && stopped.is_none() {
             let reported = summaries.as_deref().map_or(0, Vec::len);
@@ -910,6 +931,7 @@ mod tests {
             &[],
             &mut rows,
             Some(&mut summaries),
+            None,
         )
         .unwrap();
         let rows = expand(&rows, |index| archives[index].rows);
@@ -929,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn holt_winters_refused() {
+    fn holt_winters_kinds() {
         for cf in [
             "HWPREDICT",
             "MHWPREDICT",
@@ -938,13 +960,12 @@ mod tests {
             "DEVPREDICT",
             "FAILURES",
         ] {
-            match ArchiveKind::from_raw(cf.as_bytes()) {
-                Err(StoreError::RrdUnsupported(message)) => assert_eq!(
-                    message,
-                    format!("Holt-Winters consolidation function {cf} is not supported by Rondi")
-                ),
-                other => panic!("{cf}: {other:?}"),
-            }
+            let role = Role::from_cf(cf.as_bytes()).unwrap();
+            assert_eq!(
+                ArchiveKind::from_raw(cf.as_bytes()).unwrap(),
+                ArchiveKind::HoltWinters(role),
+                "{cf}"
+            );
         }
         assert_eq!(
             ArchiveKind::from_raw(b"AVERAGE").unwrap(),
