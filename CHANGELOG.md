@@ -8,12 +8,14 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ### Added
 
+- `info`, `dump` and `update` handle Holt-Winters archives (`HWPREDICT`, `MHWPREDICT`, `SEASONAL`, `DEVSEASONAL`, `DEVPREDICT`, `FAILURES`) as RRDtool 1.11.0 does, from `docs/compatibility/holt-winters.md`. `update` refuses Holt-Winters groups it does not model and leaves the file unchanged. `rondi::holt_winters` exposes `Role` and `info_fields`.
 - `tune` performs the structure operations `DEL:`, `DS:`, `DELRRA:`, `RRA#n:[+-=]rows`, `RRA:` and `--step` (#91).
 - Criterion fetch and graph calculation benchmarks for 120-row and 7,200-row archives (#79).
 - Independent-implementation rules for contributors and coding agents in `AGENTS.md` and `docs/PROVENANCE.md`, with a provenance checklist in the pull request template.
 
 ### Changed
 
+- `RrdCdpPrepInfo` gains a crate-private field holding the raw CDP words, so code outside the crate can no longer build it with a struct literal (breaking API change).
 - `tune` structure changes are reimplemented in `tune_modify.rs` from `docs/compatibility/tune-modify.md`, replacing the earlier `rrd_modify.rs`. `modify_rrd_file` now takes a list of `RrdStructureOp` values (breaking API change).
 - Rondi is licensed `MIT OR Apache-2.0`. `COPYRIGHT` carries RRDtool's unmodified notice as third-party attribution, and the license text that notice refers to is in `LICENSE-GPL-2.0` (#100).
 - Replace the library entry point `run(config)` with `prepare_server(config)`, called before threads start, and `run(prepared)`. Library callers must update (breaking API change) (#80).

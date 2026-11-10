@@ -228,7 +228,7 @@ pub struct RrdArchiveInfo {
     pub xff: f64,
     /// The ten parameter slots as raw little-endian words (RS-53); slot 0
     /// is `xff`.
-    pub param_words: [u64; 10],
+    pub(crate) param_words: [u64; 10],
     pub current_row: u64,
     pub cdp_prep: Vec<RrdCdpPrepInfo>,
     pub(crate) data_offset: u64,
@@ -243,7 +243,7 @@ pub struct RrdCdpPrepInfo {
     /// The ten CDP slots as raw words (RS-53); words 0, 1, 8 and 9 agree
     /// with `value`, `unknown_datapoints`, `primary_value` and
     /// `secondary_value`.
-    pub words: [u64; 10],
+    pub(crate) words: [u64; 10],
 }
 
 pub(crate) fn inspect_path(path: &Path) -> Result<RrdInfo, StoreError> {

@@ -35,7 +35,7 @@ impl Role {
 }
 
 /// Archive parameter slots (RS-53).
-pub mod param {
+pub(crate) mod param {
     pub const ALPHA: usize = 1;
     pub const GAMMA: usize = 1;
     pub const DELTA_POS: usize = 1;
@@ -49,7 +49,7 @@ pub mod param {
 }
 
 /// CDP slots (RS-53).
-pub mod cdp {
+pub(crate) mod cdp {
     pub const INTERCEPT: usize = 2;
     pub const SEASONAL: usize = 2;
     pub const LAST_INTERCEPT: usize = 3;
@@ -64,30 +64,30 @@ pub mod cdp {
 }
 
 impl RrdArchiveInfo {
-    pub fn param_f64(&self, slot: usize) -> f64 {
+    pub(crate) fn param_f64(&self, slot: usize) -> f64 {
         f64::from_bits(self.param_words[slot])
     }
 
-    pub fn param_u64(&self, slot: usize) -> u64 {
+    pub(crate) fn param_u64(&self, slot: usize) -> u64 {
         self.param_words[slot]
     }
 }
 
 impl RrdCdpPrepInfo {
-    pub fn word_f64(&self, slot: usize) -> f64 {
+    pub(crate) fn word_f64(&self, slot: usize) -> f64 {
         f64::from_bits(self.words[slot])
     }
 
-    pub fn word_u64(&self, slot: usize) -> u64 {
+    pub(crate) fn word_u64(&self, slot: usize) -> u64 {
         self.words[slot]
     }
 
-    pub fn set_f64(&mut self, slot: usize, value: f64) {
+    pub(crate) fn set_f64(&mut self, slot: usize, value: f64) {
         self.set_u64(slot, value.to_bits());
     }
 
     /// Stores a raw word and keeps the four named fields in sync.
-    pub fn set_u64(&mut self, slot: usize, value: u64) {
+    pub(crate) fn set_u64(&mut self, slot: usize, value: u64) {
         self.words[slot] = value;
         match slot {
             0 => self.value = f64::from_bits(value),
@@ -104,7 +104,7 @@ impl RrdCdpPrepInfo {
 ///
 /// Compatibility: the history is a byte string at the start of the CDP.
 /// Provenance: specification (docs/compatibility/holt-winters.md HW-14).
-pub fn failure_history(prep: &RrdCdpPrepInfo, window_len: u64) -> Vec<u8> {
+pub(crate) fn failure_history(prep: &RrdCdpPrepInfo, window_len: u64) -> Vec<u8> {
     let len = window_len.min(28) as usize;
     prep.words
         .iter()
@@ -122,7 +122,7 @@ pub enum InfoValue {
 }
 
 /// The largest FAILURES window `info` can print (HW-5).
-pub const MAX_WINDOW_LEN: u64 = 28;
+pub(crate) const MAX_WINDOW_LEN: u64 = 28;
 
 /// The `info` lines of a Holt-Winters archive after `pdp_per_row`, as
 /// `(key suffix after "rra[i].", value)` pairs; `None` for a classic archive.
@@ -213,7 +213,10 @@ pub fn info_fields(
 /// Compatibility: parameter elements in the HW-4 order; `smoothing_window`
 /// only under the version rule of HW-3.
 /// Provenance: specification (docs/compatibility/holt-winters.md HW-4, HW-5).
-pub fn dump_params(archive: &RrdArchiveInfo, version: &str) -> Result<Option<String>, String> {
+pub(crate) fn dump_params(
+    archive: &RrdArchiveInfo,
+    version: &str,
+) -> Result<Option<String>, String> {
     use crate::rrd_binary::format_rrd_float as f;
     let Some(role) = Role::from_cf(&archive.raw_consolidation) else {
         return Ok(None);
@@ -272,7 +275,7 @@ pub fn dump_params(archive: &RrdArchiveInfo, version: &str) -> Result<Option<Str
 /// byte as a decimal integer with no separator, signed except on Linux
 /// aarch64.
 /// Provenance: specification (docs/compatibility/holt-winters.md HW-4).
-pub fn dump_cdp(archive: &RrdArchiveInfo, prep: &RrdCdpPrepInfo) -> Option<String> {
+pub(crate) fn dump_cdp(archive: &RrdArchiveInfo, prep: &RrdCdpPrepInfo) -> Option<String> {
     use crate::rrd_binary::format_rrd_value as f;
     let role = Role::from_cf(&archive.raw_consolidation)?;
     let mut out = String::new();
