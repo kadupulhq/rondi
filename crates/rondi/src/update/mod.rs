@@ -788,8 +788,10 @@ fn apply(
         info,
         ..
     } = command;
-    writes.commit(file, &header, &info.archives, row_len)?;
-    result
+    // The held writes are stored even after a failed argument (UP-34); when
+    // both fail, the argument's error is the one reported.
+    let committed = writes.commit(file, &header, &info.archives, row_len);
+    result.and(committed)
 }
 
 /// Puts every archive's CDP entries and current row into `header`.
