@@ -4549,6 +4549,11 @@ fn rrdcached_time_value(
         .ok_or_else(|| format!("invalid rrdcached {verb} response").into())
 }
 
+// The rrdcached client functions below (`rrdcached_client_path`,
+// `translate_rrdcached_file_command`, `connect_rrdcached`,
+// `split_rrdcached_network_address`) derive from RRDtool 1.11.0's client library
+// source file, which is MIT-licensed (Copyright (C) 2008-2013 Florian octo
+// Forster). See THIRD-PARTY-NOTICES.md for the copyright notice and license text.
 /// Chooses the path sent to the daemon, as RRDtool 1.11.0 does. A local
 /// daemon receives a canonical absolute path; a remote daemon receives its
 /// own relative path after the configured literal prefix is stripped.
