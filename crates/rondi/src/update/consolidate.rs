@@ -487,6 +487,18 @@ mod tests {
             unknown_datapoints: 0,
             primary_value: rrd_nan(),
             secondary_value: rrd_nan(),
+            words: [
+                rrd_nan().to_bits(),
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                rrd_nan().to_bits(),
+                rrd_nan().to_bits(),
+            ],
         }
     }
 
@@ -497,6 +509,11 @@ mod tests {
             rows,
             pdp_per_row,
             xff,
+            param_words: {
+                let mut words = [0u64; 10];
+                words[0] = xff.to_bits();
+                words
+            },
             current_row: 0,
             cdp_prep: vec![created_cdp()],
             data_offset: 0,

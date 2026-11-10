@@ -226,6 +226,9 @@ pub struct RrdArchiveInfo {
     pub rows: u64,
     pub pdp_per_row: u64,
     pub xff: f64,
+    /// The ten parameter slots as raw little-endian words (RS-53); slot 0
+    /// is `xff`.
+    pub param_words: [u64; 10],
     pub current_row: u64,
     pub cdp_prep: Vec<RrdCdpPrepInfo>,
     pub(crate) data_offset: u64,
@@ -237,6 +240,10 @@ pub struct RrdCdpPrepInfo {
     pub unknown_datapoints: u64,
     pub primary_value: f64,
     pub secondary_value: f64,
+    /// The ten CDP slots as raw words (RS-53); words 0, 1, 8 and 9 agree
+    /// with `value`, `unknown_datapoints`, `primary_value` and
+    /// `secondary_value`.
+    pub words: [u64; 10],
 }
 
 pub(crate) fn inspect_path(path: &Path) -> Result<RrdInfo, StoreError> {
@@ -1383,6 +1390,10 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
         let rows = u64_at(bytes, checked_add(start, 24)?)?;
         let pdp_per_row = u64_at(bytes, checked_add(start, 32)?)?;
         let xff = f64_at(bytes, checked_add(start, 40)?)?;
+        let mut param_words = [0u64; 10];
+        for (slot, word) in param_words.iter_mut().enumerate() {
+            *word = u64_at(bytes, checked_add(start, 40 + slot * 8)?)?;
+        }
         let current_row = u64_at(
             bytes,
             checked_add(pointer_start, checked_mul(index, RRA_PTR_LEN)?)?,
@@ -1401,7 +1412,12 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
                     CDP_PREP_LEN,
                 )?,
             )?;
+            let mut words = [0u64; 10];
+            for (slot, word) in words.iter_mut().enumerate() {
+                *word = u64_at(bytes, checked_add(prep_offset, slot * 8)?)?;
+            }
             cdp_prep.push(RrdCdpPrepInfo {
+                words,
                 value: f64_at(bytes, prep_offset)?,
                 unknown_datapoints: u64_at(bytes, checked_add(prep_offset, 8)?)?,
                 primary_value: f64_at(bytes, checked_add(prep_offset, 64)?)?,
@@ -1414,6 +1430,7 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
             rows,
             pdp_per_row,
             xff,
+            param_words,
             current_row,
             cdp_prep,
             data_offset,
