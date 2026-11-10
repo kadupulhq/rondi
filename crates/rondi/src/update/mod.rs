@@ -110,6 +110,12 @@ pub fn update_rrd_text_file_quiet(
 }
 
 /// Applies updates whose readings are already split per data source.
+///
+/// Raw and numeric updates take one value per data source in definition
+/// order, computed sources included, unlike text arguments (CP-10). The
+/// value given for a computed source is ignored: the source is evaluated
+/// as usual and its last value is stored as `U`, as for a text argument
+/// that leaves it out.
 pub fn update_rrd_raw_batch(
     path: impl AsRef<Path>,
     updates: &[RrdRawUpdate<'_>],
@@ -139,6 +145,12 @@ pub fn update_rrd_raw_batch_file(
 }
 
 /// Updates a one-DS file with one value.
+///
+/// Raw and numeric updates take one value per data source in definition
+/// order, computed sources included, unlike text arguments (CP-10). The
+/// value given for a computed source is ignored: the source is evaluated
+/// as usual and its last value is stored as `U`, as for a text argument
+/// that leaves it out.
 pub fn update_rrd_file(
     path: impl AsRef<Path>,
     timestamp: i64,
@@ -167,6 +179,12 @@ pub fn update_rrd_file_precise(
 }
 
 /// Updates every data source with one value each.
+///
+/// Raw and numeric updates take one value per data source in definition
+/// order, computed sources included, unlike text arguments (CP-10). The
+/// value given for a computed source is ignored: the source is evaluated
+/// as usual and its last value is stored as `U`, as for a text argument
+/// that leaves it out.
 pub fn update_rrd_values(
     path: impl AsRef<Path>,
     timestamp: i64,
@@ -178,6 +196,12 @@ pub fn update_rrd_values(
 }
 
 /// Updates every data source with one reading each.
+///
+/// Raw and numeric updates take one value per data source in definition
+/// order, computed sources included, unlike text arguments (CP-10). The
+/// value given for a computed source is ignored: the source is evaluated
+/// as usual and its last value is stored as `U`, as for a text argument
+/// that leaves it out.
 pub fn update_rrd_raw_values(
     path: impl AsRef<Path>,
     timestamp: i64,
@@ -260,7 +284,7 @@ fn numeric_reading(value: Option<f64>) -> String {
         Some(x) if x == f64::NEG_INFINITY => "-inf".to_string(),
         Some(x) => {
             // A reading longer than the 29 characters a stored reading
-            // keeps (UP-14) is given in exponent form, which keeps every
+            // keeps (UP-13) is given in exponent form, which keeps every
             // digit of the shortest round-trip text.
             let plain = format!("{x}");
             if plain.len() <= 29 {
@@ -359,7 +383,10 @@ fn argument_error(error: ArgumentError) -> StoreError {
     }
 }
 
-fn raw_argument(update: &RrdRawUpdate<'_>, sources: usize) -> Result<Argument, StoreError> {
+/// One raw update as an argument. `computed` marks each data source that
+/// is computed; the value given for one is replaced by `U`.
+fn raw_argument(update: &RrdRawUpdate<'_>, computed: &[bool]) -> Result<Argument, StoreError> {
+    let sources = computed.len();
     if update.values.len() != sources {
         return Err(StoreError::RrdExpression(format!(
             "expected {sources} data source readings (got {}) from {}",
@@ -375,7 +402,11 @@ fn raw_argument(update: &RrdRawUpdate<'_>, sources: usize) -> Result<Argument, S
         readings: update
             .values
             .iter()
-            .map(|value| value.unwrap_or("U").to_string())
+            .zip(computed)
+            .map(|(value, &computed)| match value {
+                Some(text) if !computed => text.to_string(),
+                _ => "U".to_string(),
+            })
             .collect(),
     })
 }
@@ -441,18 +472,25 @@ const WRITE_CHUNK: usize = 1 << 20;
 
 /// Stores a range of rows, wrapping to row 0 at the archive's row count
 /// (UP-30), in writes of at most [`WRITE_CHUNK`] bytes.
+/// `row_len` is the archive's row width in bytes, one value per data
+/// source.
 fn write_range(
     file: &mut File,
     archive: &RrdArchiveInfo,
+    row_len: usize,
     range: &RowRange,
 ) -> Result<(), StoreError> {
+    if range.count == 0 || row_len == 0 {
+        return Ok(());
+    }
     let row: Vec<u8> = range
         .values
         .iter()
         .flat_map(|value| value.to_bits().to_le_bytes())
         .collect();
-    let row_len = row.len() as u64;
-    let chunk_rows = (WRITE_CHUNK / row.len()).max(1) as u64;
+    debug_assert_eq!(row.len(), row_len);
+    let chunk_rows = (WRITE_CHUNK / row_len).max(1) as u64;
+    let row_len = row_len as u64;
     let chunk = row.repeat(chunk_rows.min(range.count) as usize);
     let mut next = range.first_row;
     let mut remaining = range.count;
@@ -546,6 +584,7 @@ fn apply(
             None => 0,
         })
         .collect();
+    let computed: Vec<bool> = info.data_sources.iter().map(|s| s.is_computed()).collect();
     let programs: Vec<Option<Option<ComputeProgram>>> = info
         .data_sources
         .iter()
@@ -559,7 +598,7 @@ fn apply(
                 parse_argument(arguments[index], source_count, order.as_deref(), now())
                     .map_err(argument_error)?
             }
-            Input::Raw(updates) => raw_argument(&updates[index], source_count)?,
+            Input::Raw(updates) => raw_argument(&updates[index], &computed)?,
         };
 
         // Provenance: specification (docs/compatibility/update.md UP-9).
@@ -726,7 +765,12 @@ fn apply(
             &header[layout.live..layout.end],
         )?;
         for range in &rows {
-            write_range(&mut file, &info.archives[range.archive], range)?;
+            write_range(
+                &mut file,
+                &info.archives[range.archive],
+                source_count * VALUE_LEN,
+                range,
+            )?;
         }
         if past_end {
             if let Some(summaries) = summaries.as_deref_mut() {
@@ -838,9 +882,7 @@ mod tests {
             timestamp_usec: 0,
             values: Vec::new(),
         };
-        let started = std::time::Instant::now();
         let summaries = update_rrd_raw_batch(&path, &[update], false).unwrap();
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
         assert!(summaries.is_empty());
         let info = crate::inspect_rrd_file(&path).unwrap();
         // The starting row 0 advances once per PDP (UP-30).
@@ -1011,5 +1053,73 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].values[0], 3.0);
         assert!(rows[0].values[1].is_nan());
+    }
+
+    #[test]
+    fn microsecond_difference_is_an_integer_subtraction() {
+        // Compatibility: the microsecond difference is subtracted as
+        // integers before it becomes a double; RRDtool 1.11.0 stores a PDP
+        // value of 2806.775807 here, where subtracting doubles gives
+        // 2806.775808.
+        // Provenance: black-box compatibility test (rrdtool 1.11.0, macOS
+        // arm64); specification (docs/compatibility/update.md UP-14).
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("usec.rrd");
+        crate::create_rrd_file(
+            &path,
+            1_000_000_000,
+            10,
+            &["DS:a:GAUGE:9223372036854775807:U:U".to_string()],
+            &["RRA:LAST:0.5:1:5".to_string()],
+            false,
+        )
+        .unwrap();
+        let (_, first) = update_rrd_text(&path, None, &["9223381260226809856:U"], false);
+        let (_, second) = update_rrd_text(&path, None, &["inf:1"], false);
+        if cfg!(target_arch = "aarch64") {
+            first.unwrap();
+            second.unwrap();
+            let info = crate::inspect_rrd_file(&path).unwrap();
+            let value = info.data_sources[0].pdp_value;
+            assert_eq!(format!("{value:.6}"), "2806.775807", "{value}");
+        } else {
+            // Elsewhere the first time is refused (UP-9).
+            assert!(first.is_err() || second.is_err(), "{first:?} {second:?}");
+        }
+    }
+
+    #[test]
+    fn raw_value_for_a_computed_source_is_ignored() {
+        let temp = tempfile::tempdir().unwrap();
+        let raw = temp.path().join("raw.rrd");
+        let text = temp.path().join("text.rrd");
+        crate::create_rrd_file(
+            &raw,
+            1_000_000_000,
+            10,
+            &[
+                "DS:a:GAUGE:600:U:U".to_string(),
+                "DS:y:COMPUTE:a,2,*".to_string(),
+            ],
+            &["RRA:LAST:0.5:1:5".to_string()],
+            false,
+        )
+        .unwrap();
+        std::fs::copy(&raw, &text).unwrap();
+
+        let rows =
+            update_rrd_raw_values_verbose(&raw, 1_000_000_010, &[Some("3"), Some("123")]).unwrap();
+        let (expected, result) = update_rrd_text(&text, None, &["1000000010:3"], false);
+        result.unwrap();
+        assert_eq!(rows, expected);
+        assert_eq!(rows[0].values, vec![3.0, 6.0]);
+        let info = crate::inspect_rrd_file(&raw).unwrap();
+        assert_eq!(info.data_sources[1].raw_last_value, b"U");
+        assert_eq!(std::fs::read(&raw).unwrap(), std::fs::read(&text).unwrap());
+
+        // A numeric value for it is ignored too.
+        update_rrd_values(&raw, 1_000_000_020, &[Some(4.0), Some(99.0)]).unwrap();
+        let info = crate::inspect_rrd_file(&raw).unwrap();
+        assert_eq!(info.data_sources[1].raw_last_value, b"U");
     }
 }

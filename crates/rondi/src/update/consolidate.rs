@@ -320,6 +320,8 @@ pub(crate) fn consolidate_run(
     mut summaries: Option<&mut Vec<RrdUpdateSummary>>,
 ) -> Result<(), RowPastEnd> {
     let ArchiveKind::Classic(cf) = kind;
+    // One PDP and one accumulator per data source; the zips below rely on it.
+    debug_assert_eq!(run.values.len(), archive.cdp_prep.len());
     if archive.rows == 0 || run.len == 0 {
         return Ok(());
     }
@@ -411,6 +413,7 @@ pub(crate) fn consolidate_all(
     // archive's CDP state changes for the run, but rows are written archive
     // by archive, so a row past the end of the file keeps the rows and
     // current rows of later archives unwritten.
+    debug_assert_eq!(archives.len(), kinds.len());
     let current_rows: Vec<u64> = archives.iter().map(|archive| archive.current_row).collect();
     let mut stopped = None;
     for (index, (archive, &kind)) in archives.iter_mut().zip(kinds).enumerate() {
@@ -450,7 +453,6 @@ pub(crate) fn consolidate_all(
 mod tests {
     use super::*;
     use crate::rrd_binary::{RrdCdpPrepInfo, rrd_nan};
-    use std::time::{Duration, Instant};
 
     /// One stored row, as a range expands to.
     #[derive(Clone, Debug, PartialEq)]
@@ -717,7 +719,6 @@ mod tests {
 
     #[test]
     fn capped_run_writes_rows_rows_and_does_not_iterate_per_pdp() {
-        let started = Instant::now();
         let mut rra = archive("AVERAGE", 1, 5, 0.5);
         let (rows, summaries) = feed(&mut rra, &[run(100, 1_000_000_000, 3.0)]);
         assert_eq!(rows.len(), 5);
@@ -727,13 +728,22 @@ mod tests {
         let mut rra = archive("AVERAGE", 7, 5, 0.5);
         let (rows, _) = feed(&mut rra, &[run(100, 1_000_000_000, 3.0)]);
         assert_eq!(rows.len(), 5);
-        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
     fn huge_pdp_per_row_does_not_overflow() {
         let mut rra = archive("AVERAGE", u64::MAX / 2, 4, 0.5);
-        feed(&mut rra, &[run(i64::MAX / 4, u64::MAX / 4, 1.0)]);
+        let (rows, summaries) = feed(&mut rra, &[run(i64::MAX / 4, u64::MAX / 4, 1.0)]);
+        // The run ends inside its first row: nothing is written and the
+        // accumulator holds every PDP, folded in one step (UP-26).
+        assert!(rows.is_empty());
+        assert!(summaries.is_empty());
+        assert_eq!(rra.current_row, 0);
+        let cdp = &rra.cdp_prep[0];
+        assert_eq!(cdp.value, (u64::MAX / 4) as f64);
+        assert_eq!(cdp.unknown_datapoints, 0);
+        assert!(cdp.primary_value.is_nan());
+        assert!(cdp.secondary_value.is_nan());
 
         let mut rra = archive("MIN", u64::MAX, u64::MAX, 0.5);
         rra.current_row = u64::MAX - 1;

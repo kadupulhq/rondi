@@ -50,6 +50,15 @@ history of the old update path.
   `rrd_binary.rs`) was deleted from a signature listing, without its bodies
   being read. `require_rows_in_file` stays in `rrd_binary.rs`; the update
   path no longer uses it.
+- Retained helpers: the new module also relies on clean or audited code
+  kept outside it: `read_info`/`inspect_parts`, `RrdFileLock`,
+  `rrd_mul_add`, `rrd_nan`, `rrd_strerror`, `dst_conv_error`/`cf_conv_error`
+  and `divides_by_zero` in `rrd_binary.rs`, and `ComputeProgram::evaluate`
+  in `rpn`.
+- Raw-API contract: the raw and numeric entry points take one value per
+  data source, computed sources included, as the existing Rondi API did.
+  The value given for a computed source is ignored; its last value is
+  stored as `U`, as for a text argument that leaves it out (CP-10).
 
 ### Specification changes during implementation
 

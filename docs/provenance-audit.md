@@ -26,7 +26,7 @@ About 12,400 lines of Rust (38 percent of non-test source) are rated High: modul
 | `crates/rondi-server/src/rrdcached_listen.rs` | Removed | 926 | Declared port of listener setup and daemonize (GPL-2.0-only file); replaced by the clean-room `rrdcached/` daemon modules |
 | `crates/rondi-cli/src/main.rs` (front end, print/time helpers, list) | High | ~1,020 of 7,295 | Ports of the command dispatcher, batch-mode tokenizer, print_calc and helpers, directory listing |
 | `crates/rondi-cli/src/help/*.txt` | High (FLAG) | 354 text | Verbatim RRDtool help output |
-| `crates/rondi/src/rrd_binary.rs` | Review | 3,046 | Update path replaced by the clean-room `update/` module; format reader is format-dictated |
+| `crates/rondi/src/rrd_binary.rs` | Review | 1,963 | Update path replaced by the clean-room `update/` module; format reader is format-dictated |
 | `crates/rondi-server/src/lib.rs` | Replaced | 5,203 | rrdcached handlers, queue and journal replaced by the clean-room `rrdcached/` protocol modules; the JSON API remains |
 | `crates/rondi/src/xml_reader.rs` | Replaced | 1,958 | Modelled libxml2 internals; replaced by a clean-room rewrite from `docs/compatibility/restore.md` and black-box runs |
 | `crates/rondi-cli/src/main.rs` (rest except renderer) | Review | ~4,735 | Command handlers with C line citations; rrdcached client ported from an MIT-licensed C file |
