@@ -580,7 +580,7 @@ evaluator. [doc]
   range, `Parameter '101.000000' out of range in VDEF 'v'`. [bb]
 - A VDEF name used in a CDEF pushes the VDEF value in every row. [bb]
 - `STDEV` and the least-squares functions are platform sensitive in the
-  last bit (tag `fma`). [bb]
+  last bit (tag `fma`); graph.md GR-100 states the rounding. [bb]
 
 ## Error messages
 

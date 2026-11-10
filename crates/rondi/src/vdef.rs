@@ -7,11 +7,11 @@ use thiserror::Error;
 
 use crate::rrd_binary::{rrd_mul_add, rrd_nan};
 
-/// The pinned Linux aarch64 oracle is built with GCC, which contracts across
-/// statements (`-ffp-contract=fast`) and after expanding `pow(x, 2.0)`, while
-/// the macOS build uses Clang, which only fuses within one expression. They
-/// also split `a * b - c * d` differently. x86_64 never fuses, so there both
-/// forms round the same.
+/// Compatibility: which VDEF products are fused with the following add
+/// differs between the pinned Linux aarch64 and macOS arm64 builds; x86_64
+/// never fuses, so there both forms round the same.
+/// Provenance: black-box compatibility test; see GR-100 in
+/// docs/compatibility/graph.md.
 const GCC_CONTRACTION: bool = cfg!(all(target_arch = "aarch64", target_os = "linux"));
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +79,8 @@ pub enum VdefError {
 /// Evaluate one RRDtool VDEF aggregate over regularly spaced values.
 ///
 /// `start` is the beginning of the first interval, and values are ordered in
-/// ascending time. NaN and infinity handling follows RRDtool's vdef_calc.
+/// ascending time. NaN and infinity handling and the rounding of each
+/// aggregate follow GR-46 and GR-100 of docs/compatibility/graph.md.
 pub fn evaluate_vdef(
     function: VdefFunction,
     percentile: Option<f64>,
@@ -143,7 +144,7 @@ pub fn evaluate_vdef(
             if finite.is_empty() {
                 no_time(rrd_nan())
             } else {
-                // vdef_calc starts at +0.0; Rust's f64 sum starts at -0.0.
+                // GR-100: the sum starts at +0.0; Rust's f64 sum starts at -0.0.
                 let sum = finite.iter().fold(0.0, |sum, value| sum + value);
                 let average = sum / finite.len() as f64;
                 let value = match function {
@@ -176,7 +177,7 @@ pub fn evaluate_vdef(
                     sum_x += x;
                     sum_y += value;
                     sum_xy = rrd_mul_add(x, value, sum_xy);
-                    // C squares the unsigned step index before converting it.
+                    // GR-100: i² is an unsigned 64-bit product, then converted.
                     sum_xx += index.wrapping_mul(index) as f64;
                     sum_yy = rrd_mul_add(value, value, sum_yy);
                 }
@@ -184,9 +185,9 @@ pub fn evaluate_vdef(
             if count == 0.0 {
                 no_time(rrd_nan())
             } else {
-                // Clang rounds the count products and fuses the others; GCC
-                // does the reverse. The correlation below stays unfused in
-                // both because each product feeds a division first.
+                // GR-100: macOS rounds the count products and fuses the
+                // others; Linux aarch64 does the reverse. The correlation
+                // stays unfused on both.
                 let slope = if GCC_CONTRACTION {
                     rrd_mul_add(-sum_xy, count, sum_x * sum_y)
                         / rrd_mul_add(-sum_xx, count, sum_x * sum_x)
@@ -277,11 +278,14 @@ fn interval_timestamp(start: i64, index: usize, step: u64) -> Result<i64, VdefEr
 }
 
 fn rrd_qsort_compatible(values: &mut [f64]) {
-    // RRDtool passes vdef_percent_compar to the host C library's qsort.
-    // In particular, its comparisons involving infinities are not a strict
-    // weak order, so a Rust sort produces different results from RRDtool.
-    // Matching the same libc qsort call preserves the pinned implementation's
-    // observable behavior on a given platform.
+    // Compatibility: RRDtool sorts PERCENT and PERCENTNAN values with the
+    // host C library's qsort. With infinities present its comparisons are
+    // not a strict weak order, so the result depends on that qsort and a
+    // Rust sort gives different results (rpn.md, "Ordering used by SORT,
+    // MEDIAN, PERCENT and PREDICTPERC", vdef-22). Unknown values sort
+    // first, and an infinity compares by the libc's isinf sign.
+    // Provenance: black-box compatibility test
+    // (vdef_percentiles_with_infinities_match_pinned_rrdtool_qsort).
     unsafe extern "C" fn compare(
         left: *const libc::c_void,
         right: *const libc::c_void,
@@ -302,8 +306,8 @@ fn rrd_qsort_compatible(values: &mut [f64]) {
         }
         if left < right { -1 } else { 1 }
     }
-    // The comparator returns isinf() directly. glibc's isinf() is -1 for
-    // negative infinity; the Apple and BSD libcs return 1 for both signs.
+    // glibc's isinf() is -1 for negative infinity; the Apple and BSD libcs
+    // return 1 for both signs.
     fn c_isinf(value: f64) -> libc::c_int {
         if cfg!(target_env = "gnu") && value.is_sign_negative() {
             -1
@@ -424,8 +428,8 @@ mod tests {
                 .value
                 .is_nan()
         );
-        // RRDtool's source comparator passes the sign-coded C isinf result
-        // through qsort; this is the observed pinned-libc ordering for +INF.
+        // RRDtool's percentile sort orders +INF as the host libc's qsort
+        // leaves it; this is the observed pinned-libc ordering.
         assert!(
             evaluate_vdef(VdefFunction::PercentNan, Some(0.0), &values, 0, 1)
                 .unwrap()
