@@ -92,7 +92,8 @@ byte *k* of the DS's CDP record is 1 and `0` for any other byte value
 result (HW-14), so the text reads newest first: in the probe with
 *w* = 28, the results 1, 1, 1, 1, 0, 0, 0, 0, 0, 1 (oldest to newest,
 after only zeros) print `"1000001111000000000000000000"`. *w* = 1
-prints one character; a new file with *w* = 9 prints `"000000000"`.
+prints one character; a new file with *w* = 9 prints `"000000000"`
+(vectors `195` and `197`: *w* = 1 and 28 after spikes).
 
 `smoothing_window` (parameter slot 2) is printed, by `info` and by `dump`
 (HW-4), when the file's version string read as C `atoi` (leading blanks,
@@ -105,7 +106,9 @@ and setting the version bytes back to `0004` shows it again. Which files
 `create` writes as `0004` is CR-37, so a `MHWPREDICT` file or an explicit
 `smoothing-window=` (even `=0`) shows the key and an implicit `HWPREDICT`
 group or explicit archives without the option do not; `tune -s` and
-`-S` raise the version (HW-34) and so make the key appear.
+`-S` raise the version (HW-34) and so make the key appear (vectors `187`
+to `192`: `hwsw5` patched to `0003` hides its 0.5, `hwimp` and `hwp40`
+patched to `0004` show their 0).
 
 Vectors: `000` (`hwimp`, `0003`, no `smoothing_window`), `002`
 (`mhwimp`, `0004`, `smoothing_window = 0.0000000000e+00`), `004`
@@ -115,14 +118,7 @@ PDPs per row), `012` (`hw2ds`, two DSs) and `014` (`hwrun`, state after
 updates). The Linux x86_64 and aarch64 builds print the same bytes for
 all eight.
 
-*w* outside 1 to 28 occurs only in a crafted file: `create` and `tune`
-(HW-33) limit it to 1 to 28, but `restore` accepts any `<window_len>`.
-Then *w* = 0 prints `""`, and RRDtool prints *w* bytes of the record from
-byte 0 for *w* up to 31 on macOS and up to at least 32 on Linux. Larger
-values abort on macOS (no output, signal 6 from *w* = 32) and crash on
-Linux (signal 11 by *w* = 80). A replacement must not crash or read outside the DS's
-CDP record; for *w* above 28 it should fail with an error (defect in the
-reference; not pinned).
+*w* = 0 (only in a crafted file) prints `""`. *w* above 28 is HW-5.
 
 **HW-4** (black-box; must). `dump`. A Holt-Winters `<rra>` has the
 classic layout: `<cf>`, `<pdp_per_row>` with its `<!-- N seconds -->`
@@ -156,21 +152,20 @@ Value forms. Doubles use RRDtool's own `%0.10e` (`format-strings.md`
 FS-52: `-0` prints `0.0000000000e+00`, a subnormal 1.5e-310 prints
 `0.0150000000e-308`, the locale is ignored), with `inf` and `-inf`. A NaN
 prints `NaN` in `<cdp_prep>` but `nan` in `<params>`, for any NaN on every
-build; this also holds for a classic `<xff>` (defect, reproduce; no
-vector holds a NaN parameter). Integers are unsigned 64-bit decimal.
+build; this also holds for a classic `<xff>` (defect, reproduce;
+vectors `193` and `194`, `hwsw5` with every double parameter and every
+`primary_value` and `secondary_value` patched to NaN). Integers are
+unsigned 64-bit decimal.
 `<history>` has no quotes: each of the *w* bytes from byte 0 of the DS's
 CDP record, newest first as in HW-3, written as a decimal integer, with
 no separator. A file written by `create`, `update`, `tune` or `restore`
 holds only bytes 0 and 1 (`restore.md` RS-26), so the text is one digit
-per byte (`11100` in the probe of `hwfail`). For other bytes, macOS arm64
+per byte (`11100` in the probe of `hwfail`; vectors `196` and `198`).
+For other bytes, macOS arm64
 and Linux x86_64 print the byte as signed (`-1` for `0xff`, `-128` for
 `0x80`) and Linux aarch64 as unsigned (`255`, `128`) (platform specific;
-should, not pinned). `dump` prints *w* bytes for any *w*: `0` gives
-`<history></history>`, and *w* from 29 to 80 continue through the record,
-including the bytes of `primary_value` and `secondary_value`; above 80 it
-reads the bytes that follow the record. A replacement must not read
-outside the record; for *w* above 28 it should fail with an error (defect
-in the reference; not pinned).
+should, not pinned). *w* = 0 gives `<history></history>`; *w* above 28
+is HW-5.
 
 The `<database>` section is as for a classic archive (`time-spec.md`
 TS-71 comments, rows oldest first from the row after `cur_row`, one `<v>`
@@ -183,6 +178,34 @@ Vectors: `001`, `003`, `005`, `007`, `009`, `011`, `013` and `015`, for
 the same files as HW-3; all eight are the same bytes on Linux x86_64 and
 aarch64 (`expected/hw.linux-x86_64.vectors` holds no `info` or `dump`
 case).
+
+**HW-5** (black-box; should, defect). A FAILURES `window_len`
+above 28 occurs only in a crafted file: `create` (CR-33) and `tune`
+(HW-33) refuse it, but `restore` stores any `<window_len>`. RRDtool then
+treats the history as *w* bytes from byte 0 of the DS's 80-byte CDP
+record and beyond it:
+
+- `info` prints *w* characters (HW-3) while *w* is small enough and then
+  crashes with no output: from *w* = 32 on macOS arm64 (abort, signal 6),
+  from *w* = 33 on Linux aarch64 and from *w* = 34 on Linux x86_64
+  (segmentation fault, signal 11). Every *w* from the threshold to 130,
+  and 200, 255, 256, 1000, 100000 and 2^32 − 1, crashed in the probes.
+- `dump` exits 0 for every *w* up to at least 1000, printing *w* bytes:
+  up to 80 from the record (including the bytes of `primary_value` and
+  `secondary_value`), then the bytes that follow it in the file. It
+  crashes at *w* = 100000 on every build.
+- `update` exits 0 for every *w* up to at least 1000, shifting *w* bytes
+  of history and so overwriting the record's other slots and, above 80,
+  the next records. It crashes at *w* = 100000.
+
+A replacement should instead (defect in the reference) fail `info`, `dump` and `update` of such a
+file with exit status 1 and an `ERROR: ` line, before writing anything,
+and leave the file unchanged. RRDtool prints no error for any nearby
+window (1 to 28 succeed, and `create`'s and `tune`'s range errors are
+messages of those commands), so the text after `ERROR: ` is
+implementation-defined. Vectors `199` to `204` (*w* = 29, which RRDtool
+still prints, and *w* = 40, which crashes `info`) record RRDtool's result
+and carry the expectation `clean-error`.
 
 ## 2. Update: runs of one PDP
 
@@ -286,12 +309,30 @@ has been applied, however many triggers there were; within the command,
 later PDPs see the rows and *I* as they were before the pass. Each DS's
 SEASONAL and DEVSEASONAL rows are smoothed:
 
-- The half-width is *h* = trunc(*f*·*P* / 2) for the archive's
-  `smoothing_window` *f* (*f*·*P* and the division in doubles); the window
-  is 2*h* + 1 rows, centred and circular. When *h* = 0 that archive is not
-  smoothed at all. This includes *f* = 0, the value an implicit definition
-  (`HWPREDICT` with no dependent archives named) stores, and the
-  explicit-definition default 0.05 for *P* < 40.
+- The window fraction *f* depends on the file's version string read as C
+  `atoi` (as for the `info` key, HW-3). At 4 or more (`0004`, `0005`) *f*
+  is the archive's stored `smoothing_window`. At 3 (`0003`, `3`, `+3`,
+  ` 3`, `3x`) *f* is 0.05 for both SEASONAL and DEVSEASONAL, whatever the
+  slot holds: 0 in an implicit definition (`HWPREDICT` or `MHWPREDICT`
+  with no dependent archives named), an explicit `smoothing-window` in a
+  file restored or patched to `0003`, or anything else. Files whose
+  version reads below 3 are not covered here (versions 1 and 2 use an
+  older header layout). So an implicit definition is smoothed once the
+  season is long enough, contrary to what its stored 0 suggests. Probed
+  for `HWPREDICT` and `MHWPREDICT`, implicit and explicit, *P* = 40, 100
+  and 200, with one argument per command and all arguments in one
+  command: each `0003` result matched the same file at `0004` holding
+  0.05, and differed from it holding the stored value. Vectors `181` to
+  `186` update `hwp40` (implicit, `0003`), `hwp40v4` (the same bytes at
+  `0004`, so its stored 0 applies) and `hwx40v3` (an explicit 0.5 patched
+  to `0003`), each with 60 arguments and with one argument that completes
+  45 PDPs (a run, HW-21) and so passes row 0; every `0003` result equals
+  the `0004` file holding 0.05.
+- The half-width is *h* = trunc(*f*·*P* / 2) (*f*·*P* and the division in
+  doubles); the window is 2*h* + 1 rows, centred and circular. When
+  *h* = 0 that archive is not smoothed at all. This includes *f* = 0 in a
+  version-4 file and *f* = 0.05 for *P* < 40, which covers every `0003`
+  input of the earlier vectors.
 - When the rows of an archive contain an unknown for any DS, that archive
   is left unchanged for every DS (the SEASONAL and DEVSEASONAL archives
   are judged separately). So one DS still in its first season, or reset
@@ -477,16 +518,6 @@ archives already match (vectors `164` to `167`).
   (HW-21 keeps *I* and *T*).
 - Which words 8 and 9 of DEVPREDICT and FAILURES hold after runs: frozen
   by the vectors, not specified.
-- HW-18 and the version rule of HW-3: in probes, `update` of a file whose
-  version is below 4 (by the HW-3 rule) ignored the stored
-  `smoothing_window` and smoothed as if it were 0.05. A `0003` file
-  holding 0.5, and an implicit `HWPREDICT` group (stored 0) with a
-  seasonal period of 40, both gave the same bytes as the same file at
-  `0004` holding 0.05, and differed from it at 0.5 or 0. The vectors do
-  not see this: every `0003` input has a period below 40, where 0.05
-  gives *h* = 0. HW-18's statement that an implicit definition is never
-  smoothed holds only for periods below 40; this needs vectors and an
-  HW-18 revision before an implementation relies on it.
 
 - HW-2: the exact derivation of the initial `seasonal_smooth_idx`. It
   could not be settled black-box: it is stable for a given file name but
@@ -499,14 +530,17 @@ archives already match (vectors `164` to `167`).
 
 `crates/rondi-cli/tests/hw_spec_vectors.rs` replays the `hw` suite
 (`crates/rondi-cli/tests/data/hw`), which `scripts/gen-create-resize-vectors.py`
-records; `expected/hw.linux-x86_64.vectors` holds the 42 cases whose bytes
+records; `expected/hw.linux-x86_64.vectors` holds the 47 cases whose bytes
 differ on the unfused x86_64 build (HW-19), and the Linux aarch64 build
 matches macOS arm64 in every case. The inputs are fresh files with each
 Holt-Winters archive type and smoothing window, and one file that has
 already been updated. The cases read them (`info`, `dump`, `fetch` of each
 archive) and update them with seasonal, spiking, gapped, irregular,
 multi-source, failure-bound, smoothing and run series, and `tune` them
-with every option, valid and invalid.
+with every option, valid and invalid. Cases `181` to `204` add files
+byte-patched by the generator: version changes (HW-3, HW-18 at *P* = 40),
+NaN parameters (HW-4), failure windows of 1 and 28, and crafted windows
+of 29 and 40 (HW-5, expectation `clean-error`).
 
 Sections 2 and 3 were checked with a black-box model, a script outside the
 repository written from these rules and `update.md` UP-10 and UP-19 to
