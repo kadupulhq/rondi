@@ -147,6 +147,30 @@ def number_rows(b):
     return bytes(out)
 
 
+def patch_version(b, version):
+    """Sets the stored version text (bytes 4 to 8)."""
+    return b[:4] + version.encode().ljust(5, b"\0") + b[9:]
+
+
+def patch_param(b, rra, slot, value):
+    """Sets parameter slot `slot` of archive `rra`: a float is stored as a
+    double, an int as an unsigned 64-bit word (restore.md RS-53)."""
+    out = bytearray(b)
+    ds = word(b, 24)
+    o = 128 + 120 * ds + 120 * rra + 40 + 8 * slot
+    struct.pack_into("<d" if isinstance(value, float) else "<Q", out, o, value)
+    return bytes(out)
+
+
+def patch_cdp(b, rra, ds_index, slot, value):
+    """Sets CDP slot `slot` of archive `rra` and data source `ds_index`."""
+    out = bytearray(b)
+    ds, rras = word(b, 24), word(b, 32)
+    o = 128 + 120 * ds + 120 * rras + 16 + 112 * ds + 80 * (rra * ds + ds_index) + 8 * slot
+    struct.pack_into("<d" if isinstance(value, float) else "<Q", out, o, value)
+    return bytes(out)
+
+
 def legacy_v1(b):
     """Version 0001 layout: the live header is a 4-byte-padded time_t
     without microseconds."""
@@ -372,6 +396,71 @@ def build_inputs(rrdtool, tmp):
         *explicit("HWPREDICT", 5, 0.37, 0.13, 0.21, 0),
         ds=["DS:x:GAUGE:1000:U:U"],
     )
+
+    # Stage 4 inputs (holt-winters.md HW-3, HW-4 and HW-18 versions).
+    # Version patches: the `smoothing_window` key and the window an update
+    # uses follow the stored version (atoi below 4: key absent, window 0.05).
+    hw40 = ["DS:x:GAUGE:1000:U:U"]
+    # Implicit group, period 40, created as 0003 (stored window 0), with
+    # two and a half seasons of state.
+    hw("hwp40", "RRA:HWPREDICT:120:0.1:0.01:40", ds=hw40, updates=wave(100))
+    # The same file with its version patched to 0004: the stored 0 applies.
+    made["hw"]["hwp40v4"] = patch_version(made["hw"]["hwp40"], "0004")
+    # An explicit group with window 0.5 (0004), patched to 0003: 0.05 applies.
+    hw(
+        "hwx40",
+        "RRA:HWPREDICT:120:0.1:0.01:40:2",
+        "RRA:SEASONAL:40:0.1:1:smoothing-window=0.5",
+        "RRA:DEVSEASONAL:40:0.1:1:smoothing-window=0.5",
+        "RRA:DEVPREDICT:120:4",
+        "RRA:FAILURES:120:7:9:4",
+        ds=hw40,
+        updates=wave(100),
+    )
+    made["hw"]["hwx40v3"] = patch_version(made["hw"]["hwx40"], "0003")
+    # The info and dump key: window 0.5 stored but hidden at 0003, and
+    # window 0 shown at 0004.
+    made["hw"]["hwsw5v3"] = patch_version(made["hw"]["hwsw5"], "0003")
+    made["hw"]["hwimpv4"] = patch_version(made["hw"]["hwimp"], "0004")
+    # NaN spelling in dump: NaN in every double parameter (archives 0 to 4
+    # of hwsw5: HWPREDICT, SEASONAL, DEVSEASONAL, DEVPREDICT, FAILURES) and
+    # in primary_value and secondary_value of every archive.
+    nan_file = made["hw"]["hwsw5"]
+    for rra, slot in [(0, 1), (0, 2), (1, 1), (1, 2), (2, 1), (2, 2), (4, 1), (4, 2)]:
+        nan_file = patch_param(nan_file, rra, slot, float("nan"))
+    for rra in range(5):
+        for slot in (8, 9):
+            nan_file = patch_cdp(nan_file, rra, 0, slot, float("nan"))
+    made["hw"]["hwnan"] = nan_file
+    # Failure windows of 1 and 28 with set history bytes after spikes.
+    spiky = [10, 20, 40, 20] * 4 + [500, 20, 40, 500, 500, 20, 40, 20, 10, 500]
+    spiky = [f"{1000000010 + 10 * i}:{v}" for i, v in enumerate(spiky)]
+    for w in (1, 28):
+        hw(
+            f"hww{w}",
+            "RRA:HWPREDICT:60:0.5:0.5:4:2",
+            "RRA:SEASONAL:4:0.5:1",
+            "RRA:DEVSEASONAL:4:0.5:1",
+            "RRA:DEVPREDICT:60:3",
+            f"RRA:FAILURES:60:1:{w}:3",
+            updates=spiky,
+        )
+    # Crafted windows above 28: window_len (FAILURES parameter 4) patched.
+    for w in (29, 40):
+        made["hw"][f"hww{w}"] = patch_param(made["hw"]["hww28"], 4, 4, w)
+    # Stage 5 inputs (HW-12): hwimp's definitions with a NaN alpha or beta
+    # set by tune (HW-31), so learning makes the intercept or the slope
+    # unknown.
+    for name, opt in (("hwimpna", "--alpha"), ("hwimpnb", "--beta")):
+        make(
+            "hw",
+            name,
+            [
+                cr("-b", "1000000000", "-s", "10", *g, "RRA:AVERAGE:0.5:1:10",
+                   "RRA:HWPREDICT:12:0.1:0.01:4"),
+                ["tune", "in.rrd", opt, "nan"],
+            ],
+        )
     return made
 
 
@@ -872,13 +961,16 @@ def compute_cases():
 def hw_cases():
     c = []
 
-    # Rondi does not implement Holt-Winters archives yet: every command
-    # that reads or writes their state is refused (expectation
-    # `unsupported`); fetch already works. Promote cases to `same` with the
-    # implementation.
+    # Rondi implements info, dump, fetch, update and updatev of files with
+    # Holt-Winters archives (expectation `same`). It still refuses tune of
+    # such files (`unsupported`, holt-winters.md HW-36); promote those cases
+    # with the implementation. Explicit expectations (`clean-error`,
+    # `divergent`) are kept as given.
+    implemented = {"info", "dump", "fetch", "update", "updatev"}
+
     def add(*args, inputs=(), expect=None, note="-"):
         if expect is None:
-            expect = "same" if args[0] == "fetch" else "unsupported"
+            expect = "same" if args[0] in implemented else "unsupported"
             note = "-" if expect == "same" else "HW-unsupported"
         c.append((expect, note, list(inputs), list(args)))
 
@@ -1064,6 +1156,65 @@ def hw_cases():
     # A reset source holds back smoothing for the other source.
     later = [hw_pair(i) for i in range(20, 45)]
     add("update", "hwreset.rrd", *later, inputs=["hwreset"])
+
+    # Stage 4 (HW-3, HW-4, HW-5, HW-18). Appended so earlier ids keep
+    # their positions.
+    # The window an update uses below version 4: period 40, whose 0.05
+    # default gives a half-width of 1. Many arguments, then one argument
+    # that completes 45 PDPs at once (a run, HW-21) and so passes row 0.
+    for name in ("hwp40", "hwp40v4", "hwx40v3"):
+        add("update", f"{name}.rrd", *wave(60, start=1000001010), inputs=[name])
+        add("update", f"{name}.rrd", "1000001450:30", inputs=[name])
+    # The smoothing_window key follows the version, not the stored value.
+    for name in ("hwsw5v3", "hwimpv4", "hwp40v4"):
+        add("info", f"{name}.rrd", inputs=[name])
+        add("dump", f"{name}.rrd", inputs=[name])
+    # NaN parameters print `nan`, NaN CDP values `NaN`.
+    add("info", "hwnan.rrd", inputs=["hwnan"])
+    add("dump", "hwnan.rrd", inputs=["hwnan"])
+    # Failure windows at the limits, with set history bytes.
+    for name in ("hww1", "hww28"):
+        add("info", f"{name}.rrd", inputs=[name])
+        add("dump", f"{name}.rrd", inputs=[name])
+    # Crafted windows above 28: RRDtool prints past the history, aborts or
+    # crashes (HW-5); Rondi fails cleanly instead.
+    for name in ("hww29", "hww40"):
+        for args in (["info"], ["dump"], ["update", "1000000270:20"]):
+            add(
+                args[0],
+                f"{name}.rrd",
+                *args[1:],
+                inputs=[name],
+                expect="clean-error",
+                note="HW-5",
+            )
+
+    # Stage 5 (HW-12, HW-12a). An intercept or slope made unknown by a NaN
+    # parameter, with and without a gap.
+    for name in ("hwnan", "hwimpna", "hwimpnb"):
+        add("update", f"{name}.rrd", *wave(40), inputs=[name])
+        add("update", f"{name}.rrd", *wave(40, gap=(10, 17)), inputs=[name])
+    # Multiplicative division by a value not above 0: a level driven below
+    # 0 (the reviewer's series), a first value below and at 0, coefficients
+    # at or below 0, and a negative first season, whose SEASONAL mean is
+    # then below 0 when it is smoothed.
+    def readings(values):
+        return [f"{1000000010 + 10 * i}:{v}" for i, v in enumerate(values)]
+
+    add("update", "mhwsm10.rrd",
+        *readings([*range(97, 24, -3), *["U"] * 30, 40]), inputs=["mhwsm10"])
+    add("update", "mhwimp.rrd", *readings([-5, 3, 4, -2, 6, *[10, 20, 40, 20] * 6]),
+        inputs=["mhwimp"])
+    add("update", "mhwimp.rrd", *readings([0, 3, 4, 2, *[10, 20, 40, 20] * 6]),
+        inputs=["mhwimp"])
+    add("update", "mhwimp.rrd",
+        *readings([[10, -20, 40, 0][i % 4] + i // 4 for i in range(40)]), inputs=["mhwimp"])
+    add("update", "mhwsm10.rrd", *readings([10, *[-5 - k % 3 for k in range(29)]]),
+        inputs=["mhwsm10"])
+    # A negative first season, then a gap, so the pass at row 0 finds every
+    # SEASONAL row known and their mean below 0.
+    add("update", "mhwsm10.rrd", *readings([10, *[-5, -6, -7] * 3, *["U"] * 8]),
+        inputs=["mhwsm10"])
     return c
 
 

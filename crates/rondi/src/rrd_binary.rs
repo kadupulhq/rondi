@@ -226,6 +226,9 @@ pub struct RrdArchiveInfo {
     pub rows: u64,
     pub pdp_per_row: u64,
     pub xff: f64,
+    /// The ten parameter slots as raw little-endian words (RS-53); slot 0
+    /// is `xff`.
+    pub(crate) param_words: [u64; 10],
     pub current_row: u64,
     pub cdp_prep: Vec<RrdCdpPrepInfo>,
     pub(crate) data_offset: u64,
@@ -237,6 +240,10 @@ pub struct RrdCdpPrepInfo {
     pub unknown_datapoints: u64,
     pub primary_value: f64,
     pub secondary_value: f64,
+    /// The ten CDP slots as raw words (RS-53); words 0, 1, 8 and 9 agree
+    /// with `value`, `unknown_datapoints`, `primary_value` and
+    /// `secondary_value`.
+    pub(crate) words: [u64; 10],
 }
 
 pub(crate) fn inspect_path(path: &Path) -> Result<RrdInfo, StoreError> {
@@ -914,6 +921,7 @@ pub fn dump_rrd_open_file_bytes(
             archive.consolidation.as_str(),
             "AVERAGE" | "MIN" | "MAX" | "LAST"
         ) && cf_conv_error(&archive.raw_consolidation).is_none()
+            && crate::holt_winters::Role::from_cf(&archive.raw_consolidation).is_none()
     }) {
         return Err(StoreError::RrdUnsupported(
             "rrdtool dump currently supports AVERAGE/MIN/MAX/LAST archives only".into(),
@@ -1005,7 +1013,12 @@ pub fn dump_rrd_open_file_bytes(
         )
         .unwrap();
         out.extend_from_slice(b"\t\t<params>\n");
-        writeln!(out, "\t\t<xff>{}</xff>", format_rrd_float(archive.xff)).unwrap();
+        match crate::holt_winters::dump_params(archive, &info.version)
+            .map_err(|message| rrd_error(&message))?
+        {
+            Some(params) => out.extend_from_slice(params.as_bytes()),
+            None => writeln!(out, "\t\t<xff>{}</xff>", format_rrd_float(archive.xff)).unwrap(),
+        }
         out.extend_from_slice(b"\t\t</params>\n\t\t<cdp_prep>\n");
         for prep in &archive.cdp_prep {
             out.extend_from_slice(b"\t\t\t<ds>\n");
@@ -1021,13 +1034,18 @@ pub fn dump_rrd_open_file_bytes(
                 format_rrd_value(prep.secondary_value)
             )
             .unwrap();
-            writeln!(out, "\t\t\t<value>{}</value>", format_rrd_value(prep.value)).unwrap();
-            writeln!(
-                out,
-                "\t\t\t<unknown_datapoints>{}</unknown_datapoints>",
-                prep.unknown_datapoints
-            )
-            .unwrap();
+            match crate::holt_winters::dump_cdp(archive, prep) {
+                Some(state) => out.extend_from_slice(state.as_bytes()),
+                None => {
+                    writeln!(out, "\t\t\t<value>{}</value>", format_rrd_value(prep.value)).unwrap();
+                    writeln!(
+                        out,
+                        "\t\t\t<unknown_datapoints>{}</unknown_datapoints>",
+                        prep.unknown_datapoints
+                    )
+                    .unwrap();
+                }
+            }
             out.extend_from_slice(b"\t\t\t</ds>\n");
         }
         out.extend_from_slice(b"\t\t</cdp_prep>\n\t\t<database>\n");
@@ -1076,7 +1094,7 @@ pub fn dump_rrd_open_file_bytes(
     Ok(out)
 }
 
-fn format_rrd_value(value: f64) -> String {
+pub(crate) fn format_rrd_value(value: f64) -> String {
     if value.is_nan() {
         "NaN".to_owned()
     } else {
@@ -1090,7 +1108,7 @@ fn format_rrd_optional(value: Option<f64>) -> String {
 
 // Dump writes values with RRDtool's own printf, which drops the sign of -0
 // and leaves subnormals unnormalized.
-fn format_rrd_float(value: f64) -> String {
+pub(crate) fn format_rrd_float(value: f64) -> String {
     crate::format_value::data_value(value)
 }
 
@@ -1260,6 +1278,11 @@ fn c_atoi(field: &[u8]) -> i64 {
     i64::from(crate::rrd_number::c_strtol(&text, 10).0 as i32)
 }
 
+/// The version text read as C `atoi`.
+pub(crate) fn version_number(field: &[u8]) -> i64 {
+    c_atoi(field)
+}
+
 /// The strerror text for an I/O error.
 pub(crate) fn rrd_strerror(error: &std::io::Error) -> String {
     match error.raw_os_error() {
@@ -1383,6 +1406,10 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
         let rows = u64_at(bytes, checked_add(start, 24)?)?;
         let pdp_per_row = u64_at(bytes, checked_add(start, 32)?)?;
         let xff = f64_at(bytes, checked_add(start, 40)?)?;
+        let mut param_words = [0u64; 10];
+        for (slot, word) in param_words.iter_mut().enumerate() {
+            *word = u64_at(bytes, checked_add(start, 40 + slot * 8)?)?;
+        }
         let current_row = u64_at(
             bytes,
             checked_add(pointer_start, checked_mul(index, RRA_PTR_LEN)?)?,
@@ -1401,7 +1428,12 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
                     CDP_PREP_LEN,
                 )?,
             )?;
+            let mut words = [0u64; 10];
+            for (slot, word) in words.iter_mut().enumerate() {
+                *word = u64_at(bytes, checked_add(prep_offset, slot * 8)?)?;
+            }
             cdp_prep.push(RrdCdpPrepInfo {
+                words,
                 value: f64_at(bytes, prep_offset)?,
                 unknown_datapoints: u64_at(bytes, checked_add(prep_offset, 8)?)?,
                 primary_value: f64_at(bytes, checked_add(prep_offset, 64)?)?,
@@ -1414,6 +1446,7 @@ fn inspect_parts(bytes: &[u8], file_len: usize) -> Result<RrdInfo, StoreError> {
             rows,
             pdp_per_row,
             xff,
+            param_words,
             current_row,
             cdp_prep,
             data_offset,

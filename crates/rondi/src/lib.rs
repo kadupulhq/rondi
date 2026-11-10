@@ -5,6 +5,7 @@ mod data_source;
 mod format;
 pub mod format_value;
 pub mod graph;
+pub mod holt_winters;
 pub mod import_export;
 pub mod layout;
 mod numeric_cast;

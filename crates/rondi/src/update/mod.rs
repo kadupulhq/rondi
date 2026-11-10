@@ -4,6 +4,7 @@
 mod amount;
 mod arguments;
 mod consolidate;
+mod holt_winters;
 mod pdp;
 
 use std::fs::File;
@@ -14,8 +15,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use amount::{DsKind, amount, stored_text};
 use arguments::{Argument, ArgumentError, parse_argument, template_order};
 use consolidate::{ArchiveKind, RowRange, consolidate_all};
+use holt_winters::{Group, Seasons, smooth};
 use pdp::{Completed, PdpState, StepPlan, Time, advance, plan, runs};
 
+use crate::holt_winters::{MAX_WINDOW_LEN, Role, param};
 use crate::rpn::ComputeProgram;
 use crate::rrd_binary::{
     CDP_PREP_LEN, DS_DEF_LEN, PDP_PREP_LEN, RRA_DEF_LEN, RRA_PTR_LEN, RrdArchiveInfo, RrdFileLock,
@@ -467,6 +470,138 @@ fn evaluate_computed(
     Ok(())
 }
 
+/// Where a command's file writes go. Without Holt-Winters archives each
+/// write happens when the argument makes it. With them, writes are held
+/// until the command ends, and the smoothing pass's rows (HW-18) are queued
+/// after every other row of the command.
+struct Writes {
+    hold: bool,
+    /// The span of the header that changed while held.
+    header: Option<(usize, usize)>,
+    rows: Vec<RowRange>,
+}
+
+impl Writes {
+    /// Writes `header[from..to]`, now or at [`Writes::commit`]. The header
+    /// buffer only accumulates changes, so writing its final state once
+    /// stores what writing each span in turn would.
+    fn header(
+        &mut self,
+        file: &mut File,
+        header: &[u8],
+        from: usize,
+        to: usize,
+    ) -> Result<(), StoreError> {
+        if !self.hold {
+            return write_at(file, from as u64, &header[from..to]);
+        }
+        self.header = Some(match self.header {
+            Some((start, end)) => (start.min(from), end.max(to)),
+            None => (from, to),
+        });
+        Ok(())
+    }
+
+    /// Stores row ranges, now or at [`Writes::commit`], in their order.
+    fn rows(
+        &mut self,
+        file: &mut File,
+        archives: &[RrdArchiveInfo],
+        row_len: usize,
+        rows: Vec<RowRange>,
+    ) -> Result<(), StoreError> {
+        if self.hold {
+            self.rows.extend(rows);
+            return Ok(());
+        }
+        for range in &rows {
+            write_range(file, &archives[range.archive], row_len, range)?;
+        }
+        Ok(())
+    }
+
+    /// Stores the held writes: the header first, then the rows in order.
+    fn commit(
+        self,
+        file: &mut File,
+        header: &[u8],
+        archives: &[RrdArchiveInfo],
+        row_len: usize,
+    ) -> Result<(), StoreError> {
+        if let Some((from, to)) = self.header {
+            write_at(file, from as u64, &header[from..to])?;
+        }
+        for range in &self.rows {
+            write_range(file, &archives[range.archive], row_len, range)?;
+        }
+        Ok(())
+    }
+}
+
+/// The group of a file's Holt-Winters archives, after the checks that let
+/// Rondi update it; `None` for a file without them.
+fn holt_winters_group(info: &RrdInfo, kinds: &[ArchiveKind]) -> Result<Option<Group>, StoreError> {
+    if !kinds
+        .iter()
+        .any(|kind| matches!(kind, ArchiveKind::HoltWinters(_)))
+    {
+        return Ok(None);
+    }
+    let group = Group::find(kinds).ok_or_else(|| {
+        StoreError::RrdUnsupported(
+            "Holt-Winters archives without exactly one prediction archive and at most one \
+             archive of each other type are not supported by Rondi"
+                .into(),
+        )
+    })?;
+    // Compatibility: `rrdtool create` gives every Holt-Winters archive one
+    // PDP per row; another count comes only from a restored, edited dump.
+    // Rondi models one row per PDP, so it refuses such a file before
+    // writing anything instead of storing rows RRDtool would not.
+    // Provenance: specification (docs/compatibility/holt-winters.md, update
+    // refusals).
+    if kinds.iter().zip(&info.archives).any(|(kind, archive)| {
+        matches!(kind, ArchiveKind::HoltWinters(_)) && archive.pdp_per_row != 1
+    }) {
+        return Err(StoreError::RrdUnsupported(
+            "Holt-Winters archives with more than one PDP per row are not supported by Rondi"
+                .into(),
+        ));
+    }
+    // Compatibility: a FAILURES window above 28 (only in a crafted file)
+    // fails the update before anything is written, where RRDtool would
+    // overwrite the CDP state beyond the history.
+    // Provenance: specification (docs/compatibility/holt-winters.md HW-5).
+    if let Some(index) = group.failures {
+        let window_len = info.archives[index].param_u64(param::WINDOW_LEN);
+        if window_len > MAX_WINDOW_LEN {
+            return Err(StoreError::Rrd(format!(
+                "FAILURES window length {window_len} exceeds {MAX_WINDOW_LEN}"
+            )));
+        }
+    }
+    // Compatibility: a prediction, SEASONAL or DEVSEASONAL link that names
+    // an archive of another type changes what RRDtool computes in ways no
+    // vector pins; Rondi refuses such a file before writing anything.
+    // `rrdtool create` stores a misnumbered rra-num as given (create.md
+    // CR-35), so an ordinary create can produce one, not only a crafted
+    // file. DEVPREDICT and FAILURES links are followed.
+    // Provenance: black-box compatibility test (hwimp with each link
+    // patched); docs/compatibility/holt-winters.md Open questions.
+    if !group.season_links_match_types(&info.archives) {
+        return Err(StoreError::RrdUnsupported(
+            "Holt-Winters prediction or season archives whose dependent_rra_idx names an \
+             archive of another type are not supported by Rondi"
+                .into(),
+        ));
+    }
+    debug_assert!(matches!(
+        kinds[group.prediction],
+        ArchiveKind::HoltWinters(Role::Prediction { .. })
+    ));
+    Ok(Some(group))
+}
+
 /// The most bytes [`write_range`] writes at once.
 const WRITE_CHUNK: usize = 1 << 20;
 
@@ -517,11 +652,11 @@ fn apply(
     path: &Path,
     input: &Input<'_, '_>,
     skip_past_updates: bool,
-    mut summaries: Option<&mut Vec<RrdUpdateSummary>>,
+    summaries: Option<&mut Vec<RrdUpdateSummary>>,
 ) -> Result<(), StoreError> {
     let mut file = RrdFileLock::exclusive(file)?;
     file.seek(SeekFrom::Start(0))?;
-    let mut info = read_info(&mut file, path)?;
+    let info = read_info(&mut file, path)?;
     let file_len = file.metadata()?.len();
 
     // Provenance: specification (docs/compatibility/update.md UP-4, UP-5;
@@ -563,15 +698,14 @@ fn apply(
     {
         return Err(divides_by_zero());
     }
+    let group = holt_winters_group(&info, &archive_kinds)?;
 
     let layout = Layout::new(&info);
     let mut header = vec![0; layout.end];
     file.seek(SeekFrom::Start(0))?;
     file.read_exact(&mut header)?;
 
-    let step = info.step;
     let source_count = info.data_sources.len();
-    let archive_count = info.archives.len();
     // Rows of each archive that lie inside the file; a damaged row count
     // can claim more.
     let row_bytes = (source_count * VALUE_LEN) as u64;
@@ -590,7 +724,149 @@ fn apply(
         .iter()
         .map(|source| source.is_computed().then(|| source.program.clone()))
         .collect();
+    let seasons = match &group {
+        Some(group) => Seasons::load(&mut file, &info, group)?,
+        None => Seasons::default(),
+    };
+    let row_len = source_count * VALUE_LEN;
+    let mut command = Command {
+        file: &mut file,
+        writes: Writes {
+            hold: group.is_some(),
+            header: None,
+            rows: Vec::new(),
+        },
+        info,
+        header,
+        layout,
+        order,
+        kinds,
+        archive_kinds,
+        group,
+        rows_in_file,
+        computed,
+        programs,
+        seasons,
+        triggered: false,
+    };
+    let result = apply_arguments(&mut command, input, skip_past_updates, summaries);
+    // Compatibility: one smoothing pass follows the last argument of a
+    // command whose season counters triggered; its rows are stored after
+    // every other write of the command and are not printed. A command that
+    // fails runs no pass (UP-34 keeps what it applied).
+    // Provenance: specification (docs/compatibility/holt-winters.md HW-18;
+    // the failure rule is the Holt-Winters plan's ruling on HW-18's open
+    // point).
+    if let Some(group) = &command.group
+        && result.is_ok()
+        && command.triggered
+    {
+        let mut rows = Vec::new();
+        smooth(
+            group,
+            &mut command.info.archives,
+            &mut command.seasons,
+            &command.info.version,
+            &mut rows,
+        );
+        encode_archives(&mut command.header, &command.layout, &command.info);
+        let Command {
+            file,
+            writes,
+            header,
+            info,
+            layout,
+            ..
+        } = &mut command;
+        writes.header(file, header, layout.cdp, layout.end)?;
+        writes.rows(file, &info.archives, row_len, rows)?;
+    }
+    let Command {
+        file,
+        writes,
+        header,
+        info,
+        ..
+    } = command;
+    // The held writes are stored even after a failed argument (UP-34); when
+    // both fail, the argument's error is the one reported.
+    let committed = writes.commit(file, &header, &info.archives, row_len);
+    result.and(committed)
+}
 
+/// Puts every archive's CDP entries and current row into `header`.
+fn encode_archives(header: &mut [u8], layout: &Layout, info: &RrdInfo) {
+    let source_count = info.data_sources.len();
+    let archive_count = info.archives.len();
+    for (rra, archive) in info.archives.iter().enumerate() {
+        for (ds, cdp) in archive.cdp_prep.iter().enumerate() {
+            // Classic consolidation changes the named fields only;
+            // Holt-Winters state lives in words 2 to 7 (RS-53), which
+            // classic archives carry through unchanged.
+            let offset = layout.cdp_entry(source_count, rra, ds);
+            put_f64(header, offset, cdp.value);
+            put_u64(header, offset + 8, cdp.unknown_datapoints);
+            for slot in 2..8 {
+                put_u64(header, offset + 8 * slot, cdp.words[slot]);
+            }
+            put_f64(header, offset + 64, cdp.primary_value);
+            put_f64(header, offset + 72, cdp.secondary_value);
+        }
+        put_u64(
+            header,
+            layout.pointer(source_count, archive_count, rra),
+            archive.current_row,
+        );
+    }
+}
+
+/// The state of one `update` command, read once before its arguments.
+struct Command<'a> {
+    file: &'a mut File,
+    info: RrdInfo,
+    header: Vec<u8>,
+    layout: Layout,
+    order: Option<Vec<usize>>,
+    kinds: Vec<DsKind>,
+    archive_kinds: Vec<ArchiveKind>,
+    group: Option<Group>,
+    rows_in_file: Vec<u64>,
+    computed: Vec<bool>,
+    programs: Vec<Option<Option<ComputeProgram>>>,
+    seasons: Seasons,
+    /// Set when a season counter reaches a smoothing point (HW-17).
+    triggered: bool,
+    writes: Writes,
+}
+
+/// Applies every argument in turn, each completely before the next is
+/// examined (UP-3, UP-34), appending the rows of applied arguments to
+/// `summaries`.
+fn apply_arguments(
+    command: &mut Command<'_>,
+    input: &Input<'_, '_>,
+    skip_past_updates: bool,
+    mut summaries: Option<&mut Vec<RrdUpdateSummary>>,
+) -> Result<(), StoreError> {
+    let Command {
+        file,
+        info,
+        header,
+        layout,
+        order,
+        kinds,
+        archive_kinds,
+        group,
+        rows_in_file,
+        computed,
+        programs,
+        seasons,
+        triggered,
+        writes,
+    } = command;
+    let step = info.step;
+    let source_count = info.data_sources.len();
+    let row_len = source_count * VALUE_LEN;
     for index in 0..input.len() {
         // Provenance: specification (docs/compatibility/update.md UP-6 to UP-8).
         let argument = match input {
@@ -598,7 +874,7 @@ fn apply(
                 parse_argument(arguments[index], source_count, order.as_deref(), now())
                     .map_err(argument_error)?
             }
-            Input::Raw(updates) => raw_argument(&updates[index], &computed)?,
+            Input::Raw(updates) => raw_argument(&updates[index], computed)?,
         };
 
         // Provenance: specification (docs/compatibility/update.md UP-9).
@@ -638,11 +914,7 @@ fn apply(
                         let offset = layout.pdp_entry(earlier);
                         header[offset..offset + 30].copy_from_slice(&stored_text(text));
                     }
-                    write_at(
-                        &mut file,
-                        layout.pdp as u64,
-                        &header[layout.pdp..layout.cdp],
-                    )?;
+                    writes.header(file, header, layout.pdp, layout.cdp)?;
                     return Err(StoreError::RrdExpression(message));
                 }
             }
@@ -672,17 +944,13 @@ fn apply(
 
         // Provenance: specification (docs/compatibility/compute.md CP-12,
         // CP-13, CP-16).
-        if let Err(error) = evaluate_computed(&programs, &mut completed) {
+        if let Err(error) = evaluate_computed(programs, &mut completed) {
             for (ds, state) in states.iter().enumerate() {
                 if kinds[ds] != DsKind::Compute {
-                    encode_source(&mut header, ds, state);
+                    encode_source(header, ds, state);
                 }
             }
-            write_at(
-                &mut file,
-                layout.pdp as u64,
-                &header[layout.pdp..layout.cdp],
-            )?;
+            writes.header(file, header, layout.pdp, layout.cdp)?;
             return Err(StoreError::RrdExpression(error));
         }
 
@@ -691,17 +959,21 @@ fn apply(
         let mut rows: Vec<RowRange> = Vec::new();
         let mut written = Vec::new();
         let mut past_end = false;
-        for (position, run) in runs(&plan, step, &completed).iter().enumerate() {
+        let runs = runs(&plan, step, &completed);
+        for (position, run) in runs.iter().enumerate() {
             let early_first_row = position == 0 && plan.early_first_print;
             let consolidated = consolidate_all(
                 &mut info.archives,
-                &archive_kinds,
+                archive_kinds,
                 run,
                 step,
                 early_first_row,
-                &rows_in_file,
+                rows_in_file,
                 &mut rows,
                 summaries.is_some().then_some(&mut written),
+                group
+                    .as_ref()
+                    .map(|group| (group, &mut *seasons, &mut *triggered)),
             );
             if consolidated.is_err() {
                 past_end = true;
@@ -731,13 +1003,13 @@ fn apply(
         // CDP state, current rows and earlier rows are written but the last
         // update time is not, and the update fails.
         if !past_end {
-            put_u64(&mut header, layout.live, argument.time.secs as u64);
+            put_u64(header, layout.live, argument.time.secs as u64);
             if info.live_head_len >= 16 {
-                put_u64(&mut header, layout.live + 8, argument.time.usec);
+                put_u64(header, layout.live + 8, argument.time.usec);
             }
         }
         for (ds, state) in states.iter().enumerate() {
-            encode_source(&mut header, ds, state);
+            encode_source(header, ds, state);
             let source = &mut info.data_sources[ds];
             let text = stored_text(&argument.readings[ds]);
             let end = text.iter().position(|&b| b == 0).unwrap_or(text.len());
@@ -745,33 +1017,9 @@ fn apply(
             source.unknown_seconds = state.unknown_seconds;
             source.pdp_value = state.value;
         }
-        for (rra, archive) in info.archives.iter().enumerate() {
-            for (ds, cdp) in archive.cdp_prep.iter().enumerate() {
-                let offset = layout.cdp_entry(source_count, rra, ds);
-                put_f64(&mut header, offset, cdp.value);
-                put_u64(&mut header, offset + 8, cdp.unknown_datapoints);
-                put_f64(&mut header, offset + 64, cdp.primary_value);
-                put_f64(&mut header, offset + 72, cdp.secondary_value);
-            }
-            put_u64(
-                &mut header,
-                layout.pointer(source_count, archive_count, rra),
-                archive.current_row,
-            );
-        }
-        write_at(
-            &mut file,
-            layout.live as u64,
-            &header[layout.live..layout.end],
-        )?;
-        for range in &rows {
-            write_range(
-                &mut file,
-                &info.archives[range.archive],
-                source_count * VALUE_LEN,
-                range,
-            )?;
-        }
+        encode_archives(header, layout, info);
+        writes.header(file, header, layout.live, layout.end)?;
+        writes.rows(file, &info.archives, row_len, rows)?;
         if past_end {
             if let Some(summaries) = summaries.as_deref_mut() {
                 summaries.append(&mut written);
@@ -868,6 +1116,229 @@ mod tests {
         bytes.extend_from_slice(&0u64.to_le_bytes());
         bytes.extend_from_slice(&0u64.to_le_bytes());
         std::fs::write(path, bytes).unwrap();
+    }
+
+    fn hw_input(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../rondi-cli/tests/data/hw/inputs")
+            .join(format!("{name}.rrd"))
+    }
+
+    /// Copies Holt-Winters input `name` into `dir`, with its version text
+    /// replaced by `version` when given.
+    fn hw_copy(dir: &Path, name: &str, version: Option<&[u8; 4]>) -> std::path::PathBuf {
+        let mut bytes = std::fs::read(hw_input(name)).unwrap();
+        if let Some(version) = version {
+            bytes[4..8].copy_from_slice(version);
+        }
+        let path = dir.join(format!(
+            "{name}-{}.rrd",
+            String::from_utf8_lossy(version.map_or(b"same", |v| v))
+        ));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// One-PDP arguments for hwsm10 from 1000000010 on.
+    fn hwsm10_arguments(count: i64) -> Vec<String> {
+        (1..=count)
+            .map(|i| format!("{}:{}", 1_000_000_000 + 10 * i, 50 + (i * 7) % 13))
+            .collect()
+    }
+
+    /// The centred circular mean of each DS-0 row with half-width 1.
+    fn centred_1(rows: &[Vec<f64>]) -> Vec<f64> {
+        let p = rows.len();
+        (0..p)
+            .map(|i| (rows[(i + p - 1) % p][0] + rows[i][0] + rows[(i + 1) % p][0]) / 3.0)
+            .collect()
+    }
+
+    fn close(a: &[f64], b: &[f64]) -> bool {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(x, y)| (x - y).abs() <= 1e-12 * y.abs().max(1.0))
+    }
+
+    #[test]
+    fn smoothing_pass_runs_once_after_command() {
+        // hwsm10: version 0004, P = 10, stored window 0.3, so h = 1 and the
+        // model is additive. The same file at 0003 uses 0.05 (h = 0) and
+        // never smooths, so it shows the command without its pass.
+        let temp = tempfile::tempdir().unwrap();
+        let smoothed = hw_copy(temp.path(), "hwsm10", None);
+        let plain = hw_copy(temp.path(), "hwsm10", Some(b"0003"));
+        let flag = |path: &Path| {
+            crate::inspect_rrd_file(path).unwrap().archives[1].cdp_prep[0]
+                .word_u64(crate::holt_winters::cdp::INIT_FLAG)
+        };
+        let before = flag(&smoothed);
+        // 30 PDPs pass SEASONAL's row 0 three times; six PDPs follow the
+        // last trigger.
+        let arguments = hwsm10_arguments(30);
+        let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        let (verbose, result) = update_rrd_text(&smoothed, None, &arguments, false);
+        result.unwrap();
+        let (plain_rows, result) = update_rrd_text(&plain, None, &arguments, false);
+        result.unwrap();
+        assert!(flag(&smoothed) >= before + 2, "two or more triggers");
+        // The pass prints nothing: updatev shows what the plain file shows.
+        assert_eq!(format!("{verbose:?}"), format!("{plain_rows:?}"));
+
+        // One pass over the rows the last argument left.
+        let seasonal = centred_1(&stored_rows(&plain, 1));
+        let mean = seasonal.iter().sum::<f64>() / seasonal.len() as f64;
+        let expected: Vec<f64> = seasonal.iter().map(|v| v - mean).collect();
+        let got = |path: &Path, archive| -> Vec<f64> {
+            stored_rows(path, archive)
+                .iter()
+                .map(|row| row[0])
+                .collect()
+        };
+        assert!(
+            close(&got(&smoothed, 1), &expected),
+            "{:?}",
+            got(&smoothed, 1)
+        );
+        assert!(close(
+            &got(&smoothed, 2),
+            &centred_1(&stored_rows(&plain, 2))
+        ));
+        let intercept = |path: &Path| {
+            crate::inspect_rrd_file(path).unwrap().archives[0].cdp_prep[0]
+                .word_f64(crate::holt_winters::cdp::INTERCEPT)
+        };
+        assert!(close(&[intercept(&smoothed)], &[intercept(&plain) + mean]));
+
+        // Nothing else differs: later PDPs saw the rows and intercept as
+        // they were before the pass.
+        let info = crate::inspect_rrd_file(&plain).unwrap();
+        let layout = Layout::new(&info);
+        let (a, b) = (
+            std::fs::read(&smoothed).unwrap(),
+            std::fs::read(&plain).unwrap(),
+        );
+        let intercept_at = layout.cdp_entry(1, 0, 0) + 8 * crate::holt_winters::cdp::INTERCEPT;
+        let season_rows =
+            info.archives[1].data_offset as usize..info.archives[3].data_offset as usize;
+        for (offset, (x, y)) in a.iter().zip(&b).enumerate() {
+            let expected_change = (4..8).contains(&offset)
+                || (intercept_at..intercept_at + 8).contains(&offset)
+                || season_rows.contains(&offset);
+            assert!(x == y || expected_change, "byte {offset} differs");
+        }
+    }
+
+    #[test]
+    fn failed_command_skips_smoothing_pass() {
+        let temp = tempfile::tempdir().unwrap();
+        let smoothed = hw_copy(temp.path(), "hwsm10", None);
+        let plain = hw_copy(temp.path(), "hwsm10", Some(b"0003"));
+        let mut arguments = hwsm10_arguments(30);
+        arguments.push("1000000310:x".into());
+        arguments.push("1000000320:5".into());
+        let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        let (rows, result) = update_rrd_text(&smoothed, None, &arguments, false);
+        assert!(
+            matches!(result, Err(StoreError::RrdExpression(_))),
+            "{result:?}"
+        );
+        assert_eq!(rows.len(), 30 * 5);
+        let (_, plain_result) = update_rrd_text(&plain, None, &arguments, false);
+        assert!(plain_result.is_err());
+        // UP-34 keeps the 30 applied arguments; no pass runs, so the files
+        // differ only in the version text.
+        let (mut a, b) = (
+            std::fs::read(&smoothed).unwrap(),
+            std::fs::read(&plain).unwrap(),
+        );
+        a[4..8].copy_from_slice(b"0003");
+        assert!(a == b);
+        assert_eq!(
+            crate::inspect_rrd_file(&smoothed).unwrap().last_update,
+            1_000_000_300
+        );
+    }
+
+    #[test]
+    fn quiet_and_verbose_write_same_hw_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        // hwsm10 smooths; hwruns gets runs of two and of many PDPs, gaps and
+        // split updates.
+        let mut runs = hwsm10_arguments(12);
+        runs.extend([
+            "1000000140:7".to_string(),
+            "1000000185:U".to_string(),
+            "1000000700:9.5".to_string(),
+            "1000000712:3".to_string(),
+        ]);
+        for (name, arguments) in [("hwsm10", hwsm10_arguments(40)), ("hwruns", runs)] {
+            let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+            let verbose = hw_copy(temp.path(), name, None);
+            let quiet = temp.path().join(format!("{name}-quiet.rrd"));
+            let raw = temp.path().join(format!("{name}-raw.rrd"));
+            std::fs::copy(&verbose, &quiet).unwrap();
+            std::fs::copy(&verbose, &raw).unwrap();
+            let before = std::fs::read(&verbose).unwrap();
+            let (rows, result) = update_rrd_text(&verbose, None, &arguments, false);
+            result.unwrap();
+            assert!(!rows.is_empty());
+            update_rrd_text_quiet(&quiet, None, &arguments, false).unwrap();
+            let updates: Vec<RrdRawUpdate<'_>> = arguments
+                .iter()
+                .map(|argument| {
+                    let (time, value) = argument.split_once(':').unwrap();
+                    RrdRawUpdate {
+                        timestamp: time.parse().unwrap(),
+                        timestamp_usec: 0,
+                        values: vec![(value != "U").then_some(value)],
+                    }
+                })
+                .collect();
+            update_rrd_raw_batch(&raw, &updates, false).unwrap();
+            let written = std::fs::read(&verbose).unwrap();
+            assert_ne!(written, before, "{name}");
+            assert!(std::fs::read(&quiet).unwrap() == written, "{name}: quiet");
+            assert!(std::fs::read(&raw).unwrap() == written, "{name}: raw");
+        }
+    }
+
+    #[test]
+    fn classic_cdp_words_2_to_7_are_written_back() {
+        // Compatibility: update changes only words 0, 1, 8 and 9 of a
+        // classic archive's CDP entries; any other bytes stay as they were.
+        // Provenance: specification (docs/compatibility/update.md UP-33).
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("words.rrd");
+        create(&path);
+        let info = crate::inspect_rrd_file(&path).unwrap();
+        let layout = Layout::new(&info);
+        let mut bytes = std::fs::read(&path).unwrap();
+        let patterns: Vec<u64> = (2..8u64).map(|slot| 0x1111_1111_1111_1111 * slot).collect();
+        for ds in 0..2 {
+            let entry = layout.cdp_entry(2, 0, ds);
+            for (slot, word) in (2..8).zip(&patterns) {
+                put_u64(&mut bytes, entry + 8 * slot, *word);
+            }
+        }
+        std::fs::write(&path, &bytes).unwrap();
+
+        let (rows, result) =
+            update_rrd_text(&path, None, &["1000000010:5:6", "1000000020:9:9"], false);
+        result.unwrap();
+        assert_eq!(rows.len(), 2);
+        let after = std::fs::read(&path).unwrap();
+        for ds in 0..2 {
+            let entry = layout.cdp_entry(2, 0, ds);
+            assert_eq!(
+                after[entry + 16..entry + 64],
+                bytes[entry + 16..entry + 64],
+                "DS {ds}"
+            );
+            // Words 8 and 9 did change.
+            assert_ne!(after[entry + 64..entry + 80], bytes[entry + 64..entry + 80]);
+        }
     }
 
     #[test]

@@ -457,7 +457,10 @@ impl Shared {
             Err(answer) => return answer,
         };
         match self.inspect(&target, &joined) {
-            Ok(info) => Answer::Done(info_reply(&joined, &info)),
+            Ok(info) => match info_reply(&joined, &info) {
+                Ok(reply) => Answer::Done(reply),
+                Err(message) => rrd_error(message),
+            },
             Err(error) => rrd_error(error),
         }
     }
@@ -778,7 +781,7 @@ fn info_float(value: f64) -> String {
 // Compatibility: the keys of `rrdtool info`; type 0 is a float, 1 an
 // integer, 2 a string. Provenance: rrdcached(1) and black-box
 // compatibility test.
-fn info_reply(joined: &[u8], info: &rondi::RrdInfo) -> Vec<u8> {
+fn info_reply(joined: &[u8], info: &rondi::RrdInfo) -> Result<Vec<u8>, String> {
     let mut lines: Vec<Vec<u8>> = Vec::new();
     let mut line = |key: &[u8], kind: u8, value: &[u8]| {
         let mut text = key.to_vec();
@@ -826,6 +829,24 @@ fn info_reply(joined: &[u8], info: &rondi::RrdInfo) -> Vec<u8> {
             1,
             archive.pdp_per_row.to_string().as_bytes(),
         );
+        // Compatibility: a Holt-Winters archive prints its own parameter and
+        // CDP keys instead of xff and the classic CDP lines.
+        // Provenance: specification (docs/compatibility/holt-winters.md HW-3).
+        if let Some(fields) = rondi::holt_winters::info_fields(archive, &info.version)? {
+            for (field, value) in fields {
+                let key = key(&field);
+                match value {
+                    rondi::holt_winters::InfoValue::Float(v) => {
+                        line(&key, 0, info_float(v).as_bytes());
+                    }
+                    rondi::holt_winters::InfoValue::Uint(v) => {
+                        line(&key, 1, v.to_string().as_bytes());
+                    }
+                    rondi::holt_winters::InfoValue::Text(t) => line(&key, 2, &t),
+                }
+            }
+            continue;
+        }
         line(&key("xff"), 0, info_float(archive.xff).as_bytes());
         for (slot, prep) in archive.cdp_prep.iter().enumerate() {
             let prep_key =
@@ -845,7 +866,7 @@ fn info_reply(joined: &[u8], info: &rondi::RrdInfo) -> Vec<u8> {
         reply.extend_from_slice(&line);
         reply.push(b'\n');
     }
-    reply
+    Ok(reply)
 }
 
 #[cfg(test)]
@@ -1013,5 +1034,29 @@ mod tests {
             pending(&replayed).into_values().next().unwrap(),
             ["1000000300:1"]
         );
+    }
+
+    #[test]
+    fn rrdcached_info_prints_hw_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let base = root.join("b");
+        let journal = root.join("j");
+        std::fs::create_dir(&base).unwrap();
+        std::fs::create_dir(&journal).unwrap();
+        std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let source = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../rondi-cli/tests/data/hw/inputs/hwimp.rrd");
+        std::fs::copy(source, base.join("hwimp.rrd")).unwrap();
+        let shared = open(&base, &journal);
+        let answer = reply(shared.execute(Command::Info, b"INFO hwimp.rrd"));
+        let text = String::from_utf8(answer).unwrap();
+        assert!(text.contains("rra[1].alpha 0 1.0000000000e-01\n"), "{text}");
+        assert!(
+            text.contains("rra[5].cdp_prep[0].history 2 \"000000000\"\n"),
+            "{text}"
+        );
+        assert!(!text.contains("rra[1].xff"), "{text}");
+        shared.finish(false);
     }
 }

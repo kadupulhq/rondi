@@ -3766,6 +3766,7 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             archive.consolidation.as_str(),
             "AVERAGE" | "MIN" | "MAX" | "LAST"
         ) && rondi::cf_conv_error(&archive.raw_consolidation).is_none()
+            && rondi::holt_winters::Role::from_cf(&archive.raw_consolidation).is_none()
     }) {
         return Err("rrdtool info output for this consolidation type is not implemented".into());
     }
@@ -3818,6 +3819,23 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         writeln!(out, "rra[{index}].rows = {}", archive.rows)?;
         writeln!(out, "rra[{index}].cur_row = {}", archive.current_row)?;
         writeln!(out, "rra[{index}].pdp_per_row = {}", archive.pdp_per_row)?;
+        // Compatibility: a Holt-Winters archive prints its own parameter and
+        // CDP keys instead of xff and the classic CDP lines.
+        // Provenance: specification (docs/compatibility/holt-winters.md HW-3).
+        if let Some(fields) = rondi::holt_winters::info_fields(archive, &info.version)? {
+            for (key, value) in fields {
+                write!(out, "rra[{index}].{key} = ")?;
+                match value {
+                    rondi::holt_winters::InfoValue::Float(v) => {
+                        write!(out, "{}", format_info_float(v))?;
+                    }
+                    rondi::holt_winters::InfoValue::Uint(v) => write!(out, "{v}")?,
+                    rondi::holt_winters::InfoValue::Text(t) => out.extend_from_slice(&t),
+                }
+                out.push(b'\n');
+            }
+            continue;
+        }
         writeln!(out, "rra[{index}].xff = {}", format_rrd_float(archive.xff))?;
         for (ds_index, prep) in archive.cdp_prep.iter().enumerate() {
             writeln!(
@@ -4094,6 +4112,37 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             .position(|source| source == name)
             .ok_or_else(|| format!("unknown data source name '{name}'"))
     };
+    // Compatibility: after its value checks, a Holt-Winters option on a
+    // file without the archive it tunes reports that archive missing; on a
+    // file with it, Rondi refuses the option and leaves the file unchanged,
+    // as rrdcached's TUNE does (holt-winters.md HW-36).
+    // Provenance: black-box compatibility test (hw vectors, tune cases).
+    const HOLT_WINTERS_PREDICTION_AND_SEASONS: &[&str] = &[
+        "HWPREDICT",
+        "MHWPREDICT",
+        "SEASONAL",
+        "DEVSEASONAL",
+        "DEVPREDICT",
+    ];
+    let has_cf = |names: &[&str]| {
+        info.archives
+            .iter()
+            .any(|archive| names.contains(&archive.consolidation.as_str()))
+    };
+    let unsupported = |letter: char| {
+        let long = LONGOPTS
+            .iter()
+            .find(|spec| spec.key == letter)
+            .map_or("", |spec| spec.long);
+        format!("--{long} is not supported by Rondi")
+    };
+    let failures_refusal = |letter: char| {
+        if has_cf(&["FAILURES"]) {
+            unsupported(letter)
+        } else {
+            "Failures RRA does not exist in this RRD".to_owned()
+        }
+    };
     // The second pass sees the options before the operands, so a trailing
     // short option without a value takes the file name as its value there.
     let second_words = first_pass.rearranged();
@@ -4174,9 +4223,7 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     changes[ds].new_name = Some(new_name.clone());
                     current_names[ds] = new_name;
                 }
-                // Rondi opens no Holt-Winters file, so after the value checks
-                // these always find their RRA missing.
-                'p' | 'n' => {
+                kind @ ('p' | 'n') => {
                     let (status, parsed) = cparse::rrd_strtodbl_status(value, None);
                     let param = parsed.unwrap_or_else(|_| cparse::rrd_strtod_prefix(value));
                     if matches!(status, 1 | 2) && param < 0.1 {
@@ -4185,14 +4232,14 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     if status == 1 {
                         return Err("Unable to parse parameter in set_deltaarg".into());
                     }
-                    return Err("Failures RRA does not exist in this RRD".into());
+                    return Err(failures_refusal(kind).into());
                 }
-                'f' | 'w' => {
+                kind @ ('f' | 'w') => {
                     let param = cparse::atoi(value) as libc::c_ulong;
                     if !(1..=28).contains(&param) {
                         return Err("Parameter must be between 1 and 28".into());
                     }
-                    return Err("Failures RRA does not exist in this RRD".into());
+                    return Err(failures_refusal(kind).into());
                 }
                 kind @ ('x' | 'y' | 'z' | 'v' | 's' | 'S') => {
                     let (status, parsed) = cparse::rrd_strtodbl_status(value, None);
@@ -4208,6 +4255,9 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     if status == 0 {
                         return Err("Unable to parse Holt-Winters parameter".into());
                     }
+                    if has_cf(HOLT_WINTERS_PREDICTION_AND_SEASONS) {
+                        return Err(unsupported(kind).into());
+                    }
                     return Err("Holt-Winters RRA does not exist in this RRD".into());
                 }
                 'b' => {
@@ -4219,22 +4269,8 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     // nothing. With them it would rewrite their state,
                     // which Rondi does not implement (tune-modify.md
                     // TM-60), so refuse rather than report success.
-                    if let Some(archive) = info.archives.iter().find(|archive| {
-                        matches!(
-                            archive.consolidation.as_str(),
-                            "HWPREDICT"
-                                | "MHWPREDICT"
-                                | "SEASONAL"
-                                | "DEVSEASONAL"
-                                | "DEVPREDICT"
-                                | "FAILURES"
-                        )
-                    }) {
-                        return Err(format!(
-                            "consolidation function {} is not supported by Rondi",
-                            archive.consolidation
-                        )
-                        .into());
+                    if has_cf(HOLT_WINTERS_PREDICTION_AND_SEASONS) || has_cf(&["FAILURES"]) {
+                        return Err(unsupported('b').into());
                     }
                 }
                 't' => newstep = cparse::atoi(value),

@@ -34,7 +34,7 @@
 
 ## Implementation context
 
-Not started. The implementation pull request fills in this section.
+See [`holt-winters-impl.md`](holt-winters-impl.md) for `info`, `dump` and `update`. `create` and `tune` are not started.
 
 ## Exposure
 
