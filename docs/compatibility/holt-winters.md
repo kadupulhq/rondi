@@ -661,8 +661,9 @@ values RRDtool converts from its readings (`restore.md` RS-38's digit loop
 is not correctly rounded, so a few three-decimal readings differ from a
 correctly rounded parse in the last bit). Every `tune` case's
 status, error text and changed fields were checked against section 4,
-and the probes behind it were run on all three builds. Rondi implements `info`, `dump`, `fetch` and `update` for these archives:
-111 cases are `same`, 6 are `clean-error` (`info`, `dump` and `update` on the
+and the probes behind it were run on all three builds. Rondi implements `info`, `dump` and `update` for these archives;
+`fetch` reads their stored rows as it does any classic archive's, and its
+six cases match. 111 cases are `same`, 6 are `clean-error` (`info`, `dump` and `update` on the
 crafted files with window lengths above 28, HW-5) and none is `divergent`. The 100 `tune` cases
 stay `unsupported` (HW-36).
 

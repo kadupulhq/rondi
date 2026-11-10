@@ -3,8 +3,9 @@
 //! update and updatev. The behavior is specified in
 //! docs/compatibility/holt-winters.md; the vectors under tests/data/hw were
 //! recorded from RRDtool 1.11.0 by scripts/gen-create-resize-vectors.py.
-//! Rondi implements info, dump, fetch, update and updatev of these files,
-//! so those cases are expected to match RRDtool; tune of a file with
+//! Rondi implements info, dump, update and updatev of these files, and fetch
+//! reads their rows as it does a classic archive's, so those cases are
+//! expected to match RRDtool; tune of a file with
 //! Holt-Winters archives is still refused (HW-36), so its cases are
 //! expected to fail cleanly and leave the file unchanged.
 //! With an RRDtool 1.11.0 oracle on PATH, or always under

@@ -48,7 +48,8 @@ The audits behind #86 to #98 left these differences open. Each is tracked in the
 | Legend `coords` under `--zoom` on Linux | RD-006 | Reported |
 | `graph`, `graphv`, `xport` and rrdcached `FETCH` stop at 10 million rows | RD-017 | Checked for `xport`; the others read from code |
 | `graph`, `graphv` and `xport` with `--daemon` send `FLUSH` per file, where RRDtool sends one `FETCH` per DEF | RD-025 | Checked against GR-37 (no vectors) |
-| Holt-Winters archives are refused by `create` and `tune`; COMPUTE sources only by `tune` | RD-001, RD-004 | Checked for `create`; `tune` read from code. `info`, `dump` and `update` are implemented (`holt-winters.md`) |
+| Holt-Winters archives are refused by `create` and `tune`; COMPUTE sources only by `tune` | RD-001, RD-004 | Checked for `create`; `tune` read from code. `info`, `dump` and `update` are implemented (`holt-winters.md`); `update` refuses, leaving the file unchanged, a Holt-Winters group without exactly one prediction archive and at most one archive of each other type, a prediction, SEASONAL or DEVSEASONAL link to an archive of another type, and a Holt-Winters archive with more than one PDP per row |
+| Holt-Winters `update` of crafted files: with a smoothing window of 2 or more, which only a crafted file can hold because `tune -s` caps it at 1, RRDtool still smooths and Rondi leaves the archives unsmoothed; SEASONAL rows past the end of a damaged file read as unknown and fail with `writing rrd`, where RRDtool reads the overlapping bytes and then fails | RD-001 | Checked (`holt-winters.md` HW-18, Vectors) |
 | rrdcached may drop requests sent just before a half-close; Rondi answers them | RD-015 | Reported (timing-dependent) |
 
 ## Intentional differences

@@ -65,7 +65,7 @@ Each behavior change below merged to `main` with differential tests against RRDt
 
 - Opens versions 0001 to 0005 wherever `rrd_open` accepts them, including the 0001/0002 `time_t` live head (READ-ONLY: `rrd_binary.rs` and RD-001).
 - Requires a 64-bit little-endian target (`rrd_binary.rs`, `target_pointer_width` and `target_endian` check). READ-ONLY.
-- Supports GAUGE, COUNTER, DERIVE, ABSOLUTE, DCOUNTER, DDERIVE and COMPUTE (docs/compatibility/compute.md) with AVERAGE, MIN, MAX, LAST. Holt-Winters `info`, `dump` and `update` work; `create` and `tune` still refuse them; `tune` still refuses COMPUTE. COMPUTE is pinned by the `compute`, `create` and `restore` vectors.
+- Supports GAUGE, COUNTER, DERIVE, ABSOLUTE, DCOUNTER, DDERIVE and COMPUTE (docs/compatibility/compute.md) with AVERAGE, MIN, MAX, LAST. Holt-Winters `info`, `dump` and `update` work; `update` refuses, leaving the file unchanged, a Holt-Winters group without exactly one prediction archive and at most one archive of each other type, a prediction, SEASONAL or DEVSEASONAL link to an archive of another type, and a Holt-Winters archive with more than one PDP per row; `create` and `tune` still refuse them; `tune` still refuses COMPUTE. COMPUTE is pinned by the `compute`, `create` and `restore` vectors.
 - Updates no longer sync each write (EXECUTED: no `sync` call in `rrd_binary.rs`). `update --locking` and `RRD_LOCKING` are accepted (EXECUTED: `update --locking none` succeeds).
 - `tune` performs the structure operations (#91). `resize` accepts v3 and v4 only (READ-ONLY).
 - Damaged headers open as upstream does; three cases that would need undefined behavior are refused on purpose (ID-001 to ID-003).
@@ -73,7 +73,7 @@ Each behavior change below merged to `main` with differential tests against RRDt
 
 ### Gaps
 
-1. Holt-Winters family: create, update, fetch, info, dump, restore, tune (`--alpha`, `--beta`, `--gamma`, `--gamma-deviation`, `--window-length`, `--failure-threshold`, `--deltapos`, `--deltaneg`, `--smoothing-window`, `--aberrant-reset`).
+1. Holt-Winters family: create and tune (`--alpha`, `--beta`, `--gamma`, `--gamma-deviation`, `--window-length`, `--failure-threshold`, `--deltapos`, `--deltaneg`, `--smoothing-window`, `--aberrant-reset`).
 2. COMPUTE data sources. The RPN engine in `crates/rondi/src/rpn/` can be reused.
 3. Non-64-bit and big-endian layouts (i386, armhf, ppc64el, s390x). This needs a layout descriptor computed for the build target, not fixed offsets.
 4. `resize` for v5; `create --source` with several sources and mappings (RD-004).
@@ -302,7 +302,7 @@ Effort is for one engineer with IDE support, estimated at `de820e9` (58 to 82 en
 Status: partly done. Fuzz targets exist and CI replays their seeds; `RONDI_REQUIRE_ORACLE=1` makes a missing oracle fail. No upstream `tests/` job, no golden corpus, no macOS CI job.
 
 **M1: format, update, fetch byte parity (13 to 17 weeks).** All data source types including COMPUTE; all consolidation functions including Holt-Winters; non-64-bit and big-endian layouts; resize v5. Exit: seeded differential streams for every DS and CF pair give identical bytes on every target in CI; cross-continuation passes; 24 hours of fuzzing per format target without a crash; update throughput within 1.2 times upstream.
-Status: in progress. Done: legacy 0001/0002 reads, `--locking`, no per-update sync, `tune` modify forms (#91), damaged-header handling (#94). Open: COMPUTE, Holt-Winters, other layouts, resize v5, RD-021, RD-023, the `tune -s`/`-S` version bump.
+Status: in progress. Done: legacy 0001/0002 reads, `--locking`, no per-update sync, `tune` modify forms (#91), damaged-header handling (#94). Holt-Winters `info`, `dump` and `update` are done. Open: COMPUTE, Holt-Winters `create` and `tune`, other layouts, resize v5, RD-021, RD-023, the `tune -s`/`-S` version bump.
 
 **M2: CLI parity (9 to 12 weeks).** Full pipe mode and tokenizer; all non-graph options; `rrdupdate`; `RRDCACHED_STRIPPATH`; local-fallback text; time parser; error corpus. Exit: every upstream `tests/` script that passes with upstream passes with Rondi (graph scripts wait for M5); a golden corpus of at least 2,000 argv cases matches; Cacti poller and maintenance flows pass unchanged in a disposable Kadupul install (closes RD-011 except graphs).
 Status: in progress. Done: pipe mode and tokenizer, `rrdupdate`, `RRDCACHED_STRIPPATH`, daemon address parsing (#96), restore error text (#98). Open: local fallback (RD-010), `tune --daemon` modification words (RD-019), RD-022, the error corpus, and the exit criteria, none of which has been run.

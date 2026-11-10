@@ -52,7 +52,7 @@ The same create, update and fetch run through RRDtool 1.11.0 returns the same ro
 
 ## Compatibility
 
-The contract is the behavior of RRDtool 1.11.0: file bytes, values, and error text. Rondi checks this by running the same input through both implementations. The tested subset covers version 0003 to 0005 `.rrd` layouts on 64-bit little-endian targets, the GAUGE, COUNTER, DERIVE, ABSOLUTE, DCOUNTER and DDERIVE source types, and AVERAGE, MIN, MAX and LAST archives. COMPUTE sources and Holt-Winters archives are refused. The [compatibility matrix](https://github.com/kadupulhq/rondi/blob/main/docs/compatibility.md) lists what is tested and what is not, and the [defect register](https://github.com/kadupulhq/rondi/blob/main/docs/COMPATIBILITY_DEFECTS.md) lists known differences.
+The contract is the behavior of RRDtool 1.11.0: file bytes, values, and error text. Rondi checks this by running the same input through both implementations. The tested subset covers version 0003 to 0005 `.rrd` layouts on 64-bit little-endian targets, the GAUGE, COUNTER, DERIVE, ABSOLUTE, DCOUNTER and DDERIVE source types, and AVERAGE, MIN, MAX and LAST archives. `info`, `dump` and `update` handle Holt-Winters archives; `create` and `tune` still refuse them, and `tune` refuses COMPUTE sources. The [compatibility matrix](https://github.com/kadupulhq/rondi/blob/main/docs/compatibility.md) lists what is tested and what is not, and the [defect register](https://github.com/kadupulhq/rondi/blob/main/docs/COMPATIBILITY_DEFECTS.md) lists known differences.
 
 Rondi is pre-alpha and not a drop-in replacement for librrd.
 
