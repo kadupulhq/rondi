@@ -1,6 +1,8 @@
 //! The amount a reading contributes to a data source (UP-10 to UP-18).
 
-use crate::rrd_number::{rrd_diff, rrd_strtodbl};
+use std::cmp::Ordering;
+
+use crate::rrd_number::{parse_rrd_number, rrd_strtodbl};
 
 /// Width of the stored-text field of a data source.
 const STORED_LEN: usize = 30;
@@ -96,7 +98,7 @@ pub(crate) fn amount(
             if !reading.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(format!("not a simple unsigned integer: '{reading}'"));
             }
-            let mut d = integer_difference(reading, &stored);
+            let mut d = decimal_text_difference(reading, &stored);
             // Compatibility: the wrap constants are not the counter's range.
             // Provenance: specification (docs/compatibility/update.md UP-16).
             if d < 0.0 {
@@ -112,7 +114,7 @@ pub(crate) fn amount(
             if !digits.bytes().all(|b| b.is_ascii_digit()) {
                 return Err(format!("not a simple signed integer: '{reading}'"));
             }
-            (integer_difference(reading, &stored), None)
+            (decimal_text_difference(reading, &stored), None)
         }
         DsKind::DCounter | DsKind::DDerive => {
             if stored.starts_with('U') {
@@ -150,14 +152,81 @@ fn stored_str(stored: &[u8]) -> String {
     String::from_utf8_lossy(&stored[..end]).into_owned()
 }
 
-/// Exact decimal difference of two integer texts (UP-16); NaN when unknown.
-fn integer_difference(reading: &str, stored: &str) -> f64 {
-    // rrd_diff documents a limit on digits; UP-16 limits characters, so a
-    // sign plus 30 digits needs this check.
+/// `reading − stored` for two integer texts, formed exactly in decimal and
+/// then converted by the decimal conversion (NM-5); NaN when unknown.
+// Provenance: specification (docs/compatibility/update.md UP-16,
+// docs/compatibility/numbers.md NM-5 and NM-7).
+fn decimal_text_difference(reading: &str, stored: &str) -> f64 {
     if reading.len() > STORED_LEN {
         return f64::NAN;
     }
-    rrd_diff(reading, stored)
+    let (Some((reading_negative, reading_digits)), Some((stored_negative, stored_digits))) =
+        (split_integer_text(reading), split_integer_text(stored))
+    else {
+        return f64::NAN;
+    };
+    if reading_negative != stored_negative {
+        return f64::NAN;
+    }
+    let reading_digits = reading_digits.trim_start_matches('0');
+    let stored_digits = stored_digits.trim_start_matches('0');
+    // With equal signs, reading − stored has the sign of the magnitude
+    // difference, flipped when both texts are negative. Two equal negative
+    // texts give `-0`, which converts to negative zero.
+    let (magnitude, magnitude_negative) = match compare_magnitudes(reading_digits, stored_digits) {
+        Ordering::Less => (subtract_magnitudes(stored_digits, reading_digits), true),
+        Ordering::Equal | Ordering::Greater => {
+            (subtract_magnitudes(reading_digits, stored_digits), false)
+        }
+    };
+    let negative = magnitude_negative != reading_negative;
+    let text = if negative {
+        format!("-{magnitude}")
+    } else {
+        magnitude
+    };
+    parse_rrd_number(&text).unwrap_or(f64::NAN)
+}
+
+/// An optional `-` followed by at least one decimal digit: the sign and the
+/// digits.
+fn split_integer_text(text: &str) -> Option<(bool, &str)> {
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text),
+    };
+    (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then_some((negative, digits))
+}
+
+/// Order of two digit strings without leading zeros.
+fn compare_magnitudes(a: &str, b: &str) -> Ordering {
+    a.len().cmp(&b.len()).then_with(|| a.cmp(b))
+}
+
+/// `larger − smaller` for digit strings without leading zeros, where
+/// `larger` is not less than `smaller`; the result has no leading zeros
+/// (`0` when they are equal).
+fn subtract_magnitudes(larger: &str, smaller: &str) -> String {
+    let mut borrow = 0;
+    let mut smaller_digits = smaller.bytes().rev();
+    let mut result: Vec<u8> = larger
+        .bytes()
+        .rev()
+        .map(|digit| {
+            let subtrahend = smaller_digits.next().map_or(0, |d| d - b'0') + borrow;
+            let minuend = digit - b'0';
+            borrow = u8::from(minuend < subtrahend);
+            b'0' + minuend + 10 * borrow - subtrahend
+        })
+        .collect();
+    while result.len() > 1 && result.last() == Some(&b'0') {
+        result.pop();
+    }
+    if result.is_empty() {
+        result.push(b'0');
+    }
+    result.reverse();
+    String::from_utf8(result).expect("ASCII digits")
 }
 
 /// Floating conversion of UP-11. Prefix checks look at the reading as given;
@@ -214,6 +283,115 @@ mod tests {
             ("4294967296", "5", 4.0),
             ("4294967295", "0", 0.0),
             ("18446744073709551615", "5", 0.0),
+        ];
+        for (stored, reading, expected) in cases {
+            assert_eq!(
+                run(DsKind::Counter, stored, reading),
+                Ok(Some(expected)),
+                "{stored} -> {reading}"
+            );
+        }
+    }
+
+    #[test]
+    fn difference_of_equal_readings_is_zero() {
+        for text in ["0", "7", "000123", "99999999999999999999999"] {
+            let x = decimal_text_difference(text, text);
+            assert!(x == 0.0 && x.is_sign_positive(), "{text}");
+        }
+        let x = decimal_text_difference("-0012", "-12");
+        assert!(x == 0.0 && x.is_sign_negative());
+    }
+
+    #[test]
+    fn difference_handles_readings_of_different_lengths() {
+        assert_eq!(decimal_text_difference("1000", "999"), 1.0);
+        assert_eq!(decimal_text_difference("999", "1000"), -1.0);
+        assert_eq!(decimal_text_difference("12345", "7"), 12338.0);
+        assert_eq!(decimal_text_difference("7", "12345"), -12338.0);
+        assert_eq!(decimal_text_difference("0005", "3"), 2.0);
+        assert_eq!(run(DsKind::Counter, "9", "10"), Ok(Some(1.0)));
+    }
+
+    #[test]
+    fn difference_of_long_readings_is_exact_before_conversion() {
+        // 2^70 + 1 − 2^70 is 1 only when subtracted exactly.
+        assert_eq!(
+            decimal_text_difference("1180591620717411303425", "1180591620717411303424"),
+            1.0
+        );
+        assert_eq!(
+            decimal_text_difference(
+                "100000000000000000000000000000",
+                "99999999999999999999999999999"
+            ),
+            1.0
+        );
+        assert_eq!(
+            decimal_text_difference("123456789012345678901234567", "0"),
+            parse_rrd_number("123456789012345678901234567").unwrap()
+        );
+        // UP-16: a reading longer than 30 characters is unknown.
+        assert!(decimal_text_difference(&"1".repeat(31), "0").is_nan());
+        assert!(!decimal_text_difference(&"1".repeat(30), "0").is_nan());
+        assert!(decimal_text_difference(&format!("-{}", "1".repeat(30)), "-1").is_nan());
+    }
+
+    #[test]
+    fn derive_negative_readings_take_the_true_sign() {
+        // Provenance: black-box compatibility test (numbers.md NM-7).
+        let cases = [
+            ("-5", "-3", 2.0),
+            ("-3", "-5", -2.0),
+            ("-0012", "-007", 5.0),
+            ("-7", "-0", 7.0),
+            ("-0", "-7", -7.0),
+            ("5", "3", -2.0),
+        ];
+        for (stored, reading, expected) in cases {
+            assert_eq!(
+                run(DsKind::Derive, stored, reading),
+                Ok(Some(expected)),
+                "{stored} -> {reading}"
+            );
+        }
+        assert_eq!(
+            run(DsKind::Derive, "-123456789012345678901234567", "-1"),
+            Ok(Some(
+                parse_rrd_number("123456789012345678901234566").unwrap()
+            ))
+        );
+    }
+
+    #[test]
+    fn difference_is_unknown_for_mixed_signs_or_non_integers() {
+        for (reading, stored) in [
+            ("5", "-5"),
+            ("-5", "5"),
+            ("0", "-0"),
+            ("5", "U"),
+            ("5", ""),
+            ("", "5"),
+            ("-", "-5"),
+            ("5", "1.5"),
+        ] {
+            assert!(
+                decimal_text_difference(reading, stored).is_nan(),
+                "{stored} -> {reading}"
+            );
+        }
+    }
+
+    #[test]
+    fn counter_wrap_edges() {
+        let cases = [
+            // One below the first constant still wraps to a positive value.
+            ("4294967294", "0", 1.0),
+            ("4294967296", "0", -1.0 + 18446744069414584320.0),
+            ("1", "0", 4294967294.0),
+            ("0", "0", 0.0),
+            // Past 2^64 − 1 the second step still lands short of zero.
+            ("18446744073709551616", "0", 0.0),
         ];
         for (stored, reading, expected) in cases {
             assert_eq!(
