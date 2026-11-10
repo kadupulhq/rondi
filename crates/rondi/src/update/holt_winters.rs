@@ -321,8 +321,17 @@ struct Model {
 
 impl Model {
     /// *a* ⊖ *b*: the value with the season taken out.
+    // Compatibility: a multiplicative divisor that is not above 0 (negative,
+    // 0, −0 or unknown) gives an unknown.
+    // Provenance: specification (docs/compatibility/holt-winters.md HW-12a).
     fn remove(self, a: f64, b: f64) -> f64 {
-        if self.multiplicative { a / b } else { a - b }
+        if !self.multiplicative {
+            a - b
+        } else if b > 0.0 {
+            a / b
+        } else {
+            rrd_nan()
+        }
     }
 
     /// *a* ⊗ *b*: the level with the season put in.
@@ -364,9 +373,21 @@ impl Level {
     }
 }
 
-/// Learns from the PDP value `x` with the prefetched coefficient `s`;
-/// returns the prediction *p* and the new coefficient *s'*.
-// Compatibility: no state starts the level from the first known value; a
+/// What one PDP's learning gives the other archives (HW-12).
+struct Learned {
+    /// The prediction *p* the prediction archive writes.
+    written: f64,
+    /// The prediction *p̂* the deviation and failure check use; `None` when
+    /// HW-12 gives none.
+    used: Option<f64>,
+    /// The new coefficient *s'*.
+    season: f64,
+}
+
+/// Learns from the PDP value `x` with the prefetched coefficient `s`.
+// Compatibility: an unknown intercept (never set, or made unknown by
+// learning) restarts the level from the next known value and blends a known
+// coefficient with the new level; an unknown slope freezes the level; a
 // missing coefficient (the first season) predicts nothing and keeps the
 // level; otherwise the level, slope and coefficient are smoothed, and an
 // unknown value projects the trend one step further.
@@ -379,29 +400,61 @@ fn learn(
     beta: f64,
     gamma: f64,
     model: Model,
-) -> (f64, f64) {
+) -> Learned {
     level.last_nan_count = level.nan_count;
     if level.intercept.is_nan() {
-        if !x.is_nan() {
-            level.intercept = x;
-            level.last_intercept = x;
-            level.slope = 0.0;
-            level.last_slope = 0.0;
-            level.nan_count = 1;
-            level.last_nan_count = 1;
+        level.last_intercept = level.intercept;
+        level.last_slope = level.slope;
+        if x.is_nan() {
+            return Learned {
+                written: rrd_nan(),
+                used: None,
+                season: s,
+            };
         }
-        return (rrd_nan(), model.remove(x, level.intercept));
+        level.intercept = x;
+        level.last_intercept = x;
+        level.slope = 0.0;
+        level.last_slope = 0.0;
+        level.nan_count = 1;
+        level.last_nan_count = 1;
+        let deseasoned = model.remove(x, level.intercept);
+        return Learned {
+            written: rrd_nan(),
+            used: Some(model.apply(x, s)),
+            season: if s.is_nan() {
+                deseasoned
+            } else {
+                blend(gamma, deseasoned, s)
+            },
+        };
     }
     level.last_intercept = level.intercept;
     level.last_slope = level.slope;
+    if level.slope.is_nan() {
+        return Learned {
+            written: rrd_nan(),
+            used: None,
+            season: if x.is_nan() { s } else { rrd_nan() },
+        };
+    }
     if s.is_nan() {
-        return (rrd_nan(), model.remove(x, level.intercept));
+        return Learned {
+            written: rrd_nan(),
+            used: None,
+            season: model.remove(x, level.intercept),
+        };
     }
     let base = rrd_mul_add(level.nan_count as f64, level.slope, level.intercept);
     let prediction = model.apply(base, s);
+    let learned = |season| Learned {
+        written: prediction,
+        used: Some(prediction),
+        season,
+    };
     if x.is_nan() {
         level.nan_count = level.nan_count.wrapping_add(1);
-        return (prediction, s);
+        return learned(s);
     }
     level.intercept = blend(alpha, model.remove(x, s), base);
     level.slope = blend(
@@ -410,20 +463,16 @@ fn learn(
         level.last_slope,
     );
     level.nan_count = 1;
-    (
-        prediction,
-        blend(gamma, model.remove(x, level.intercept), s),
-    )
+    learned(blend(gamma, model.remove(x, level.intercept), s))
 }
 
-/// The new deviation from the value `x`, the prediction `p` and the
-/// prefetched deviation `d`.
+/// The new deviation from the value `x`, the prediction `p` the deviation
+/// uses (`None` when there is none) and the prefetched deviation `d`.
 // Provenance: specification (docs/compatibility/holt-winters.md HW-13).
-fn deviate(x: f64, p: f64, d: f64, gamma: f64) -> f64 {
+fn deviate(x: f64, p: Option<f64>, d: f64, gamma: f64) -> f64 {
+    let Some(p) = p else { return rrd_nan() };
     if x.is_nan() {
         d
-    } else if p.is_nan() {
-        rrd_nan()
     } else if d.is_nan() {
         (x - p).abs()
     } else {
@@ -432,11 +481,14 @@ fn deviate(x: f64, p: f64, d: f64, gamma: f64) -> f64 {
 }
 
 /// Whether `x` falls outside the band around `p` (a bound itself is inside).
+// Compatibility: an unknown value is a violation whenever the deviation is
+// known, whether or not there is a prediction.
 // Provenance: specification (docs/compatibility/holt-winters.md HW-14, HW-19).
-fn violates(x: f64, p: f64, d: f64, delta_pos: f64, delta_neg: f64) -> bool {
-    if p.is_nan() || d.is_nan() {
+fn violates(x: f64, p: Option<f64>, d: f64, delta_pos: f64, delta_neg: f64) -> bool {
+    if d.is_nan() {
         return false;
     }
+    let p = p.unwrap_or_else(rrd_nan);
     x.is_nan() || x > rrd_mul_add(delta_pos, d, p) || x < rrd_mul_add(-delta_neg, d, p)
 }
 
@@ -640,12 +692,13 @@ fn learn_pdp(
             continue;
         };
         let mut level = Level::read(prep);
-        let (prediction, season) = learn(&mut level, x, s, alpha, beta, gamma, model);
+        let learned = learn(&mut level, x, s, alpha, beta, gamma, model);
+        let season = learned.season;
         level.write(prep);
-        store_result(prep, pdp, run.len, prediction);
-        put(Some(group.prediction), prediction);
+        store_result(prep, pdp, run.len, learned.written);
+        put(Some(group.prediction), learned.written);
 
-        let deviation = deviate(x, prediction, d, gamma_dev);
+        let deviation = deviate(x, learned.used, d, gamma_dev);
         // A lone PDP writes its row to the season store before the prefetch
         // reads the row after it (HW-15, HW-16); a pair reads two rows
         // ahead and writes no row (HW-20).
@@ -717,7 +770,7 @@ fn learn_pdp(
             if let Some(prep) = archives[index].cdp_prep.get_mut(ds) {
                 let flag = match band {
                     Some(d) => {
-                        let violated = violates(x, prediction, d, delta_pos, delta_neg);
+                        let violated = violates(x, learned.used, d, delta_pos, delta_neg);
                         record_failure(prep, window, threshold, violated)
                     }
                     None => x,
@@ -1123,6 +1176,159 @@ mod tests {
         assert!(lone(&written[2])[0].is_nan());
         assert!(lone(&written[3])[0].is_nan());
         assert_eq!(lone(&written[4]), vec![0.0]);
+    }
+
+    /// Runs one PDP of value `x` through `archives` with the given rows.
+    fn learn_one(
+        archives: &mut [RrdArchiveInfo],
+        rows: &mut Seasons,
+        x: f64,
+    ) -> Vec<(usize, Vec<f64>)> {
+        let group = Group::find(&kinds(archives)).unwrap();
+        let mut triggered = false;
+        consolidate_group(
+            &group,
+            archives,
+            rows,
+            &one_pdp(1_000_000_000, x),
+            &mut triggered,
+        )
+        .iter()
+        .map(|row| (row.archive, lone(row)))
+        .collect()
+    }
+
+    fn multiplicative_group() -> Vec<RrdArchiveInfo> {
+        let mut archives = additive_group();
+        archives[0].consolidation = "MHWPREDICT".into();
+        archives[0].raw_consolidation = b"MHWPREDICT".to_vec();
+        archives
+    }
+
+    #[test]
+    fn unknown_intercept_restarts_and_blends_the_known_season() {
+        // HW-12 case 1 with s = 2 and d = 1 known: I = x, T = 0, p unknown,
+        // s' = blend(0.5, 0, 2), and the deviation uses x + s = 16.
+        let mut archives = additive_group();
+        let prep = &mut archives[0].cdp_prep[0];
+        prep.set_f64(cdp::INTERCEPT, rrd_nan());
+        prep.set_u64(cdp::NAN_COUNT, 3);
+        let mut rows = seasons(&[7.0, 8.0, 9.0, 10.0], &[5.0, 6.0, 7.0, 8.0]);
+        let written = learn_one(&mut archives, &mut rows, 14.0);
+        assert!(written[0].1[0].is_nan());
+        assert_eq!(written[1].1, vec![1.0]);
+        assert_eq!(written[2].1, vec![1.5]);
+        assert_eq!(written[3].1, vec![1.0]);
+        assert_eq!(written[4].1, vec![0.0]);
+        let level = &archives[0].cdp_prep[0];
+        assert_eq!(level.word_f64(cdp::INTERCEPT), 14.0);
+        assert_eq!(level.word_f64(cdp::LAST_INTERCEPT), 14.0);
+        assert_eq!(level.word_f64(cdp::SLOPE), 0.0);
+        assert_eq!(level.word_f64(cdp::LAST_SLOPE), 0.0);
+        assert_eq!(level.word_u64(cdp::NAN_COUNT), 1);
+        assert_eq!(level.word_u64(cdp::LAST_NAN_COUNT), 1);
+
+        // An unknown value keeps the level, leaves no prediction for the
+        // deviation (d' unknown though d is known) and is a violation.
+        let mut archives = additive_group();
+        let prep = &mut archives[0].cdp_prep[0];
+        prep.set_f64(cdp::INTERCEPT, rrd_nan());
+        prep.set_u64(cdp::NAN_COUNT, 3);
+        let mut rows = seasons(&[7.0, 8.0, 9.0, 10.0], &[5.0, 6.0, 7.0, 8.0]);
+        let written = learn_one(&mut archives, &mut rows, rrd_nan());
+        assert!(written[0].1[0].is_nan());
+        assert_eq!(written[1].1, vec![2.0]);
+        assert!(written[2].1[0].is_nan());
+        let level = &archives[0].cdp_prep[0];
+        assert!(level.word_f64(cdp::INTERCEPT).is_nan());
+        assert!(level.word_f64(cdp::LAST_INTERCEPT).is_nan());
+        assert_eq!(level.word_f64(cdp::SLOPE), 1.0);
+        assert_eq!(level.word_f64(cdp::LAST_SLOPE), 1.0);
+        assert_eq!(level.word_u64(cdp::NAN_COUNT), 3);
+        assert_eq!(
+            crate::holt_winters::failure_history(&archives[4].cdp_prep[0], 9)[0],
+            1
+        );
+    }
+
+    #[test]
+    fn unknown_slope_freezes_the_level() {
+        // HW-12 case 2: no prediction, I, T and n unchanged, s' unknown for
+        // a known value and s for an unknown one, d' unknown.
+        for (x, season) in [(14.0, rrd_nan()), (rrd_nan(), 2.0)] {
+            let mut archives = additive_group();
+            let prep = &mut archives[0].cdp_prep[0];
+            prep.set_f64(cdp::SLOPE, rrd_nan());
+            prep.set_u64(cdp::NAN_COUNT, 3);
+            let mut rows = seasons(&[7.0, 8.0, 9.0, 10.0], &[5.0, 6.0, 7.0, 8.0]);
+            let written = learn_one(&mut archives, &mut rows, x);
+            assert!(written[0].1[0].is_nan());
+            assert_eq!(written[1].1[0].to_bits(), season.to_bits());
+            assert!(written[2].1[0].is_nan());
+            let level = &archives[0].cdp_prep[0];
+            assert_eq!(level.word_f64(cdp::INTERCEPT), 10.0);
+            assert_eq!(level.word_f64(cdp::LAST_INTERCEPT), 10.0);
+            assert!(level.word_f64(cdp::SLOPE).is_nan());
+            assert!(level.word_f64(cdp::LAST_SLOPE).is_nan());
+            assert_eq!(level.word_u64(cdp::NAN_COUNT), 3);
+            assert_eq!(level.word_u64(cdp::LAST_NAN_COUNT), 3);
+            let violated = u8::from(x.is_nan());
+            assert_eq!(
+                crate::holt_winters::failure_history(&archives[4].cdp_prep[0], 9)[0],
+                violated
+            );
+        }
+    }
+
+    #[test]
+    fn multiplicative_division_by_non_positive_is_unknown() {
+        // HW-12a: s = −1 makes x ⊖ s unknown, so I, T and s' are unknown;
+        // p = (10 + 1) × −1 is still written and used by the deviation.
+        let mut archives = multiplicative_group();
+        archives[1].cdp_prep[0].set_f64(cdp::SEASONAL, -1.0);
+        let mut rows = seasons(&[7.0, 8.0, 9.0, 10.0], &[5.0, 6.0, 7.0, 8.0]);
+        let written = learn_one(&mut archives, &mut rows, 14.0);
+        assert_eq!(written[0].1, vec![-11.0]);
+        assert!(written[1].1[0].is_nan());
+        assert_eq!(written[2].1, vec![13.0]);
+        let level = &archives[0].cdp_prep[0];
+        assert!(level.word_f64(cdp::INTERCEPT).is_nan());
+        assert!(level.word_f64(cdp::SLOPE).is_nan());
+        assert_eq!(level.word_u64(cdp::NAN_COUNT), 1);
+
+        // A new intercept at or below 0 keeps I and T but not s'.
+        let mut archives = multiplicative_group();
+        archives[1].cdp_prep[0].set_f64(cdp::SEASONAL, 1.0);
+        let mut rows = seasons(&[7.0, 8.0, 9.0, 10.0], &[5.0, 6.0, 7.0, 8.0]);
+        let written = learn_one(&mut archives, &mut rows, -11.0);
+        // I = blend(0.5, −11, 11) = 0.
+        assert_eq!(archives[0].cdp_prep[0].word_f64(cdp::INTERCEPT), 0.0);
+        assert!(written[1].1[0].is_nan());
+
+        // A first value below 0 gives an unknown first coefficient.
+        let mut archives = multiplicative_group();
+        archives[0].cdp_prep[0].set_f64(cdp::INTERCEPT, rrd_nan());
+        archives[1].cdp_prep[0].set_f64(cdp::SEASONAL, rrd_nan());
+        let nan = rrd_nan();
+        let mut rows = seasons(&[nan; 4], &[nan; 4]);
+        let written = learn_one(&mut archives, &mut rows, -5.0);
+        assert_eq!(archives[0].cdp_prep[0].word_f64(cdp::INTERCEPT), -5.0);
+        assert!(written[1].1[0].is_nan());
+    }
+
+    #[test]
+    fn multiplicative_smoothing_with_mean_not_above_zero_is_unknown() {
+        let mut archives = multiplicative_group();
+        for index in [1, 2] {
+            archives[index].param_words[param::SMOOTHING_WINDOW] = f(0.5);
+        }
+        let group = Group::find(&kinds(&archives)).unwrap();
+        let mut rows = seasons(&[-1.0, -2.0, -4.0, 1.0], &[3.0, 1.0, 2.0, 6.0]);
+        smooth(&group, &mut archives, &mut rows, "0004", &mut Vec::new());
+        assert!(rows.seasonal.values.iter().all(|v| v.is_nan()));
+        // The mean −1.5 is still added to the intercept.
+        let intercept = archives[0].cdp_prep[0].word_f64(cdp::INTERCEPT);
+        assert!(close(&[intercept], &[8.5]), "{intercept}");
     }
 
     #[test]
