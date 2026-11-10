@@ -1,6 +1,8 @@
-// The decimal conversion in this file derives from RRDtool 1.11.0's string-to-double
-// source file, which is BSD-licensed (Copyright (C) 2002 Michael Ringgaard). See
-// THIRD-PARTY-NOTICES.md for the copyright notice and license text.
+// The decimal conversion `parse_rrd_decimal`, its wrappers `parse_rrd_number`
+// and `rrd_strtodbl`, and their helper `parse_special` derive from RRDtool
+// 1.11.0's string-to-double source file, which is BSD-licensed (Copyright (C)
+// 2002 Michael Ringgaard). See THIRD-PARTY-NOTICES.md for the copyright notice
+// and license text. The `strtol` family below is not derived from that file.
 
 //! Numeric conversion used by RRDtool's update path.
 
