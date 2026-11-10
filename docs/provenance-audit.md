@@ -1,5 +1,13 @@
 # Provenance audit
 
+## Maintainer disposition (2026-11-10)
+
+This disposition answers the re-audit at `c568603`.
+
+- `rrd_diff`, the COUNTER and DERIVE difference routine in `crates/rondi/src/rrd_number.rs`, is replaced clean-room in the pull request that adds this subsection. The new `decimal_text_difference` in `crates/rondi/src/update/amount.rs` was written from `docs/compatibility/update.md` UP-16 and `docs/compatibility/numbers.md` NM-5 and NM-7 without reading the old body, and `THIRD-PARTY-NOTICES.md` now attributes only the decimal-conversion functions of `rrd_number.rs` to the BSD parser.
+- Under decision D1, the ruling that the license history of code merged in the GPL period is not a release blocker, the `tune` header options and the `xport` and `graphv` writers in `crates/rondi-cli/src/main.rs`, and `crates/rondi/src/rrd_binary.rs`, are scheduled for respecification and rewrite in 0.2. They do not block 0.1.0.
+- `scripts/check-provenance.py` tracks those two files again in its `LEGACY` list and names them on every run until they are rewritten.
+
 This audit identifies Rondi code that appears to derive from the RRDtool 1.11.0 C implementation rather than from independent design. It is engineering provenance hygiene, not a legal conclusion. Similarity alone does not prove copying: a behavior-compatible reimplementation of a file format, protocol, and command line will share names, constants, error text, and edge-case behavior with the original for legitimate reasons. The findings below separate those reasons from implementation expression that the project cannot currently show was independently written.
 
 Audited revision: `origin/main` at `0fd0cf8`. Reference: RRDtool 1.11.0 release tarball, used only for side-by-side similarity assessment. This report contains no RRDtool source expression.
