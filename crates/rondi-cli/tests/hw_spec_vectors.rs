@@ -31,7 +31,10 @@ fn hw_vectors_cover_the_specification() {
         assert!(ids.insert(&case.id), "duplicate id {}", case.id);
         assert!(vectors.contains_key(&case.id), "no vector for {}", case.id);
         assert!(
-            matches!(case.expect, Expect::Same | Expect::Unsupported),
+            matches!(
+                case.expect,
+                Expect::Same | Expect::Unsupported | Expect::CleanError
+            ),
             "{}: unexpected expectation",
             case.id
         );
