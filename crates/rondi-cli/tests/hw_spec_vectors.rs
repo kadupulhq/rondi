@@ -79,3 +79,48 @@ fn rrdtool_reproduces_hw_vectors_and_rondi_matches_it() {
     common::require_oracle();
     spec_vectors::replay_oracle(&suite());
 }
+
+/// HW-35 then HW-18: after `--aberrant-reset` of one DS, an update series
+/// leaves the same file bytes as RRDtool's (Review Focus 5).
+#[test]
+fn update_after_aberrant_reset_matches_rrdtool() {
+    if Command::new("rrdtool").arg("--version").output().is_err() {
+        common::skipped("skipping aberrant reset then update: rrdtool is not installed".into());
+        return;
+    }
+    common::require_oracle();
+    let temp = tempfile::tempdir().unwrap();
+    let rondi = temp.path().join("rrdtool");
+    std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &rondi).unwrap();
+    let input =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/hw/inputs/hwtune.rrd");
+    let updates: Vec<String> = (1..=40_u64)
+        .map(|i| {
+            let wave = [10, 40, 25, 5, 60][(i % 5) as usize] + if i == 27 { 400 } else { 0 };
+            format!("{}:{}:{}", 1_000_000_200 + 10 * i, wave, 2 * wave + i)
+        })
+        .collect();
+    let mut files = Vec::new();
+    for (who, program) in [("rondi", rondi.clone()), ("rrdtool", "rrdtool".into())] {
+        let path = temp.path().join(format!("{who}.rrd"));
+        std::fs::copy(&input, &path).unwrap();
+        for args in [
+            vec![
+                "tune".to_owned(),
+                path.display().to_string(),
+                "-b".into(),
+                "x".into(),
+            ],
+            [
+                vec!["update".to_owned(), path.display().to_string()],
+                updates.clone(),
+            ]
+            .concat(),
+        ] {
+            let output = Command::new(&program).args(&args).output().unwrap();
+            assert!(output.status.success(), "{who} {}: {output:?}", args[0]);
+        }
+        files.push(std::fs::read(&path).unwrap());
+    }
+    assert!(files[0] == files[1], "files differ after reset and update");
+}

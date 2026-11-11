@@ -193,11 +193,14 @@ impl Tuned<'_> {
     /// Sets every row of `source` in `archive` to unknown.
     fn clear_rows(&mut self, archive: usize, source: usize) -> Result<(), StoreError> {
         let sources = self.sources();
-        let (rows, start) = {
-            let info = &self.info.archives[archive];
-            (info.rows as usize, info.data_offset)
-        };
-        let length = rows * sources * VALUE_LEN;
+        // The header's row count is untrusted: bound the archive by the
+        // file's length, with checked arithmetic, before sizing the read.
+        let file_len = self.file.metadata()?.len();
+        let info = &self.info.archives[archive];
+        crate::rrd_binary::require_rows_in_file(&self.info, info, file_len)?;
+        let start = info.data_offset;
+        let length = usize::try_from(info.rows * (sources * VALUE_LEN) as u64)
+            .map_err(|_| StoreError::RrdFormat("archive larger than memory".into()))?;
         let mut block = vec![0_u8; length];
         self.file.seek(SeekFrom::Start(start))?;
         self.file.read_exact(&mut block)?;
@@ -603,6 +606,23 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    /// A row count whose byte size wraps past `u64` is refused before the
+    /// rows are read, not used to size the read.
+    #[test]
+    fn aberrant_reset_refuses_rows_past_the_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = create(temp.path(), "a.rrd", &[GROUP]);
+        let mut bytes = std::fs::read(&path).unwrap();
+        // SEASONAL is archive 1; its row count is at offset 24 of its
+        // definition. Adding 2^61 rows leaves rows * 2 DS * 8 bytes unchanged
+        // modulo 2^64.
+        let at = 128 + 2 * 120 + 120 + 24;
+        let rows = u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+        bytes[at..at + 8].copy_from_slice(&(rows + (1 << 61)).to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(tune(&path, &[O::AberrantReset(0)]).is_err());
     }
 
     /// Review Focus 5 (HW-35): a reset of one DS changes only that DS's
