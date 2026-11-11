@@ -1053,7 +1053,7 @@ mod tests {
         let text = String::from_utf8(answer).unwrap();
         assert!(text.contains("rra[1].alpha 0 1.0000000000e-01\n"), "{text}");
         assert!(
-            text.contains("rra[5].cdp_prep[0].history 2 \"000000000\"\n"),
+            text.contains("rra[5].cdp_prep[0].history 2 000000000\n"),
             "{text}"
         );
         assert!(!text.contains("rra[1].xff"), "{text}");

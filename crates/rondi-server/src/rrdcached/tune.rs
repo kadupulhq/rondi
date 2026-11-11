@@ -2,7 +2,7 @@
 
 use super::files::Access;
 use super::service::{Answer, Shared};
-use rondi::{RrdDataSourceTune, RrdInfo, RrdTuneBound};
+use rondi::{HwTuneOption, RrdDataSourceTune, RrdTuneBound};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -97,7 +97,19 @@ pub(crate) fn tune(shared: &Shared, fields: &[Vec<u8>]) -> Answer {
             },
         })
         .collect::<Vec<_>>();
-    let outcome = read_options(&words[1.min(words.len())..], &info, &mut sources);
+    // Holt-Winters options write the file when they are read, through
+    // their own handle on it (HW-30 to HW-35).
+    let mut holt_winters = |option: HwTuneOption| {
+        file.try_clone()
+            .map_err(rondi::StoreError::from)
+            .and_then(|handle| rondi::tune_holt_winters_file(handle, path, &[option]))
+            .map_err(|error| error.to_string())
+    };
+    let outcome = read_options(
+        &words[1.min(words.len())..],
+        &mut sources,
+        &mut holt_winters,
+    );
     let changes = sources
         .into_iter()
         .map(|source| source.change)
@@ -121,7 +133,11 @@ pub(crate) fn tune(shared: &Shared, fields: &[Vec<u8>]) -> Answer {
 }
 
 /// Reads the options and records each change; stops at the first error.
-fn read_options(words: &[Vec<u8>], info: &RrdInfo, sources: &mut [Source]) -> Result<(), String> {
+fn read_options(
+    words: &[Vec<u8>],
+    sources: &mut [Source],
+    holt_winters: &mut dyn FnMut(HwTuneOption) -> Result<(), String>,
+) -> Result<(), String> {
     let mut index = 0;
     let mut positional = Vec::new();
     while index < words.len() {
@@ -139,7 +155,7 @@ fn read_options(words: &[Vec<u8>], info: &RrdInfo, sources: &mut [Source]) -> Re
             },
         };
         match option {
-            Some((letter, argument)) => apply(letter, &argument, info, sources)?,
+            Some((letter, argument)) => apply(letter, &argument, sources, holt_winters)?,
             None => positional.push(word),
         }
     }
@@ -286,21 +302,6 @@ fn scan_float(text: &[u8]) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
-/// The consolidation functions of the Holt-Winters archives.
-const HOLT_WINTERS: &[&str] = &[
-    "HWPREDICT",
-    "MHWPREDICT",
-    "SEASONAL",
-    "DEVSEASONAL",
-    "DEVPREDICT",
-];
-
-fn has_cf(info: &RrdInfo, names: &[&str]) -> bool {
-    info.archives
-        .iter()
-        .any(|archive| names.contains(&archive.consolidation.as_str()))
-}
-
 // Compatibility: each option parses `name:value` before looking the name
 // up, and reports `invalid arguments for <setting>` or `unknown data
 // source name '<name>'` (RC-90). Provenance: black-box compatibility
@@ -308,8 +309,8 @@ fn has_cf(info: &RrdInfo, names: &[&str]) -> bool {
 fn apply(
     letter: u8,
     argument: &[u8],
-    info: &RrdInfo,
     sources: &mut [Source],
+    holt_winters: &mut dyn FnMut(HwTuneOption) -> Result<(), String>,
 ) -> Result<(), String> {
     match letter {
         b'h' => {
@@ -369,60 +370,54 @@ fn apply(
         // leaves the step alone. Provenance: black-box compatibility test.
         b'D' => {}
         b't' if rondi::c_strtol(&String::from_utf8_lossy(argument), 10).0 <= 0 => {}
+        // Compatibility: the name is the leading run of name characters,
+        // cut at 19 bytes, as the CLI reads it (HW-35).
+        // Provenance: black-box compatibility test.
         b'b' => {
-            find(sources, argument)?;
-            holt_winters(info, letter)?;
-        }
-        b'x' | b'y' | b'z' | b'v' | b's' | b'S' => {
-            // Compatibility: the smoothing windows (-s, -S) accept 0 and 1.
-            // Provenance: black-box compatibility test.
-            let value = scan_float(argument).ok_or("Unable to parse Holt-Winters parameter")?;
-            if matches!(letter, b'x' | b'y' | b'z' | b'v') && !(value > 0.0 && value < 1.0) {
-                return Err("Holt-Winters parameter must be between 0 and 1".to_owned());
+            let length = argument
+                .iter()
+                .take_while(|&&byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+                .count()
+                .min(NAME_MAX);
+            if length == 0 {
+                return Err("invalid argument for aberrant-reset".to_owned());
             }
-            holt_winters(info, letter)?;
+            let name = &argument[..length];
+            find(sources, name)?;
+            let index = sources
+                .iter()
+                .position(|source| source.current == name)
+                .unwrap_or_default();
+            holt_winters(HwTuneOption::AberrantReset(index))?;
         }
-        b'f' | b'w' => {
-            let value = rondi::c_strtol(&String::from_utf8_lossy(argument), 10).0;
-            if !(1..=28).contains(&value) {
-                return Err("Parameter must be between 1 and 28".to_owned());
-            }
-            failures(info, letter)?;
+        b'x' | b'y' | b'z' | b'v' | b's' | b'S' | b'f' | b'w' | b'p' | b'n' => {
+            let text = String::from_utf8_lossy(argument).into_owned();
+            holt_winters(match letter {
+                b'x' => HwTuneOption::Alpha(text),
+                b'y' => HwTuneOption::Beta(text),
+                b'z' => HwTuneOption::Gamma(text),
+                b'v' => HwTuneOption::GammaDeviation(text),
+                b's' => HwTuneOption::SmoothingWindow(text),
+                b'S' => HwTuneOption::SmoothingWindowDeviation(text),
+                b'p' => HwTuneOption::DeltaPos(text),
+                b'n' => HwTuneOption::DeltaNeg(text),
+                b'w' => HwTuneOption::WindowLength(text),
+                _ => HwTuneOption::FailureThreshold(text),
+            })?;
         }
-        b'p' | b'n' => failures(info, letter)?,
         other => return Err(unsupported(other)),
     }
     Ok(())
 }
 
 /// The refusal of an option Rondi does not support.
-// Rondi difference (known defect, RD-019): Holt-Winters tuning and step
-// changes are not supported.
+// Rondi difference (known defect, RD-019): step changes are not supported.
 fn unsupported(letter: u8) -> String {
     let full = OPTIONS
         .iter()
         .find(|(short, _)| *short == letter)
         .map_or("", |(_, full)| full);
     format!("--{full} is not supported by Rondi")
-}
-
-// Compatibility: on a file without the archives these options tune, the
-// reference reports that they do not exist; an aberrant reset of such a
-// file does nothing (RC-90). Provenance: black-box compatibility test.
-fn holt_winters(info: &RrdInfo, letter: u8) -> Result<(), String> {
-    match (has_cf(info, HOLT_WINTERS), letter) {
-        (false, b'b') => Ok(()),
-        (false, _) => Err("Holt-Winters RRA does not exist in this RRD".to_owned()),
-        (true, _) => Err(unsupported(letter)),
-    }
-}
-
-fn failures(info: &RrdInfo, letter: u8) -> Result<(), String> {
-    if has_cf(info, &["FAILURES"]) {
-        Err(unsupported(letter))
-    } else {
-        Err("Failures RRA does not exist in this RRD".to_owned())
-    }
 }
 
 #[cfg(test)]

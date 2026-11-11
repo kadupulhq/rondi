@@ -32,6 +32,15 @@ pub(crate) fn rrd_strtodbl(input: &str, context: &str) -> Result<f64, String> {
     }
 }
 
+/// The longest leading number of `input` (leading white space skipped),
+/// else a special spelling at its start; `None` when neither is there.
+pub(crate) fn leading_number(input: &str) -> Option<f64> {
+    match parse_rrd_decimal(input) {
+        Some((number, _)) => Some(number),
+        None => parse_special(input),
+    }
+}
+
 fn parse_special(input: &str) -> Option<f64> {
     let starts_with = |prefix: &str| {
         input

@@ -44,6 +44,27 @@ impl Work {
             .output()
             .unwrap();
         assert!(created.status.success(), "{created:?}");
+        // A Holt-Winters file with learned state, for TUNE (HW-30 to HW-35).
+        let hw = root.join("hwbase.rrd");
+        let created = Command::new("rrdtool")
+            .arg("create")
+            .arg(&hw)
+            .args(["--start", "1000000000", "--step", "10"])
+            .args(["DS:x:GAUGE:20:U:U", "DS:y:GAUGE:20:U:U"])
+            .args(["RRA:AVERAGE:0.5:1:5", "RRA:HWPREDICT:20:0.1:0.01:5"])
+            .output()
+            .unwrap();
+        assert!(created.status.success(), "{created:?}");
+        let updates: Vec<String> = (1..=30)
+            .map(|i| format!("{}:{}:{}", 1_000_000_000 + 10 * i, i % 5 * 10 + i, 3 * i))
+            .collect();
+        let updated = Command::new("rrdtool")
+            .arg("update")
+            .arg(&hw)
+            .args(&updates)
+            .output()
+            .unwrap();
+        assert!(updated.status.success(), "{updated:?}");
         std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), root.join("rrdcached")).unwrap();
         Some(Self { _temp: temp, root })
     }
@@ -62,6 +83,7 @@ impl Work {
         for name in ["a.rrd", "sub/d.rrd", "sub/deep/f.rrd"] {
             std::fs::copy(self.root.join("baseline.rrd"), base.join(name)).unwrap();
         }
+        std::fs::copy(self.root.join("hwbase.rrd"), base.join("hw.rrd")).unwrap();
         let _ = std::fs::remove_file(self.root.join("s.sock"));
     }
 
@@ -498,6 +520,39 @@ fn tune_parses_options_like_rrdtool() {
     assert!(observed[0][1].ends_with("]\n-1 Got error unknown data source name 'z'\n"));
     assert!(observed[0][3].ends_with("]\n-1 Got error invalid option -- 'bogus'\n"));
     assert_same(&observed);
+}
+
+/// HW-30 to HW-35 through TUNE: the Holt-Winters options read their values,
+/// stop at the first failure and change the file as `rrdtool tune` does.
+#[test]
+fn tune_holt_winters_options_like_rrdcached() {
+    let Some(work) = Work::new() else { return };
+    let sessions: [&[u8]; 14] = [
+        b"TUNE hw.rrd 3 tune -x 0.5\nINFO hw.rrd\n",
+        b"TUNE hw.rrd 5 tune --beta nan --gamma 2\nINFO hw.rrd\n",
+        b"TUNE hw.rrd 5 tune -v 0.25x -s 1\nINFO hw.rrd\n",
+        b"TUNE hw.rrd 3 tune -S x\nINFO hw.rrd\n",
+        b"TUNE hw.rrd 3 tune -p x\nINFO hw.rrd\n",
+        b"TUNE hw.rrd 3 tune -n 0.05x\nINFO hw.rrd\n",
+        b"TUNE hw.rrd 5 tune -w 5 -f 3.7\nINFO hw.rrd\n",
+        b"TUNE hw.rrd 3 tune -w 29\nINFO hw.rrd\n",
+        b"TUNE hw.rrd 3 tune -b y\nINFO hw.rrd\n",
+        b"TUNE hw.rrd 5 tune -r x:q -b q\nINFO hw.rrd\n",
+        b"TUNE hw.rrd 3 tune -b zz\n",
+        b"TUNE hw.rrd 5 tune -h x:900 --alpha 1\nINFO hw.rrd\n",
+        b"TUNE a.rrd 3 tune -x 0.5\n",
+        b"TUNE a.rrd 3 tune -s 0.5\nINFO a.rrd\n",
+    ];
+    let observed = work.differential(&["-B"], &sessions);
+    assert!(observed[0][0].contains("\nrra[1].alpha 0 5.0000000000e-01\n"));
+    for (upstream, rondi) in observed[0].iter().zip(&observed[1]) {
+        let first = upstream.lines().zip(rondi.lines()).find(|(a, b)| a != b);
+        assert!(
+            upstream == rondi,
+            "{}: first difference {first:?}",
+            upstream.lines().next().unwrap()
+        );
+    }
 }
 
 /// RD-015: upstream may drop requests sent just before a half-close,

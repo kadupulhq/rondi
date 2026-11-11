@@ -969,12 +969,10 @@ def compute_cases():
 def hw_cases():
     c = []
 
-    # Rondi implements info, dump, fetch, update and updatev of files with
-    # Holt-Winters archives (expectation `same`). It still refuses tune of
-    # such files (`unsupported`, holt-winters.md HW-36); promote those cases
-    # with the implementation. Explicit expectations (`clean-error`,
-    # `divergent`) are kept as given.
-    implemented = {"info", "dump", "fetch", "update", "updatev"}
+    # Rondi implements info, dump, fetch, update, updatev and tune of files
+    # with Holt-Winters archives (expectation `same`). Explicit expectations
+    # (`clean-error`, `divergent`) are kept as given.
+    implemented = {"info", "dump", "fetch", "update", "updatev", "tune"}
 
     def add(*args, inputs=(), expect=None, note="-"):
         if expect is None:

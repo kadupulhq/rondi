@@ -166,11 +166,6 @@ pub(crate) fn rrd_strtodbl_status(text: &str, error: Option<&str>) -> (u32, Resu
     (2, Ok(value))
 }
 
-/// The value a partial conversion (status 1) leaves in `*dbl`.
-pub(crate) fn rrd_strtod_prefix(text: &str) -> f64 {
-    rrd_strtod(text.as_bytes()).0
-}
-
 /// Formats one double with the C library so locale and spelling of
 /// non-finite values match RRDtool.
 pub(crate) fn c_format_double(format: &CStr, value: f64) -> String {

@@ -489,13 +489,14 @@ exist, deleting a data source that does not exist and `RRA#i:+0` or `=n`
 with the current count all still rewrite the file (TM-27 rotation and the
 other rules apply), with exit status 0.
 
-**TM-60** (black-box; should). Rondi refuses `COMPUTE` data sources and
-Holt-Winters archives (`HWPREDICT`, `MHWPREDICT`, `SEASONAL`,
-`DEVSEASONAL`, `DEVPREDICT`, `FAILURES`) with its own
-`... not supported by Rondi` error and leaves the file unchanged. The
-reference accepts them. This specification does not describe their effect;
-[`holt-winters.md`](holt-winters.md) section 4 describes the
-Holt-Winters options.
+**TM-60** (black-box; should). In structure changes Rondi refuses
+`COMPUTE` data sources and Holt-Winters archives (`HWPREDICT`,
+`MHWPREDICT`, `SEASONAL`, `DEVSEASONAL`, `DEVPREDICT`, `FAILURES`), both
+when a word adds one and when the file already holds one, with its own
+`... not supported by Rondi` error, and leaves the file unchanged. The
+reference accepts them. This specification does not describe their effect.
+The Holt-Winters header options are implemented as
+[`holt-winters.md`](holt-winters.md) section 4 describes.
 
 ## Summary by class
 

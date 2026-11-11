@@ -594,9 +594,9 @@ gives `-1 Too many arguments (expected <argc>)`. Settings before a failing
 option are written. Pending values are not flushed. (`tune-*`.)
 
 *Rondi difference (known defect)*: Rondi supports heartbeat, minimum,
-maximum, data source type and rename options and refuses Holt-Winters
-parameters, `--step` and the `DS:`/`RRA:` modification words (RD-007,
-RD-019).
+maximum, data source type and rename options and the Holt-Winters options
+of `holt-winters.md` section 4, and refuses `--step` and the
+`DS:`/`RRA:` modification words (RD-007, RD-019).
 
 **RC-91** (black-box; defect-or-undefined). An *argc* larger than the
 number of words sent makes the reference stop answering on that connection
