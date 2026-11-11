@@ -34,7 +34,7 @@ RS-53; every other slot zero):
 | `HWPREDICT`, `MHWPREDICT` | intercept, last intercept, slope, last slope unknown; NaN count 1; last NaN count 1 |
 | `SEASONAL` | seasonal, last seasonal unknown; init flag 1 |
 | `DEVSEASONAL` | deviation (slot 2) and last deviation unknown; init flag 1 |
-| `DEVPREDICT` | none |
+| `DEVPREDICT` | value (slot 0) unknown |
 | `FAILURES` | failure history all zero (`000000000` for window length 9) |
 
 Rows are all unknown, as for classic archives (CR-44).
@@ -47,7 +47,10 @@ the inode, but it does depend on the output file name (`s.rrd`, `h3.rrd`,
 `abc.rrd` give different values for the same definitions). The function is
 not specified here. A replacement may choose any value in range;
 comparisons of created files mask this slot as they mask the current rows
-(CR-46). See "Open questions".
+(CR-46): the `create` suite's masked form zeroes parameter slot 4 of every
+`SEASONAL` and `DEVSEASONAL` archive. Rondi stores 0 for an archive
+defined on the command line (a template's stored value is copied,
+`create.md` CR-52). See "Open questions".
 
 ## 1a. `info` and `dump`
 
@@ -76,7 +79,7 @@ CDP keys `rra[i].cdp_prep[j].<key>`, all of one DS before the next:
 | `HWPREDICT`, `MHWPREDICT` | `alpha` (`hw_alpha`), `beta` (`hw_beta`) | `intercept`, `slope`, `NaN_count` (`nan_count`) |
 | `SEASONAL` | `gamma` (`seasonal_gamma`), then `smoothing_window` if the rule below allows | `seasonal` |
 | `DEVSEASONAL` | `gamma` (`seasonal_gamma`), then `smoothing_window` if the rule below allows | `deviation` (CDP slot 2) |
-| `DEVPREDICT` | none | none |
+| `DEVPREDICT` | value (slot 0) unknown | none |
 | `FAILURES` | `delta_pos`, `delta_neg`, `failure_threshold`, `window_length` (`window_len`) | `history` |
 
 `info` never prints `dependent_rra_idx`, `seasonal_smooth_idx`,
@@ -143,7 +146,7 @@ Each `<cdp_prep>` `<ds>` starts with `primary_value` and
 |---|---|
 | `HWPREDICT`, `MHWPREDICT` | `intercept`, `last_intercept`, `slope`, `last_slope`, `nan_count`, `last_nan_count` |
 | `SEASONAL`, `DEVSEASONAL` | `seasonal`, `last_seasonal`, `init_flag` (`DEVSEASONAL` uses the same names for its deviation slots) |
-| `DEVPREDICT` | none |
+| `DEVPREDICT` | value (slot 0) unknown |
 | `FAILURES` | `history` |
 
 No Holt-Winters archive prints `<xff>`, `<value>` or

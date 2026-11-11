@@ -22,7 +22,8 @@ docs/compatibility/resize.md.
 
 Only the standard library is used. `create` picks a random current row for
 each archive, so created files are compared in masked form: every archive is
-rotated so its oldest row comes first and the current-row words are zeroed.
+rotated so its oldest row comes first, the current-row words are zeroed and
+so is the `seasonal_smooth_idx` of SEASONAL and DEVSEASONAL archives (HW-2).
 Resize output is deterministic for a frozen input and kept as is.
 """
 
@@ -71,6 +72,12 @@ def masked(b):
     if pointers + 8 * rra > len(b):
         return b
     out = bytearray(b[:pointers]) + bytes(8 * rra)
+    for i in range(rra):
+        # HW-2: the initial seasonal_smooth_idx (parameter slot 4) is the
+        # implementation's choice, like the current rows.
+        record = 128 + 120 * ds + 120 * i
+        if b[record:record + 20].rstrip(b"\0") in (b"SEASONAL", b"DEVSEASONAL"):
+            out[record + 72:record + 80] = bytes(8)
     data = pointers + 8 * rra
     for i in range(rra):
         rows = word(b, 128 + 120 * ds + 120 * i + 24)
