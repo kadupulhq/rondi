@@ -257,7 +257,11 @@ says there is none.
 
 1. If *I* is unknown: when *x* is known, *I* = *I'* = *x*, *T* = *T'* = 0
    and *n* = *n'* = 1 (*n* may have grown in runs, HW-21); *p* is
-   unknown, *p̂* = *x* ⊗ *s* (unknown when *s* is), and the new
+   unknown, *p̂* = *x* ⊗ *s* when *s* is known and there is no *p̂* when
+   it is not (so *d'* is the unknown value itself, HW-13; on Linux x86_64
+   its sign bit is set, where a value derived from an unknown *s* would
+   not have it: probes after `tune --aberrant-reset` and with the
+   intercept, season and deviation words of `hwtune` patched), and the new
    coefficient is *s'* = *blend*(γs, *x* ⊖ *I*, *s*) with the new *I*
    when *s* is known, and *s'* = *x* ⊖ *I* when it is not (so 0, or 1 for
    a positive first value of `MHWPREDICT`). When *x* is unknown, *I'* = *I*
