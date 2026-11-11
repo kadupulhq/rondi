@@ -2,8 +2,8 @@
 
 Status: complete for create-time state (section 1), `info` and `dump`
 output (section 1a), `update` (sections 2 and 3) and `tune` (section 4).
-Rondi implements `info`, `dump` and `update` for these archives; `create`
-and `tune` still refuse them (CR-80, HW-36).
+Rondi implements `create`, `info`, `dump` and `update` for these
+archives; `tune` still refuses their options (HW-36).
 `fetch` and `restore` of these archives are covered by the vectors and by
 the specifications of those commands, not restated here.
 

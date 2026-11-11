@@ -309,38 +309,38 @@
 307-o-rrd-b-1000000000-s-10-ds-a-dcounter-20	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:a:DCOUNTER:20:U:U	DS:b:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5
 308-o-rrd-b-1000000000-s-10-ds-a-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:a:GAUGE:20:U:U	DS:b:DDERIVE:20:U:U	RRA:AVERAGE:0.5:1:5
 309-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:2000
-310-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:HWPREDICT:20:0.1:0.01:5
-311-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:MHWPREDICT:20:0.1:0.01:5
-312-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:HWPREDICT:20:0.1:0.01:5:2
-313-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:HWPREDICT:20:0.1:1:5
+310-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:HWPREDICT:20:0.1:0.01:5
+311-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:MHWPREDICT:20:0.1:0.01:5
+312-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:HWPREDICT:20:0.1:0.01:5:2
+313-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:HWPREDICT:20:0.1:1:5
 314-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	undefined	varies-between-runs	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:HWPREDICT:20:0.1:0.01:0
-315-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:HWPREDICT:20:0.1:0.01:1m
-316-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:HWPREDICT:5m:0.1:0.01:1m
-317-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:HWPREDICT:20:0.1:0.01:5:9
-318-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:HWPREDICT:20:0.1:0.01:5:0
-319-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:SEASONAL:5:0.1:1
-320-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:SEASONAL:5:0.1:1:smoothing-window=0.3
-321-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:DEVSEASONAL:5:0.1:1
-322-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:DEVSEASONAL:5:0.1:1:smoothing-window=0
-323-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:DEVPREDICT:20:1
-324-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:FAILURES:20:7:9:1
-325-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:FAILURES:20:1:28:1
-326-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:HWPREDICT:20:0.1:0.01:5:2	RRA:SEASONAL:5:0.2:1
-327-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:HWPREDICT:20:0:0.01:5
-328-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:HWPREDICT:20:1:0.01:5
-329-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:HWPREDICT:20:0.1:-0.1:5
-330-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:HWPREDICT:0:0.1:0.01:5
-331-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:HWPREDICT:20:0.1:0.01
-332-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:HWPREDICT:20:0.1:0.01:5:2:3
-333-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:SEASONAL:5:0.1
-334-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:SEASONAL:5:1.5:1
-335-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:SEASONAL:5:0.2:1:smoothing-window=2
-336-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:SEASONAL:5:0.2:1:foo=1
-337-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:DEVPREDICT:20
-338-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:FAILURES:20:10:9:1
-339-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:FAILURES:20:7:29:1
-340-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:FAILURES:20:0:9:1
-341-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:FAILURES:20:7:9
+315-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:HWPREDICT:20:0.1:0.01:1m
+316-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:HWPREDICT:5m:0.1:0.01:1m
+317-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	clean-error	CR-35	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:HWPREDICT:20:0.1:0.01:5:9
+318-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	clean-error	CR-35	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:HWPREDICT:20:0.1:0.01:5:0
+319-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:SEASONAL:5:0.1:1
+320-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:SEASONAL:5:0.1:1:smoothing-window=0.3
+321-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:DEVSEASONAL:5:0.1:1
+322-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:DEVSEASONAL:5:0.1:1:smoothing-window=0
+323-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:DEVPREDICT:20:1
+324-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:FAILURES:20:7:9:1
+325-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:AVERAGE:0.5:1:5	RRA:FAILURES:20:1:28:1
+326-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:HWPREDICT:20:0.1:0.01:5:2	RRA:SEASONAL:5:0.2:1
+327-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:HWPREDICT:20:0:0.01:5
+328-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:HWPREDICT:20:1:0.01:5
+329-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:HWPREDICT:20:0.1:-0.1:5
+330-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:HWPREDICT:0:0.1:0.01:5
+331-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:HWPREDICT:20:0.1:0.01
+332-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	clean-error	CR-35	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:HWPREDICT:20:0.1:0.01:5:2:3
+333-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:SEASONAL:5:0.1
+334-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:SEASONAL:5:1.5:1
+335-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:SEASONAL:5:0.2:1:smoothing-window=2
+336-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:SEASONAL:5:0.2:1:foo=1
+337-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:DEVPREDICT:20
+338-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:FAILURES:20:10:9:1
+339-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:FAILURES:20:7:29:1
+340-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:FAILURES:20:0:9:1
+341-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	RRA:FAILURES:20:7:9
 342-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	DS:y:COMPUTE:x,2,*	RRA:AVERAGE:0.5:1:5
 343-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	DS:y:COMPUTE:x,1,+,x,*	RRA:AVERAGE:0.5:1:5
 344-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	DS:y:COMPUTE:z,2,*	RRA:AVERAGE:0.5:1:5
@@ -362,8 +362,8 @@
 360-o-rrd-t-tpl-rrd-s-7-rra-average-0-5-1m-1	same	-	tpl	create	o.rrd	-t	tpl.rrd	-s	7	RRA:AVERAGE:0.5:1m:1h
 361-o-rrd-t-v5-rrd	same	-	v5	create	o.rrd	-t	v5.rrd
 362-o-rrd-t-v5-rrd-ds-z-gauge-20-u-u	same	-	v5	create	o.rrd	-t	v5.rrd	DS:z:GAUGE:20:U:U
-363-o-rrd-t-hw-rrd	divergent	CR-div-template-hw	hw	create	o.rrd	-t	hw.rrd
-364-o-rrd-t-mhw-rrd	divergent	CR-div-template-hw	mhw	create	o.rrd	-t	mhw.rrd
+363-o-rrd-t-hw-rrd	same	-	hw	create	o.rrd	-t	hw.rrd
+364-o-rrd-t-mhw-rrd	same	-	mhw	create	o.rrd	-t	mhw.rrd
 365-o-rrd-t-cp-rrd	same	-	cp	create	o.rrd	-t	cp.rrd
 366-o-rrd-t-text-rrd	same	-	text	create	o.rrd	-t	text.rrd
 367-o-rrd-t-missing-rrd	same	-	-	create	o.rrd	-t	missing.rrd
@@ -461,10 +461,10 @@
 459-o-rrd-b-1000000000-step	same	-	-	create	o.rrd	-b	1000000000	--step
 460-o-rrd-template	same	-	-	create	o.rrd	--template
 461-o-rrd-start	same	-	-	create	o.rrd	--start
-462-o-rrd-b-1000000000-s-10-rra-hwpredict-20	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	RRA:HWPREDICT:20:0:0.01:5	DS:x:GAUGE:20:U:U
+462-o-rrd-b-1000000000-s-10-rra-hwpredict-20	same	-	-	create	o.rrd	-b	1000000000	-s	10	RRA:HWPREDICT:20:0:0.01:5	DS:x:GAUGE:20:U:U
 463-o-rrd-b-1000000000-s-10-rra-average-0-5-	same	-	-	create	o.rrd	-b	1000000000	-s	10	RRA:AVERAGE:0.5:1:5	DS:y:COMPUTE:2,3,+	foo
-464-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	DS:x:DCOUNTER:20:U:U	RRA:MHWPREDICT:20:0.1:0.01:5
-465-o-rrd-b-1000000000-s-10-ds-d-dcounter-20	unsupported	CR-unsupported	-	create	o.rrd	-b	1000000000	-s	10	DS:d:DCOUNTER:20:U:U	RRA:MHWPREDICT:20:0.1:0.01:5
+464-o-rrd-b-1000000000-s-10-ds-x-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:x:GAUGE:20:U:U	DS:x:DCOUNTER:20:U:U	RRA:MHWPREDICT:20:0.1:0.01:5
+465-o-rrd-b-1000000000-s-10-ds-d-dcounter-20	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:d:DCOUNTER:20:U:U	RRA:MHWPREDICT:20:0.1:0.01:5
 466-o-rrd-b-1000000000-s-10-ds-a-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:a:GAUGE:20:U:U	DS:b:GAUGE:20:0:100	DS:c:COMPUTE:a,b,+	RRA:AVERAGE:0.5:1:5
 467-o-rrd-b-1000000000-s-10-ds-a-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:a:GAUGE:20:U:U	DS:b:GAUGE:20:0:100	DS:c:COMPUTE:b,a,+	RRA:AVERAGE:0.5:1:5
 468-o-rrd-b-1000000000-s-10-ds-a-gauge-20-u-	same	-	-	create	o.rrd	-b	1000000000	-s	10	DS:a:GAUGE:20:U:U	DS:b:GAUGE:20:0:100	DS:c:COMPUTE:a	RRA:AVERAGE:0.5:1:5

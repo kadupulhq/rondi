@@ -651,8 +651,12 @@ def create_cases():
     mk("DS:a:GAUGE:20:U:U", "DS:b:DDERIVE:20:U:U", RRA)
     mk(DS, "RRA:AVERAGE:0.5:1:2000")
 
-    # 9. Holt-Winters archives and computed sources (Rondi refuses them).
-    hw = dict(expect="unsupported", note="CR-unsupported")
+    # 9. Holt-Winters archives and computed sources. Rondi rejects the
+    # unchecked links, zero periods and extra fields of CR-35.
+    hw = dict(expect="same", note="-")
+    cr35 = dict(expect="clean-error", note="CR-35")
+    rejected = {"RRA:HWPREDICT:20:0.1:0.01:0", "RRA:HWPREDICT:20:0.1:0.01:5:9",
+                "RRA:HWPREDICT:20:0.1:0.01:5:0", "RRA:HWPREDICT:20:0.1:0.01:5:2:3"}
     for rra in ["RRA:HWPREDICT:20:0.1:0.01:5", "RRA:MHWPREDICT:20:0.1:0.01:5",
                 "RRA:HWPREDICT:20:0.1:0.01:5:2", "RRA:HWPREDICT:20:0.1:1:5",
                 "RRA:HWPREDICT:20:0.1:0.01:0", "RRA:HWPREDICT:20:0.1:0.01:1m",
@@ -661,7 +665,7 @@ def create_cases():
                 "RRA:SEASONAL:5:0.1:1:smoothing-window=0.3", "RRA:DEVSEASONAL:5:0.1:1",
                 "RRA:DEVSEASONAL:5:0.1:1:smoothing-window=0", "RRA:DEVPREDICT:20:1",
                 "RRA:FAILURES:20:7:9:1", "RRA:FAILURES:20:1:28:1"]:
-        mk(DS, RRA, rra, **hw)
+        mk(DS, RRA, rra, **(cr35 if rra in rejected else hw))
     mk(DS, "RRA:HWPREDICT:20:0.1:0.01:5:2", "RRA:SEASONAL:5:0.2:1", **hw)
     for rra in ["RRA:HWPREDICT:20:0:0.01:5", "RRA:HWPREDICT:20:1:0.01:5",
                 "RRA:HWPREDICT:20:0.1:-0.1:5", "RRA:HWPREDICT:0:0.1:0.01:5",
@@ -670,7 +674,7 @@ def create_cases():
                 "RRA:SEASONAL:5:0.2:1:smoothing-window=2", "RRA:SEASONAL:5:0.2:1:foo=1",
                 "RRA:DEVPREDICT:20", "RRA:FAILURES:20:10:9:1", "RRA:FAILURES:20:7:29:1",
                 "RRA:FAILURES:20:0:9:1", "RRA:FAILURES:20:7:9"]:
-        mk(DS, rra, **hw)
+        mk(DS, rra, **(cr35 if rra in rejected else hw))
     for ds in ["DS:y:COMPUTE:x,2,*", "DS:y:COMPUTE:x,1,+,x,*",
                "DS:y:COMPUTE:z,2,*", "DS:y:COMPUTE:x,TIME,+", "DS:y:COMPUTE:y,1,+",
                "DS:y:COMPUTE:x,1,+:extra", "DS:y:COMPUTE:x,PREV,+", "DS:y:COMPUTE:x,COUNT,+"]:
@@ -686,9 +690,8 @@ def create_cases():
         add("o.rrd", "-t", "tpl.rrd", *args, inputs=["tpl"])
     add("o.rrd", "-t", "v5.rrd", inputs=["v5"])
     add("o.rrd", "-t", "v5.rrd", "DS:z:GAUGE:20:U:U", inputs=["v5"])
-    add("o.rrd", "-t", "hw.rrd", inputs=["hw"], expect="divergent", note="CR-div-template-hw")
-    add("o.rrd", "-t", "mhw.rrd", inputs=["mhw"], expect="divergent",
-        note="CR-div-template-hw")
+    add("o.rrd", "-t", "hw.rrd", inputs=["hw"])
+    add("o.rrd", "-t", "mhw.rrd", inputs=["mhw"])
     add("o.rrd", "-t", "cp.rrd", inputs=["cp"])
     add("o.rrd", "-t", "text.rrd", inputs=["text"])
     add("o.rrd", "-t", "missing.rrd")
@@ -787,12 +790,10 @@ def create_cases():
     add("o.rrd", "-b", "1000000000", "--step")
     add("o.rrd", "--template")
     add("o.rrd", "--start")
-    mk("RRA:HWPREDICT:20:0:0.01:5", DS, expect="unsupported", note="CR-unsupported")
+    mk("RRA:HWPREDICT:20:0:0.01:5", DS)
     mk(RRA, "DS:y:COMPUTE:2,3,+", "foo")
-    mk(DS, "DS:x:DCOUNTER:20:U:U", "RRA:MHWPREDICT:20:0.1:0.01:5", expect="unsupported",
-       note="CR-unsupported")
-    mk("DS:d:DCOUNTER:20:U:U", "RRA:MHWPREDICT:20:0.1:0.01:5", expect="unsupported",
-       note="CR-unsupported")
+    mk(DS, "DS:x:DCOUNTER:20:U:U", "RRA:MHWPREDICT:20:0.1:0.01:5")
+    mk("DS:d:DCOUNTER:20:U:U", "RRA:MHWPREDICT:20:0.1:0.01:5")
     # COMPUTE expression grammar and encoding (docs/compatibility/compute.md
     # CP-1 to CP-9). The file bytes pin each operator's code.
     two = ["DS:a:GAUGE:20:U:U", "DS:b:GAUGE:20:0:100"]

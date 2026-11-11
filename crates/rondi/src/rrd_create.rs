@@ -12,14 +12,14 @@ use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use crate::holt_winters::{Role, cdp};
 use crate::rrd_binary::{
     CDP_PREP_LEN, DS_DEF_LEN, FLOAT_COOKIE, LIVE_HEAD_LEN, PDP_PREP_LEN, RRA_DEF_LEN, RRA_PTR_LEN,
     STAT_HEAD_LEN, TemplateDefinitions, VALUE_LEN, read_template_definitions, rrd_nan,
     rrd_strerror,
 };
 use crate::rrd_definitions::{
-    ArchiveDef, DefinitionError, SourceDef, is_holt_winters, stored_archive_shape, stored_cf,
-    stored_ds_name,
+    CreateArchive, HwArchiveDef, SourceDef, stored_archive_shape, stored_cf, stored_ds_name,
 };
 use crate::storage::StoreError;
 
@@ -79,6 +79,8 @@ impl NewRrd {
             None => (Vec::new(), Vec::new()),
         };
         let mut double_counters = false;
+        let mut holt_winters_v4 = false;
+        let mut linked: Vec<HwArchiveDef> = Vec::new();
         for word in words {
             if let Some(spec) = word.strip_prefix("DS:") {
                 // CP-1: an expression names sources defined before it,
@@ -101,7 +103,13 @@ impl NewRrd {
                 double_counters |= def.needs_version_5();
                 sources.push(def.to_bytes());
             } else if let Some(spec) = word.strip_prefix("RRA:") {
-                archives.push(ArchiveDef::parse(spec, step)?.to_bytes());
+                for def in CreateArchive::parse(spec, step, archives.len() as u64)? {
+                    archives.push(def.to_bytes());
+                    if let CreateArchive::HoltWinters(def) = def {
+                        holt_winters_v4 |= def.needs_version_4();
+                        linked.push(def);
+                    }
+                }
             } else {
                 return Err(StoreError::Rrd(format!("can't parse argument '{word}'")));
             }
@@ -116,9 +124,19 @@ impl NewRrd {
                 "you must define at least one Data Source".into(),
             ));
         }
+        // CR-35: a link names an archive of the finished file.
+        for def in &linked {
+            def.check_link(archives.len())?;
+        }
         let rrd = Self {
-            // CR-37: template data sources never raise the version.
-            version: if double_counters { b"0005" } else { b"0003" },
+            // CR-37: template definitions never raise the version.
+            version: if double_counters {
+                b"0005"
+            } else if holt_winters_v4 {
+                b"0004"
+            } else {
+                b"0003"
+            },
             step,
             last_update,
             sources,
@@ -204,6 +222,13 @@ impl NewRrd {
         // CR-45: the PDPs already in the current slot are unknown.
         let slot_start = last_update - unknown_seconds;
         for record in &self.archives {
+            if let Some(role) = Role::from_cf(stored_cf(record)) {
+                let state = holt_winters_state(role);
+                for _ in &self.sources {
+                    bytes.extend_from_slice(&state);
+                }
+                continue;
+            }
             let (_, pdp_per_row) = stored_archive_shape(record);
             let slot = self.step.wrapping_mul(pdp_per_row);
             if slot == 0 {
@@ -250,24 +275,46 @@ fn now_seconds() -> i64 {
         .map_or(0, |elapsed| elapsed.as_secs() as i64)
 }
 
-/// Reads `--template` (CR-48). Its definitions are copied as stored, a
-/// `COMPUTE` data source included, but a Holt-Winters archive is refused:
-/// its initial state differs from the classic one this module writes.
-// Compatibility: refusing such templates is the resolution CR-div-template-hw
-// allows (CR-52, CR-80).
-// Provenance: black-box compatibility test.
-fn open_template(name: &str) -> Result<TemplateDefinitions, StoreError> {
-    let template = read_template_definitions(Path::new(name))
-        .map_err(|_| StoreError::Rrd(format!("Cannot open template RRD {name}")))?;
-    if let Some(record) = template
-        .rra_defs
-        .iter()
-        .find(|record| is_holt_winters(stored_cf(record)))
-    {
-        let cf = String::from_utf8_lossy(stored_cf(record)).into_owned();
-        return Err(DefinitionError::HoltWintersRefused(cf).into());
+/// The CDP state of a new Holt-Winters archive, for one data source
+/// (HW-1, CR-36): whatever the last update, and for template archives too
+/// (CR-52).
+fn holt_winters_state(role: Role) -> [u8; CDP_PREP_LEN] {
+    let unknown = rrd_nan().to_bits();
+    let mut words = [0_u64; CDP_PREP_LEN / VALUE_LEN];
+    match role {
+        Role::Prediction { .. } => {
+            for slot in [
+                cdp::INTERCEPT,
+                cdp::LAST_INTERCEPT,
+                cdp::SLOPE,
+                cdp::LAST_SLOPE,
+            ] {
+                words[slot] = unknown;
+            }
+            words[cdp::NAN_COUNT] = 1;
+            words[cdp::LAST_NAN_COUNT] = 1;
+        }
+        Role::Seasonal | Role::DevSeasonal => {
+            words[cdp::SEASONAL] = unknown;
+            words[cdp::LAST_SEASONAL] = unknown;
+            words[cdp::INIT_FLAG] = 1;
+        }
+        Role::DevPredict => words[0] = unknown,
+        // An all-zero failure history.
+        Role::Failures => {}
     }
-    Ok(template)
+    let mut state = [0_u8; CDP_PREP_LEN];
+    for (chunk, word) in state.as_chunks_mut::<VALUE_LEN>().0.iter_mut().zip(words) {
+        *chunk = word.to_le_bytes();
+    }
+    state
+}
+
+/// Reads `--template` (CR-48). Its definitions are copied as stored,
+/// `COMPUTE` data sources and Holt-Winters parameters included (CR-52).
+fn open_template(name: &str) -> Result<TemplateDefinitions, StoreError> {
+    read_template_definitions(Path::new(name))
+        .map_err(|_| StoreError::Rrd(format!("Cannot open template RRD {name}")))
 }
 
 /// Creates the RRD `path` from `words` (`DS:` and `RRA:` definitions). The
@@ -721,6 +768,361 @@ mod tests {
             rows.chunks(8)
                 .all(|value| value == rrd_nan().to_le_bytes().as_slice())
         );
+    }
+
+    /// Writes `rrd` to a file in `dir` and reads it back.
+    fn written(rrd: &NewRrd, dir: &Path, name: &str) -> crate::RrdInfo {
+        let head = rrd.head_bytes().unwrap();
+        let mut bytes = Vec::new();
+        rrd.write_to(&head, &mut bytes).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, &bytes).unwrap();
+        crate::inspect_rrd_file(&path).unwrap()
+    }
+
+    fn nan_bits() -> u64 {
+        rrd_nan().to_bits()
+    }
+
+    /// CR-34 and CR-36: one implicit word becomes five archives with the
+    /// documented rows, parameter slots, links and HW-1 state.
+    #[test]
+    fn implicit_hwpredict_expands_to_five_archives() {
+        let rrd = build(&[
+            "DS:x:GAUGE:20:U:U",
+            "RRA:AVERAGE:0.5:1:5",
+            "RRA:HWPREDICT:12:0.1:0.01:4",
+        ])
+        .unwrap();
+        assert_eq!(rrd.version, b"0003");
+        let temp = tempfile::tempdir().unwrap();
+        let info = written(&rrd, temp.path(), "hw.rrd");
+        let shape: Vec<(&str, u64, u64)> = info
+            .archives
+            .iter()
+            .map(|a| (a.consolidation.as_str(), a.rows, a.pdp_per_row))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("AVERAGE", 5, 1),
+                ("HWPREDICT", 12, 1),
+                ("SEASONAL", 4, 1),
+                ("DEVSEASONAL", 4, 1),
+                ("DEVPREDICT", 12, 1),
+                ("FAILURES", 4, 1),
+            ]
+        );
+        let (a, b) = (0.1_f64.to_bits(), 0.01_f64.to_bits());
+        let two = 2.0_f64.to_bits();
+        let params: Vec<[u64; 6]> = info.archives[1..]
+            .iter()
+            .map(|a| a.param_words[..6].try_into().unwrap())
+            .collect();
+        assert_eq!(
+            params,
+            [
+                [0, a, b, 2, 4.0_f64.to_bits(), 0],
+                [0, a, 0, 1, 0, 0],
+                [0, a, 0, 1, 0, 0],
+                [0, 0, 0, 3, 0, 0],
+                [0, two, two, 3, 9, 7],
+            ]
+        );
+        let n = nan_bits();
+        let cdp: Vec<[u64; 10]> = info.archives[1..]
+            .iter()
+            .map(|a| a.cdp_prep[0].words)
+            .collect();
+        assert_eq!(
+            cdp,
+            [
+                [0, 0, n, n, n, n, 1, 1, 0, 0],
+                [0, 0, n, n, 0, 0, 1, 0, 0, 0],
+                [0, 0, n, n, 0, 0, 1, 0, 0, 0],
+                [n, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [0; 10],
+            ]
+        );
+    }
+
+    /// CR-32, CR-36: explicit archives store their own fields, links
+    /// 0-based, and `MHWPREDICT` raises the version (CR-37).
+    #[test]
+    fn explicit_archives_store_their_fields() {
+        let rrd = build(&[
+            "DS:x:GAUGE:20:U:U",
+            "RRA:MHWPREDICT:5m:0.1:0:2m:2",
+            "RRA:SEASONAL:5:0.2:1",
+            "RRA:DEVPREDICT:20:5",
+            "RRA:FAILURES:20:7x:9.9:5",
+            "RRA:DEVSEASONAL:1m:0.3:1:smoothing-window=0.4x",
+        ])
+        .unwrap();
+        assert_eq!(rrd.version, b"0004");
+        let temp = tempfile::tempdir().unwrap();
+        let info = written(&rrd, temp.path(), "x.rrd");
+        let rows: Vec<u64> = info.archives.iter().map(|a| a.rows).collect();
+        assert_eq!(rows, [30, 5, 20, 20, 6]);
+        let params: Vec<[u64; 6]> = info
+            .archives
+            .iter()
+            .map(|a| a.param_words[..6].try_into().unwrap())
+            .collect();
+        let f = |v: f64| v.to_bits();
+        assert_eq!(
+            params,
+            [
+                [0, f(0.1), 0, 1, f(2.0), 0],
+                [0, f(0.2), f(0.05), 0, 0, 0],
+                [0, 0, 0, 4, 0, 0],
+                [0, f(2.0), f(2.0), 4, 9, 7],
+                [0, f(0.3), f(0.4), 0, 0, 0],
+            ]
+        );
+    }
+
+    /// Review Focus 2: an explicit season archive without the option gets
+    /// 0.05 and leaves the version at 0003; any form of the option raises it.
+    #[test]
+    fn smoothing_window_default_and_version() {
+        let ds = "DS:x:GAUGE:20:U:U";
+        let window = |word: &str| {
+            let rrd = build(&[ds, word]).unwrap();
+            let temp = tempfile::tempdir().unwrap();
+            let info = written(&rrd, temp.path(), "s.rrd");
+            (rrd.version, info.archives[0].param_words[2])
+        };
+        let default = 0.05_f64.to_bits();
+        assert_eq!(window("RRA:SEASONAL:5:0.1:1"), (b"0003", default));
+        assert_eq!(
+            window("RRA:SEASONAL:5:0.1:1:smoothing-window"),
+            (b"0004", default)
+        );
+        assert_eq!(
+            window("RRA:SEASONAL:5:0.1:1:smoothing-window="),
+            (b"0004", default)
+        );
+        assert_eq!(
+            window("RRA:DEVSEASONAL:5:0.1:1:smoothing-window=0"),
+            (b"0004", 0)
+        );
+        assert_eq!(
+            window("RRA:SEASONAL:5:0.1:1:smoothing-window=1"),
+            (b"0004", 1.0_f64.to_bits())
+        );
+        assert_eq!(
+            window("RRA:SEASONAL:5:0.1:1:smoothing-window=nan"),
+            (b"0004", 0x7ff8_0000_0000_0000)
+        );
+        // CR-32: alpha's NaN spelling is stored with the opposite sign.
+        let rrd = build(&[ds, "RRA:HWPREDICT:20:nan:0.01:5"]).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let info = written(&rrd, temp.path(), "n.rrd");
+        assert_eq!(info.archives[0].param_words[1], (-rrd_nan()).to_bits());
+        assert_eq!(info.archives[1].param_words[1], (-rrd_nan()).to_bits());
+    }
+
+    /// CR-33 texts and order.
+    #[test]
+    fn holt_winters_field_errors() {
+        let ds = "DS:x:GAUGE:20:U:U";
+        let cases = [
+            (
+                "RRA:HWPREDICT:20:0.1:0.01",
+                "Expected at least 5 arguments for RRA but got 4",
+            ),
+            (
+                "RRA:SEASONAL:5:0.1",
+                "Expected at least 4 arguments for RRA but got 3",
+            ),
+            (
+                "RRA:DEVPREDICT:20",
+                "Expected at least 3 arguments for RRA but got 2",
+            ),
+            (
+                "RRA:FAILURES:20:7:9",
+                "Expected at least 5 arguments for RRA but got 4",
+            ),
+            (
+                "RRA:HWPREDICT:0:2:2:99",
+                "Invalid row count 0: value must be positive",
+            ),
+            (
+                "RRA:HWPREDICT:20x:0.1:0.01:5",
+                "Invalid row count 20x: value has trailing garbage",
+            ),
+            (
+                "RRA:HWPREDICT:20:0:0.01:5",
+                "Invalid alpha: must be between 0 and 1",
+            ),
+            (
+                "RRA:HWPREDICT:20:0.5x:0.01:5",
+                "Invalid alpha: must be between 0 and 1",
+            ),
+            (
+                "RRA:HWPREDICT:20:inf:0.01:5",
+                "Invalid alpha: must be between 0 and 1",
+            ),
+            (
+                "RRA:HWPREDICT:20:0.1:-0.1:5",
+                "Invalid beta: must be between 0 and 1",
+            ),
+            (
+                "RRA:HWPREDICT:20:0.1:0.01:30s",
+                "Length of seasonal cycle exceeds length of HW prediction array",
+            ),
+            (
+                "RRA:HWPREDICT:20:0.1:0.01:-3",
+                "Length of seasonal cycle exceeds length of HW prediction array",
+            ),
+            (
+                "RRA:HWPREDICT:20:2:0.01:5:1:2",
+                "Invalid alpha: must be between 0 and 1",
+            ),
+            (
+                "RRA:SEASONAL:x:0.1:1",
+                "Invalid row count x: value must be (suffixed) positive number",
+            ),
+            (
+                "RRA:SEASONAL:5:1:1",
+                "Invalid gamma: must be between 0 and 1",
+            ),
+            (
+                "RRA:SEASONAL:5:0.2:1:smoothing-window=2",
+                "Invalid smoothing-window 2.000000: must be between 0 and 1",
+            ),
+            (
+                "RRA:SEASONAL:5:0.2:1:smoothing-window=-0.1",
+                "Invalid smoothing-window -0.100000: must be between 0 and 1",
+            ),
+            ("RRA:SEASONAL:5:0.2:1:foo=1", "Invalid option foo=1"),
+            (
+                "RRA:SEASONAL:5:0.2:1:Smoothing-window=1",
+                "Invalid option Smoothing-window=1",
+            ),
+            (
+                "RRA:FAILURES:20:10:9:1",
+                "Window length is shorter than the failure threshold",
+            ),
+            (
+                "RRA:FAILURES:20:7:29:1",
+                "Window length is out of range 1, 28",
+            ),
+            (
+                "RRA:FAILURES:20:0:9:1",
+                "Failure threshold is out of range 1, 28",
+            ),
+            (
+                "RRA:FAILURES:20:x:9:1",
+                "Failure threshold is out of range 1, 28",
+            ),
+            (
+                "RRA:FAILURES:20:9:0:1",
+                "Window length is shorter than the failure threshold",
+            ),
+        ];
+        for (word, message) in cases {
+            assert_eq!(build(&[ds, word]).unwrap_err(), message, "{word}");
+        }
+        // Beta may be 0 or 1; NaN passes every range check.
+        for word in [
+            "RRA:HWPREDICT:20:0.1:0:5",
+            "RRA:HWPREDICT:20:0.1:1:5",
+            "RRA:HWPREDICT:20:nanx:0.01:5",
+            "RRA:HWPREDICT:20:0.1:0.01:6x",
+            "RRA:HWPREDICT:5:0.1:0.01:5",
+        ] {
+            assert!(build(&[ds, word]).is_ok(), "{word}");
+        }
+    }
+
+    /// CR-35: the reference's unchecked inputs are rejected.
+    #[test]
+    fn cr35_defects_rejected() {
+        let ds = "DS:x:GAUGE:20:U:U";
+        let avg = "RRA:AVERAGE:0.5:1:5";
+        let cases: [(&[&str], &str); 9] = [
+            (
+                &[ds, avg, "RRA:HWPREDICT:20:0.1:0.01:5:0"],
+                "Invalid rra-num 0: no such archive",
+            ),
+            (
+                &[ds, avg, "RRA:HWPREDICT:20:0.1:0.01:5:9"],
+                "Invalid rra-num 9: no such archive",
+            ),
+            (
+                &[ds, avg, "RRA:SEASONAL:5:0.1:x"],
+                "Invalid rra-num x: no such archive",
+            ),
+            (
+                &[ds, "RRA:DEVPREDICT:20:-1", avg],
+                "Invalid rra-num -1: no such archive",
+            ),
+            (
+                &[ds, avg, "RRA:HWPREDICT:20:0.1:0.01:0"],
+                "Invalid seasonal period 0: must be positive",
+            ),
+            (
+                &[ds, avg, "RRA:HWPREDICT:20:0.1:0.01:5:2:3"],
+                "Unexpected extra argument for consolidation function HWPREDICT",
+            ),
+            (
+                &[ds, "RRA:SEASONAL:5:0.1:1:smoothing-window=0.1:x"],
+                "Unexpected extra argument for consolidation function SEASONAL",
+            ),
+            (
+                &[ds, "RRA:FAILURES:20:7:9:1:x"],
+                "Unexpected extra argument for consolidation function FAILURES",
+            ),
+            (
+                &[ds, "RRA:DEVPREDICT:20:1:x"],
+                "Unexpected extra argument for consolidation function DEVPREDICT",
+            ),
+        ];
+        for (list, message) in cases {
+            assert_eq!(build(list).unwrap_err(), message, "{list:?}");
+        }
+        // The link check counts every archive, including later ones.
+        assert!(build(&[ds, "RRA:SEASONAL:5:0.1:2", avg]).is_ok());
+    }
+
+    /// Review Focus 1 (CR-52): a template's Holt-Winters archives keep their
+    /// definition bytes but get fresh HW-1 state, not the learned state.
+    #[test]
+    fn template_resets_hw_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let fresh = build(&["DS:x:GAUGE:20:U:U", "RRA:HWPREDICT:20:0.1:0.01:5"]).unwrap();
+        let head = fresh.head_bytes().unwrap();
+        let mut bytes = Vec::new();
+        fresh.write_to(&head, &mut bytes).unwrap();
+        // Patch the SEASONAL smoothing index and every CDP word, as a
+        // learned file would hold them.
+        let defs = 128 + 120;
+        bytes[defs + 120 + 72..defs + 120 + 80].copy_from_slice(&3_u64.to_le_bytes());
+        let cdp = defs + 5 * 120 + 16 + 112;
+        for word in bytes[cdp..cdp + 5 * 80].chunks_mut(8) {
+            word.copy_from_slice(&1.5_f64.to_le_bytes());
+        }
+        let template = temp.path().join("t.rrd");
+        std::fs::write(&template, &bytes).unwrap();
+        let out = temp.path().join("o.rrd");
+        let options = CreateOptions {
+            template: Some(template.to_str().unwrap()),
+            ..Default::default()
+        };
+        create_rrd(out.to_str().unwrap(), &options, &[]).unwrap();
+        let info = crate::inspect_rrd_file(&out).unwrap();
+        let original = crate::inspect_rrd_file(&template).unwrap();
+        assert_eq!(info.version, "0003");
+        for (made, from) in info.archives.iter().zip(&original.archives) {
+            assert_eq!(made.param_words, from.param_words);
+        }
+        assert_eq!(info.archives[1].param_words[4], 3);
+        let pristine = written(&fresh, temp.path(), "p.rrd");
+        for (made, want) in info.archives.iter().zip(&pristine.archives) {
+            assert_eq!(made.cdp_prep[0].words, want.cdp_prep[0].words);
+        }
     }
 
     fn options() -> CreateOptions<'static> {

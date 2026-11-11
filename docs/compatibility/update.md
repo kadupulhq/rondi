@@ -37,8 +37,8 @@ the macOS arm64 recording, the Linux aarch64 overrides and, with UP-35's
 x86_64 arithmetic, the Linux x86_64 overrides. It also agrees with RRDtool on several thousand
 further random update sequences over all six non-computed types.
 
-Out of scope: Holt-Winters archives (Rondi refuses them at create time,
-`create.md` CR-80), `--daemon` and the cache daemon (`rrdcached.md`), and
+Out of scope: Holt-Winters archives (`holt-winters.md` sections 2 and 3),
+`--daemon` and the cache daemon (`rrdcached.md`), and
 `--locking` and file locking (`cli.md` CLI-12 and CLI-38).
 
 ## Terms

@@ -707,15 +707,13 @@ stored value.
 
 ## 18. Refused features
 
-**CR-80** (black-box; must for Rondi). RRDtool accepts all Holt-Winters
-archives. Rondi does not implement them: a create with a definition word
-whose CF is a Holt-Winters CF fails with an `ERROR:` line naming the
-feature (`... not supported by Rondi`), exit status 1, and writes nothing.
-Rondi refuses such a word before reporting errors in other words and also
-when the word itself is malformed, so its message differs from RRDtool's
-there (`RRA:HWPREDICT:20:0:0.01:5`); the vectors accept either, as
-`unsupported`. `COMPUTE` data sources are implemented (compute.md). Templates holding such archives
-are a known divergence (CR-div-template-hw).
+**CR-80** (historical). Rondi 0.1 refused every Holt-Winters archive in
+`create` with `Holt-Winters consolidation function <CF> is not supported
+by Rondi`, including templates holding them. Rondi now implements
+section 8 and CR-52; only the CR-35 rejections remain. `tune` structure
+changes that add a Holt-Winters archive are still refused
+(`tune-modify.md` TM-60). `COMPUTE` data sources are implemented
+(compute.md).
 
 ## 19. Behavior other commands depend on
 
@@ -744,8 +742,7 @@ keep these entry points consistent with this specification:
 
 Must reproduce exactly: CR-1 to CR-20, CR-22 to CR-31, CR-37 to CR-45,
 CR-47 to CR-51, CR-55, CR-60 to CR-65, CR-70 (pinned sizes), CR-73
-(RRDtool's behavior; Rondi diverges), CR-74, CR-75, CR-76, CR-77 and, for
-Rondi, CR-80.
+(RRDtool's behavior; Rondi diverges), CR-74, CR-75, CR-76 and CR-77.
 
 Should reproduce: CR-21, CR-32 to CR-34, CR-36, CR-46, CR-52, CR-56 to
 CR-59, CR-66, CR-71 and CR-72.
@@ -767,17 +764,17 @@ Current Rondi against RRDtool 1.11.0, as of this specification:
   reached instead of creating locally; it also prints daemon errors without
   the `rrdcached@<address>: ` prefix and checks `--template` locally before
   contacting the daemon (CR-72, not pinned).
-- CR-div-template-hw (CR-52): Rondi refuses a template holding
-  Holt-Winters archives with
-  `Holt-Winters consolidation function <CF> is not supported by Rondi`
-  and writes nothing (CR-80). A template holding a `COMPUTE` data
-  source is copied as stored, as RRDtool does (vector `365`).
 - CR-div-source (section 12): Rondi refuses every `--source` use except one
   source with the same definitions and last update, and in that case it
   copies data through the text dump, losing precision (vector `371`).
   Other source cases are `unsupported`.
-- CR-80: Holt-Winters definitions are refused (expectation
-  `unsupported`).
+- CR-div-hw-defects (CR-35): Rondi rejects unchecked links, a zero
+  prediction period and extra fields that RRDtool stores or ignores
+  (vectors `317`, `318` and `332`, expectation `clean-error`; `314` stays
+  `undefined` because RRDtool's file varies between runs, and the unit
+  test `cr35_defects_rejected` pins Rondi's error).
+- CR-div-smooth-idx (HW-2): Rondi stores `seasonal_smooth_idx` 0 where
+  RRDtool derives it from the file name; the masked form hides the slot.
 
 ## Tests
 

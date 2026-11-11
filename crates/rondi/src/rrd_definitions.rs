@@ -50,6 +50,18 @@ pub(crate) enum DefinitionError {
     ComputeRefused,
     UnknownCf(String),
     HoltWintersRefused(String),
+    /// CR-33: a Holt-Winters parameter outside its range.
+    HwParameter(&'static str),
+    SeasonalCycle,
+    SmoothingWindow(f64),
+    InvalidOption(String),
+    FailureThreshold,
+    WindowLength,
+    WindowShorter,
+    /// CR-35, rejected by Rondi: a link that names no archive.
+    Link(String),
+    /// CR-35, rejected by Rondi: a prediction archive's period of 0.
+    ZeroPeriod(String),
     TooFewFields {
         needed: usize,
         got: usize,
@@ -86,6 +98,27 @@ impl fmt::Display for DefinitionError {
                 f,
                 "Holt-Winters consolidation function {cf} is not supported by Rondi"
             ),
+            Self::HwParameter(name) => write!(f, "Invalid {name}: must be between 0 and 1"),
+            Self::SeasonalCycle => {
+                f.write_str("Length of seasonal cycle exceeds length of HW prediction array")
+            }
+            Self::SmoothingWindow(value) => write!(
+                f,
+                "Invalid smoothing-window {value:.6}: must be between 0 and 1"
+            ),
+            Self::InvalidOption(text) => write!(f, "Invalid option {text}"),
+            Self::FailureThreshold => f.write_str("Failure threshold is out of range 1, 28"),
+            Self::WindowLength => f.write_str("Window length is out of range 1, 28"),
+            Self::WindowShorter => {
+                f.write_str("Window length is shorter than the failure threshold")
+            }
+            // Compatibility: RRDtool stores these unchecked (CR-35); Rondi
+            // rejects them with its own texts.
+            // Provenance: black-box compatibility test.
+            Self::Link(field) => write!(f, "Invalid rra-num {field}: no such archive"),
+            Self::ZeroPeriod(field) => {
+                write!(f, "Invalid seasonal period {field}: must be positive")
+            }
             Self::TooFewFields { needed, got } => {
                 write!(
                     f,
@@ -414,17 +447,10 @@ pub(crate) struct ArchiveDef {
 impl ArchiveDef {
     /// Parses the text after `RRA:`, reading durations against `step`.
     pub(crate) fn parse(spec: &str, step: u64) -> Result<Self, DefinitionError> {
-        // CR-26: empty fields are dropped before anything is counted.
-        let fields: Vec<&str> = spec.split(':').filter(|field| !field.is_empty()).collect();
-        let Some(cf_field) = fields.first() else {
+        let fields = rra_fields(spec);
+        let Some(run) = fields.first().map(|field| cf_run(field)) else {
             return Err(DefinitionError::TooFewFields { needed: 4, got: 0 });
         };
-        let run_len = cf_field
-            .bytes()
-            .take(MAX_CF_LEN)
-            .take_while(u8::is_ascii_uppercase)
-            .count();
-        let run = &cf_field[..run_len];
         let consolidation = match run {
             "AVERAGE" => Consolidation::Average,
             "MIN" => Consolidation::Minimum,
@@ -482,6 +508,315 @@ impl ArchiveDef {
     }
 }
 
+/// CR-26: the fields of an `RRA:` word, empty ones dropped.
+fn rra_fields(spec: &str) -> Vec<&str> {
+    spec.split(':').filter(|field| !field.is_empty()).collect()
+}
+
+/// CR-27: the consolidation function is the run of capital letters that
+/// starts the first field, cut at 19 bytes.
+fn cf_run(field: &str) -> &str {
+    let length = field
+        .bytes()
+        .take(MAX_CF_LEN)
+        .take_while(u8::is_ascii_uppercase)
+        .count();
+    &field[..length]
+}
+
+/// Parameter slots of an archive definition record (RS-53).
+const PARAM_SLOTS: usize = 10;
+const PARAMS_OFFSET: usize = XFF_OFFSET;
+/// Deviation multipliers of a `FAILURES` archive (CR-34, CR-36).
+const DEFAULT_DELTA: f64 = 2.0;
+/// `smoothing_window` of an explicit season archive without a number in
+/// its option (CR-36).
+const DEFAULT_SMOOTHING_WINDOW: f64 = 0.05;
+/// FAILURES threshold and window length of an implicit group (CR-34).
+const IMPLICIT_THRESHOLD: u64 = 7;
+const IMPLICIT_WINDOW: u64 = 9;
+/// Largest threshold and window length (CR-33).
+const MAX_WINDOW: i32 = 28;
+
+/// A Holt-Winters archive for `create` (CR-32 to CR-36). Its parameter
+/// slots are final except an explicit link, which can only be checked
+/// once every definition has been read (CR-35).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct HwArchiveDef {
+    cf: &'static str,
+    rows: u64,
+    params: [u64; PARAM_SLOTS],
+    /// The rra-num field as given, when the word has one.
+    link_field: Option<String>,
+    /// Whether the word has a `smoothing-window` option (CR-37).
+    smoothing_option: bool,
+}
+
+impl HwArchiveDef {
+    fn new(cf: &'static str, rows: u64, params: [u64; PARAM_SLOTS]) -> Self {
+        Self {
+            cf,
+            rows,
+            params,
+            link_field: None,
+            smoothing_option: false,
+        }
+    }
+
+    /// Stores an explicit rra-num field, which is 1-based (CR-36).
+    fn with_link(mut self, field: &str) -> Self {
+        self.params[crate::holt_winters::param::DEPENDENT] = (i64::from(c_atoi(field)) - 1) as u64;
+        self.link_field = Some(field.to_owned());
+        self
+    }
+
+    /// Checks an explicit link against the final number of archives.
+    pub(crate) fn check_link(&self, archive_count: usize) -> Result<(), DefinitionError> {
+        match &self.link_field {
+            Some(field) if !(1..=archive_count as i64).contains(&i64::from(c_atoi(field))) => {
+                Err(DefinitionError::Link(field.clone()))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Whether this archive needs file version 0004 (CR-37).
+    pub(crate) fn needs_version_4(&self) -> bool {
+        self.smoothing_option || self.cf == "MHWPREDICT"
+    }
+
+    /// The 120-byte definition record (CR-40, CR-36).
+    pub(crate) fn to_bytes(&self) -> [u8; RRA_DEF_LEN] {
+        let mut record = [0_u8; RRA_DEF_LEN];
+        put_text(&mut record, 0, self.cf.as_bytes());
+        record[ROWS_OFFSET..ROWS_OFFSET + 8].copy_from_slice(&self.rows.to_le_bytes());
+        record[PDP_OFFSET..PDP_OFFSET + 8].copy_from_slice(&1_u64.to_le_bytes());
+        for (slot, word) in self.params.iter().enumerate() {
+            let at = PARAMS_OFFSET + 8 * slot;
+            record[at..at + 8].copy_from_slice(&word.to_le_bytes());
+        }
+        record
+    }
+}
+
+/// A `create` archive word: classic, or one or more Holt-Winters archives.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum CreateArchive {
+    Classic(ArchiveDef),
+    HoltWinters(HwArchiveDef),
+}
+
+impl CreateArchive {
+    /// Parses the text after `RRA:` for `create`. `index` is the 0-based
+    /// position the first resulting archive takes in the file, which the
+    /// links of an implicit group are relative to (CR-36).
+    pub(crate) fn parse(spec: &str, step: u64, index: u64) -> Result<Vec<Self>, DefinitionError> {
+        let fields = rra_fields(spec);
+        let run = fields.first().map_or("", |field| cf_run(field));
+        match HOLT_WINTERS.iter().find(|cf| **cf == run) {
+            Some(&cf) => parse_holt_winters(cf, &fields, step, index),
+            None => Ok(vec![Self::Classic(ArchiveDef::parse(spec, step)?)]),
+        }
+    }
+
+    pub(crate) fn to_bytes(&self) -> [u8; RRA_DEF_LEN] {
+        match self {
+            Self::Classic(def) => def.to_bytes(),
+            Self::HoltWinters(def) => def.to_bytes(),
+        }
+    }
+}
+
+/// C `atoi`: leading blanks, a sign, decimal digits; 0 when none.
+fn c_atoi(text: &str) -> i32 {
+    // atoi is (int)strtol(text, NULL, 10) on the supported C libraries.
+    crate::rrd_number::c_strtol(text, 10).0 as i32
+}
+
+/// C `strtod` on the longest leading number of `text`, or `None` when
+/// nothing converts.
+fn c_strtod_prefix(text: &str) -> Option<f64> {
+    let input = std::ffi::CString::new(text).ok()?;
+    let mut end: *mut libc::c_char = std::ptr::null_mut();
+    // SAFETY: `input` is NUL-terminated and outlives the call; strtod only
+    // writes `end`, which points into `input`.
+    let value = unsafe { libc::strtod(input.as_ptr(), &mut end) };
+    (end.cast_const() != input.as_ptr()).then_some(value)
+}
+
+/// alpha, beta and gamma (CR-32, CR-33). `closed` admits 0 and 1 (beta).
+/// NaN compares false and so passes.
+fn hw_parameter(text: &str, name: &'static str, closed: bool) -> Result<f64, DefinitionError> {
+    let value = rrd_strtodbl(text, name).map_err(|_| DefinitionError::HwParameter(name))?;
+    let outside = if closed {
+        value < 0.0 || value > 1.0
+    } else {
+        value <= 0.0 || value >= 1.0
+    };
+    if outside {
+        return Err(DefinitionError::HwParameter(name));
+    }
+    Ok(value)
+}
+
+/// The fourth field of a season archive (CR-32): the `smoothing_window`
+/// it sets, `None` when it gives no number.
+fn smoothing_option(text: &str) -> Result<Option<f64>, DefinitionError> {
+    let value = match text.strip_prefix("smoothing-window") {
+        Some("") => None,
+        Some(rest) if rest.starts_with('=') => c_strtod_prefix(&rest[1..]),
+        _ => return Err(DefinitionError::InvalidOption(text.to_owned())),
+    };
+    if let Some(window) = value
+        && (window < 0.0 || window > 1.0)
+    {
+        return Err(DefinitionError::SmoothingWindow(window));
+    }
+    Ok(value)
+}
+
+fn parse_holt_winters(
+    cf: &'static str,
+    fields: &[&str],
+    step: u64,
+    index: u64,
+) -> Result<Vec<CreateArchive>, DefinitionError> {
+    use crate::holt_winters::param;
+    let needed = match cf {
+        "SEASONAL" | "DEVSEASONAL" => 4,
+        "DEVPREDICT" => 3,
+        _ => 5,
+    };
+    if fields.len() < needed {
+        return Err(DefinitionError::TooFewFields {
+            needed,
+            got: fields.len(),
+        });
+    }
+    // Every Holt-Winters archive has one PDP per row.
+    let rows = |text: &str| {
+        rrd_scaled_duration(text, step).map_err(|reason| DefinitionError::Rows {
+            field: text.to_owned(),
+            reason,
+        })
+    };
+    let at_most = |count: usize| {
+        if fields.len() > count {
+            Err(DefinitionError::ExtraField(cf))
+        } else {
+            Ok(())
+        }
+    };
+    let mut params = [0_u64; PARAM_SLOTS];
+    let single = |def: HwArchiveDef| Ok(vec![CreateArchive::HoltWinters(def)]);
+    match cf {
+        "HWPREDICT" | "MHWPREDICT" => {
+            let rows = rows(fields[1])?;
+            let alpha = hw_parameter(fields[2], "alpha", false)?;
+            let beta = hw_parameter(fields[3], "beta", true)?;
+            let period = i64::from(c_atoi(fields[4]));
+            if period < 0 || period as u64 > rows {
+                return Err(DefinitionError::SeasonalCycle);
+            }
+            if period == 0 {
+                return Err(DefinitionError::ZeroPeriod(fields[4].to_owned()));
+            }
+            at_most(6)?;
+            let period = period as u64;
+            params[param::ALPHA] = alpha.to_bits();
+            params[param::BETA] = beta.to_bits();
+            // Compatibility: the prediction archive keeps the period in
+            // slot 4 as a double, which info and dump do not show (CR-36).
+            // Provenance: black-box compatibility test.
+            params[param::SMOOTH_IDX] = (period as f64).to_bits();
+            if let Some(link) = fields.get(5) {
+                return single(HwArchiveDef::new(cf, rows, params).with_link(link));
+            }
+            Ok(implicit_group(cf, rows, params, alpha, period, index))
+        }
+        "SEASONAL" | "DEVSEASONAL" => {
+            let rows = rows(fields[1])?;
+            let gamma = hw_parameter(fields[2], "gamma", false)?;
+            let window = fields
+                .get(4)
+                .map(|text| smoothing_option(text))
+                .transpose()?;
+            at_most(5)?;
+            params[param::GAMMA] = gamma.to_bits();
+            params[param::SMOOTHING_WINDOW] = window
+                .flatten()
+                .unwrap_or(DEFAULT_SMOOTHING_WINDOW)
+                .to_bits();
+            // Compatibility: RRDtool's initial seasonal_smooth_idx is its own
+            // choice; Rondi stores 0, which is in range (HW-2).
+            // Provenance: black-box compatibility test.
+            params[param::SMOOTH_IDX] = 0;
+            let mut def = HwArchiveDef::new(cf, rows, params).with_link(fields[3]);
+            def.smoothing_option = window.is_some();
+            single(def)
+        }
+        "DEVPREDICT" => {
+            let rows = rows(fields[1])?;
+            at_most(3)?;
+            single(HwArchiveDef::new(cf, rows, params).with_link(fields[2]))
+        }
+        _ => {
+            let rows = rows(fields[1])?;
+            let threshold = c_atoi(fields[2]);
+            let window = c_atoi(fields[3]);
+            if !(1..=MAX_WINDOW).contains(&threshold) {
+                return Err(DefinitionError::FailureThreshold);
+            }
+            if window < threshold {
+                return Err(DefinitionError::WindowShorter);
+            }
+            if window > MAX_WINDOW {
+                return Err(DefinitionError::WindowLength);
+            }
+            at_most(5)?;
+            params[param::DELTA_POS] = DEFAULT_DELTA.to_bits();
+            params[param::DELTA_NEG] = DEFAULT_DELTA.to_bits();
+            params[param::WINDOW_LEN] = window as u64;
+            params[param::THRESHOLD] = threshold as u64;
+            single(HwArchiveDef::new(cf, rows, params).with_link(fields[4]))
+        }
+    }
+}
+
+/// CR-34: a prediction archive at `index` without a link, followed by its
+/// season, deviation and failure archives, linked as CR-36 gives.
+fn implicit_group(
+    cf: &'static str,
+    rows: u64,
+    mut prediction: [u64; PARAM_SLOTS],
+    alpha: f64,
+    period: u64,
+    index: u64,
+) -> Vec<CreateArchive> {
+    use crate::holt_winters::param;
+    prediction[param::DEPENDENT] = index + 1;
+    let mut season = [0_u64; PARAM_SLOTS];
+    season[param::GAMMA] = alpha.to_bits();
+    season[param::DEPENDENT] = index;
+    let mut deviation = [0_u64; PARAM_SLOTS];
+    deviation[param::DEPENDENT] = index + 2;
+    let mut failures = deviation;
+    failures[param::DELTA_POS] = DEFAULT_DELTA.to_bits();
+    failures[param::DELTA_NEG] = DEFAULT_DELTA.to_bits();
+    failures[param::WINDOW_LEN] = IMPLICIT_WINDOW;
+    failures[param::THRESHOLD] = IMPLICIT_THRESHOLD;
+    [
+        HwArchiveDef::new(cf, rows, prediction),
+        HwArchiveDef::new("SEASONAL", period, season),
+        HwArchiveDef::new("DEVSEASONAL", period, season),
+        HwArchiveDef::new("DEVPREDICT", rows, deviation),
+        HwArchiveDef::new("FAILURES", period, failures),
+    ]
+    .into_iter()
+    .map(CreateArchive::HoltWinters)
+    .collect()
+}
+
 /// CR-24: any conversion failure and any value outside [0, 1) give the same
 /// text; NaN is kept.
 fn parse_xff(text: &str) -> Result<f64, DefinitionError> {
@@ -514,11 +849,6 @@ pub(crate) fn stored_ds_name(record: &[u8; DS_DEF_LEN]) -> &[u8] {
 /// The consolidation function stored in an archive record.
 pub(crate) fn stored_cf(record: &[u8; RRA_DEF_LEN]) -> &[u8] {
     field_text(&record[..NAME_FIELD])
-}
-
-/// Whether a stored consolidation function is one Rondi refuses.
-pub(crate) fn is_holt_winters(cf: &[u8]) -> bool {
-    HOLT_WINTERS.iter().any(|name| name.as_bytes() == cf)
 }
 
 /// Row count and PDPs per row of an archive record.

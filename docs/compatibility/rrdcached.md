@@ -561,9 +561,10 @@ file has mode 0644 (umask 022). Pending values of a replaced file are kept
 (`create-047`). (`create-*`.)
 
 *Rondi difference (known defect)*: Rondi refuses `-r` and `-t`
-(`-1 unsupported CREATE option: -r`) and Holt-Winters archives
-(`create-043`, `create-044`, `create-046`). COMPUTE data sources are
-created as by `rrdtool create` (`create-045`; see compute.md).
+(`-1 unsupported CREATE option: -r`; `create-043`, `create-044`).
+COMPUTE data sources and Holt-Winters archives are created as by
+`rrdtool create` (`create-045`, `create-046`; see compute.md and
+create.md section 8).
 
 *Rondi policy (intentional difference)*: Rondi limits the size of a file
 created through `CREATE` to 64 MiB and refuses larger layouts before writing
@@ -776,7 +777,7 @@ of writing (104 cases):
 | policy | 17 `opt-*` cases, `opt-037` | RCD-3, RCD-5 | Unix sockets 0600 without `-m`/`-s`; new `-b` directories 0750 |
 | policy | `pid-005` | RCD-11 | a live socket is refused, not replaced |
 | policy | 29 `signal-*` and `journal-*` cases | RCD-30 | journal files 0600 |
-| defect | `create-043`, `create-044`, `create-046` | RC-80 | `CREATE -r`, `-t` and Holt-Winters refused |
+| defect | `create-043`, `create-044` | RC-80 | `CREATE -r` and `-t` refused |
 | defect | `update-015`, `fetch-002`, `fetch-005`, `fetch-006`, `fetch-008` (x86_64 only) | RC-70 | stored NaN sign not kept |
 
 Some entries also carry per-platform variants of Rondi's result

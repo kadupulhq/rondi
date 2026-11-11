@@ -263,3 +263,112 @@ fn create_picks_initial_rows_at_random() {
         }
     }
 }
+
+/// Gives a created file Rondi's implementation-defined choices: current
+/// row 0 in every archive (CR-46) and `seasonal_smooth_idx` 0 (HW-2). The
+/// rows are all unknown, so no reader can tell the difference yet.
+fn with_rondi_choices(mut bytes: Vec<u8>) -> Vec<u8> {
+    let word = |bytes: &[u8], at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+    let (ds, rra) = (word(&bytes, 24) as usize, word(&bytes, 32) as usize);
+    for index in 0..rra {
+        let record = 128 + 120 * ds + 120 * index;
+        let cf = &bytes[record..record + 12];
+        if cf.starts_with(b"SEASONAL\0") || cf.starts_with(b"DEVSEASONAL\0") {
+            bytes[record + 72..record + 80].fill(0);
+        }
+    }
+    let pointers = 128 + 120 * ds + 120 * rra + 16 + 112 * ds + 80 * ds * rra;
+    bytes[pointers..pointers + 8 * rra].fill(0);
+    bytes
+}
+
+/// CR-32 to CR-36 end to end: files Rondi creates with Holt-Winters
+/// archives match RRDtool's in masked form, and once RRDtool's file is
+/// given Rondi's current rows and smoothing index, one update series turns
+/// both into the same bytes.
+#[test]
+fn rondi_created_hw_file_updates_like_rrdtools() {
+    if Command::new("rrdtool").arg("--version").output().is_err() {
+        common::skipped("Holt-Winters create and update: no rrdtool oracle".into());
+        return;
+    }
+    common::require_oracle();
+    let bench = spec_vectors::Bench::new();
+    let definitions: [&[&str]; 3] = [
+        &[
+            "DS:a:GAUGE:20:U:U",
+            "DS:b:GAUGE:20:U:U",
+            "RRA:AVERAGE:0.5:1:5",
+            "RRA:HWPREDICT:30:0.1:0.01:6",
+        ],
+        &[
+            "DS:a:GAUGE:20:U:U",
+            "RRA:MHWPREDICT:30:0.2:0.05:6:2",
+            "RRA:SEASONAL:6:0.3:1:smoothing-window=0.5",
+            "RRA:DEVSEASONAL:6:0.4:1",
+            "RRA:DEVPREDICT:30:3",
+            "RRA:FAILURES:30:2:4:3",
+        ],
+        &["DS:a:GAUGE:20:U:U", "RRA:HWPREDICT:5m:0.5:0.5:4"],
+    ];
+    let start = 1_000_000_000_u64;
+    let updates: Vec<String> = (1..=45_u64)
+        .map(|i| {
+            let wave = [10, 40, 25, 5, 60, 30][(i % 6) as usize] + if i == 33 { 500 } else { 0 };
+            format!("{}:{}:{}", start + 10 * i, wave, wave / 2 + i)
+        })
+        .collect();
+    for (n, defs) in definitions.iter().enumerate() {
+        let name = format!("hw{n}.rrd");
+        let mut files = Vec::new();
+        for (who, program) in [
+            ("rondi", bench.rondi.clone()),
+            ("rrdtool", "rrdtool".into()),
+        ] {
+            let dir = bench.work.join(format!("{who}{n}"));
+            std::fs::create_dir(&dir).unwrap();
+            let mut args = vec!["-b", "1000000000", "-s", "10"];
+            args.extend_from_slice(defs);
+            let (status, stderr) = create(&program, &dir, "022", &name, &args);
+            assert_eq!(status, Some(0), "{who} {defs:?}: {stderr}");
+            files.push(dir.join(&name));
+        }
+        let rondi = std::fs::read(&files[0]).unwrap();
+        let upstream = std::fs::read(&files[1]).unwrap();
+        assert!(
+            spec_vectors::masked(&rondi) == spec_vectors::masked(&upstream),
+            "{defs:?}: created files differ"
+        );
+        std::fs::write(&files[1], with_rondi_choices(upstream)).unwrap();
+        for (file, program) in files.iter().zip([bench.rondi.clone(), "rrdtool".into()]) {
+            let values: Vec<String> = if defs[1].starts_with("DS:") {
+                updates.clone()
+            } else {
+                updates
+                    .iter()
+                    .map(|u| u.rsplit_once(':').unwrap().0.to_owned())
+                    .collect()
+            };
+            let output = Command::new(&program)
+                .arg("update")
+                .arg(file)
+                .args(&values)
+                .env("TZ", "UTC")
+                .env_remove("RRDCACHED_ADDRESS")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{defs:?}: {output:?}");
+        }
+        let (rondi, upstream) = (
+            std::fs::read(&files[0]).unwrap(),
+            std::fs::read(&files[1]).unwrap(),
+        );
+        let first = rondi.iter().zip(&upstream).position(|(a, b)| a != b);
+        assert!(
+            rondi == upstream,
+            "{defs:?}: updated files differ (lengths {} and {}, first byte {first:?})",
+            rondi.len(),
+            upstream.len()
+        );
+    }
+}
