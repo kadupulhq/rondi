@@ -570,13 +570,15 @@ other, so the threshold may exceed the window (vectors `138` to `151`,
 `155`).
 
 **HW-34** (black-box; must). After its value passes, an option whose
-archive is missing fails: `-x`, `-y`, `-z`, `-v`, `-s` and `-S` with
+archive is missing fails (but see the version rule for `-s` and `-S`
+below): `-x`, `-y`, `-z`, `-v`, `-s` and `-S` with
 `Holt-Winters RRA does not exist in this RRD`, `-p`, `-n`, `-w` and `-f`
 with `Failures RRA does not exist in this RRD`. A file with only some
 Holt-Winters archives fails for the options of the missing ones
 (`--gamma-deviation` on a file created with `HWPREDICT` and an explicit
 `SEASONAL` only). `-s` and `-S` raise the file's version to `0004` before
-looking for the archive, so they leave it changed even when they fail;
+checking their value and before looking for the archive, so they leave it
+changed even when either check fails (`-s 1.5`, `-S x`);
 a version that reads as 4 or more by HW-3's rule (`0005`) is kept
 (vectors `165`, `166`, `168`, `169`, `177` to `179`; `170` shows that an
 implicit definition has all the archives).

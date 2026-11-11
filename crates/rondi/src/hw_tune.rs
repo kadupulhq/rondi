@@ -193,11 +193,8 @@ impl Tuned<'_> {
     /// Sets every row of `source` in `archive` to unknown.
     fn clear_rows(&mut self, archive: usize, source: usize) -> Result<(), StoreError> {
         let sources = self.sources();
-        // The header's row count is untrusted: bound the archive by the
-        // file's length, with checked arithmetic, before sizing the read.
-        let file_len = self.file.metadata()?.len();
+        self.check_rows(archive)?;
         let info = &self.info.archives[archive];
-        crate::rrd_binary::require_rows_in_file(&self.info, info, file_len)?;
         let start = info.data_offset;
         let length = usize::try_from(info.rows * (sources * VALUE_LEN) as u64)
             .map_err(|_| StoreError::RrdFormat("archive larger than memory".into()))?;
@@ -211,8 +208,29 @@ impl Tuned<'_> {
         self.write(start, &block)
     }
 
+    /// The header's row counts are untrusted and its offsets wrap: an
+    /// archive's rows must lie after the header and within the file.
+    fn check_rows(&mut self, archive: usize) -> Result<(), StoreError> {
+        let file_len = self.file.metadata()?.len();
+        let info = &self.info.archives[archive];
+        crate::rrd_binary::require_rows_in_file(&self.info, info, file_len)?;
+        if info.data_offset < self.info.header_size as u64 {
+            return Err(StoreError::RrdFormat(
+                "archive rows overlap the header".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// HW-35: forgets what every Holt-Winters archive learned for `source`.
     fn aberrant_reset(&mut self, source: usize) -> Result<(), StoreError> {
+        // Every row range is checked before the first write, so a malformed
+        // file is refused unchanged.
+        for archive in 0..self.info.archives.len() {
+            if matches!(self.role(archive), Some(Role::Seasonal | Role::DevSeasonal)) {
+                self.check_rows(archive)?;
+            }
+        }
         for archive in 0..self.info.archives.len() {
             match self.role(archive) {
                 Some(Role::Prediction { .. }) => {
@@ -250,8 +268,11 @@ impl Tuned<'_> {
                 (Target::DevSeasonal, param::GAMMA, unit_value(text, false)?)
             }
             O::SmoothingWindow(text) | O::SmoothingWindowDeviation(text) => {
-                let value = unit_value(text, true)?;
+                // Compatibility: the version is raised before the value is
+                // checked, so a rejected value still leaves 0004 (HW-34).
+                // Provenance: black-box compatibility test.
                 self.raise_version()?;
+                let value = unit_value(text, true)?;
                 let target = if matches!(option, O::SmoothingWindow(_)) {
                     Target::Seasonal
                 } else {
@@ -435,13 +456,25 @@ mod tests {
             );
         }
         assert_eq!(info(&path).version, "0004");
-        // A value check failure comes first and leaves the version alone.
-        let other = create(temp.path(), "b.rrd", &["RRA:AVERAGE:0.5:1:5"]);
-        assert_eq!(
-            tune(&other, &[O::SmoothingWindow("1.5".into())]),
-            Err("Holt-Winters parameter must be between 0 and 1".into())
-        );
-        assert_eq!(info(&other).version, "0003");
+        // The version is raised before the value is checked, so a value
+        // that fails still leaves 0004.
+        for (name, option, message) in [
+            (
+                "b.rrd",
+                O::SmoothingWindow("1.5".into()),
+                "Holt-Winters parameter must be between 0 and 1",
+            ),
+            (
+                "c.rrd",
+                O::SmoothingWindowDeviation("x".into()),
+                "Unable to parse Holt-Winters parameter",
+            ),
+        ] {
+            let other = create(temp.path(), name, &[GROUP]);
+            assert_eq!(tune(&other, &[option]), Err(message.into()));
+            assert_eq!(info(&other).version, "0004", "{name}");
+        }
+        let other = create(temp.path(), "d.rrd", &["RRA:AVERAGE:0.5:1:5"]);
         let path = temp.path().join("v5.rrd");
         let options = crate::CreateOptions {
             step: Some(10),
@@ -623,6 +656,25 @@ mod tests {
         bytes[at..at + 8].copy_from_slice(&(rows + (1 << 61)).to_le_bytes());
         std::fs::write(&path, &bytes).unwrap();
         assert!(tune(&path, &[O::AberrantReset(0)]).is_err());
+    }
+
+    /// Archive rows whose wrapped offset lands inside the header are refused
+    /// before anything is written, so the file is left as it was.
+    #[test]
+    fn aberrant_reset_refuses_rows_inside_the_header() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = create(temp.path(), "a.rrd", &["RRA:AVERAGE:0.5:1:5", GROUP]);
+        let mut bytes = std::fs::read(&path).unwrap();
+        // Archive 0 (AVERAGE, 5 rows of 2 DS) is first in the data, then
+        // HWPREDICT's 20 rows. Adding 2^60 - 27 rows to archive 0 moves every
+        // later archive's offset back by 27 * 16 bytes modulo 2^64: the
+        // SEASONAL rows then start 32 bytes before the end of the header.
+        let at = 128 + 2 * 120 + 24;
+        let rows = u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+        bytes[at..at + 8].copy_from_slice(&(rows + (1 << 60) - 27).to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(tune(&path, &[O::AberrantReset(0)]).is_err());
+        assert!(std::fs::read(&path).unwrap() == bytes, "file changed");
     }
 
     /// Review Focus 5 (HW-35): a reset of one DS changes only that DS's

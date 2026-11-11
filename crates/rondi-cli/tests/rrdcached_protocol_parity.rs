@@ -527,7 +527,7 @@ fn tune_parses_options_like_rrdtool() {
 #[test]
 fn tune_holt_winters_options_like_rrdcached() {
     let Some(work) = Work::new() else { return };
-    let sessions: [&[u8]; 14] = [
+    let sessions: [&[u8]; 16] = [
         b"TUNE hw.rrd 3 tune -x 0.5\nINFO hw.rrd\n",
         b"TUNE hw.rrd 5 tune --beta nan --gamma 2\nINFO hw.rrd\n",
         b"TUNE hw.rrd 5 tune -v 0.25x -s 1\nINFO hw.rrd\n",
@@ -542,6 +542,8 @@ fn tune_holt_winters_options_like_rrdcached() {
         b"TUNE hw.rrd 5 tune -h x:900 --alpha 1\nINFO hw.rrd\n",
         b"TUNE a.rrd 3 tune -x 0.5\n",
         b"TUNE a.rrd 3 tune -s 0.5\nINFO a.rrd\n",
+        b"TUNE hw.rrd 3 tune -s 1.5\nINFO hw.rrd\n",
+        b"TUNE a.rrd 3 tune -S x\nINFO a.rrd\n",
     ];
     let observed = work.differential(&["-B"], &sessions);
     assert!(observed[0][0].contains("\nrra[1].alpha 0 5.0000000000e-01\n"));
