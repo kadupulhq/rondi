@@ -57,7 +57,8 @@ non-positive divisors, window below the period).
 
 ## Vectors
 
-`cases.tsv` holds 217 cases: 111 `same`, 100 `unsupported` (all `tune`),
+`cases.tsv` holds 217 cases: 111 `same`, 100 `unsupported` (all `tune`;
+promoted to `same` by the create and tune work below),
 6 `clean-error` (window lengths above 28, HW-5) and 0 `divergent`.
 The Linux x86_64 overrides for cases 205 to 216 are pending: docker was
 unavailable. The x86_64 CI job will arbitrate.
@@ -75,10 +76,47 @@ None known. No context saw RRDtool C source.
   unknown and the update fails with the `writing rrd` error of UP-38.
   Season moves in runs are not checked against the row count; unpinned.
 
+## Create and tune (0.2)
+
+- Branch: `feat/holt-winters-create-tune`, based on `origin/main` at
+  `1fadbd7`; plan `docs/superpowers/plans/2026-11-10-holt-winters-create-tune.md`.
+- Method: one inline session, from `create.md` section 8 (CR-32 to
+  CR-36, CR-52), `holt-winters.md` HW-1, HW-2 and HW-30 to HW-35,
+  `tune-modify.md` TM-4 and the `create`, `hw` and `rrdcached` vectors.
+  The gaps (field readers, check order, implicit group links, template
+  state, history byte counts, which archives each option tunes, the
+  version raise) were settled by black-box runs of RRDtool 1.11.0 on
+  macOS arm64 and the `rondi-oracle` Linux x86_64 and aarch64 images,
+  written into the specification, then into vectors, then into code.
+- Code: `crates/rondi/src/rrd_definitions.rs` (Holt-Winters archive
+  definitions), `rrd_create.rs` (layout, HW-1 state, templates),
+  `hw_tune.rs` (new; HW-30 to HW-35), the CLI `tune` arms and rrdcached's
+  `TUNE` (`crates/rondi-server/src/rrdcached/tune.rs`), which share the
+  library code.
+- HW-2 choice: Rondi stores `seasonal_smooth_idx` 0, where RRDtool stores
+  a value that depends on the creation time; the `create` vectors mask
+  that slot.
+- CR-35 rejections: RRDtool accepts four malformed archive definitions
+  and writes files it cannot use (a zero period, links to missing
+  archives, extra fields). Rondi rejects them with its own errors
+  (`create.md` CR-div-hw-defects); cases 317, 318 and 332 are
+  `clean-error`, and case 314, whose RRDtool result is not
+  deterministic, stays `undefined` with a unit test of the rejection.
+- Vectors after the change: `create` cases with Holt-Winters archives are
+  `same` except the CR-35 ones; the 100 `hw` `tune` cases are `same`
+  (211 `same`, 6 `clean-error`, 0 `unsupported`, 0 `divergent`);
+  rrdcached `create-046` expects RRDtool's success, and
+  `tune_holt_winters_options_like_rrdcached` compares 14 `TUNE` sessions
+  with upstream rrdcached.
+- Commits: `847c74c` (specification and vectors), `40ed51c` (create),
+  `7f23f5a` (tune options and rrdcached `TUNE`).
+- Divergent cases: none beyond the CR-35 rejections and HW-2.
+- Exposure: none. No context opened RRDtool C source.
+
 ## Remaining refusals
 
-- `tune` on files with Holt-Winters archives (HW-36).
-- `create` of Holt-Winters archives (CR-80).
+- `tune` structure changes (`DS:`, `RRA:`, `DEL:`, `DELRRA:`, `RRA#`,
+  `--step`) on files with Holt-Winters archives, or adding them (TM-60).
 - `update` of files whose prediction, SEASONAL or DEVSEASONAL archive
   links to an archive of the wrong type (`rrdtool create` can produce a
   misnumbered index, so these are not only crafted).
