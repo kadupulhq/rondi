@@ -460,9 +460,16 @@ fn learn(
         level.nan_count = 1;
         level.last_nan_count = 1;
         let deseasoned = model.remove(x, level.intercept);
+        // Compatibility: with the coefficient unknown there is no
+        // prediction for the deviation, which is then the unknown value
+        // itself rather than one derived from it; on x86_64 the two differ
+        // in sign.
+        // Provenance: black-box compatibility test (x86_64 probes of
+        // hwtune after tune --aberrant-reset and with patched intercept,
+        // season and deviation words).
         return Learned {
             written: rrd_nan(),
-            used: Some(model.apply(x, s)),
+            used: (!s.is_nan()).then(|| model.apply(x, s)),
             season: if s.is_nan() {
                 deseasoned
             } else {
@@ -1244,6 +1251,22 @@ mod tests {
         archives[0].consolidation = "MHWPREDICT".into();
         archives[0].raw_consolidation = b"MHWPREDICT".to_vec();
         archives
+    }
+
+    #[test]
+    fn unknown_intercept_and_season_leave_no_prediction() {
+        // HW-12 case 1 with s unknown: there is no p̂, so the deviation is
+        // the unknown value itself (its sign shows on x86_64), whether d is
+        // known or not.
+        for d in [1.0, rrd_nan()] {
+            let mut archives = additive_group();
+            archives[0].cdp_prep[0].set_f64(cdp::INTERCEPT, rrd_nan());
+            archives[1].cdp_prep[0].set_f64(cdp::SEASONAL, rrd_nan());
+            archives[2].cdp_prep[0].set_f64(cdp::SEASONAL, d);
+            let mut rows = seasons(&[rrd_nan(); 4], &[d; 4]);
+            let written = learn_one(&mut archives, &mut rows, 14.0);
+            assert_eq!(written[2].1[0].to_bits(), rrd_nan().to_bits(), "d = {d}");
+        }
     }
 
     #[test]

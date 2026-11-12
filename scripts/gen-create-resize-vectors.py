@@ -22,7 +22,8 @@ docs/compatibility/resize.md.
 
 Only the standard library is used. `create` picks a random current row for
 each archive, so created files are compared in masked form: every archive is
-rotated so its oldest row comes first and the current-row words are zeroed.
+rotated so its oldest row comes first, the current-row words are zeroed and
+so is the `seasonal_smooth_idx` of SEASONAL and DEVSEASONAL archives (HW-2).
 Resize output is deterministic for a frozen input and kept as is.
 """
 
@@ -71,6 +72,12 @@ def masked(b):
     if pointers + 8 * rra > len(b):
         return b
     out = bytearray(b[:pointers]) + bytes(8 * rra)
+    for i in range(rra):
+        # HW-2: the initial seasonal_smooth_idx (parameter slot 4) is the
+        # implementation's choice, like the current rows.
+        record = 128 + 120 * ds + 120 * i
+        if b[record:record + 20].rstrip(b"\0") in (b"SEASONAL", b"DEVSEASONAL"):
+            out[record + 72:record + 80] = bytes(8)
     data = pointers + 8 * rra
     for i in range(rra):
         rows = word(b, 128 + 120 * ds + 120 * i + 24)
@@ -644,8 +651,12 @@ def create_cases():
     mk("DS:a:GAUGE:20:U:U", "DS:b:DDERIVE:20:U:U", RRA)
     mk(DS, "RRA:AVERAGE:0.5:1:2000")
 
-    # 9. Holt-Winters archives and computed sources (Rondi refuses them).
-    hw = dict(expect="unsupported", note="CR-unsupported")
+    # 9. Holt-Winters archives and computed sources. Rondi rejects the
+    # unchecked links, zero periods and extra fields of CR-35.
+    hw = dict(expect="same", note="-")
+    cr35 = dict(expect="clean-error", note="CR-35")
+    rejected = {"RRA:HWPREDICT:20:0.1:0.01:0", "RRA:HWPREDICT:20:0.1:0.01:5:9",
+                "RRA:HWPREDICT:20:0.1:0.01:5:0", "RRA:HWPREDICT:20:0.1:0.01:5:2:3"}
     for rra in ["RRA:HWPREDICT:20:0.1:0.01:5", "RRA:MHWPREDICT:20:0.1:0.01:5",
                 "RRA:HWPREDICT:20:0.1:0.01:5:2", "RRA:HWPREDICT:20:0.1:1:5",
                 "RRA:HWPREDICT:20:0.1:0.01:0", "RRA:HWPREDICT:20:0.1:0.01:1m",
@@ -654,7 +665,7 @@ def create_cases():
                 "RRA:SEASONAL:5:0.1:1:smoothing-window=0.3", "RRA:DEVSEASONAL:5:0.1:1",
                 "RRA:DEVSEASONAL:5:0.1:1:smoothing-window=0", "RRA:DEVPREDICT:20:1",
                 "RRA:FAILURES:20:7:9:1", "RRA:FAILURES:20:1:28:1"]:
-        mk(DS, RRA, rra, **hw)
+        mk(DS, RRA, rra, **(cr35 if rra in rejected else hw))
     mk(DS, "RRA:HWPREDICT:20:0.1:0.01:5:2", "RRA:SEASONAL:5:0.2:1", **hw)
     for rra in ["RRA:HWPREDICT:20:0:0.01:5", "RRA:HWPREDICT:20:1:0.01:5",
                 "RRA:HWPREDICT:20:0.1:-0.1:5", "RRA:HWPREDICT:0:0.1:0.01:5",
@@ -663,7 +674,7 @@ def create_cases():
                 "RRA:SEASONAL:5:0.2:1:smoothing-window=2", "RRA:SEASONAL:5:0.2:1:foo=1",
                 "RRA:DEVPREDICT:20", "RRA:FAILURES:20:10:9:1", "RRA:FAILURES:20:7:29:1",
                 "RRA:FAILURES:20:0:9:1", "RRA:FAILURES:20:7:9"]:
-        mk(DS, rra, **hw)
+        mk(DS, rra, **(cr35 if rra in rejected else hw))
     for ds in ["DS:y:COMPUTE:x,2,*", "DS:y:COMPUTE:x,1,+,x,*",
                "DS:y:COMPUTE:z,2,*", "DS:y:COMPUTE:x,TIME,+", "DS:y:COMPUTE:y,1,+",
                "DS:y:COMPUTE:x,1,+:extra", "DS:y:COMPUTE:x,PREV,+", "DS:y:COMPUTE:x,COUNT,+"]:
@@ -679,9 +690,8 @@ def create_cases():
         add("o.rrd", "-t", "tpl.rrd", *args, inputs=["tpl"])
     add("o.rrd", "-t", "v5.rrd", inputs=["v5"])
     add("o.rrd", "-t", "v5.rrd", "DS:z:GAUGE:20:U:U", inputs=["v5"])
-    add("o.rrd", "-t", "hw.rrd", inputs=["hw"], expect="divergent", note="CR-div-template-hw")
-    add("o.rrd", "-t", "mhw.rrd", inputs=["mhw"], expect="divergent",
-        note="CR-div-template-hw")
+    add("o.rrd", "-t", "hw.rrd", inputs=["hw"])
+    add("o.rrd", "-t", "mhw.rrd", inputs=["mhw"])
     add("o.rrd", "-t", "cp.rrd", inputs=["cp"])
     add("o.rrd", "-t", "text.rrd", inputs=["text"])
     add("o.rrd", "-t", "missing.rrd")
@@ -780,12 +790,10 @@ def create_cases():
     add("o.rrd", "-b", "1000000000", "--step")
     add("o.rrd", "--template")
     add("o.rrd", "--start")
-    mk("RRA:HWPREDICT:20:0:0.01:5", DS, expect="unsupported", note="CR-unsupported")
+    mk("RRA:HWPREDICT:20:0:0.01:5", DS)
     mk(RRA, "DS:y:COMPUTE:2,3,+", "foo")
-    mk(DS, "DS:x:DCOUNTER:20:U:U", "RRA:MHWPREDICT:20:0.1:0.01:5", expect="unsupported",
-       note="CR-unsupported")
-    mk("DS:d:DCOUNTER:20:U:U", "RRA:MHWPREDICT:20:0.1:0.01:5", expect="unsupported",
-       note="CR-unsupported")
+    mk(DS, "DS:x:DCOUNTER:20:U:U", "RRA:MHWPREDICT:20:0.1:0.01:5")
+    mk("DS:d:DCOUNTER:20:U:U", "RRA:MHWPREDICT:20:0.1:0.01:5")
     # COMPUTE expression grammar and encoding (docs/compatibility/compute.md
     # CP-1 to CP-9). The file bytes pin each operator's code.
     two = ["DS:a:GAUGE:20:U:U", "DS:b:GAUGE:20:0:100"]
@@ -961,12 +969,10 @@ def compute_cases():
 def hw_cases():
     c = []
 
-    # Rondi implements info, dump, fetch, update and updatev of files with
-    # Holt-Winters archives (expectation `same`). It still refuses tune of
-    # such files (`unsupported`, holt-winters.md HW-36); promote those cases
-    # with the implementation. Explicit expectations (`clean-error`,
-    # `divergent`) are kept as given.
-    implemented = {"info", "dump", "fetch", "update", "updatev"}
+    # Rondi implements info, dump, fetch, update, updatev and tune of files
+    # with Holt-Winters archives (expectation `same`). Explicit expectations
+    # (`clean-error`, `divergent`) are kept as given.
+    implemented = {"info", "dump", "fetch", "update", "updatev", "tune"}
 
     def add(*args, inputs=(), expect=None, note="-"):
         if expect is None:

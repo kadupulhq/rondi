@@ -341,9 +341,8 @@ any template archives. Duplicate archives are allowed.
 
 ## 8. Holt-Winters archives
 
-These rules record what RRDtool does. Rondi refuses every Holt-Winters
-archive (CR-80); the vectors pin RRDtool's results with expectation
-`unsupported`.
+These rules record what RRDtool does. Rondi implements them, except the
+defects of CR-35, which it rejects.
 
 **CR-32** (documentation, black-box; should). Argument shapes and minimum
 field counts (CF included):
@@ -356,35 +355,110 @@ field counts (CF included):
 | `FAILURES` | rows, threshold, window length, rra-num | 5 |
 
 Too few fields fail with `Expected at least <m> arguments for RRA but got <k>`.
+Empty fields are dropped first, as for classic archives (CR-26). Each
+field is read as follows:
+
+- rows (all types) and the `SEASONAL`/`DEVSEASONAL` seasonal period: a row
+  count, by CR-29 with one PDP per row (`5m` with step 10 is 30).
+- alpha, beta, gamma: CR-24's number reader (the reader of `xff`). Text
+  that does not convert completely fails with the parameter's range error
+  (CR-33). `nan` and `-nan` pass the range checks, since NaN compares
+  false, and are stored with the sign NM-3 gives the spelling: `nan` as
+  the platform's NaN with the sign bit flipped (`0xfff8000000000000` on
+  arm64 and aarch64, `0x7ff8000000000000` on x86_64), `-nan` as the
+  platform's NaN (CR-74). The flip is the same as `tune`'s (HW-31).
+- the `HWPREDICT`/`MHWPREDICT` seasonal period: the leading integer, as C
+  `atoi` reads it (`2m` is 2, `6.7` is 6, `0x10` is 0, `x` is 0). A
+  negative value, or one above the archive's rows, fails with
+  `Length of seasonal cycle exceeds length of HW prediction array`
+  (`30s` with 20 rows fails, as does `-3`).
+- rra-num: the leading integer, as C `atoi` reads it (`2x` is 2), naming
+  an archive by its 1-based position in the file (template archives
+  first, CR-49). It is stored 0-based (CR-36).
+- threshold and window length: the leading integer, as C `atoi` reads
+  it (`7x` is 7, `9.9` is 9).
+- the optional fourth field of `SEASONAL` and `DEVSEASONAL`: either
+  `smoothing-window`, or `smoothing-window=` followed by a value read as
+  the longest leading decimal number, as C `strtod` reads it (`0.3x` is
+  0.3, `1e-400` is 0, `nan` is the positive quiet NaN
+  `0x7ff8000000000000` on every platform). No number at all (`=` alone,
+  or no `=`) leaves the default of CR-36. Any other text, including a
+  different letter case, fails with `Invalid option <text>`.
 
 **CR-33** (black-box; should). Parameter checks and texts:
 `Invalid alpha: must be between 0 and 1`, `Invalid beta: must be between 0 and 1`,
-`Invalid gamma: must be between 0 and 1` (alpha must lie strictly between 0
-and 1; beta 1 is accepted); rows use CR-29's
+`Invalid gamma: must be between 0 and 1` (alpha and gamma must lie strictly
+between 0 and 1; beta may be 0 or 1); rows use CR-29's
 `Invalid row count <f>: <message>`;
-`Invalid smoothing-window <value printed as %f>: must be between 0 and 1`;
-an unknown `name=value` option fails with `Invalid option <text>`;
+`Invalid smoothing-window <value printed as %f>: must be between 0 and 1`
+(0 and 1 are accepted);
+an unknown option fails with `Invalid option <text>`;
 `Failure threshold is out of range 1, 28`,
 `Window length is out of range 1, 28`,
 `Window length is shorter than the failure threshold`.
+Within one word the checks run in field order: the field count, rows,
+then alpha and beta (or gamma, or threshold), then the period against the
+rows (CR-32), then the option. For `FAILURES` the threshold range comes
+first, then window length against the threshold, then the window range,
+so `FAILURES:20:9:0:1` reports the window as shorter than the threshold.
 
 **CR-34** (documentation, black-box; should). `HWPREDICT` or `MHWPREDICT`
 without rra-num creates four more archives after it: `SEASONAL` and
 `DEVSEASONAL` with the seasonal period as rows and gamma equal to alpha,
-`DEVPREDICT` with the same rows, and `FAILURES` with the seasonal period as
-rows, threshold 7, window length 9 and deviation multipliers 2.0. Seasonal
-period and rows accept durations (`5m` with step 10 gives 30 rows).
+`DEVPREDICT` with the prediction archive's rows, and `FAILURES` with the
+seasonal period as rows, threshold 7, window length 9 and deviation
+multipliers 2.0. Their links are given in CR-36.
 
-**CR-35** (black-box; defect). The rra-num link is not validated: an index
-of 0 or beyond the archive count is stored as given and the file is
-written. A seasonal period of 0 creates archives with 0 rows (vector
-`314`, recorded as `undefined` because such a file's current rows vary).
-`HWPREDICT` with a sixth field fails with `Unknown error`. A replacement
-that implements Holt-Winters archives should reject these cases.
+**CR-35** (black-box; defect). RRDtool does not validate the rra-num
+link: an index of 0, a negative one or one beyond the archive count is
+stored as given minus one (0 becomes 2^64 − 1) and the file is written.
+A seasonal period of 0 creates archives with 0 rows and an unspecified
+`seasonal_smooth_idx` (vector `314`). A `HWPREDICT` or `MHWPREDICT` word
+with a sixth field fails with `Unknown error`; extra fields after the
+fourth field of `SEASONAL`, `DEVSEASONAL` or `FAILURES` are ignored, and
+`DEVPREDICT` reports `Unexpected extra argument for consolidation function
+DEVPREDICT`. Rondi rejects these cases instead, with exit status 1, an
+`ERROR:` line and no file:
 
-**CR-36** (black-box; should). The CDP state of Holt-Winters archives is
-not the classic one of CR-45; its bytes, and the archives' parameter bytes,
-are pinned by the vectors but not specified here.
+- a link outside 1 to the final archive count (template and implicit
+  archives included), after every word has been read:
+  `Invalid rra-num <field>: no such archive`;
+- a `HWPREDICT` or `MHWPREDICT` seasonal period of 0:
+  `Invalid seasonal period <field>: must be positive`;
+- any field beyond those of CR-32, after the checks of CR-33:
+  `Unexpected extra argument for consolidation function <CF>` (the text
+  RRDtool gives for `DEVPREDICT`).
+
+A link that names an archive of the wrong type is accepted, as RRDtool
+accepts it (`holt-winters.md` "Open questions").
+
+**CR-36** (black-box; should). A Holt-Winters archive's definition record
+holds the CF name, rows and one PDP per row (CR-40) and then these
+parameter slots (`restore.md` RS-53 numbering; slot 0, `xff`, and every
+slot not listed are zero):
+
+| CF | 1 | 2 | 3 | 4 | 5 |
+| --- | --- | --- | --- | --- | --- |
+| `HWPREDICT`, `MHWPREDICT` | alpha | beta | link | seasonal period, as a double | |
+| `SEASONAL`, `DEVSEASONAL` | gamma | `smoothing_window` | link | `seasonal_smooth_idx` (HW-2) | |
+| `DEVPREDICT` | | | link | | |
+| `FAILURES` | delta+ 2.0 | delta− 2.0 | link | window length | threshold |
+
+`smoothing_window` is 0 in an implicit group (CR-34) and 0.05 in an
+explicit `SEASONAL` or `DEVSEASONAL` without a number in its option
+(CR-32). The prediction archive's slot 4 is not printed by `info` or
+`dump` (`holt-winters.md` HW-3, HW-4). An explicit link is the rra-num
+field minus one. The links of an implicit group whose prediction archive
+is at 0-based index *i* are: prediction *i* + 1 (the `SEASONAL`);
+`SEASONAL` and `DEVSEASONAL` *i*; `DEVPREDICT` and `FAILURES` *i* + 2 (the
+`DEVSEASONAL`).
+
+The CDP state of every Holt-Winters archive, for every data source, is
+`holt-winters.md` HW-1, whatever the last update: unlike CR-45, slot 1 is
+always 0.
+
+Vectors: `310` to `326` (files), `327` to `341` and `462` (errors), `363`
+and `364` (templates, CR-52).
 
 ## 9. File versions
 
@@ -472,7 +546,10 @@ file (`create tpl.rrd -t tpl.rrd`): the template is read before the output
 is replaced.
 
 **CR-52** (black-box; must). Holt-Winters archives copied from a template
-get the Holt-Winters CDP state of CR-36, not the classic one.
+get the Holt-Winters CDP state of CR-36, not the classic one. Their
+definition records, parameter slots included (`seasonal_smooth_idx` and
+`smoothing_window` too), are copied as stored, and a template's
+`smoothing_window` does not raise the version (CR-37).
 
 ## 12. Sources (prefill)
 
@@ -630,15 +707,13 @@ stored value.
 
 ## 18. Refused features
 
-**CR-80** (black-box; must for Rondi). RRDtool accepts all Holt-Winters
-archives. Rondi does not implement them: a create with a definition word
-whose CF is a Holt-Winters CF fails with an `ERROR:` line naming the
-feature (`... not supported by Rondi`), exit status 1, and writes nothing.
-Rondi refuses such a word before reporting errors in other words and also
-when the word itself is malformed, so its message differs from RRDtool's
-there (`RRA:HWPREDICT:20:0:0.01:5`); the vectors accept either, as
-`unsupported`. `COMPUTE` data sources are implemented (compute.md). Templates holding such archives
-are a known divergence (CR-div-template-hw).
+**CR-80** (historical). Rondi 0.1 refused every Holt-Winters archive in
+`create` with `Holt-Winters consolidation function <CF> is not supported
+by Rondi`, including templates holding them. Rondi now implements
+section 8 and CR-52; only the CR-35 rejections remain. `tune` structure
+changes that add a Holt-Winters archive are still refused
+(`tune-modify.md` TM-60). `COMPUTE` data sources are implemented
+(compute.md).
 
 ## 19. Behavior other commands depend on
 
@@ -667,8 +742,7 @@ keep these entry points consistent with this specification:
 
 Must reproduce exactly: CR-1 to CR-20, CR-22 to CR-31, CR-37 to CR-45,
 CR-47 to CR-51, CR-55, CR-60 to CR-65, CR-70 (pinned sizes), CR-73
-(RRDtool's behavior; Rondi diverges), CR-74, CR-75, CR-76, CR-77 and, for
-Rondi, CR-80.
+(RRDtool's behavior; Rondi diverges), CR-74, CR-75, CR-76 and CR-77.
 
 Should reproduce: CR-21, CR-32 to CR-34, CR-36, CR-46, CR-52, CR-56 to
 CR-59, CR-66, CR-71 and CR-72.
@@ -690,17 +764,17 @@ Current Rondi against RRDtool 1.11.0, as of this specification:
   reached instead of creating locally; it also prints daemon errors without
   the `rrdcached@<address>: ` prefix and checks `--template` locally before
   contacting the daemon (CR-72, not pinned).
-- CR-div-template-hw (CR-52): Rondi refuses a template holding
-  Holt-Winters archives with
-  `Holt-Winters consolidation function <CF> is not supported by Rondi`
-  and writes nothing (CR-80). A template holding a `COMPUTE` data
-  source is copied as stored, as RRDtool does (vector `365`).
 - CR-div-source (section 12): Rondi refuses every `--source` use except one
   source with the same definitions and last update, and in that case it
   copies data through the text dump, losing precision (vector `371`).
   Other source cases are `unsupported`.
-- CR-80: Holt-Winters definitions are refused (expectation
-  `unsupported`).
+- CR-div-hw-defects (CR-35): Rondi rejects unchecked links, a zero
+  prediction period and extra fields that RRDtool stores or ignores
+  (vectors `317`, `318` and `332`, expectation `clean-error`; `314` stays
+  `undefined` because RRDtool's file varies between runs, and the unit
+  test `cr35_defects_rejected` pins Rondi's error).
+- CR-div-smooth-idx (HW-2): Rondi stores `seasonal_smooth_idx` 0 where
+  RRDtool derives it from the file name; the masked form hides the slot.
 
 ## Tests
 

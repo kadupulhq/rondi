@@ -3,11 +3,9 @@
 //! update and updatev. The behavior is specified in
 //! docs/compatibility/holt-winters.md; the vectors under tests/data/hw were
 //! recorded from RRDtool 1.11.0 by scripts/gen-create-resize-vectors.py.
-//! Rondi implements info, dump, update and updatev of these files, and fetch
-//! reads their rows as it does a classic archive's, so those cases are
-//! expected to match RRDtool; tune of a file with
-//! Holt-Winters archives is still refused (HW-36), so its cases are
-//! expected to fail cleanly and leave the file unchanged.
+//! Rondi implements info, dump, update, updatev and tune of these files,
+//! and fetch reads their rows as it does a classic archive's, so those
+//! cases are expected to match RRDtool.
 //! With an RRDtool 1.11.0 oracle on PATH, or always under
 //! RONDI_REQUIRE_ORACLE=1, the cases also run live against it.
 
@@ -82,47 +80,47 @@ fn rrdtool_reproduces_hw_vectors_and_rondi_matches_it() {
     spec_vectors::replay_oracle(&suite());
 }
 
-/// Each Holt-Winters `tune` option on a file with the archive it tunes is
-/// refused by its long name, as rrdcached's TUNE does, and the file is left
-/// unchanged (HW-36).
+/// HW-35 then HW-18: after `--aberrant-reset` of one DS, an update series
+/// leaves the same file bytes as RRDtool's (Review Focus 5).
 #[test]
-fn tune_refuses_holt_winters_options_by_long_name() {
+fn update_after_aberrant_reset_matches_rrdtool() {
+    if Command::new("rrdtool").arg("--version").output().is_err() {
+        common::skipped("skipping aberrant reset then update: rrdtool is not installed".into());
+        return;
+    }
+    common::require_oracle();
     let temp = tempfile::tempdir().unwrap();
     let rondi = temp.path().join("rrdtool");
     std::os::unix::fs::symlink(env!("CARGO_BIN_EXE_rondi"), &rondi).unwrap();
     let input =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/hw/inputs/hwimp.rrd");
-    let original = std::fs::read(&input).unwrap();
-    let path = temp.path().join("hwimp.rrd");
-    for (option, value, long) in [
-        ("-x", "0.5", "alpha"),
-        ("-y", "0.5", "beta"),
-        ("-z", "0.5", "gamma"),
-        ("-v", "0.5", "gamma-deviation"),
-        ("-s", "0.5", "smoothing-window"),
-        ("-S", "0.5", "smoothing-window-deviation"),
-        ("-p", "2", "deltapos"),
-        ("-n", "2", "deltaneg"),
-        ("-w", "5", "window-length"),
-        ("-f", "3", "failure-threshold"),
-        ("-b", "x", "aberrant-reset"),
-    ] {
-        std::fs::write(&path, &original).unwrap();
-        let output = Command::new(&rondi)
-            .arg("tune")
-            .arg(&path)
-            .args([option, value])
-            .output()
-            .unwrap();
-        assert!(!output.status.success(), "{option}");
-        assert_eq!(
-            String::from_utf8_lossy(&output.stderr),
-            format!("ERROR: --{long} is not supported by Rondi\n"),
-            "{option}"
-        );
-        assert!(
-            std::fs::read(&path).unwrap() == original,
-            "{option} changed the file"
-        );
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/hw/inputs/hwtune.rrd");
+    let updates: Vec<String> = (1..=40_u64)
+        .map(|i| {
+            let wave = [10, 40, 25, 5, 60][(i % 5) as usize] + if i == 27 { 400 } else { 0 };
+            format!("{}:{}:{}", 1_000_000_200 + 10 * i, wave, 2 * wave + i)
+        })
+        .collect();
+    let mut files = Vec::new();
+    for (who, program) in [("rondi", rondi.clone()), ("rrdtool", "rrdtool".into())] {
+        let path = temp.path().join(format!("{who}.rrd"));
+        std::fs::copy(&input, &path).unwrap();
+        for args in [
+            vec![
+                "tune".to_owned(),
+                path.display().to_string(),
+                "-b".into(),
+                "x".into(),
+            ],
+            [
+                vec!["update".to_owned(), path.display().to_string()],
+                updates.clone(),
+            ]
+            .concat(),
+        ] {
+            let output = Command::new(&program).args(&args).output().unwrap();
+            assert!(output.status.success(), "{who} {}: {output:?}", args[0]);
+        }
+        files.push(std::fs::read(&path).unwrap());
     }
+    assert!(files[0] == files[1], "files differ after reset and update");
 }

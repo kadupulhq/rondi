@@ -118,6 +118,7 @@ pub(crate) fn failure_history(prep: &RrdCdpPrepInfo, window_len: u64) -> Vec<u8>
 pub enum InfoValue {
     Float(f64),
     Uint(u64),
+    /// A string; `info` prints it quoted, rrdcached's `INFO` as is.
     Text(Vec<u8>),
 }
 
@@ -191,13 +192,10 @@ pub fn info_fields(
             Role::DevSeasonal => put(key("deviation"), Float(prep.word_f64(cdp::SEASONAL))),
             Role::DevPredict => {}
             Role::Failures => {
-                let mut text = vec![b'"'];
-                text.extend(
-                    failure_history(prep, window_len)
-                        .iter()
-                        .map(|&byte| if byte == 1 { b'1' } else { b'0' }),
-                );
-                text.push(b'"');
+                let text = failure_history(prep, window_len)
+                    .iter()
+                    .map(|&byte| if byte == 1 { b'1' } else { b'0' })
+                    .collect();
                 put(key("history"), Text(text));
             }
         }

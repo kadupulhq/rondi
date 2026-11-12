@@ -2,8 +2,8 @@
 
 Status: complete for create-time state (section 1), `info` and `dump`
 output (section 1a), `update` (sections 2 and 3) and `tune` (section 4).
-Rondi implements `info`, `dump` and `update` for these archives; `create`
-and `tune` still refuse them (CR-80, HW-36).
+Rondi implements `create`, `info`, `dump`, `update` and `tune` for these
+archives.
 `fetch` and `restore` of these archives are covered by the vectors and by
 the specifications of those commands, not restated here.
 
@@ -34,7 +34,7 @@ RS-53; every other slot zero):
 | `HWPREDICT`, `MHWPREDICT` | intercept, last intercept, slope, last slope unknown; NaN count 1; last NaN count 1 |
 | `SEASONAL` | seasonal, last seasonal unknown; init flag 1 |
 | `DEVSEASONAL` | deviation (slot 2) and last deviation unknown; init flag 1 |
-| `DEVPREDICT` | none |
+| `DEVPREDICT` | value (slot 0) unknown |
 | `FAILURES` | failure history all zero (`000000000` for window length 9) |
 
 Rows are all unknown, as for classic archives (CR-44).
@@ -47,7 +47,10 @@ the inode, but it does depend on the output file name (`s.rrd`, `h3.rrd`,
 `abc.rrd` give different values for the same definitions). The function is
 not specified here. A replacement may choose any value in range;
 comparisons of created files mask this slot as they mask the current rows
-(CR-46). See "Open questions".
+(CR-46): the `create` suite's masked form zeroes parameter slot 4 of every
+`SEASONAL` and `DEVSEASONAL` archive. Rondi stores 0 for an archive
+defined on the command line (a template's stored value is copied,
+`create.md` CR-52). See "Open questions".
 
 ## 1a. `info` and `dump`
 
@@ -76,7 +79,7 @@ CDP keys `rra[i].cdp_prep[j].<key>`, all of one DS before the next:
 | `HWPREDICT`, `MHWPREDICT` | `alpha` (`hw_alpha`), `beta` (`hw_beta`) | `intercept`, `slope`, `NaN_count` (`nan_count`) |
 | `SEASONAL` | `gamma` (`seasonal_gamma`), then `smoothing_window` if the rule below allows | `seasonal` |
 | `DEVSEASONAL` | `gamma` (`seasonal_gamma`), then `smoothing_window` if the rule below allows | `deviation` (CDP slot 2) |
-| `DEVPREDICT` | none | none |
+| `DEVPREDICT` | value (slot 0) unknown | none |
 | `FAILURES` | `delta_pos`, `delta_neg`, `failure_threshold`, `window_length` (`window_len`) | `history` |
 
 `info` never prints `dependent_rra_idx`, `seasonal_smooth_idx`,
@@ -88,7 +91,10 @@ platform, and `inf` / `-inf`. The CLI-49 locale comma applies
 (`rra[1].alpha = 1,0000000000e-01`). Integers are unsigned 64-bit
 decimal (`18446744073709551615`).
 
-`history` is a quoted string of *w* characters. Character *k* is `1` when
+`history` is a quoted string of *w* characters (rrdcached's `INFO` prints
+it as a type-2 value without the quotes: `history 2 000000000`; observed
+against upstream rrdcached by `tune_holt_winters_options_like_rrdcached`).
+Character *k* is `1` when
 byte *k* of the DS's CDP record is 1 and `0` for any other byte value
 (2, 10, `0x30`, `0x80` and `0xff` all print `0`). Byte 0 holds the newest
 result (HW-14), so the text reads newest first: in the probe with
@@ -143,7 +149,7 @@ Each `<cdp_prep>` `<ds>` starts with `primary_value` and
 |---|---|
 | `HWPREDICT`, `MHWPREDICT` | `intercept`, `last_intercept`, `slope`, `last_slope`, `nan_count`, `last_nan_count` |
 | `SEASONAL`, `DEVSEASONAL` | `seasonal`, `last_seasonal`, `init_flag` (`DEVSEASONAL` uses the same names for its deviation slots) |
-| `DEVPREDICT` | none |
+| `DEVPREDICT` | value (slot 0) unknown |
 | `FAILURES` | `history` |
 
 No Holt-Winters archive prints `<xff>`, `<value>` or
@@ -251,7 +257,11 @@ says there is none.
 
 1. If *I* is unknown: when *x* is known, *I* = *I'* = *x*, *T* = *T'* = 0
    and *n* = *n'* = 1 (*n* may have grown in runs, HW-21); *p* is
-   unknown, *p̂* = *x* ⊗ *s* (unknown when *s* is), and the new
+   unknown, *p̂* = *x* ⊗ *s* when *s* is known and there is no *p̂* when
+   it is not (so *d'* is the unknown value itself, HW-13; on Linux x86_64
+   its sign bit is set, where a value derived from an unknown *s* would
+   not have it: probes after `tune --aberrant-reset` and with the
+   intercept, season and deviation words of `hwtune` patched), and the new
    coefficient is *s'* = *blend*(γs, *x* ⊖ *I*, *s*) with the new *I*
    when *s* is known, and *s'* = *x* ⊖ *I* when it is not (so 0, or 1 for
    a positive first value of `MHWPREDICT`). When *x* is unknown, *I'* = *I*
@@ -513,8 +523,9 @@ covers a missing argument). Error texts below are the message after
 `ERROR: `.
 
 **HW-30** (black-box; must). Each option writes one parameter
-(`restore.md` RS-53 numbering) of the archive of its type, and nothing
-else unless stated:
+(`restore.md` RS-53 numbering) of the first archive of its type, and
+nothing else unless stated; later archives of the same type, as in a file
+with two `HWPREDICT` groups, keep their values:
 
 | Option | Archive | Parameter |
 |---|---|---|
@@ -530,8 +541,10 @@ else unless stated:
 | `--failure-threshold`, `-f` | `FAILURES` | 5 (`failure_threshold`, integer) |
 
 `--window-length` and `--failure-threshold` also clear the failure history
-of every DS (HW-14) to zero bytes, even when the value is unchanged; the
-other options leave it (vectors `076`, `085`, `094`, `103`, `112` to
+of every DS (HW-14) in the archive they tune to zero bytes, even when the
+value is unchanged: the first *w* bytes of each DS's CDP record, with *w*
+the new window length for `--window-length` and the stored one for
+`--failure-threshold` (at most 28). The other options leave it (vectors `076`, `085`, `094`, `103`, `112` to
 `114`, `118` to `120`, `124`, `125`, `131`, `132`, `138`, `139`, `142`,
 `144` to `146`, `149`, `151` to `155`, `163`, `176`; history: `172` to
 `174`).
@@ -561,13 +574,16 @@ other, so the threshold may exceed the window (vectors `138` to `151`,
 `155`).
 
 **HW-34** (black-box; must). After its value passes, an option whose
-archive is missing fails: `-x`, `-y`, `-z`, `-v`, `-s` and `-S` with
+archive is missing fails (but see the version rule for `-s` and `-S`
+below): `-x`, `-y`, `-z`, `-v`, `-s` and `-S` with
 `Holt-Winters RRA does not exist in this RRD`, `-p`, `-n`, `-w` and `-f`
 with `Failures RRA does not exist in this RRD`. A file with only some
 Holt-Winters archives fails for the options of the missing ones
 (`--gamma-deviation` on a file created with `HWPREDICT` and an explicit
 `SEASONAL` only). `-s` and `-S` raise the file's version to `0004` before
-looking for the archive, so they leave it changed even when they fail
+checking their value and before looking for the archive, so they leave it
+changed even when either check fails (`-s 1.5`, `-S x`);
+a version that reads as 4 or more by HW-3's rule (`0005`) is kept
 (vectors `165`, `166`, `168`, `169`, `177` to `179`; `170` shows that an
 implicit definition has all the archives).
 
@@ -577,7 +593,11 @@ one with `unknown data source name '<name>'`. For the named DS only it
 sets to unknown the prediction archive's intercept, last intercept, slope
 and last slope (CDP slots 2 to 5), the SEASONAL and DEVSEASONAL CDP slots
 2 and 3 and every SEASONAL and DEVSEASONAL row, and clears its failure
-history. It does not change the NaN counts, the season counters, the
+history (the first *w* bytes, as for `--failure-threshold`). Unlike the
+other options it changes every Holt-Winters archive of these types, in
+every group of the file. The name is the leading run of letters, digits,
+`_` and `-` of the value, cut at 19 bytes, and is looked up after the
+renames of earlier `--data-source-rename` options. It does not change the NaN counts, the season counters, the
 prediction, DEVPREDICT or FAILURES rows, or any other DS. Unknowns are the
 platform's NaN (`create.md` CR-74). A file without Holt-Winters archives is
 left unchanged with exit status 0. Each `-b` resets its DS, so `-b x -b y`
@@ -587,16 +607,10 @@ its unknown rows hold back smoothing for every DS until they are filled
 the second because a fresh file has nothing to reset; `180` updates a file
 whose first DS was reset).
 
-**HW-36** (black-box; should). Rondi does not yet implement these options
-on files with Holt-Winters archives (`tune-modify.md` TM-60). Until it
-does it refuses them and leaves the file unchanged: after the value
-checks, the CLI and rrdcached's `TUNE` both report
-`--<long option> is not supported by Rondi` (for example
-`--alpha is not supported by Rondi`) when the file has the archive the
-option tunes. In particular `--aberrant-reset` on such a file is refused
-rather than accepted without effect. The value checks that fail before any archive
-is read (HW-31 to HW-33) and the effects on files without Holt-Winters
-archives already match (vectors `164` to `167`).
+**HW-36** (historical). Rondi 0.1 refused these options on files with the
+archive they tune, with `--<long option> is not supported by Rondi`.
+Rondi now implements HW-30 to HW-35 in the CLI and in rrdcached's `TUNE`,
+which reads its options the same way (`rrdcached.md` RC-90).
 
 ## Open questions
 
@@ -687,11 +701,11 @@ values RRDtool converts from its readings (`restore.md` RS-38's digit loop
 is not correctly rounded, so a few three-decimal readings differ from a
 correctly rounded parse in the last bit). Every `tune` case's
 status, error text and changed fields were checked against section 4,
-and the probes behind it were run on all three builds. Rondi implements `info`, `dump` and `update` for these archives;
+and the probes behind it were run on all three builds. Rondi implements `info`, `dump`, `update` and `tune` for these archives;
 `fetch` reads their stored rows as it does any classic archive's, and its
-six cases match. 111 cases are `same`, 6 are `clean-error` (`info`, `dump` and `update` on the
-crafted files with window lengths above 28, HW-5) and none is `divergent`. The 100 `tune` cases
-stay `unsupported` (HW-36).
+six cases match. 211 cases are `same`, 6 are `clean-error` (`info`, `dump` and `update` on the
+crafted files with window lengths above 28, HW-5) and none is `divergent`. rrdcached's `TUNE` is
+compared with upstream rrdcached by `tune_holt_winters_options_like_rrdcached`.
 
 Black-box evidence for the dependency links: the probes
 patched the dependency index of one or two archives in the committed

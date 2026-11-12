@@ -8,8 +8,9 @@
 //! untouched, `file:<path>` with the bytes of a new or changed file,
 //! `link:<path>` with a symbolic link's target and `dir:<path>`. Created
 //! files are compared in masked form (each archive rotated oldest row
-//! first, current-row words zeroed) because `create` picks a random current
-//! row. Unknowns written as the x86_64 negative quiet NaN are folded into
+//! first, current-row words and the `seasonal_smooth_idx` of SEASONAL and
+//! DEVSEASONAL archives zeroed) because `create` picks a random current row
+//! and an implementation-defined smoothing index (HW-2). Unknowns written as the x86_64 negative quiet NaN are folded into
 //! the positive one before comparing.
 #![allow(dead_code)]
 
@@ -224,7 +225,8 @@ fn word(bytes: &[u8], offset: usize) -> u64 {
 }
 
 /// A created file in comparison form: each archive rotated so its oldest
-/// row comes first and the current-row words zeroed. Anything that is not
+/// row comes first, the current-row words zeroed and the HW-2 smoothing
+/// index zeroed. Anything that is not
 /// a complete 64-bit RRD is returned unchanged.
 pub fn masked(bytes: &[u8]) -> Vec<u8> {
     if bytes.len() < 128 || !bytes.starts_with(b"RRD\0") {
@@ -240,6 +242,16 @@ pub fn masked(bytes: &[u8]) -> Vec<u8> {
     }
     let mut out = bytes[..pointers].to_vec();
     out.extend(std::iter::repeat_n(0, 8 * rra));
+    for index in 0..rra {
+        // HW-2: the initial seasonal_smooth_idx (parameter slot 4) is the
+        // implementation's choice, like the current rows.
+        let record = 128 + 120 * ds + 120 * index;
+        let cf = &bytes[record..record + 20];
+        let cf = &cf[..cf.iter().position(|b| *b == 0).unwrap_or(20)];
+        if cf == b"SEASONAL" || cf == b"DEVSEASONAL" {
+            out[record + 72..record + 80].fill(0);
+        }
+    }
     let mut data = pointers + 8 * rra;
     for index in 0..rra {
         let rows = word(bytes, 128 + 120 * ds + 120 * index + 24);

@@ -3830,7 +3830,12 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                         write!(out, "{}", format_info_float(v))?;
                     }
                     rondi::holt_winters::InfoValue::Uint(v) => write!(out, "{v}")?,
-                    rondi::holt_winters::InfoValue::Text(t) => out.extend_from_slice(&t),
+                    // `info` quotes strings; rrdcached's INFO does not.
+                    rondi::holt_winters::InfoValue::Text(t) => {
+                        out.push(b'"');
+                        out.extend_from_slice(&t);
+                        out.push(b'"');
+                    }
                 }
                 out.push(b'\n');
             }
@@ -4112,37 +4117,6 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             .position(|source| source == name)
             .ok_or_else(|| format!("unknown data source name '{name}'"))
     };
-    // Compatibility: after its value checks, a Holt-Winters option on a
-    // file without the archive it tunes reports that archive missing; on a
-    // file with it, Rondi refuses the option and leaves the file unchanged,
-    // as rrdcached's TUNE does (holt-winters.md HW-36).
-    // Provenance: black-box compatibility test (hw vectors, tune cases).
-    const HOLT_WINTERS_PREDICTION_AND_SEASONS: &[&str] = &[
-        "HWPREDICT",
-        "MHWPREDICT",
-        "SEASONAL",
-        "DEVSEASONAL",
-        "DEVPREDICT",
-    ];
-    let has_cf = |names: &[&str]| {
-        info.archives
-            .iter()
-            .any(|archive| names.contains(&archive.consolidation.as_str()))
-    };
-    let unsupported = |letter: char| {
-        let long = LONGOPTS
-            .iter()
-            .find(|spec| spec.key == letter)
-            .map_or("", |spec| spec.long);
-        format!("--{long} is not supported by Rondi")
-    };
-    let failures_refusal = |letter: char| {
-        if has_cf(&["FAILURES"]) {
-            unsupported(letter)
-        } else {
-            "Failures RRA does not exist in this RRD".to_owned()
-        }
-    };
     // The second pass sees the options before the operands, so a trailing
     // short option without a value takes the file name as its value there.
     let second_words = first_pass.rearranged();
@@ -4223,55 +4197,36 @@ fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                     changes[ds].new_name = Some(new_name.clone());
                     current_names[ds] = new_name;
                 }
-                kind @ ('p' | 'n') => {
-                    let (status, parsed) = cparse::rrd_strtodbl_status(value, None);
-                    let param = parsed.unwrap_or_else(|_| cparse::rrd_strtod_prefix(value));
-                    if matches!(status, 1 | 2) && param < 0.1 {
-                        return Err("Parameter specified is too small".into());
-                    }
-                    if status == 1 {
-                        return Err("Unable to parse parameter in set_deltaarg".into());
-                    }
-                    return Err(failures_refusal(kind).into());
-                }
-                kind @ ('f' | 'w') => {
-                    let param = cparse::atoi(value) as libc::c_ulong;
-                    if !(1..=28).contains(&param) {
-                        return Err("Parameter must be between 1 and 28".into());
-                    }
-                    return Err(failures_refusal(kind).into());
-                }
-                kind @ ('x' | 'y' | 'z' | 'v' | 's' | 'S') => {
-                    let (status, parsed) = cparse::rrd_strtodbl_status(value, None);
-                    let param = parsed.unwrap_or_else(|_| cparse::rrd_strtod_prefix(value));
-                    let out_of_range = if matches!(kind, 's' | 'S') {
-                        !(0.0..=1.0).contains(&param)
-                    } else {
-                        param <= 0.0 || param >= 1.0
+                // Compatibility: each Holt-Winters option is checked and
+                // written when it is read, so a later failure keeps it
+                // (holt-winters.md HW-30 to HW-35, TM-4).
+                // Provenance: black-box compatibility test (hw vectors).
+                kind @ ('p' | 'n' | 'f' | 'w' | 'x' | 'y' | 'z' | 'v' | 's' | 'S') => {
+                    use rondi::HwTuneOption as O;
+                    let text = value.to_owned();
+                    let option = match kind {
+                        'x' => O::Alpha(text),
+                        'y' => O::Beta(text),
+                        'z' => O::Gamma(text),
+                        'v' => O::GammaDeviation(text),
+                        's' => O::SmoothingWindow(text),
+                        'S' => O::SmoothingWindowDeviation(text),
+                        'p' => O::DeltaPos(text),
+                        'n' => O::DeltaNeg(text),
+                        'w' => O::WindowLength(text),
+                        _ => O::FailureThreshold(text),
                     };
-                    if matches!(status, 1 | 2) && out_of_range {
-                        return Err("Holt-Winters parameter must be between 0 and 1".into());
-                    }
-                    if status == 0 {
-                        return Err("Unable to parse Holt-Winters parameter".into());
-                    }
-                    if has_cf(HOLT_WINTERS_PREDICTION_AND_SEASONS) {
-                        return Err(unsupported(kind).into());
-                    }
-                    return Err("Holt-Winters RRA does not exist in this RRD".into());
+                    rondi::tune_holt_winters(std::path::Path::new(&filename), &[option])?;
                 }
                 'b' => {
                     let Some(name) = tune_scan_name(value) else {
                         return Err("invalid argument for aberrant-reset".into());
                     };
-                    ds_match(&current_names, &name)?;
-                    // Without Holt-Winters archives the reset changes
-                    // nothing. With them it would rewrite their state,
-                    // which Rondi does not implement (tune-modify.md
-                    // TM-60), so refuse rather than report success.
-                    if has_cf(HOLT_WINTERS_PREDICTION_AND_SEASONS) || has_cf(&["FAILURES"]) {
-                        return Err(unsupported('b').into());
-                    }
+                    let ds = ds_match(&current_names, &name)?;
+                    rondi::tune_holt_winters(
+                        std::path::Path::new(&filename),
+                        &[rondi::HwTuneOption::AberrantReset(ds)],
+                    )?;
                 }
                 't' => newstep = cparse::atoi(value),
                 _ => {}
