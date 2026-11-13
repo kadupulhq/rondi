@@ -701,7 +701,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rondi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "fs2",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "rondi-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "clap",
@@ -734,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "rondi-server"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "http-body-util",

@@ -3,7 +3,7 @@ members = ["crates/rondi", "crates/rondi-cli", "crates/rondi-server"]
 resolver = "3"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.88"
@@ -21,8 +21,8 @@ all = { level = "warn", priority = -1 }
 [workspace.dependencies]
 # Keep these versions equal to workspace.package.version; crates.io needs
 # them because it drops the path when publishing.
-rondi = { path = "crates/rondi", version = "0.1.0" }
-rondi-server = { path = "crates/rondi-server", version = "0.1.0" }
+rondi = { path = "crates/rondi", version = "0.2.0" }
+rondi-server = { path = "crates/rondi-server", version = "0.2.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

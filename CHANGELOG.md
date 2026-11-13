@@ -6,11 +6,38 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-13
+
+Rondi is a pure Rust implementation of RRDtool 1.11.0: no C code, no C
+library dependencies, no librrd. This release completes Holt-Winters support
+and is the first with a container image, Linux packages and prebuilt
+binaries.
+
 ### Added
 
-- Container image `ghcr.io/kadupulhq/rondi` for linux/amd64 and linux/arm64, built from a root `Dockerfile` and published, attested and signed by the Release workflow.
-- Debian and Ubuntu packages (`rondi_X.Y.Z-1_amd64.deb`, `_arm64.deb`) and RPM packages for RHEL-compatible systems, Fedora, SLES and openSUSE (`rondi-X.Y.Z-1.x86_64.rpm`, `.aarch64.rpm`) on each release. They install `/usr/bin/rondi`, the compatibility names in `/usr/lib/rondi/bin`, a disabled `rondi-rrdcached.service` and a `rondi` sysusers.d account, and coexist with the distribution `rrdtool` package.
-- Release archives of the `rondi` executable for x86_64 and aarch64 Linux and macOS, with SHA-256 files and build provenance attestations.
+- `create` builds Holt-Winters archives (`HWPREDICT`, `MHWPREDICT`, `SEASONAL`, `DEVSEASONAL`, `DEVPREDICT`, `FAILURES`), as the implicit group and as explicit definitions, from the CLI, from templates and through rrdcached `CREATE` (#160).
+- `tune` implements the Holt-Winters options `-x -y -z -v -s -S -p -n -w -f -b` in the CLI and in rrdcached `TUNE` (#160).
+- Container image `ghcr.io/kadupulhq/rondi` for linux/amd64 and linux/arm64, built from a root `Dockerfile` on a distroless base and published with provenance, an SBOM and a cosign signature by the Release workflow (#161).
+- Release archives of the `rondi` executable for x86_64 and aarch64 Linux (glibc 2.34 or later) and macOS, with SHA-256 files and build provenance attestations (#161).
+- Debian and Ubuntu packages (`rondi_0.2.0-1_amd64.deb`, `_arm64.deb`, #162) and one RPM for RHEL-compatible systems, Fedora, SLES and openSUSE (`rondi-0.2.0-1.x86_64.rpm`, `.aarch64.rpm`, #163, #164). They install `/usr/bin/rondi`, the compatibility names in `/usr/lib/rondi/bin`, a disabled `rondi-rrdcached.service` and a `rondi` sysusers.d account, and coexist with the distribution `rrdtool` package.
+
+### Changed
+
+- `tune -s` and `-S` raise the file version to `0004` before checking their value, as RRDtool and upstream rrdcached do (#160).
+- rrdcached `INFO` prints the Holt-Winters failure history without quotes, as upstream does; `rrdtool info` keeps them (#160).
+- `create` rejects four malformed Holt-Winters definitions that RRDtool accepts and writes as unusable files: a zero period, links to missing archives, and extra fields (CR-35, #160).
+- The release workflow grants every permission the organisation release workflow declares, which the v0.1.0 tag run lacked (#159).
+
+### Fixed
+
+- `update` leaves no prediction after an unknown intercept and an unknown seasonal coefficient, matching RRDtool's NaN sign on x86_64 (#160).
+- `tune --aberrant-reset` checks every SEASONAL and DEVSEASONAL row range against the header and the file length before its first write (#160).
+
+### Known limitations
+
+- `tune` structure changes on files with Holt-Winters archives are still refused (TM-60).
+- The `tune` header options, the `xport` and `graphv` writers in `rondi-cli` and parts of `rrd_binary.rs` predate the clean-room process and are still scheduled for respecification and rewrite.
+- RPM packages are unsigned; verify them with `gh attestation verify`.
 
 ## [0.1.0] - 2026-11-10
 
