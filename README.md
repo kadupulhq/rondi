@@ -25,7 +25,7 @@ On `main` at `204f58a`, `RONDI_REQUIRE_ORACLE=1 cargo test --workspace` passes 5
 | Graph calculations and exports | DEF/CDEF/VDEF/SHIFT, fetch and mixed-step data preparation, RPN with RRDtool 1.11.0 operator semantics, XML/JSON xport, CSV/TSV/SSV/XML/JSON graph export, numeric PRINT/GPRINT and SI scaling | Graph and xport stop at 10 million rows per fetch, series or shared grid, so a long window over coprime steps is refused; `--daemon` sends FLUSH where RRDtool sends FETCH; the last row of a PREDICT-family CDEF with shift 0 differs |
 | Graph rendering | Native PNG with LINE/AREA/STACK/TICK and rules; image size, layout keys, legends, colors, `--zoom` and options match for the default font | PNG bytes and fonts differ from RRDtool; SVG, PDF and EPS are refused; complete Cacti graph coverage is unverified |
 | `rrdcached` | Unix and TCP listeners, `-U`/`-G` privilege drop, upstream-format journals, upstream signal handling, tested request handlers including CREATE, UPDATE, FETCH/FETCHBIN, FLUSH, LIST, STATS, TUNE and SUSPEND/RESUME | Rondi never forks; `-o` log format differs; TCP has no authentication; full configuration and lifecycle parity remain incomplete |
-| RRDProxy | Direct and PHP launcher aliases with tested help/version/error behavior | Proxy daemon and wire protocol are unimplemented; no librrd C ABI is provided |
+| RRDProxy | `rrdtool-proxy` and `rrdproxy` names with tested help/version/error behavior | Proxy daemon and wire protocol are unimplemented; no librrd C ABI is provided |
 
 The [compatibility matrix](docs/compatibility.md) and [defect register](docs/COMPATIBILITY_DEFECTS.md) record the detailed boundaries. The [roadmap](docs/ROADMAP.md) tracks the work needed for a drop-in replacement.
 
@@ -85,7 +85,7 @@ scripts/install-compat-links.sh "$PWD/target/release/rondi" "$HOME/.local/bin"
 
 The names are installed for packaging and mode selection; legacy-compatible behavior remains incomplete as listed in the defect register.
 
-The installer also installs `rrdtool-proxy.php` for service definitions that invoke the proxy through PHP. It delegates to the neighboring `rrdtool-proxy` alias; set `RONDI_BIN` when the executable is installed elsewhere. This adapter currently covers only the pinned launcher help/version/invalid-option responses, not the proxy daemon or wire protocol.
+Rondi ships no PHP. A service definition that starts Cacti's proxy as `php rrdtool-proxy.php [options]` runs Rondi as `rrdtool-proxy [options]` instead (under the packages, `/usr/lib/rondi/bin/rrdtool-proxy`). Only the help, version and invalid-option responses are implemented; the proxy daemon and its wire protocol are not.
 
 For systemd deployments, `packaging/systemd/rondi-rrdcached.service` is the packaged security profile; the Linux packages install it with `ExecStart` pointing at `/usr/lib/rondi/bin/rrdcached` and create the account. For a manual install, provision a dedicated unprivileged `rondi` user and group first, install the compatibility symlink as `/usr/bin/rrdcached`, and enable the unit. It explicitly sets `-m 0660 -s rondi` and keeping the journal outside the base directory with `-j /var/lib/rondi-journal`; the service data and socket directories are group-owned and unavailable to other users. Do not use this profile with a shared `/tmp` base directory.
 

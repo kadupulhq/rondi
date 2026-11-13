@@ -15,7 +15,7 @@ ln -s "$(command -v rondi)" ~/.local/bin/rrdtool
 ln -s "$(command -v rondi)" ~/.local/bin/rrdcached
 ```
 
-The repository's `scripts/install-compat-links.sh` creates the full set of names and the `rrdtool-proxy.php` launcher; it is not part of this crate.
+The repository's `scripts/install-compat-links.sh` creates the full set of names; it is not part of this crate.
 
 ## Example
 

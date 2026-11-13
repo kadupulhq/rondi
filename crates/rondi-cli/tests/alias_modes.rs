@@ -187,58 +187,31 @@ fn rrdcached_option_parsing_matches_pinned_daemon() {
 }
 
 #[test]
-fn rrdproxy_alias_preserves_pinned_version_and_help_invocations() {
+fn rrdproxy_aliases_preserve_pinned_version_and_help_invocations() {
     let temp = tempfile::tempdir().unwrap();
-    let alias = temp.path().join("rrdtool-proxy.php");
-    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
+    for name in ["rrdtool-proxy", "rrdproxy"] {
+        let alias = temp.path().join(name);
+        symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
 
-    let version = Command::new(&alias).arg("--version").output().unwrap();
-    assert!(version.status.success());
-    let version = String::from_utf8(version.stdout).unwrap();
-    assert!(version.starts_with("RRDtool Proxy Server v1.2.17, Copyright (C) 2004-"));
-    assert!(version.ends_with(" The Cacti Group\r\n"));
+        let version = Command::new(&alias).arg("--version").output().unwrap();
+        assert!(version.status.success(), "{name}");
+        let version = String::from_utf8(version.stdout).unwrap();
+        assert!(version.starts_with("RRDtool Proxy Server v1.2.17, Copyright (C) 2004-"));
+        assert!(version.ends_with(" The Cacti Group\r\n"));
 
-    let help = Command::new(&alias).arg("--help").output().unwrap();
-    assert!(help.status.success());
-    let help = String::from_utf8(help.stdout).unwrap();
-    assert!(help.starts_with(&version));
-    assert!(help.contains("Usage: rrdtool-proxy.php [-w|--wizard] [-v|--version]"));
-    assert!(help.contains("-s --systemd   - Adjust output messages for systemd\r\n"));
+        let help = Command::new(&alias).arg("--help").output().unwrap();
+        assert!(help.status.success(), "{name}");
+        let help = String::from_utf8(help.stdout).unwrap();
+        assert!(help.starts_with(&version));
+        assert!(help.contains("Usage: rrdtool-proxy.php [-w|--wizard] [-v|--version]"));
+        assert!(help.contains("-s --systemd   - Adjust output messages for systemd\r\n"));
 
-    let invalid = Command::new(&alias).arg("--invalid").output().unwrap();
-    assert!(invalid.status.success());
-    assert!(
-        String::from_utf8_lossy(&invalid.stdout)
-            .starts_with("ERROR: Invalid Parameter --invalid\r\n")
-    );
-}
-
-#[test]
-fn php_rrdproxy_launcher_forwards_arguments_and_output() {
-    let php = Command::new("php").arg("-v").output();
-    if !php.is_ok_and(|output| output.status.success()) {
-        oracle_skip!("skipping PHP launcher test: PHP CLI is not installed");
-        return;
-    }
-    let temp = tempfile::tempdir().unwrap();
-    let alias = temp.path().join("rrdtool-proxy");
-    symlink(env!("CARGO_BIN_EXE_rondi"), &alias).unwrap();
-    let script = format!(
-        "{}/compat/rrdtool-proxy.php",
-        env!("CARGO_MANIFEST_DIR").trim_end_matches("/crates/rondi-cli")
-    );
-
-    for argument in ["--version", "--help", "--invalid"] {
-        let direct = Command::new(&alias).arg(argument).output().unwrap();
-        let through_php = Command::new("php")
-            .arg(&script)
-            .arg(argument)
-            .env("RONDI_BIN", &alias)
-            .output()
-            .unwrap();
-        assert_eq!(through_php.status, direct.status);
-        assert_eq!(through_php.stdout, direct.stdout);
-        assert_eq!(through_php.stderr, direct.stderr);
+        let invalid = Command::new(&alias).arg("--invalid").output().unwrap();
+        assert!(invalid.status.success(), "{name}");
+        assert!(
+            String::from_utf8_lossy(&invalid.stdout)
+                .starts_with("ERROR: Invalid Parameter --invalid\r\n")
+        );
     }
 }
 

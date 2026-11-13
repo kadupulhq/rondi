@@ -18,9 +18,4 @@ fn required_oracles_are_installed() {
         .arg("-h")
         .output()
         .expect("rrdcached is required");
-    let php = Command::new("php")
-        .arg("-v")
-        .output()
-        .expect("php is required for the rrdtool-proxy.php launcher test");
-    assert!(php.status.success(), "php -v failed: {}", php.status);
 }

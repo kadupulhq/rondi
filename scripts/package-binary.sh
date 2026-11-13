@@ -25,11 +25,10 @@ staging=$(mktemp -d)
 trap 'rm -rf "$staging"' EXIT
 dir="$staging/$stem"
 
-mkdir -p "$dir/bin" "$dir/scripts" "$dir/compat" "$outdir"
+mkdir -p "$dir/bin" "$dir/scripts" "$outdir"
 cp "$binary" "$dir/bin/rondi"
 chmod 0755 "$dir/bin/rondi"
 cp "$root/scripts/install-compat-links.sh" "$dir/scripts/"
-cp "$root/compat/rrdtool-proxy.php" "$dir/compat/"
 for file in README.md CHANGELOG.md LICENSE-MIT LICENSE-APACHE LICENSE-GPL-2.0 COPYRIGHT THIRD-PARTY-NOTICES.md; do
     cp "$root/$file" "$dir/"
 done

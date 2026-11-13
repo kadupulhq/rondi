@@ -42,12 +42,10 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
         cargo build --release --locked -p rondi-cli --target "$triple"; \
     install -D -m 0755 "target/$triple/release/rondi" /usr/local/bin/rondi
 
-# Lay out the final tree here because the runtime image has no shell. The
-# PHP launcher is dropped: the image has no PHP to run it.
+# Lay out the final tree here because the runtime image has no shell.
 RUN set -eu; \
     mkdir -p /out/usr/local/bin /out/data; \
     sh scripts/install-compat-links.sh /usr/local/bin/rondi /out/usr/local/bin; \
-    rm /out/usr/local/bin/rrdtool-proxy.php; \
     cp /usr/local/bin/rondi /out/usr/local/bin/rondi; \
     chown 65532:65532 /out/data
 
