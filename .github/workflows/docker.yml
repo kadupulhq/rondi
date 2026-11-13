@@ -53,7 +53,9 @@ jobs:
           set -euo pipefail
           docker run --rm rondi:ci --version
           docker run --rm --entrypoint /usr/local/bin/rondi rondi:ci --version
-          docker run --rm --entrypoint /usr/local/bin/rrdcached rondi:ci -h | head -n 1
+          # rrdcached -h exits 1, as upstream does, so check its text instead.
+          help=$(docker run --rm --entrypoint /usr/local/bin/rrdcached rondi:ci -h || :)
+          printf '%s\n' "$help" | grep -q '^RRDCacheD 1\.11\.0'
           docker volume create rondi-ci
           docker run --rm -v rondi-ci:/data rondi:ci \
             create t.rrd --start 1700000000 --step 10 DS:x:GAUGE:20:U:U RRA:AVERAGE:0.5:1:10
