@@ -8,7 +8,8 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.88"
 repository = "https://github.com/kadupulhq/rondi"
-description = "Rust-native round-robin storage and RRDtool compatibility workspace"
+homepage = "https://github.com/kadupulhq/rondi"
+description = "Pure Rust implementation of RRDtool: .rrd round-robin databases, the rrdtool command line and rrdcached"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

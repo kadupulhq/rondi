@@ -6,7 +6,7 @@
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=kadupulhq_rondi&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=kadupulhq_rondi)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-Rondi is a Rust reimplementation of RRDtool 1.11.0, `rrdcached` and the `.rrd` file format, differentially tested against the real C programs, built for Kadupul.
+Rondi is a **pure Rust implementation of RRDtool**: the `.rrd` round-robin database format, the `rrdtool` command line and `rrdcached`, matching RRDtool 1.11.0 byte for byte where it can and differentially tested against the real C programs. It contains no C code and links no C libraries; like any Rust program, it uses only the operating system's C library for system calls. It is built for Kadupul and usable anywhere RRDtool is: Cacti, Munin, Smokeping, collectd and scripts that call `rrdtool`.
 
 Kadupul, like Cacti, drives RRDtool as a child process: its `lib/rrd.php` pipes commands to `rrdtool -`. Rondi exists to replace that dependency with a Rust implementation without changing what Kadupul sees: on every surface it shares with RRDtool (the `.rrd` format, the `rrdtool` and `rrdcached` command lines and protocol) the target is the exact behavior of RRDtool 1.11.0, including file bytes, output, error text and exit status. It reimplements that behavior in Rust rather than wrapping librrd. One Cargo workspace and coordinated release contain the storage library, CLI, and daemon.
 

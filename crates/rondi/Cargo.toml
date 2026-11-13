@@ -1,13 +1,15 @@
 [package]
 name = "rondi"
-description = "Round-robin time-series storage and RRDtool binary compatibility library"
+description = "Pure Rust RRDtool library: create, update, fetch and graph .rrd round-robin databases, byte-compatible with RRDtool 1.11.0, with no C code"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/rondi"
 readme = "README.md"
-keywords = ["rrdtool", "rrd", "time-series", "monitoring"]
+keywords = ["rrdtool", "rrd", "time-series", "round-robin", "monitoring"]
 categories = ["database-implementations", "visualization"]
 include = [
     "/src/**",

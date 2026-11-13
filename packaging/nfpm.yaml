@@ -28,9 +28,9 @@ overrides:
 rpm:
   group: Productivity/Databases/Tools
 description: |-
-  RRDtool-compatible round-robin database tools
-  Rondi is a Rust implementation of the RRDtool 1.11.0 rrdtool and rrdcached
-  command lines and .rrd file format. The compatibility names (rrdtool,
+  Pure Rust RRDtool-compatible round-robin database tools
+  Rondi is a pure Rust implementation, with no C code, of the RRDtool 1.11.0
+  rrdtool and rrdcached command lines and .rrd file format. The compatibility names (rrdtool,
   rrdcached, rrdupdate, rrdcreate, rrdinfo, rrdtool-proxy, rrdproxy) are
   installed in /usr/lib/rondi/bin; put that directory first on PATH, or point
   an application's rrdtool path setting at /usr/lib/rondi/bin/rrdtool.
