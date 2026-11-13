@@ -19,6 +19,13 @@ case "$package" in
         reinstall() { apt-get install --yes -qq --reinstall "$package"; }
         remove() { apt-get purge --yes -qq rondi; }
         ;;
+    *.rpm)
+        # Release RPMs are unsigned; their provenance is the GitHub
+        # attestation, so the signature check is skipped for the local file.
+        install() { dnf install --assumeyes --quiet --nogpgcheck "$package"; }
+        reinstall() { dnf reinstall --assumeyes --quiet --nogpgcheck "$package"; }
+        remove() { dnf remove --assumeyes --quiet rondi; }
+        ;;
     *)
         printf 'unsupported package type: %s\n' "$package" >&2
         exit 64

@@ -130,14 +130,15 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  deb:
-    name: Debian package ${{ matrix.arch }}
+  package:
+    name: ${{ matrix.packager }} package ${{ matrix.arch }}
     needs: linux
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
+        packager: [deb, rpm]
         arch: [x86_64, aarch64]
     env:
       TRIPLE: ${{ matrix.arch }}-unknown-linux-gnu
@@ -168,19 +169,22 @@ jobs:
           set -euo pipefail
           mkdir "$RUNNER_TEMP/unpack"
           tar -xzf "$RUNNER_TEMP"/binary/*.tar.gz -C "$RUNNER_TEMP/unpack" --strip-components=1
-          packaging/build-package.sh deb "$RUNNER_TEMP/unpack/bin/rondi" "${{ matrix.arch }}" dist
+          packaging/build-package.sh "$PACKAGER" "$RUNNER_TEMP/unpack/bin/rondi" "$ARCH" dist
           cd dist
-          for package in *.deb; do sha256sum "$package" > "$package.sha256"; done
+          for package in *."$PACKAGER"; do sha256sum "$package" > "$package.sha256"; done
+        env:
+          PACKAGER: ${{ matrix.packager }}
+          ARCH: ${{ matrix.arch }}
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: package-deb-${{ matrix.arch }}
+          name: package-${{ matrix.packager }}-${{ matrix.arch }}
           path: dist/
           if-no-files-found: error
 
-  deb-test:
+  package-test:
     name: Install on ${{ matrix.image.name }} ${{ matrix.arch }}
-    needs: deb
+    needs: package
     runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
     container: ${{ matrix.image.ref }}
     timeout-minutes: 15
@@ -190,13 +194,26 @@ jobs:
         arch: [x86_64, aarch64]
         image:
           - name: Debian 12
+            packager: deb
             ref: debian:12@sha256:268fb24c39bca92d326dd83ea3abebe4a3f7751c804ffef23bb6d857dd343ff8
           - name: Debian 13
+            packager: deb
             ref: debian:13@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6
           - name: Ubuntu 22.04
+            packager: deb
             ref: ubuntu:22.04@sha256:74b12b11ffa550fba1929ad4d8d16533c34f6612728469671afba1b03b66881c
           - name: Ubuntu 24.04
+            packager: deb
             ref: ubuntu:24.04@sha256:2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5
+          - name: AlmaLinux 9
+            packager: rpm
+            ref: almalinux:9@sha256:245f8aab832fe800aa42bdab5fad75ebbd8e0b4c9f24820a83c638b177857ae2
+          - name: AlmaLinux 10
+            packager: rpm
+            ref: almalinux:10@sha256:5a4b41a427c9717be8f4ac2a32aa22efbae5f9124fbcb79a6765394f312acfe8
+          - name: Fedora 43
+            packager: rpm
+            ref: fedora:43@sha256:f01112b9a1f1d0504ad962d9adfa401425033f8ab067e0a821904ebdde5b8ca5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -204,15 +221,17 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: package-deb-${{ matrix.arch }}
+          name: package-${{ matrix.image.packager }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/package
 
       - name: Smoke test
-        run: packaging/smoke-test.sh "$(ls "$RUNNER_TEMP"/package/*.deb)"
+        env:
+          PACKAGER: ${{ matrix.image.packager }}
+        run: packaging/smoke-test.sh "$(ls "$RUNNER_TEMP"/package/*."$PACKAGER")"
 
   publish:
     name: Attest and attach to the release
-    needs: [linux, macos, deb-test]
+    needs: [linux, macos, package-test]
     if: ${{ inputs.publish }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -254,9 +273,10 @@ jobs:
           subject-path: |
             dist/*.tar.gz
             dist/*.deb
+            dist/*.rpm
 
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release upload "$TAG" dist/*.tar.gz dist/*.deb dist/*.sha256 --clobber --repo "$GITHUB_REPOSITORY"
+        run: gh release upload "$TAG" dist/*.tar.gz dist/*.deb dist/*.rpm dist/*.sha256 --clobber --repo "$GITHUB_REPOSITORY"

@@ -21,6 +21,9 @@ overrides:
   deb:
     depends:
       - libc6 (>= 2.34)
+  rpm:
+    depends:
+      - glibc >= 2.34
 description: |-
   RRDtool-compatible round-robin database tools
   Rondi is a Rust implementation of the RRDtool 1.11.0 rrdtool and rrdcached
@@ -33,6 +36,27 @@ contents:
   - src: ${RONDI_BIN}
     dst: /usr/bin/rondi
     expand: true
+    file_info:
+      mode: 0755
+
+  # Owned explicitly so an RPM removal deletes them; dpkg removes empty
+  # directories on its own.
+  - dst: /usr/lib/rondi
+    type: dir
+    file_info:
+      mode: 0755
+  - dst: /usr/lib/rondi/bin
+    type: dir
+    file_info:
+      mode: 0755
+  - dst: /usr/share/doc/rondi
+    type: dir
+    packager: rpm
+    file_info:
+      mode: 0755
+  - dst: /usr/share/licenses/rondi
+    type: dir
+    packager: rpm
     file_info:
       mode: 0755
 
@@ -92,6 +116,35 @@ contents:
   - src: THIRD-PARTY-NOTICES.md
     dst: /usr/share/doc/rondi/THIRD-PARTY-NOTICES.md
     packager: deb
+
+  - src: README.md
+    dst: /usr/share/doc/rondi/README.md
+    type: doc
+    packager: rpm
+  - src: CHANGELOG.md
+    dst: /usr/share/doc/rondi/CHANGELOG.md
+    type: doc
+    packager: rpm
+  - src: COPYRIGHT
+    dst: /usr/share/licenses/rondi/COPYRIGHT
+    type: license
+    packager: rpm
+  - src: LICENSE-MIT
+    dst: /usr/share/licenses/rondi/LICENSE-MIT
+    type: license
+    packager: rpm
+  - src: LICENSE-APACHE
+    dst: /usr/share/licenses/rondi/LICENSE-APACHE
+    type: license
+    packager: rpm
+  - src: LICENSE-GPL-2.0
+    dst: /usr/share/licenses/rondi/LICENSE-GPL-2.0
+    type: license
+    packager: rpm
+  - src: THIRD-PARTY-NOTICES.md
+    dst: /usr/share/licenses/rondi/THIRD-PARTY-NOTICES.md
+    type: license
+    packager: rpm
 
 scripts:
   postinstall: packaging/scripts/postinstall.sh

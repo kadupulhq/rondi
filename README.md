@@ -43,10 +43,11 @@ Each release after 0.1.0 publishes the same `rondi` executable in three forms:
 
   The image also contains `rrdcached`, `rrdupdate`, `rrdcreate`, `rrdinfo`, `rrdtool-proxy` and `rrdproxy` in `/usr/local/bin`. TCP `rrdcached` has no authentication, so publish its port only on a trusted network. Verify a pulled image with `gh attestation verify oci://ghcr.io/kadupulhq/rondi:<version> --owner kadupulhq`.
 - **Archives** on the GitHub release for `x86_64` and `aarch64` Linux (glibc 2.34 or later) and macOS, each with a `.sha256` file and a build provenance attestation. Unpack one and run `scripts/install-compat-links.sh "$PWD/bin/rondi" "$HOME/.local/bin"` to create the compatibility names.
-- **Debian and Ubuntu packages** (`rondi_X.Y.Z-1_amd64.deb`, `_arm64.deb`) on the GitHub release, tested on Debian 12 and 13 and Ubuntu 22.04 and 24.04. The package installs `/usr/bin/rondi` and keeps the compatibility names in `/usr/lib/rondi/bin`, so it coexists with the distribution's `rrdtool` package; point an application's RRDtool path at `/usr/lib/rondi/bin/rrdtool`. It also installs `rondi-rrdcached.service` (not enabled, starting `/usr/lib/rondi/bin/rrdcached`) and a `rondi` system account.
+- **Linux packages** on the GitHub release: `rondi_X.Y.Z-1_amd64.deb` and `_arm64.deb`, tested on Debian 12 and 13 and Ubuntu 22.04 and 24.04, and `rondi-X.Y.Z-1.x86_64.rpm` and `.aarch64.rpm`, tested on AlmaLinux 9 and 10 (RHEL-compatible) and Fedora 43. The RPMs are unsigned; check them with `gh attestation verify <file> --owner kadupulhq`. Each package installs `/usr/bin/rondi` and keeps the compatibility names in `/usr/lib/rondi/bin`, so it coexists with the distribution's `rrdtool` package; point an application's RRDtool path at `/usr/lib/rondi/bin/rrdtool`. It also installs `rondi-rrdcached.service` (not enabled, starting `/usr/lib/rondi/bin/rrdcached`) and a `rondi` system account.
 
   ```sh
-  sudo apt install ./rondi_X.Y.Z-1_amd64.deb
+  sudo apt install ./rondi_X.Y.Z-1_amd64.deb        # Debian, Ubuntu
+  sudo dnf install ./rondi-X.Y.Z-1.x86_64.rpm       # RHEL 9+, Fedora
   sudo systemctl enable --now rondi-rrdcached
   ```
 - **Crates** on crates.io: `cargo install rondi-cli --locked` installs `rondi`.
@@ -147,7 +148,7 @@ mise exec -- cargo bench -p rondi --bench rrd_workload
 
 GitHub Actions runs the Rust checks on Linux x86_64 and ARM64. It builds the pinned RRDtool 1.11.0 oracle from its upstream release tarball, verifies the tarball SHA-256, and runs formatting, Clippy, the full workspace test suite, documentation generation, and release builds in the same container. This ensures the RRDtool differential tests execute instead of being skipped because the oracle is missing. A separate fuzz job builds every target and replays committed seeds; its RPN differential target needs a local RRDtool oracle and is not replayed in that job. The security workflow runs Semgrep and RustSec `cargo-audit` against `Cargo.lock` and `cargo-deny` against dependency advisories, licenses, duplicate versions, and registry sources. CodeQL is configured for Rust and GitHub Actions; GitHub only runs its code scanning upload where repository visibility and plan settings enable it. The SonarQube Cloud workflow builds the same pinned oracle, collects coverage with `cargo llvm-cov` and a Clippy report, and uploads both for the quality gate shown above.
 
-The Container image workflow builds the release `Dockerfile` for `linux/amd64` and `linux/arm64` on pull requests that touch it or the crates, and smoke-tests the amd64 image. The Binaries workflow builds and smoke-tests the release archives on pull requests that touch their build, and installs, exercises and removes the Debian package in each tested release (`packaging/smoke-test.sh`).
+The Container image workflow builds the release `Dockerfile` for `linux/amd64` and `linux/arm64` on pull requests that touch it or the crates, and smoke-tests the amd64 image. The Binaries workflow builds and smoke-tests the release archives on pull requests that touch their build, and installs, exercises and removes each Linux package in each tested release (`packaging/smoke-test.sh`).
 
 Run the same checks locally in a disposable Linux container with:
 

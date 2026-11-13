@@ -3,7 +3,7 @@
 #
 #   packaging/build-package.sh PACKAGER PATH_TO_RONDI_EXECUTABLE ARCH OUTDIR
 #
-# PACKAGER is an nfpm packager (deb). ARCH is x86_64 or aarch64. Set NFPM
+# PACKAGER is an nfpm packager (deb or rpm). ARCH is x86_64 or aarch64. Set NFPM
 # to the nfpm executable when it is not on PATH, and RONDI_MAINTAINER to
 # override the package maintainer field.
 set -eu
@@ -21,7 +21,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 nfpm=${NFPM:-nfpm}
 
 case "$packager" in
-    deb) ;;
+    deb | rpm) ;;
     *) printf 'unsupported packager: %s\n' "$packager" >&2; exit 64 ;;
 esac
 case "$arch" in
