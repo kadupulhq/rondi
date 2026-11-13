@@ -437,7 +437,7 @@ pub struct Grid {
     pub start: i64,
     pub end: i64,
     pub step: u64,
-    /// At most [`MOST_ROWS`].
+    /// At most `MOST_ROWS`.
     pub rows: usize,
 }
 

@@ -1,6 +1,6 @@
 # rondi
 
-The storage library behind [Rondi](https://github.com/kadupulhq/rondi), a Rust reimplementation of RRDtool 1.11.0. It reads and writes RRDtool `.rrd` files in place, prepares graph data (DEF, CDEF, VDEF, RPN, xport), and provides Rondi's own durable `.rondi` store. It does not link librrd or call the `rrdtool` program.
+The storage library behind [Rondi](https://github.com/kadupulhq/rondi), a pure Rust implementation of RRDtool 1.11.0 with no C code. It reads and writes RRDtool `.rrd` files in place, prepares graph data (DEF, CDEF, VDEF, RPN, xport), and provides Rondi's own durable `.rondi` store. It does not link librrd or call the `rrdtool` program.
 
 The command-line tool is in [`rondi-cli`](https://crates.io/crates/rondi-cli) and the daemons are in [`rondi-server`](https://crates.io/crates/rondi-server).
 

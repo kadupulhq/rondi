@@ -155,20 +155,19 @@ Estimated at `de820e9`: 9 to 12 engineer-weeks, of which pipe mode, the tokenize
 Pixel identity is a measured property inside one pinned container, not a promise across hosts. Upstream pixels depend on Cairo, Pango, FreeType, fontconfig, and the installed fonts, so two builds of 1.11.0 can disagree.
 
 1. **Exact**: `graphv` keys and values, PRINT values, image width and height, data-format outputs (XML, JSON, CSV, TSV, SSV), exit status, for the full option and element grammar.
-2. **Exact inside the pinned container**: PNG bytes, when Rondi renders through the same Cairo and Pango versions and fonts. Track the share of identical PNGs in a corpus; treat drops as regressions.
-3. **Perceptual elsewhere**: SSIM of at least 0.98 per image against upstream on the same host, and identical text in SVG output.
+2. **Perceptual**: SSIM of at least 0.98 per image against upstream in the pinned container, and identical text in SVG output. Track the corpus SSIM distribution and treat drops as regressions.
 
-Reaching tier 2 requires Cairo and Pango bindings; a pure-Rust rasterizer cannot meet it. Keep the renderer in its own crate so the storage library stays free of C dependencies, as `docs/architecture.md` intends.
+Rondi is pure Rust, so the renderer is a Rust rasterizer and font stack in its own crate, not Cairo and Pango bindings. Byte-identical PNGs, which would need upstream's exact Cairo, Pango and font versions, are not a goal; the AGENTS.md graph rule already prefers measured tolerances over reproducing rendering internals.
 
 ### Gaps
 
-SVG, EPS, PDF; PNG pixels and fonts (tier 2); legend `coords` under `--zoom` on Linux (reported in #93); text in fonts other than the default; Cairo strokes and gradients; the 10 million row limit for collected fetches, which needs graph and xport to consume rows as a stream; the PREDICT last-row difference.
+SVG, EPS, PDF; PNG pixels and fonts (tier 2, perceptual); legend `coords` under `--zoom` on Linux (reported in #93); text in fonts other than the default; stroke and gradient rendering; the 10 million row limit for collected fetches, which needs graph and xport to consume rows as a stream; the PREDICT last-row difference.
 
 The clean-room specification of the graph front end is [compatibility/graph.md](compatibility/graph.md), with 2,213 frozen cases in `crates/rondi-cli/tests/data/graph_spec_vectors.json` replayed against the live oracle by `graph_spec_vectors.rs`. Its `KNOWN_DIVERGENCES` list holds 49 defect cases (some on one platform only) and 21 policy cases (READ-ONLY: counted in the test source). The option parser was replaced by the clean-room `graph_args.rs` (#125) and the layout by the `layout` module (#128); `graph.rs`, which parses the elements and prepares the data, is the module still to replace. The specification lists its remaining unsettled questions.
 
 ### Effort
 
-Estimated at `de820e9`: 18 to 26 engineer-weeks, mostly an implementation compatible with RRDtool 1.11.0 onto Cairo and Pango. Layout metadata and option parsing, which were part of that estimate, are now done, so the remaining work is concentrated in rendering. Budget 4 weeks for pixel work after the renderer lands and stop when the corpus metric plateaus. Streaming collected fetches is a separate 1 to 2 weeks (not estimated before).
+Estimated at `de820e9`: 18 to 26 engineer-weeks, mostly a pure Rust renderer compatible with RRDtool 1.11.0 (the estimate assumed Cairo and Pango and was not redone). Layout metadata and option parsing, which were part of that estimate, are now done, so the remaining work is concentrated in rendering. Budget 4 weeks for pixel work after the renderer lands and stop when the corpus metric plateaus. Streaming collected fetches is a separate 1 to 2 weeks (not estimated before).
 
 ### Verification
 
@@ -313,8 +312,8 @@ Status: mostly done. Done: TCP and multiple listeners, `-U`/`-G`, journal format
 **M4: librrd ABI (10 to 14 weeks, graph symbols stubbed until M5).** `rondi-ffi`, headers, `.pc`. Prerequisites, in order: (1) argv command implementations move from `rondi-cli` into the library so the CLI and `rrd_*_r` entry points share them; (2) one `rrdc` client module for rrdcached connection, path and escaping rules; (3) a `rondi-graph` crate for graph and xport; (4) RPN parsed once into an expression tree instead of re-tokenized per row; (5) lock down the public Rust API to what the shim needs. Exit: 97 symbols exported without versions; struct layout checks pass; upstream binding tests pass; pecl `rrd` and collectd suites pass against the shim; `abidiff` reports no incompatible change.
 Status: not started; the license question in the C ABI section is open.
 
-**M5: graph (18 to 26 weeks).** Cairo and Pango renderer crate; all elements, options, formats; `graphv` metadata. Exit: `graphv` output identical for the whole corpus; data formats identical; PNG hash-identical for at least 95 percent of the corpus in the pinned container; SSIM of at least 0.98 elsewhere; Cacti, Munin, and Smokeping graph pages render with unchanged templates.
-Status: data preparation, options and `graphv` layout match for the tested cases (#92, #93); the front end is specified in [compatibility/graph.md](compatibility/graph.md). The option parser and layout were replaced from it (#125, #128). Open: the clean-room replacement of the element parser and data preparation in `graph.rs`, the Cairo and Pango renderer, SVG, PDF and EPS, streaming collected fetches past 10 million rows (RD-017), RD-020, and the corpus.
+**M5: graph (18 to 26 weeks).** Pure Rust renderer crate; all elements, options, formats; `graphv` metadata. Exit: `graphv` output identical for the whole corpus; data formats identical; SSIM of at least 0.98 for the corpus in the pinned container; Cacti, Munin, and Smokeping graph pages render with unchanged templates.
+Status: data preparation, options and `graphv` layout match for the tested cases (#92, #93); the front end is specified in [compatibility/graph.md](compatibility/graph.md). The option parser and layout were replaced from it (#125, #128). Open: the clean-room replacement of the element parser and data preparation in `graph.rs`, the pure Rust renderer, SVG, PDF and EPS, streaming collected fetches past 10 million rows (RD-017), RD-020, and the corpus.
 
 **M6: packaging and release (2 to 3 weeks, partly parallel).** Distro packages with alternatives, man pages, tested rollback. Exit: install, run all suites, uninstall, reinstall upstream, in clean containers for four distributions.
 Status: not started; no release exists.
@@ -335,7 +334,7 @@ RRDProxy (RD-008) is a Cacti protocol, not part of RRDtool. Track it outside thi
 
 ## Risks
 
-1. **Graph pixels.** Upstream pixels depend on the host font stack. A faithful Cairo and Pango port still differs across hosts. Mitigation: the tiered bar above; never promise pixel identity outside the pinned container.
+1. **Graph pixels.** Upstream pixels depend on the host font stack. A pure Rust renderer will not reproduce them exactly. Mitigation: the tiered bar above; never promise pixel identity.
 2. **Holt-Winters numerics.** The update code mixes float accumulation order, smoothing windows, and seasonal index arithmetic over `unsigned long` scratch slots. Small order changes alter bytes. Mitigation: match RRDtool's floating-point operation order, and compare every CDP scratch slot, not only archive rows.
 3. **Platform-dependent output.** NaN bits, `qsort` order, FMA contraction, double-to-integer casts, `realloc(p, 0)`, `strtoll` errno and the libxml2 version differ by compiler, CPU or libc. [compatibility.md](compatibility.md#platform-notes) lists the cases Rondi reproduces. Mitigation: generate expectations from the matching upstream build for each target; never write them by hand.
 4. **Time and locale.** `rrd_parsetime` and RPN calendar operators depend on `TZ`, DST tables, and `LC_TIME`. CI images often lack locales. Mitigation: a fixed locale and tzdata version in the CI image, and a frozen "now" in tests.
@@ -353,5 +352,5 @@ RRDProxy (RD-008) is a Cacti protocol, not part of RRDtool. Track it outside thi
 - Do not add ELF symbol versions, extra exported symbols, or changed struct layouts to the `librrd` shim.
 - Do not add features under compatibility names (TLS in `rrdcached`, new graph options, new RPN operators). Put them behind `rondi` subcommands.
 - Do not merge `.rondi` and `.rrd` code paths, and never write a `.rondi` file with an `.rrd` name.
-- Do not use a pure-Rust rasterizer if pixel parity in the pinned container is a goal.
+- Do not add C libraries or C build dependencies (Cairo, Pango, fontconfig, libxml2, librrd). Rondi is pure Rust.
 - Do not refactor update or Holt-Winters code for style until its differential coverage is complete.

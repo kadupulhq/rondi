@@ -1,6 +1,6 @@
 # rondi-cli
 
-The `rondi` executable from [Rondi](https://github.com/kadupulhq/rondi), a Rust reimplementation of RRDtool 1.11.0. One binary provides Rondi's own commands and, when invoked under the names `rrdtool`, `rrdcached`, `rrdupdate`, `rrdcreate` or `rrdinfo`, the matching RRDtool command line. It does not link librrd.
+The `rondi` executable from [Rondi](https://github.com/kadupulhq/rondi), a pure Rust implementation of RRDtool 1.11.0 with no C code. One binary provides Rondi's own commands and, when invoked under the names `rrdtool`, `rrdcached`, `rrdupdate`, `rrdcreate` or `rrdinfo`, the matching RRDtool command line. It does not link librrd.
 
 ## Install
 

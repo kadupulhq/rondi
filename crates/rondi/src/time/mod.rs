@@ -4,9 +4,9 @@
 //! The accepted grammar, evaluation rules and error texts are those of
 //! docs/compatibility/time-spec.md (TS-1 to TS-71), established by
 //! documentation and black-box runs of RRDtool 1.11.0. Parsing is split
-//! into a tokenizer ([`lexer`]), a grammar that builds a typed
-//! specification ([`parser`]), and the evaluation below, which applies the
-//! specification to local time through the host C library ([`local`]).
+//! into a tokenizer (`lexer`), a grammar that builds a typed
+//! specification (`parser`), and the evaluation below, which applies the
+//! specification to local time through the host C library (`local`).
 
 mod lexer;
 mod local;

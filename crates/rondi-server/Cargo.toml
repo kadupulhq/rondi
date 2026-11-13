@@ -1,11 +1,13 @@
 [package]
 name = "rondi-server"
-description = "Storage coordination, write journaling, and rrdcached-compatible daemon components"
+description = "Pure Rust rrdcached-compatible daemon for RRDtool .rrd files, with write journaling and storage coordination"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/rondi-server"
 readme = "README.md"
 keywords = ["rrdtool", "rrdcached", "rrd", "time-series", "monitoring"]
 categories = ["database-implementations", "network-programming"]

@@ -1,13 +1,14 @@
 [package]
 name = "rondi-cli"
-description = "RRDtool-compatible command-line interface and Rondi server executable"
+description = "Pure Rust rrdtool and rrdcached command lines, compatible with RRDtool 1.11.0, in one executable with no C code"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
+homepage.workspace = true
 readme = "README.md"
-keywords = ["rrdtool", "rrd", "rrdcached", "time-series", "monitoring"]
+keywords = ["rrdtool", "rrdcached", "rrd", "time-series", "cli"]
 categories = ["command-line-utilities", "database-implementations"]
 include = [
     "/src/**",

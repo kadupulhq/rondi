@@ -1,6 +1,6 @@
 # rondi-server
 
-The daemon components of [Rondi](https://github.com/kadupulhq/rondi), a Rust reimplementation of RRDtool 1.11.0. It contains two servers:
+The daemon components of [Rondi](https://github.com/kadupulhq/rondi), a pure Rust implementation of RRDtool 1.11.0 with no C code. It contains two servers:
 
 - an `rrdcached`-compatible adapter that speaks RRDtool's line protocol over Unix and TCP sockets, with upstream-format journals and signal handling;
 - Rondi's own HTTP/JSON API over a Unix socket, which journals each update and syncs it to disk before acknowledging it.
