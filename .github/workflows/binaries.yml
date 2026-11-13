@@ -1,9 +1,11 @@
 name: Binaries
 
-# Builds the rondi executable for each supported target and packages it with
-# scripts/package-binary.sh. Pull requests that touch the build only build and
-# upload workflow artifacts; the Release workflow calls this with publish: true
-# to attest the archives and attach them to the GitHub release.
+# Builds the rondi executable for each supported target, packages it as an
+# archive with scripts/package-binary.sh and, for Linux, as distribution
+# packages with packaging/build-package.sh, and installs each package in the
+# distributions it targets. Pull requests that touch the build only build,
+# test and upload workflow artifacts; the Release workflow calls this with
+# publish: true to attest everything and attach it to the GitHub release.
 
 on:
   pull_request:
@@ -11,6 +13,7 @@ on:
       - '.github/workflows/binaries.yml'
       - 'scripts/package-binary.sh'
       - 'scripts/install-compat-links.sh'
+      - 'packaging/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.mise.toml'
@@ -127,9 +130,89 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  deb:
+    name: Debian package ${{ matrix.arch }}
+    needs: linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+    env:
+      TRIPLE: ${{ matrix.arch }}-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install nfpm
+        run: |
+          set -euo pipefail
+          archive=nfpm_2.48.0_Linux_x86_64.tar.gz
+          curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+            "https://github.com/goreleaser/nfpm/releases/download/v2.48.0/$archive" \
+            --output "$RUNNER_TEMP/$archive"
+          echo "6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  $RUNNER_TEMP/$archive" \
+            | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" nfpm
+          echo "NFPM=$RUNNER_TEMP/nfpm" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: binary-${{ env.TRIPLE }}
+          path: ${{ runner.temp }}/binary
+
+      - name: Build the package
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/unpack"
+          tar -xzf "$RUNNER_TEMP"/binary/*.tar.gz -C "$RUNNER_TEMP/unpack" --strip-components=1
+          packaging/build-package.sh deb "$RUNNER_TEMP/unpack/bin/rondi" "${{ matrix.arch }}" dist
+          cd dist
+          for package in *.deb; do sha256sum "$package" > "$package.sha256"; done
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-deb-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+
+  deb-test:
+    name: Install on ${{ matrix.image.name }} ${{ matrix.arch }}
+    needs: deb
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    container: ${{ matrix.image.ref }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        image:
+          - name: Debian 12
+            ref: debian:12@sha256:268fb24c39bca92d326dd83ea3abebe4a3f7751c804ffef23bb6d857dd343ff8
+          - name: Debian 13
+            ref: debian:13@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6
+          - name: Ubuntu 22.04
+            ref: ubuntu:22.04@sha256:74b12b11ffa550fba1929ad4d8d16533c34f6612728469671afba1b03b66881c
+          - name: Ubuntu 24.04
+            ref: ubuntu:24.04@sha256:2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-deb-${{ matrix.arch }}
+          path: ${{ runner.temp }}/package
+
+      - name: Smoke test
+        run: packaging/smoke-test.sh "$(ls "$RUNNER_TEMP"/package/*.deb)"
+
   publish:
     name: Attest and attach to the release
-    needs: [linux, macos]
+    needs: [linux, macos, deb-test]
     if: ${{ inputs.publish }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -157,7 +240,7 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: binary-*
+          pattern: '{binary,package}-*'
           path: dist
           merge-multiple: true
 
@@ -168,10 +251,12 @@ jobs:
       # Nothing is attached unattested.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: dist/*.tar.gz
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.deb
 
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber --repo "$GITHUB_REPOSITORY"
+        run: gh release upload "$TAG" dist/*.tar.gz dist/*.deb dist/*.sha256 --clobber --repo "$GITHUB_REPOSITORY"

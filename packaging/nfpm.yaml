@@ -1,0 +1,99 @@
+# Linux package definition, built with nfpm by packaging/build-package.sh,
+# which sets every ${...} variable below.
+#
+# The package is named rondi and installs only /usr/bin/rondi on PATH. The
+# RRDtool-compatible names live in /usr/lib/rondi/bin, so the package does
+# not conflict with the distribution's rrdtool package (docs/ROADMAP.md keeps
+# the upstream names until the CLI, rrdcached and ABI milestones pass).
+name: rondi
+arch: ${NFPM_ARCH}
+platform: linux
+version: ${RONDI_VERSION}
+release: ${RONDI_RELEASE}
+section: utils
+priority: optional
+maintainer: ${RONDI_MAINTAINER}
+vendor: Kadupul
+homepage: https://github.com/kadupulhq/rondi
+license: MIT OR Apache-2.0
+# The release build runs on AlmaLinux 9, so the executable needs glibc 2.34.
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.34)
+description: |-
+  RRDtool-compatible round-robin database tools
+  Rondi is a Rust implementation of the RRDtool 1.11.0 rrdtool and rrdcached
+  command lines and .rrd file format. The compatibility names (rrdtool,
+  rrdcached, rrdupdate, rrdcreate, rrdinfo, rrdtool-proxy, rrdproxy) are
+  installed in /usr/lib/rondi/bin; put that directory first on PATH, or point
+  an application's rrdtool path setting at /usr/lib/rondi/bin/rrdtool.
+
+contents:
+  - src: ${RONDI_BIN}
+    dst: /usr/bin/rondi
+    expand: true
+    file_info:
+      mode: 0755
+
+  # The executable picks its mode from argv[0], so each name is a symlink.
+  - src: /usr/bin/rondi
+    dst: /usr/lib/rondi/bin/rrdtool
+    type: symlink
+  - src: /usr/bin/rondi
+    dst: /usr/lib/rondi/bin/rrdcached
+    type: symlink
+  - src: /usr/bin/rondi
+    dst: /usr/lib/rondi/bin/rrdupdate
+    type: symlink
+  - src: /usr/bin/rondi
+    dst: /usr/lib/rondi/bin/rrdcreate
+    type: symlink
+  - src: /usr/bin/rondi
+    dst: /usr/lib/rondi/bin/rrdinfo
+    type: symlink
+  - src: /usr/bin/rondi
+    dst: /usr/lib/rondi/bin/rrdtool-proxy
+    type: symlink
+  - src: /usr/bin/rondi
+    dst: /usr/lib/rondi/bin/rrdproxy
+    type: symlink
+
+  # Installed but not enabled. build-package.sh points its ExecStart at
+  # /usr/lib/rondi/bin/rrdcached.
+  - src: ${RONDI_UNIT}
+    dst: /usr/lib/systemd/system/rondi-rrdcached.service
+    expand: true
+    file_info:
+      mode: 0644
+  - src: packaging/sysusers/rondi.conf
+    dst: /usr/lib/sysusers.d/rondi.conf
+    file_info:
+      mode: 0644
+
+  - src: README.md
+    dst: /usr/share/doc/rondi/README.md
+    packager: deb
+  - src: CHANGELOG.md
+    dst: /usr/share/doc/rondi/CHANGELOG.md
+    packager: deb
+  - src: COPYRIGHT
+    dst: /usr/share/doc/rondi/COPYRIGHT
+    packager: deb
+  - src: LICENSE-MIT
+    dst: /usr/share/doc/rondi/LICENSE-MIT
+    packager: deb
+  - src: LICENSE-APACHE
+    dst: /usr/share/doc/rondi/LICENSE-APACHE
+    packager: deb
+  - src: LICENSE-GPL-2.0
+    dst: /usr/share/doc/rondi/LICENSE-GPL-2.0
+    packager: deb
+  - src: THIRD-PARTY-NOTICES.md
+    dst: /usr/share/doc/rondi/THIRD-PARTY-NOTICES.md
+    packager: deb
+
+scripts:
+  postinstall: packaging/scripts/postinstall.sh
+  preremove: packaging/scripts/preremove.sh
+  postremove: packaging/scripts/postremove.sh
