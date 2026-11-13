@@ -1,0 +1,299 @@
+name: Binaries
+
+# Builds the rondi executable for each supported target, packages it as an
+# archive with scripts/package-binary.sh and, for Linux, as distribution
+# packages with packaging/build-package.sh, and installs each package in the
+# distributions it targets. Pull requests that touch the build only build,
+# test and upload workflow artifacts; the Release workflow calls this with
+# publish: true to attest everything and attach it to the GitHub release.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/binaries.yml'
+      - 'scripts/package-binary.sh'
+      - 'scripts/install-compat-links.sh'
+      - 'packaging/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.mise.toml'
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      publish:
+        description: Attest the archives and attach them to the release for the calling tag.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    # AlmaLinux 9 ships glibc 2.34, so the binary also runs on RHEL 9 and
+    # later, Debian 12 and later, Ubuntu 22.04 and later and SLES 15 SP6.
+    container: almalinux:9@sha256:245f8aab832fe800aa42bdab5fad75ebbd8e0b4c9f24820a83c638b177857ae2
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            rustup_sha256: 5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            rustup_sha256: a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697
+    env:
+      TRIPLE: ${{ matrix.arch }}-unknown-linux-gnu
+    steps:
+      - name: Install build tools
+        run: dnf install --assumeyes --setopt=install_weak_deps=False gcc tar gzip findutils
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        env:
+          RUSTUP_SHA256: ${{ matrix.rustup_sha256 }}
+        run: |
+          set -euo pipefail
+          toolchain=$(sed -n 's/^rust = "\(.*\)"$/\1/p' .mise.toml)
+          curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+            "https://static.rust-lang.org/rustup/archive/1.29.2/$TRIPLE/rustup-init" \
+            --output /tmp/rustup-init
+          echo "$RUSTUP_SHA256  /tmp/rustup-init" | sha256sum --check
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "$toolchain"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: cargo build --release --locked -p rondi-cli --target "$TRIPLE"
+
+      - name: Package
+        run: scripts/package-binary.sh "target/$TRIPLE/release/rondi" "$TRIPLE" dist
+
+      - name: Smoke test the packaged executable
+        run: |
+          set -euo pipefail
+          mkdir /tmp/unpack
+          tar -xzf dist/*.tar.gz -C /tmp/unpack --strip-components=1
+          /tmp/unpack/bin/rondi --version
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binary-${{ env.TRIPLE }}
+          path: dist/
+          if-no-files-found: error
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    # Apple silicon runner; the x86_64 build is a cross-compile, and Rosetta
+    # runs it for the smoke test.
+    runs-on: macos-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64, x86_64]
+    env:
+      TRIPLE: ${{ matrix.arch }}-apple-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@6612f0ef07ed2a736cd1e00a94a065522dd41195 # v5.2.5
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          mise exec -- rustup target add "$TRIPLE"
+          mise exec -- cargo build --release --locked -p rondi-cli --target "$TRIPLE"
+
+      - name: Package
+        run: scripts/package-binary.sh "target/$TRIPLE/release/rondi" "$TRIPLE" dist
+
+      - name: Smoke test the packaged executable
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/unpack"
+          tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP/unpack" --strip-components=1
+          "$RUNNER_TEMP/unpack/bin/rondi" --version
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binary-${{ env.TRIPLE }}
+          path: dist/
+          if-no-files-found: error
+
+  package:
+    name: ${{ matrix.packager }} package ${{ matrix.arch }}
+    needs: linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        packager: [deb, rpm]
+        arch: [x86_64, aarch64]
+    env:
+      TRIPLE: ${{ matrix.arch }}-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install nfpm
+        run: |
+          set -euo pipefail
+          archive=nfpm_2.48.0_Linux_x86_64.tar.gz
+          curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+            "https://github.com/goreleaser/nfpm/releases/download/v2.48.0/$archive" \
+            --output "$RUNNER_TEMP/$archive"
+          echo "6d7f9a28b2f397934403950fcbba83f598b08d02edbe79a0815b3b4897341750  $RUNNER_TEMP/$archive" \
+            | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP" nfpm
+          echo "NFPM=$RUNNER_TEMP/nfpm" >> "$GITHUB_ENV"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: binary-${{ env.TRIPLE }}
+          path: ${{ runner.temp }}/binary
+
+      - name: Build the package
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/unpack"
+          tar -xzf "$RUNNER_TEMP"/binary/*.tar.gz -C "$RUNNER_TEMP/unpack" --strip-components=1
+          packaging/build-package.sh "$PACKAGER" "$RUNNER_TEMP/unpack/bin/rondi" "$ARCH" dist
+          cd dist
+          for package in *."$PACKAGER"; do sha256sum "$package" > "$package.sha256"; done
+        env:
+          PACKAGER: ${{ matrix.packager }}
+          ARCH: ${{ matrix.arch }}
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: package-${{ matrix.packager }}-${{ matrix.arch }}
+          path: dist/
+          if-no-files-found: error
+
+  package-test:
+    name: Install on ${{ matrix.image.name }} ${{ matrix.arch }}
+    needs: package
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    container: ${{ matrix.image.ref }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, aarch64]
+        image:
+          - name: Debian 12
+            packager: deb
+            ref: debian:12@sha256:268fb24c39bca92d326dd83ea3abebe4a3f7751c804ffef23bb6d857dd343ff8
+          - name: Debian 13
+            packager: deb
+            ref: debian:13@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6
+          - name: Ubuntu 22.04
+            packager: deb
+            ref: ubuntu:22.04@sha256:74b12b11ffa550fba1929ad4d8d16533c34f6612728469671afba1b03b66881c
+          - name: Ubuntu 24.04
+            packager: deb
+            ref: ubuntu:24.04@sha256:2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5
+          - name: AlmaLinux 9
+            packager: rpm
+            ref: almalinux:9@sha256:245f8aab832fe800aa42bdab5fad75ebbd8e0b4c9f24820a83c638b177857ae2
+          - name: AlmaLinux 10
+            packager: rpm
+            ref: almalinux:10@sha256:5a4b41a427c9717be8f4ac2a32aa22efbae5f9124fbcb79a6765394f312acfe8
+          - name: Fedora 43
+            packager: rpm
+            ref: fedora:43@sha256:f01112b9a1f1d0504ad962d9adfa401425033f8ab067e0a821904ebdde5b8ca5
+          - name: openSUSE Leap 15.6
+            packager: rpm
+            ref: opensuse/leap:15.6@sha256:79be7751205ea84559990fb76b1bec71e38d6fad41c70a4f6c921b803b58f421
+          - name: openSUSE Leap 16.0
+            packager: rpm
+            ref: opensuse/leap:16.0@sha256:a4115e2f5aea9712a7c73974fd94000a034fc3051ef29b5f7722fbf04070dd9d
+          - name: openSUSE Tumbleweed
+            packager: rpm
+            ref: opensuse/tumbleweed@sha256:dc714bafa362b1aa58a6fd2fcea9c2469255c1fb8f4433e943e44fd61195c09c
+    steps:
+      # Without git, actions/checkout downloads a tarball, and the openSUSE
+      # Leap 15.6 image has no tar or gzip to unpack it.
+      - name: Install checkout prerequisites
+        run: |
+          if ! command -v tar > /dev/null || ! command -v gzip > /dev/null; then
+            zypper --non-interactive install --no-recommends tar gzip
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: package-${{ matrix.image.packager }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/package
+
+      - name: Smoke test
+        env:
+          PACKAGER: ${{ matrix.image.packager }}
+        run: packaging/smoke-test.sh "$(ls "$RUNNER_TEMP"/package/*."$PACKAGER")"
+
+  publish:
+    name: Attest and attach to the release
+    needs: [linux, macos, package-test]
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The archive names carry the Cargo version, so a tag that disagrees
+      # with Cargo.toml would publish archives under the wrong version.
+      - name: Check the tag matches the workspace version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::Tag $TAG does not match workspace version $version in Cargo.toml." >&2
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: '{binary,package}-*'
+          path: dist
+          merge-multiple: true
+
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum --check ./*.sha256
+
+      # Nothing is attached unattested.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.rpm
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" dist/*.tar.gz dist/*.deb dist/*.rpm dist/*.sha256 --clobber --repo "$GITHUB_REPOSITORY"

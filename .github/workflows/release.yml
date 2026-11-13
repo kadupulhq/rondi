@@ -12,13 +12,23 @@ jobs:
     uses: kadupulhq/.github/.github/workflows/release.yml@f1b6366e6c1a18eafb994e88ada44680b9e1b80e # main
     with:
       generate-notes: true
-    # The called workflow declares permissions for every job, including the
-    # tarball and image jobs this repository leaves off. GitHub checks those
-    # declarations before any job starts, so the caller has to grant all of
-    # them or the run ends in startup_failure (v0.1.0). Jobs that do not run
-    # never receive a token, and the release job narrows to contents: write.
+      # Pushes ghcr.io/kadupulhq/rondi for linux/amd64 and linux/arm64 from
+      # the root Dockerfile, with provenance, an SBOM and a cosign signature.
+      image: true
+    # A called workflow can only narrow the caller's token, never widen it,
+    # so this grants everything the called workflow's jobs declare.
     permissions:
       contents: write
       packages: write
+      id-token: write
+      attestations: write
+
+  binaries:
+    needs: release
+    uses: ./.github/workflows/binaries.yml
+    with:
+      publish: true
+    permissions:
+      contents: write
       id-token: write
       attestations: write

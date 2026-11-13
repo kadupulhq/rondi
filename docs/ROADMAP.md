@@ -265,7 +265,7 @@ Daemonizing without `-g`; socket activation; `-V` log levels through syslog and 
 
 RRDtool ships `rrdtool`, `rrdupdate`, optional `rrdcgi` and `rrdcached`; `librrd.so.8`, `librrd.pc`, and three headers; 38 POD man pages.
 
-Rondi ships one `rondi` executable with symlinks `rrdtool`, `rrdcached`, `rrdupdate`, `rrdcreate`, `rrdinfo`, `rrdtool-proxy`, `rrdproxy`, the `rrdtool-proxy.php` launcher (`scripts/install-compat-links.sh`), and a systemd unit (`packaging/systemd/rondi-rrdcached.service`). It ships no man pages, no `.pc`, no headers, no library, and no distro packages. No GitHub release has been published (EXECUTED: `gh release list` is empty).
+Rondi ships one `rondi` executable with symlinks `rrdtool`, `rrdcached`, `rrdupdate`, `rrdcreate`, `rrdinfo`, `rrdtool-proxy`, `rrdproxy`, the `rrdtool-proxy.php` launcher (`scripts/install-compat-links.sh`), and a systemd unit (`packaging/systemd/rondi-rrdcached.service`). It ships no man pages, no `.pc`, no headers and no library. Releases after 0.1.0 also publish `rondi` `.deb` and `.rpm` packages (`packaging/nfpm.yaml`) that installs only `/usr/bin/rondi` on `PATH`, keeps the compatibility names in `/usr/lib/rondi/bin`, and installs the unit there disabled with a `rondi` sysusers.d account; it coexists with the distribution `rrdtool` package. Plan item 4 still applies to packages that take the upstream names.
 
 Plan:
 

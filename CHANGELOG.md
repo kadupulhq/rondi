@@ -6,6 +6,12 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ## [Unreleased]
 
+### Added
+
+- Container image `ghcr.io/kadupulhq/rondi` for linux/amd64 and linux/arm64, built from a root `Dockerfile` and published, attested and signed by the Release workflow.
+- Debian and Ubuntu packages (`rondi_X.Y.Z-1_amd64.deb`, `_arm64.deb`) and RPM packages for RHEL-compatible systems, Fedora, SLES and openSUSE (`rondi-X.Y.Z-1.x86_64.rpm`, `.aarch64.rpm`) on each release. They install `/usr/bin/rondi`, the compatibility names in `/usr/lib/rondi/bin`, a disabled `rondi-rrdcached.service` and a `rondi` sysusers.d account, and coexist with the distribution `rrdtool` package.
+- Release archives of the `rondi` executable for x86_64 and aarch64 Linux and macOS, with SHA-256 files and build provenance attestations.
+
 ## [0.1.0] - 2026-11-10
 
 First release. Rondi is a behavior-compatible implementation of RRDtool

@@ -29,6 +29,30 @@ On `main` at `204f58a`, `RONDI_REQUIRE_ORACLE=1 cargo test --workspace` passes 5
 
 The [compatibility matrix](docs/compatibility.md) and [defect register](docs/COMPATIBILITY_DEFECTS.md) record the detailed boundaries. The [roadmap](docs/ROADMAP.md) tracks the work needed for a drop-in replacement.
 
+## Install
+
+Each release after 0.1.0 publishes the same `rondi` executable in three forms:
+
+- **Container image** `ghcr.io/kadupulhq/rondi` for `linux/amd64` and `linux/arm64`, signed with cosign and carrying build provenance and an SBOM. The entrypoint is `rrdtool`; the image runs as the distroless `nonroot` user in `/data`.
+
+  ```sh
+  docker run --rm -v rrd:/data ghcr.io/kadupulhq/rondi create t.rrd --step 10 DS:x:GAUGE:20:U:U RRA:AVERAGE:0.5:1:10
+  docker run --rm -v rrd:/data ghcr.io/kadupulhq/rondi lastupdate t.rrd
+  docker run -d -v rrd:/data -p 42217:42217 --entrypoint rrdcached ghcr.io/kadupulhq/rondi -g -B -b /data -l 0.0.0.0:42217
+  ```
+
+  The image also contains `rrdcached`, `rrdupdate`, `rrdcreate`, `rrdinfo`, `rrdtool-proxy` and `rrdproxy` in `/usr/local/bin`. TCP `rrdcached` has no authentication, so publish its port only on a trusted network. Verify a pulled image with `gh attestation verify oci://ghcr.io/kadupulhq/rondi:<version> --owner kadupulhq`.
+- **Archives** on the GitHub release for `x86_64` and `aarch64` Linux (glibc 2.34 or later) and macOS, each with a `.sha256` file and a build provenance attestation. Unpack one and run `scripts/install-compat-links.sh "$PWD/bin/rondi" "$HOME/.local/bin"` to create the compatibility names.
+- **Linux packages** on the GitHub release: `rondi_X.Y.Z-1_amd64.deb` and `_arm64.deb`, tested on Debian 12 and 13 and Ubuntu 22.04 and 24.04, and `rondi-X.Y.Z-1.x86_64.rpm` and `.aarch64.rpm`, tested on AlmaLinux 9 and 10 (RHEL-compatible), Fedora 43, openSUSE Leap 15.6 and 16.0 (SLES-compatible) and Tumbleweed. One RPM serves all of them. The RPMs are unsigned; check them with `gh attestation verify <file> --owner kadupulhq`. Each package installs `/usr/bin/rondi` and keeps the compatibility names in `/usr/lib/rondi/bin`, so it coexists with the distribution's `rrdtool` package; point an application's RRDtool path at `/usr/lib/rondi/bin/rrdtool`. It also installs `rondi-rrdcached.service` (not enabled, starting `/usr/lib/rondi/bin/rrdcached`) and a `rondi` system account.
+
+  ```sh
+  sudo apt install ./rondi_X.Y.Z-1_amd64.deb        # Debian, Ubuntu
+  sudo dnf install ./rondi-X.Y.Z-1.x86_64.rpm       # RHEL 9+, Fedora
+  sudo zypper install --allow-unsigned-rpm ./rondi-X.Y.Z-1.x86_64.rpm   # SLES 15 SP6+, openSUSE
+  sudo systemctl enable --now rondi-rrdcached
+  ```
+- **Crates** on crates.io: `cargo install rondi-cli --locked` installs `rondi`.
+
 ## Quick start
 
 ```sh
@@ -63,7 +87,7 @@ The names are installed for packaging and mode selection; legacy-compatible beha
 
 The installer also installs `rrdtool-proxy.php` for service definitions that invoke the proxy through PHP. It delegates to the neighboring `rrdtool-proxy` alias; set `RONDI_BIN` when the executable is installed elsewhere. This adapter currently covers only the pinned launcher help/version/invalid-option responses, not the proxy daemon or wire protocol.
 
-For systemd deployments, `packaging/systemd/rondi-rrdcached.service` is the packaged security profile. Provision a dedicated unprivileged `rondi` user and group first, install the compatibility symlink as `/usr/bin/rrdcached`, and enable the unit. It explicitly sets `-m 0660 -s rondi` and keeping the journal outside the base directory with `-j /var/lib/rondi-journal`; the service data and socket directories are group-owned and unavailable to other users. Do not use this profile with a shared `/tmp` base directory.
+For systemd deployments, `packaging/systemd/rondi-rrdcached.service` is the packaged security profile; the Linux packages install it with `ExecStart` pointing at `/usr/lib/rondi/bin/rrdcached` and create the account. For a manual install, provision a dedicated unprivileged `rondi` user and group first, install the compatibility symlink as `/usr/bin/rrdcached`, and enable the unit. It explicitly sets `-m 0660 -s rondi` and keeping the journal outside the base directory with `-j /var/lib/rondi-journal`; the service data and socket directories are group-owned and unavailable to other users. Do not use this profile with a shared `/tmp` base directory.
 
 The unauthenticated `rrdcached` adapter refuses to serve as root unless `-B` with `-b` confines its paths. A Unix socket defaults to `0600`; use `-m` or `-s` to explicitly configure broader access.
 
@@ -124,6 +148,8 @@ mise exec -- cargo bench -p rondi --bench rrd_workload
 ## Continuous integration and Docker validation
 
 GitHub Actions runs the Rust checks on Linux x86_64 and ARM64. It builds the pinned RRDtool 1.11.0 oracle from its upstream release tarball, verifies the tarball SHA-256, and runs formatting, Clippy, the full workspace test suite, documentation generation, and release builds in the same container. This ensures the RRDtool differential tests execute instead of being skipped because the oracle is missing. A separate fuzz job builds every target and replays committed seeds; its RPN differential target needs a local RRDtool oracle and is not replayed in that job. The security workflow runs Semgrep and RustSec `cargo-audit` against `Cargo.lock` and `cargo-deny` against dependency advisories, licenses, duplicate versions, and registry sources. CodeQL is configured for Rust and GitHub Actions; GitHub only runs its code scanning upload where repository visibility and plan settings enable it. The SonarQube Cloud workflow builds the same pinned oracle, collects coverage with `cargo llvm-cov` and a Clippy report, and uploads both for the quality gate shown above.
+
+The Container image workflow builds the release `Dockerfile` for `linux/amd64` and `linux/arm64` on pull requests that touch it or the crates, and smoke-tests the amd64 image. The Binaries workflow builds and smoke-tests the release archives on pull requests that touch their build, and installs, exercises and removes each Linux package in each tested release (`packaging/smoke-test.sh`).
 
 Run the same checks locally in a disposable Linux container with:
 
