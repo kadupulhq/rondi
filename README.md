@@ -173,7 +173,7 @@ Version tags (`vMAJOR.MINOR.PATCH`, with optional SemVer prerelease or build met
 
 ## Contributing
 
-Changes are reviewed through pull requests using the repository's [pull request template](.github/PULL_REQUEST_TEMPLATE.md). Report compatibility differences with the exact RRDtool version, command, output, exit status, and a disposable `.rrd` fixture where possible.
+Changes are reviewed through pull requests using the repository's [pull request template](.github/PULL_REQUEST_TEMPLATE.md). New dependencies follow the [dependency policy](docs/DEPENDENCIES.md): pure Rust, minimal, and reviewed before they are added. Report compatibility differences with the exact RRDtool version, command, output, exit status, and a disposable `.rrd` fixture where possible.
 
 ## License
 
