@@ -1,7 +1,9 @@
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rondi::graph::{Export, Graph};
 use rondi::{create_rrd_file, fetch_rrd_file, update_rrd_values};
-use std::{hint::black_box, path::PathBuf, time::Duration};
+use std::{hint::black_box, path::PathBuf};
+
+mod harness;
+use harness::Harness;
 
 struct Fixture {
     _root: tempfile::TempDir,
@@ -68,11 +70,11 @@ impl Fixture {
     }
 }
 
-fn rrd_queries(criterion: &mut Criterion) {
+fn main() {
+    let mut harness = Harness::from_args();
     // Setup and durable writes stay outside timed query loops. Both fixtures
     // contain known value blocks and have rolled past their initial ring row.
     let fixtures = [Fixture::new(120), Fixture::new(7200)];
-    let mut fetches = criterion.benchmark_group("rrd_fetch");
     for fixture in &fixtures {
         let result =
             fetch_rrd_file(&fixture.path, "AVERAGE", fixture.start, fixture.end, 1).unwrap();
@@ -82,31 +84,21 @@ fn rrd_queries(criterion: &mut Criterion) {
                 .iter()
                 .all(|row| row.values.iter().all(Option::is_some))
         );
-        fetches.throughput(Throughput::Elements((fixture.rows + 1) * 4));
-        fetches.bench_with_input(
-            BenchmarkId::from_parameter(fixture.rows),
-            fixture,
-            |bencher, fixture| {
-                bencher.iter(|| {
-                    black_box(
-                        fetch_rrd_file(
-                            &fixture.path,
-                            "AVERAGE",
-                            black_box(fixture.start),
-                            black_box(fixture.end),
-                            1,
-                        )
-                        .unwrap(),
-                    )
-                });
-            },
-        );
+        harness.bench(&format!("rrd_fetch/{}", fixture.rows), || {
+            black_box(
+                fetch_rrd_file(
+                    &fixture.path,
+                    "AVERAGE",
+                    black_box(fixture.start),
+                    black_box(fixture.end),
+                    1,
+                )
+                .unwrap(),
+            )
+        });
     }
-    fetches.finish();
 
-    let mut graphs = criterion.benchmark_group("graph_calc");
     for fixture in &fixtures {
-        graphs.throughput(Throughput::Elements(fixture.rows));
         for (name, expression) in [
             ("arithmetic", "x0,x1,+,x2,+,x3,+,4,/"),
             ("prev", "x0,PREV,ADDNAN"),
@@ -120,21 +112,10 @@ fn rrd_queries(criterion: &mut Criterion) {
                 .find(|element| element.name.as_deref() == Some("maximum"))
                 .unwrap();
             assert!(maximum.vdef.value.is_finite());
-            graphs.bench_with_input(
-                BenchmarkId::new(name, fixture.rows),
-                fixture,
-                |bencher, fixture| {
-                    bencher.iter(|| black_box(fixture.calculate(black_box(&script))));
-                },
-            );
+            harness.bench(&format!("graph_calc/{name}/{}", fixture.rows), || {
+                black_box(fixture.calculate(black_box(&script)))
+            });
         }
     }
-    graphs.finish();
+    harness.finish();
 }
-
-criterion_group! {
-    name = benches;
-    config = Criterion::default().sample_size(50).warm_up_time(Duration::from_secs(1)).measurement_time(Duration::from_secs(3));
-    targets = rrd_queries
-}
-criterion_main!(benches);

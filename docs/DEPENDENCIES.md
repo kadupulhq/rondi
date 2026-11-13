@@ -4,16 +4,19 @@ Rondi is a pure Rust implementation of RRDtool. These rules decide which crates 
 
 ## Rules
 
-1. **Pure Rust.** No C, C++ or assembly in Rondi or its dependencies, no `cc`, `bindgen` or `-sys` crates, no `links =` keys, and no C libraries loaded at build or run time (for example Cairo, Pango, fontconfig, FreeType, HarfBuzz, libxml2, librrd). Rondi may call the operating system's C library through the `libc` crate, as Rust's standard library does. The only other exception is listed under [Exceptions](#exceptions) and never reaches shipped code. The reasons are in the [FAQ](#faq-why-does-rondi-depend-on-libc) at the end of this file.
-2. **Minimal dependencies.** Add a crate only when writing the code ourselves would be riskier or much larger than reviewing and maintaining the dependency. Prefer the smallest feature set: `default-features = false` and only the features Rondi uses. Every transitive crate counts.
-3. **Licences and sources.** Only the licences allowed in `deny.toml` (Apache-2.0, 0BSD, MIT, Unicode-3.0, Unlicense, Zlib) and only crates.io. Data embedded under another licence (for example Unicode tables) needs a notice in `THIRD-PARTY-NOTICES.md`.
-4. **Age.** Use a release only once it has been public for at least 14 days, so a compromised or broken release has time to be noticed and yanked.
-5. **Review before adding.** A new dependency, or a new major or 0.x minor version of an existing one, needs a written review (below) recorded in this file before the pull request that adds it can merge.
-6. **Untrusted input stays bounded.** Anything that parses data Rondi did not create (font files, XML, network input, `.rrd` files from elsewhere) must handle malformed input without undefined behaviour, unbounded memory or unbounded time. Where a crate cannot promise that, Rondi adds the limits itself (size caps, magic checks, `catch_unwind` at its boundary) and fuzzes the exact path it uses.
-7. **No memory-mapping of files Rondi does not own.** A file truncated by another process while mapped raises SIGBUS, which no Rust error handling can catch. Read such files into memory under a size cap instead. Crates that map files by default are used with that feature off, or not at all.
-8. **No ambient authority in libraries.** Library crates should not read environment variables, scan the file system, open network connections or start threads on Rondi's behalf. Rondi does those itself with its own file-system safety rules (no-follow opens, ownership checks, depth and size limits).
-9. **Upgrades are reviewed too.** For a version bump, read the changelog and the diff of the crate itself (not only its tests) and note anything that changes the review's conclusions. Crates that share a parser or core crate are upgraded together so only one copy is built.
-10. **Record rejections.** A rejected crate is listed below with the reason and added to `[bans]` in `deny.toml`, so it cannot arrive as a transitive dependency unnoticed.
+1. **Pure Rust.** Everything Cargo builds in this workspace is Rust: the crates, binaries, tests, benchmarks and fuzz targets, and every dependency of each, including dev and build dependencies. No C, C++ or assembly, no `cc`, `bindgen` or `-sys` crates, no `links =` keys, and no C libraries loaded at build or run time (for example Cairo, Pango, fontconfig, FreeType, HarfBuzz, libxml2, librrd). The one allowance is calling the operating system's C library through the `libc` crate, as Rust's standard library does; the reasons are in the [FAQ](#faq-why-does-rondi-depend-on-libc). There are no other exceptions.
+   - Build and release infrastructure may use other languages: CI workflows, the Dockerfile, packaging and release scripts, and the Python generators that record compatibility vectors from RRDtool. It must not become part of what the tool does at run time.
+   - What Rondi ships beyond its Rust binary is listed under [Non-Rust files that ship](#non-rust-files-that-ship). Adding to that list needs the same justification as a dependency: an external interface that cannot be met from Rust.
+2. **Idiomatic Rust.** Code follows Rust conventions rather than C ones: ownership and `Result` instead of out-parameters and status codes, enums and types instead of flags and sentinels, iterators instead of index loops where they read better, `unsafe` only at system-call boundaries with a `// SAFETY:` comment. `cargo fmt` and `cargo clippy --all-targets -- -D warnings` pass. AGENTS.md's clean-room rules forbid C-shaped ports of RRDtool.
+3. **Minimal dependencies.** Add a crate only when writing the code ourselves would be riskier or much larger than reviewing and maintaining the dependency. Prefer the smallest feature set: `default-features = false` and only the features Rondi uses. Every transitive crate counts.
+4. **Licences and sources.** Only the licences allowed in `deny.toml` (Apache-2.0, 0BSD, MIT, Unicode-3.0, Unlicense, Zlib) and only crates.io. Data embedded under another licence (for example Unicode tables) needs a notice in `THIRD-PARTY-NOTICES.md`.
+5. **Age.** Use a release only once it has been public for at least 14 days, so a compromised or broken release has time to be noticed and yanked.
+6. **Review before adding.** A new dependency, or a new major or 0.x minor version of an existing one, needs a written review (below) recorded in this file before the pull request that adds it can merge.
+7. **Untrusted input stays bounded.** Anything that parses data Rondi did not create (font files, XML, network input, `.rrd` files from elsewhere) must handle malformed input without undefined behaviour, unbounded memory or unbounded time. Where a crate cannot promise that, Rondi adds the limits itself (size caps, magic checks, `catch_unwind` at its boundary) and fuzzes the exact path it uses.
+8. **No memory-mapping of files Rondi does not own.** A file truncated by another process while mapped raises SIGBUS, which no Rust error handling can catch. Read such files into memory under a size cap instead. Crates that map files by default are used with that feature off, or not at all.
+9. **No ambient authority in libraries.** Library crates should not read environment variables, scan the file system, open network connections or start threads on Rondi's behalf. Rondi does those itself with its own file-system safety rules (no-follow opens, ownership checks, depth and size limits).
+10. **Upgrades are reviewed too.** For a version bump, read the changelog and the diff of the crate itself (not only its tests) and note anything that changes the review's conclusions. Crates that share a parser or core crate are upgraded together so only one copy is built.
+11. **Record rejections.** A rejected crate is listed below with the reason and added to `[bans]` in `deny.toml`, so it cannot arrive as a transitive dependency unnoticed.
 
 ## What a review covers
 
@@ -60,12 +63,6 @@ These are approved for the graph renderer's text path ([plans/graph-rendering.md
 
 Both crates: wrap font loading, shaping and drawing in `catch_unwind` at Rondi's text boundary and fall back to a built-in font, since neither guarantees it cannot panic; and fuzz the exact load, shape and draw path Rondi uses, with overflow checks on.
 
-### Exceptions
-
-| Crate | Pulled in by | Why it is allowed | Exit |
-|---|---|---|---|
-| `cc` (through `alloca`) | `criterion` 0.8, a dev-dependency for `cargo bench` | Compiles a small C file for the benchmark harness only; nothing reaches the shipped crates, binaries, image or packages. `deny.toml` allows `cc` only as a dependency of `alloca`. | Replace `criterion` with a pure Rust benchmark harness, or a `criterion` release without `alloca`. |
-
 ### Rejected
 
 | Crate | Reviewed | Reason |
@@ -74,7 +71,16 @@ Both crates: wrap font loading, shaping and drawing in `catch_unwind` at Rondi's
 | `fontdb` 0.24 | 2026-11-13 | A malformed font collection's face count is never checked against the file size, so a 12-byte file hangs the scan for billions of iterations or aborts on a 32 GiB allocation. Every family-name record is kept, so a small name table can expand to gigabytes. Memory-maps by default, follows symlinks without ownership checks, has no fuzzing, and carries a second font parser. |
 | `rustybuzz`, `ttf-parser` | 2026-11-13 | Unmaintained advisories (RUSTSEC-2026-0206, RUSTSEC-2026-0192); a second font parser next to `read-fonts`. |
 | `tiny-skia` | 2026-11-13 | Maintainer decision: Rondi writes its own rasterizer to keep dependencies minimal. |
+| `criterion` 0.8 | 2026-11-13 | Always depends on `alloca`, which compiles C through `cc` (rule 1). Replaced by the standard-library harness in `crates/rondi/benches/harness/`. |
 | Cairo, Pango, fontconfig, FreeType and HarfBuzz bindings | 2026-11-13 | Rule 1: C libraries. |
+
+## Non-Rust files that ship
+
+| File | Shipped in | Why it cannot be Rust |
+|---|---|---|
+| `compat/rrdtool-proxy.php` | release archives | Cacti service units start the proxy as `php rrdtool-proxy.php`. The file only starts the Rust binary with the same arguments; it implements nothing. Left out of the container image and the packages. |
+| `scripts/install-compat-links.sh` | release archives | Creates the `rrdtool`, `rrdcached` and other names as links to the `rondi` binary for archive users. Installation tooling, not part of the tool. |
+| `packaging/scripts/*.sh` | `.deb` and `.rpm` | Package maintainer scripts must be shell; `dpkg` and `rpm` run them. |
 
 ## FAQ: why does Rondi depend on `libc`?
 

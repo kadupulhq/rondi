@@ -34,8 +34,7 @@ deny = [
   { crate = "yeslogic-fontconfig-sys", reason = "C library (pure Rust rule)" },
   { crate = "servo-fontconfig-sys", reason = "C library (pure Rust rule)" },
   { crate = "libxml", reason = "C library (pure Rust rule)" },
-  # Exception: criterion's alloca compiles C for `cargo bench` only (docs/DEPENDENCIES.md).
-  { crate = "cc", reason = "no C compilation (pure Rust rule)", wrappers = ["alloca"] },
+  { crate = "cc", reason = "no C compilation (pure Rust rule)" },
   { crate = "bindgen", reason = "no C bindings (pure Rust rule)" },
 ]
 
