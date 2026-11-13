@@ -28,6 +28,10 @@ binaries.
 - `create` rejects four malformed Holt-Winters definitions that RRDtool accepts and writes as unusable files: a zero period, links to missing archives, and extra fields (CR-35, #160).
 - The release workflow grants every permission the organisation release workflow declares, which the v0.1.0 tag run lacked (#159).
 
+### Removed
+
+- The `compat/rrdtool-proxy.php` launcher and the `rrdtool-proxy.php` program name, so Rondi ships no PHP. A service definition that ran `php rrdtool-proxy.php [options]` runs `rrdtool-proxy [options]` instead, with the same help, version and invalid-option output.
+
 ### Fixed
 
 - `update` leaves no prediction after an unknown intercept and an unknown seasonal coefficient, matching RRDtool's NaN sign on x86_64 (#160).

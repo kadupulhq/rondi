@@ -26,20 +26,9 @@ for name in rrdtool rrdcached rrdupdate rrdcreate rrdinfo rrdtool-proxy rrdproxy
         fi
     fi
 done
-launcher="$bindir/rrdtool-proxy.php"
-if [ -e "$launcher" ] || [ -L "$launcher" ]; then
-    if ! cmp -s "$(dirname "$0")/../compat/rrdtool-proxy.php" "$launcher"; then
-        printf 'refusing to replace existing path: %s\n' "$launcher" >&2
-        exit 73
-    fi
-fi
 for name in rrdtool rrdcached rrdupdate rrdcreate rrdinfo rrdtool-proxy rrdproxy; do
     link="$bindir/$name"
     if [ ! -L "$link" ]; then
         ln -s "$binary" "$link"
     fi
 done
-if [ ! -e "$launcher" ]; then
-    cp "$(dirname "$0")/../compat/rrdtool-proxy.php" "$launcher"
-    chmod 755 "$launcher"
-fi

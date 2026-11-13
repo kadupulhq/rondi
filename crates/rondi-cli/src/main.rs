@@ -102,24 +102,15 @@ fn lossy_args(skip: usize) -> Vec<String> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    if std::env::args_os().nth(1).as_deref() != Some(std::ffi::OsStr::new("--rrdproxy-launcher"))
-        && invoked_name() == "rrdcached"
-    {
+    if invoked_name() == "rrdcached" {
         // rrdcached binds its sockets and drops privileges before any runtime
         // thread exists, so it starts its own runtime afterwards.
         return rrdcached::rrdcached_mode(&lossy_args(1));
     }
     let native = !matches!(
         invoked_name().as_str(),
-        "rrdtool"
-            | "rrdupdate"
-            | "rrdcreate"
-            | "rrdinfo"
-            | "rrdtool-proxy"
-            | "rrdtool-proxy.php"
-            | "rrdproxy"
-    ) && std::env::args_os().nth(1).as_deref()
-        != Some(std::ffi::OsStr::new("--rrdproxy-launcher"));
+        "rrdtool" | "rrdupdate" | "rrdcreate" | "rrdinfo" | "rrdtool-proxy" | "rrdproxy"
+    );
     let args = native.then(Args::parse);
     let prepared = match args.as_ref() {
         Some(args) if args.socket.is_none() => match &args.command {
@@ -148,9 +139,6 @@ async fn async_main(
     prepared: Option<rondi_server::PreparedServer>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let invoked_as = invoked_name();
-    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--rrdproxy-launcher")) {
-        return rrdproxy_mode(&lossy_args(2));
-    }
     if invoked_as == "rrdtool" {
         initialize_rrdtool_locale();
         // RRDtool passes argv bytes through; Rust strings cannot hold
@@ -170,10 +158,7 @@ async fn async_main(
         let _ = std::io::stdout().flush();
         std::process::exit(status);
     }
-    if invoked_as == "rrdtool-proxy"
-        || invoked_as == "rrdtool-proxy.php"
-        || invoked_as == "rrdproxy"
-    {
+    if invoked_as == "rrdtool-proxy" || invoked_as == "rrdproxy" {
         return rrdproxy_mode(&lossy_args(1));
     }
     if let Some(prepared) = prepared {
