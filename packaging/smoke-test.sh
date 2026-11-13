@@ -22,9 +22,15 @@ case "$package" in
     *.rpm)
         # Release RPMs are unsigned; their provenance is the GitHub
         # attestation, so the signature check is skipped for the local file.
-        install() { dnf install --assumeyes --quiet --nogpgcheck "$package"; }
-        reinstall() { dnf reinstall --assumeyes --quiet --nogpgcheck "$package"; }
-        remove() { dnf remove --assumeyes --quiet rondi; }
+        if command -v zypper > /dev/null 2>&1; then
+            install() { zypper --non-interactive --quiet install --allow-unsigned-rpm "$package"; }
+            reinstall() { zypper --non-interactive --quiet install --force --allow-unsigned-rpm "$package"; }
+            remove() { zypper --non-interactive --quiet remove rondi; }
+        else
+            install() { dnf install --assumeyes --quiet --nogpgcheck "$package"; }
+            reinstall() { dnf reinstall --assumeyes --quiet --nogpgcheck "$package"; }
+            remove() { dnf remove --assumeyes --quiet rondi; }
+        fi
         ;;
     *)
         printf 'unsupported package type: %s\n' "$package" >&2

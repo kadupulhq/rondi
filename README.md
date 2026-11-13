@@ -43,11 +43,12 @@ Each release after 0.1.0 publishes the same `rondi` executable in three forms:
 
   The image also contains `rrdcached`, `rrdupdate`, `rrdcreate`, `rrdinfo`, `rrdtool-proxy` and `rrdproxy` in `/usr/local/bin`. TCP `rrdcached` has no authentication, so publish its port only on a trusted network. Verify a pulled image with `gh attestation verify oci://ghcr.io/kadupulhq/rondi:<version> --owner kadupulhq`.
 - **Archives** on the GitHub release for `x86_64` and `aarch64` Linux (glibc 2.34 or later) and macOS, each with a `.sha256` file and a build provenance attestation. Unpack one and run `scripts/install-compat-links.sh "$PWD/bin/rondi" "$HOME/.local/bin"` to create the compatibility names.
-- **Linux packages** on the GitHub release: `rondi_X.Y.Z-1_amd64.deb` and `_arm64.deb`, tested on Debian 12 and 13 and Ubuntu 22.04 and 24.04, and `rondi-X.Y.Z-1.x86_64.rpm` and `.aarch64.rpm`, tested on AlmaLinux 9 and 10 (RHEL-compatible) and Fedora 43. The RPMs are unsigned; check them with `gh attestation verify <file> --owner kadupulhq`. Each package installs `/usr/bin/rondi` and keeps the compatibility names in `/usr/lib/rondi/bin`, so it coexists with the distribution's `rrdtool` package; point an application's RRDtool path at `/usr/lib/rondi/bin/rrdtool`. It also installs `rondi-rrdcached.service` (not enabled, starting `/usr/lib/rondi/bin/rrdcached`) and a `rondi` system account.
+- **Linux packages** on the GitHub release: `rondi_X.Y.Z-1_amd64.deb` and `_arm64.deb`, tested on Debian 12 and 13 and Ubuntu 22.04 and 24.04, and `rondi-X.Y.Z-1.x86_64.rpm` and `.aarch64.rpm`, tested on AlmaLinux 9 and 10 (RHEL-compatible), Fedora 43, openSUSE Leap 15.6 and 16.0 (SLES-compatible) and Tumbleweed. One RPM serves all of them. The RPMs are unsigned; check them with `gh attestation verify <file> --owner kadupulhq`. Each package installs `/usr/bin/rondi` and keeps the compatibility names in `/usr/lib/rondi/bin`, so it coexists with the distribution's `rrdtool` package; point an application's RRDtool path at `/usr/lib/rondi/bin/rrdtool`. It also installs `rondi-rrdcached.service` (not enabled, starting `/usr/lib/rondi/bin/rrdcached`) and a `rondi` system account.
 
   ```sh
   sudo apt install ./rondi_X.Y.Z-1_amd64.deb        # Debian, Ubuntu
   sudo dnf install ./rondi-X.Y.Z-1.x86_64.rpm       # RHEL 9+, Fedora
+  sudo zypper install --allow-unsigned-rpm ./rondi-X.Y.Z-1.x86_64.rpm   # SLES 15 SP6+, openSUSE
   sudo systemctl enable --now rondi-rrdcached
   ```
 - **Crates** on crates.io: `cargo install rondi-cli --locked` installs `rondi`.

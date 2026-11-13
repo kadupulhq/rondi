@@ -214,7 +214,24 @@ jobs:
           - name: Fedora 43
             packager: rpm
             ref: fedora:43@sha256:f01112b9a1f1d0504ad962d9adfa401425033f8ab067e0a821904ebdde5b8ca5
+          - name: openSUSE Leap 15.6
+            packager: rpm
+            ref: opensuse/leap:15.6@sha256:79be7751205ea84559990fb76b1bec71e38d6fad41c70a4f6c921b803b58f421
+          - name: openSUSE Leap 16.0
+            packager: rpm
+            ref: opensuse/leap:16.0@sha256:a4115e2f5aea9712a7c73974fd94000a034fc3051ef29b5f7722fbf04070dd9d
+          - name: openSUSE Tumbleweed
+            packager: rpm
+            ref: opensuse/tumbleweed@sha256:dc714bafa362b1aa58a6fd2fcea9c2469255c1fb8f4433e943e44fd61195c09c
     steps:
+      # Without git, actions/checkout downloads a tarball, and the openSUSE
+      # Leap 15.6 image has no tar or gzip to unpack it.
+      - name: Install checkout prerequisites
+        run: |
+          if ! command -v tar > /dev/null || ! command -v gzip > /dev/null; then
+            zypper --non-interactive install --no-recommends tar gzip
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

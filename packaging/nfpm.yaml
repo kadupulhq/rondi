@@ -24,6 +24,9 @@ overrides:
   rpm:
     depends:
       - glibc >= 2.34
+# One RPM serves RHEL, Fedora and SUSE. Only SUSE reads the Group tag.
+rpm:
+  group: Productivity/Databases/Tools
 description: |-
   RRDtool-compatible round-robin database tools
   Rondi is a Rust implementation of the RRDtool 1.11.0 rrdtool and rrdcached
