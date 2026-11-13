@@ -1,6 +1,6 @@
 # Releasing
 
-The three crates (`rondi`, `rondi-server`, `rondi-cli`) share one version and are released together, as [VERSIONING.md](../VERSIONING.md) describes. A release is a signed `vX.Y.Z` tag, a GitHub release, and the three crates on crates.io. Nothing publishes to crates.io automatically.
+The three crates (`rondi`, `rondi-server`, `rondi-cli`) share one version and are released together, as [VERSIONING.md](../VERSIONING.md) describes. A release is a signed `vX.Y.Z` tag, a GitHub release with binary archives, the container image `ghcr.io/kadupulhq/rondi`, and the three crates on crates.io. Nothing publishes to crates.io automatically.
 
 ## What the release workflow does
 
@@ -8,8 +8,11 @@ The three crates (`rondi`, `rondi-server`, `rondi-cli`) share one version and ar
 
 1. Checks out the tag and rejects it unless the part after `v` is a Semantic Versioning 2.0.0 version. A version containing `-` (for example `0.2.0-rc.1`) is marked as a prerelease.
 2. Runs `gh release create <tag> --title <tag> --generate-notes`, adding `--prerelease` when needed. The notes are generated from merged pull requests and grouped by the labels in [`.github/release.yml`](../.github/release.yml).
+3. With `image: true`, builds the root `Dockerfile` for `linux/amd64` and `linux/arm64`, pushes it to `ghcr.io/kadupulhq/rondi` tagged `X.Y.Z`, `X.Y`, `X` from 1.0 on (metadata-action emits no major-only tag for 0.x) and, for a final release, `latest`, attests it, and signs it with keyless cosign.
 
-It does not read `CHANGELOG.md` (that path is only used when `generate-notes` is false), does not check that the tag matches the version in `Cargo.toml`, does not build or attach binaries (the `tarball` and `image` inputs are off), and does not publish to crates.io. Those checks are manual steps below.
+After that, the `binaries` job calls [`.github/workflows/binaries.yml`](../.github/workflows/binaries.yml) with `publish: true`. It builds `rondi` for `x86_64` and `aarch64` Linux in an AlmaLinux 9 container (glibc 2.34) and for both macOS architectures, packages each with `scripts/package-binary.sh`, refuses to continue if the tag differs from `workspace.package.version`, attests the archives and attaches them with their `.sha256` files to the release.
+
+It does not read `CHANGELOG.md` (that path is only used when `generate-notes` is false) and does not publish to crates.io. The tag check runs only after the GitHub release and image exist, so check the version before tagging as the checklist below says.
 
 ## Checklist
 
@@ -51,7 +54,9 @@ Replace `X.Y.Z` with the new version throughout.
    git push origin vX.Y.Z
    ```
 
-   Confirm the Release workflow run for the tag succeeded and that the GitHub release exists with the generated notes. Edit the release text if the generated notes miss something the changelog states.
+   Confirm the Release workflow run for the tag succeeded, that the GitHub release exists with the generated notes and four `rondi-X.Y.Z-<target>.tar.gz` archives, and that `docker pull ghcr.io/kadupulhq/rondi:X.Y.Z` works without logging in. Edit the release text if the generated notes miss something the changelog states.
+
+   The first push creates the `rondi` package in the organisation's GitHub Packages as private. Make it public once under the package's settings (Change visibility); the REST API cannot change container package visibility.
 
 6. **Publish to crates.io** from a clean checkout of the tag, in dependency order:
 

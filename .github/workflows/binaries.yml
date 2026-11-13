@@ -1,0 +1,177 @@
+name: Binaries
+
+# Builds the rondi executable for each supported target and packages it with
+# scripts/package-binary.sh. Pull requests that touch the build only build and
+# upload workflow artifacts; the Release workflow calls this with publish: true
+# to attest the archives and attach them to the GitHub release.
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/binaries.yml'
+      - 'scripts/package-binary.sh'
+      - 'scripts/install-compat-links.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.mise.toml'
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      publish:
+        description: Attest the archives and attach them to the release for the calling tag.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    # AlmaLinux 9 ships glibc 2.34, so the binary also runs on RHEL 9 and
+    # later, Debian 12 and later, Ubuntu 22.04 and later and SLES 15 SP6.
+    container: almalinux:9@sha256:245f8aab832fe800aa42bdab5fad75ebbd8e0b4c9f24820a83c638b177857ae2
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            rustup_sha256: 5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            rustup_sha256: a9c168dbea81a84671c6b7a5c1795cb0eb699020110d107ddfca427bd797e697
+    env:
+      TRIPLE: ${{ matrix.arch }}-unknown-linux-gnu
+    steps:
+      - name: Install build tools
+        run: dnf install --assumeyes --setopt=install_weak_deps=False gcc tar gzip findutils
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        env:
+          RUSTUP_SHA256: ${{ matrix.rustup_sha256 }}
+        run: |
+          set -euo pipefail
+          toolchain=$(sed -n 's/^rust = "\(.*\)"$/\1/p' .mise.toml)
+          curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
+            "https://static.rust-lang.org/rustup/archive/1.29.2/$TRIPLE/rustup-init" \
+            --output /tmp/rustup-init
+          echo "$RUSTUP_SHA256  /tmp/rustup-init" | sha256sum --check
+          chmod +x /tmp/rustup-init
+          /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "$toolchain"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build
+        run: cargo build --release --locked -p rondi-cli --target "$TRIPLE"
+
+      - name: Package
+        run: scripts/package-binary.sh "target/$TRIPLE/release/rondi" "$TRIPLE" dist
+
+      - name: Smoke test the packaged executable
+        run: |
+          set -euo pipefail
+          mkdir /tmp/unpack
+          tar -xzf dist/*.tar.gz -C /tmp/unpack --strip-components=1
+          /tmp/unpack/bin/rondi --version
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binary-${{ env.TRIPLE }}
+          path: dist/
+          if-no-files-found: error
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    # Apple silicon runner; the x86_64 build is a cross-compile, and Rosetta
+    # runs it for the smoke test.
+    runs-on: macos-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [aarch64, x86_64]
+    env:
+      TRIPLE: ${{ matrix.arch }}-apple-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: jdx/mise-action@6612f0ef07ed2a736cd1e00a94a065522dd41195 # v5.2.5
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          mise exec -- rustup target add "$TRIPLE"
+          mise exec -- cargo build --release --locked -p rondi-cli --target "$TRIPLE"
+
+      - name: Package
+        run: scripts/package-binary.sh "target/$TRIPLE/release/rondi" "$TRIPLE" dist
+
+      - name: Smoke test the packaged executable
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/unpack"
+          tar -xzf dist/*.tar.gz -C "$RUNNER_TEMP/unpack" --strip-components=1
+          "$RUNNER_TEMP/unpack/bin/rondi" --version
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: binary-${{ env.TRIPLE }}
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Attest and attach to the release
+    needs: [linux, macos]
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The archive names carry the Cargo version, so a tag that disagrees
+      # with Cargo.toml would publish archives under the wrong version.
+      - name: Check the tag matches the workspace version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "v$version" != "$TAG" ]; then
+            echo "::error::Tag $TAG does not match workspace version $version in Cargo.toml." >&2
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum --check ./*.sha256
+
+      # Nothing is attached unattested.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/*.tar.gz
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" dist/*.tar.gz dist/*.sha256 --clobber --repo "$GITHUB_REPOSITORY"
