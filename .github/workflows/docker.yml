@@ -1,0 +1,61 @@
+name: Container image
+
+# Builds the release Dockerfile for both published platforms without pushing,
+# so a change that breaks the image fails its pull request instead of the
+# release. The Release workflow builds and pushes the published image.
+
+on:
+  pull_request:
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/docker.yml'
+      - 'scripts/install-compat-links.sh'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/docker.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # The release builds both platforms on one amd64 runner with no
+      # emulation; the arm64 half exercises the cross-compiling build stage.
+      - name: Build linux/amd64 and linux/arm64
+        run: docker buildx build --progress=plain --platform linux/amd64,linux/arm64 .
+
+      - name: Load the linux/amd64 image
+        run: docker buildx build --progress=plain --platform linux/amd64 --load --tag rondi:ci .
+
+      - name: Smoke test
+        run: |
+          set -euo pipefail
+          docker run --rm rondi:ci --version
+          docker run --rm --entrypoint /usr/local/bin/rondi rondi:ci --version
+          docker run --rm --entrypoint /usr/local/bin/rrdcached rondi:ci -h | head -n 1
+          docker volume create rondi-ci
+          docker run --rm -v rondi-ci:/data rondi:ci \
+            create t.rrd --start 1700000000 --step 10 DS:x:GAUGE:20:U:U RRA:AVERAGE:0.5:1:10
+          docker run --rm -v rondi-ci:/data rondi:ci update t.rrd 1700000010:5 1700000020:7
+          docker run --rm -v rondi-ci:/data rondi:ci lastupdate t.rrd
