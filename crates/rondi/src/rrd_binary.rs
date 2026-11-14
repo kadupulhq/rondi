@@ -7,6 +7,9 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
+#[cfg(unix)]
+use rustix::fs::OFlags;
+
 pub(crate) const STAT_HEAD_LEN: usize = 128;
 pub(crate) const DS_DEF_LEN: usize = 120;
 pub(crate) const RRA_DEF_LEN: usize = 120;
@@ -1241,26 +1244,22 @@ pub(crate) fn read_info(file: &mut File, path: &Path) -> Result<RrdInfo, StoreEr
 /// there with the kernel's errno.
 #[cfg(unix)]
 fn probe_mmap(file: &File, length: u64) -> std::io::Result<()> {
-    use std::os::fd::AsRawFd;
-    let length =
-        usize::try_from(length).map_err(|_| std::io::Error::from_raw_os_error(libc::ENOMEM))?;
-    // SAFETY: a fresh read-only private mapping of an open descriptor; it is
-    // unmapped before returning and never dereferenced.
+    use rustix::mm::{MapFlags, ProtFlags};
+    let length = usize::try_from(length).map_err(|_| rustix::io::Errno::NOMEM)?;
+    // SAFETY: a fresh read-only private mapping chosen by the kernel, so it
+    // cannot overlap existing memory; it is never dereferenced.
     let mapped = unsafe {
-        libc::mmap(
+        rustix::mm::mmap(
             std::ptr::null_mut(),
             length,
-            libc::PROT_READ,
-            libc::MAP_PRIVATE,
-            file.as_raw_fd(),
+            ProtFlags::READ,
+            MapFlags::PRIVATE,
+            file,
             0,
         )
-    };
-    if mapped == libc::MAP_FAILED {
-        return Err(std::io::Error::last_os_error());
-    }
+    }?;
     // SAFETY: `mapped` is the mapping created above with this length.
-    unsafe { libc::munmap(mapped, length) };
+    unsafe { rustix::mm::munmap(mapped, length) }?;
     Ok(())
 }
 
@@ -1650,7 +1649,6 @@ impl RrdFileLock {
 
     #[cfg(unix)]
     fn lock(file: File, exclusive: bool) -> Result<Self, StoreError> {
-        use std::os::fd::AsRawFd;
         use std::os::unix::fs::MetadataExt;
         let metadata = file.metadata()?;
         let key = (metadata.dev(), metadata.ino());
@@ -1670,29 +1668,21 @@ impl RrdFileLock {
             file: Some(file),
             key,
         };
-        let operation = match rrd_lock_mode() {
-            RrdLockMode::None => return Ok(guard),
-            RrdLockMode::Try => libc::F_SETLK,
-            RrdLockMode::Block => libc::F_SETLKW,
+        use rustix::fs::FlockOperation;
+        // A whole-file POSIX record lock, the kind RRDtool takes, so the two
+        // exclude each other.
+        let operation = match (rrd_lock_mode(), exclusive) {
+            (RrdLockMode::None, _) => return Ok(guard),
+            (RrdLockMode::Try, true) => FlockOperation::NonBlockingLockExclusive,
+            (RrdLockMode::Try, false) => FlockOperation::NonBlockingLockShared,
+            (RrdLockMode::Block, true) => FlockOperation::LockExclusive,
+            (RrdLockMode::Block, false) => FlockOperation::LockShared,
         };
-        let mut lock = libc::flock {
-            l_type: if exclusive {
-                libc::F_WRLCK
-            } else {
-                libc::F_RDLCK
-            } as _,
-            l_whence: libc::SEEK_SET as _,
-            l_start: 0,
-            l_len: 0,
-            l_pid: 0,
-        };
-        let fd = guard.file.as_ref().map_or(-1, AsRawFd::as_raw_fd);
-        // SAFETY: `lock` is a valid flock structure and the descriptor stays
-        // open until the guard is dropped.
-        let result = unsafe { libc::fcntl(fd, operation, &mut lock) };
-        if result == -1 {
-            return Err(StoreError::RrdLocked);
-        }
+        let file = guard
+            .file
+            .as_ref()
+            .expect("locked RRD file is open until drop");
+        rustix::fs::fcntl_lock(file, operation).map_err(|_| StoreError::RrdLocked)?;
         Ok(guard)
     }
 
@@ -1796,10 +1786,12 @@ pub fn open_output_file(path: &Path, exclusive: bool) -> std::io::Result<File> {
         // Private output and nonblocking opens keep FIFO destinations from waiting.
         options
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY);
+            .custom_flags(output_open_flags(OFlags::NOFOLLOW));
         let file = match options.open(path) {
             Ok(file) => file,
-            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+            Err(error)
+                if rustix::io::Errno::from_io_error(&error) == Some(rustix::io::Errno::LOOP) =>
+            {
                 return open_linked_character_device(path);
             }
             Err(error) => return Err(error),
@@ -1811,8 +1803,7 @@ pub fn open_output_file(path: &Path, exclusive: bool) -> std::io::Result<File> {
             clear_nonblocking(&file)?;
             return Ok(file);
         }
-        // SAFETY: geteuid has no preconditions.
-        if metadata.uid() != unsafe { libc::geteuid() } {
+        if metadata.uid() != rustix::process::geteuid().as_raw() {
             return Err(std::io::Error::other(
                 "refusing to write a file owned by another user",
             ));
@@ -1833,6 +1824,13 @@ pub fn open_output_file(path: &Path, exclusive: bool) -> std::io::Result<File> {
     }
 }
 
+/// Flags for opening an output: never become the controlling terminal and
+/// never wait on a FIFO, plus `extra`.
+#[cfg(unix)]
+fn output_open_flags(extra: OFlags) -> i32 {
+    crate::safe_fs::custom_flags(OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY | extra)
+}
+
 #[cfg(unix)]
 fn is_character_device(metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::FileTypeExt;
@@ -1841,17 +1839,8 @@ fn is_character_device(metadata: &std::fs::Metadata) -> bool {
 
 #[cfg(unix)]
 fn clear_nonblocking(file: &File) -> std::io::Result<()> {
-    use std::os::fd::AsRawFd;
-    let fd = file.as_raw_fd();
-    // SAFETY: fd is open for the lifetime of `file`.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: as above; only the status flags change.
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
+    let flags = rustix::fs::fcntl_getfl(file)?;
+    rustix::fs::fcntl_setfl(file, flags - OFlags::NONBLOCK)?;
     Ok(())
 }
 
@@ -1869,7 +1858,7 @@ fn open_linked_character_device(path: &Path) -> std::io::Result<File> {
     let file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .custom_flags(libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY)
+        .custom_flags(output_open_flags(OFlags::empty()))
         .open(path)
         .map_err(|_| refused())?;
     if !is_character_device(&file.metadata()?) {

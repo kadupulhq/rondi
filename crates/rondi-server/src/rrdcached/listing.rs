@@ -1,10 +1,11 @@
 //! `LIST [RECURSIVE] <path>` (RC-100).
 
-use super::files::{Names, open_at, stat_at};
+use super::files::{Names, file_type, open_at, stat_at};
+use rustix::fs::{Dir, FileType, Mode, OFlags, Stat};
+use rustix::io::Errno;
 use std::ffi::CString;
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
 use std::os::unix::ffi::OsStrExt;
 
 /// Directories descended into below the listed one.
@@ -22,11 +23,11 @@ pub(crate) enum Kind {
     Other,
 }
 
-fn kind_of(status: &libc::stat) -> Kind {
-    match status.st_mode & libc::S_IFMT {
-        libc::S_IFDIR => Kind::Directory,
-        libc::S_IFREG => Kind::File,
-        libc::S_IFLNK => Kind::Link,
+fn kind_of(status: &Stat) -> Kind {
+    match file_type(status) {
+        FileType::Directory => Kind::Directory,
+        FileType::RegularFile => Kind::File,
+        FileType::Symlink => Kind::Link,
         _ => Kind::Other,
     }
 }
@@ -37,70 +38,24 @@ pub(crate) fn read_names(directory: &File) -> io::Result<Vec<(Vec<u8>, Kind)>> {
     let reopened = open_at(
         directory,
         &CString::new(".").expect("no NUL"),
-        libc::O_RDONLY | libc::O_DIRECTORY,
-        0,
+        OFlags::RDONLY | OFlags::DIRECTORY,
+        Mode::empty(),
     )?;
-    let fd = reopened.into_raw_fd();
-    // SAFETY: fd is an open directory descriptor this function owns;
-    // fdopendir takes it over and closedir below releases both.
-    let stream = unsafe { libc::fdopendir(fd) };
-    if stream.is_null() {
-        let error = io::Error::last_os_error();
-        // SAFETY: fdopendir failed, so fd is still ours to close.
-        drop(unsafe { File::from_raw_fd(fd) });
-        return Err(error);
-    }
     let mut names = Vec::new();
-    let mut failure = None;
-    loop {
-        // errno distinguishes the end of the stream from a failure.
-        // SAFETY: the stream is open; errno is thread local.
-        unsafe { *errno_location() = 0 };
-        // SAFETY: the stream is open and owned here.
-        let entry = unsafe { libc::readdir(stream) };
-        if entry.is_null() {
-            let code = io::Error::last_os_error().raw_os_error().unwrap_or(0);
-            if code != 0 {
-                failure = Some(io::Error::from_raw_os_error(code));
-            }
-            break;
-        }
-        // SAFETY: readdir returned a valid entry whose name is NUL
-        // terminated; it is copied before the next call.
-        let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }
-            .to_bytes()
-            .to_vec();
+    for entry in Dir::new(reopened)? {
+        let entry = entry?;
+        let name = entry.file_name().to_bytes();
         if name == b"." || name == b".." {
             continue;
         }
-        let kind = CString::new(name.clone())
-            .ok()
-            .and_then(|c_name| stat_at(directory, &c_name).ok())
+        let kind = stat_at(directory, &entry.file_name().to_owned())
             .map_or(Kind::Other, |status| kind_of(&status));
-        names.push((name, kind));
+        names.push((name.to_vec(), kind));
         if names.len() > ENTRIES_MAX {
-            failure = Some(io::Error::from_raw_os_error(libc::E2BIG));
-            break;
+            return Err(Errno::TOOBIG.into());
         }
     }
-    // SAFETY: the stream was opened above and is closed exactly once.
-    unsafe { libc::closedir(stream) };
-    match failure {
-        Some(error) => Err(error),
-        None => Ok(names),
-    }
-}
-
-#[cfg(any(target_os = "linux", target_os = "android"))]
-unsafe fn errno_location() -> *mut libc::c_int {
-    // SAFETY: always valid for the calling thread.
-    unsafe { libc::__errno_location() }
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
-unsafe fn errno_location() -> *mut libc::c_int {
-    // SAFETY: always valid for the calling thread.
-    unsafe { libc::__error() }
+    Ok(names)
 }
 
 /// Answers `LIST`. `fields` are the request's fields after the command.
@@ -142,7 +97,7 @@ pub(crate) fn list(names: &Names, fields: &[Vec<u8>]) -> Result<Vec<u8>, Vec<u8>
         return Err(text);
     }
     if super::files::contains(path, b"..") {
-        return Err(failed(io::Error::from_raw_os_error(libc::EACCES)));
+        return Err(failed(io::Error::from(Errno::ACCESS)));
     }
     let resolved = resolve(names, base, path).map_err(failed)?;
     let mut found = Vec::new();
@@ -196,49 +151,58 @@ fn resolve(names: &Names, base: &[u8], path: &[u8]) -> io::Result<Resolved> {
     for part in parents {
         directory = enter(names, &directory, part)?;
     }
-    let name = CString::new(*last).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+    let name = CString::new(*last).map_err(|_| io::Error::from(Errno::INVAL))?;
     let status = stat_at(&directory, &name)?;
     let kind = kind_of(&status);
     if last.ends_with(b".rrd") && !path.ends_with(b"/") {
         return match kind {
             Kind::File => Ok(Resolved::One(last.to_vec())),
-            Kind::Directory => Err(io::Error::from_raw_os_error(libc::ENXIO)),
+            Kind::Directory => Err(io::Error::from(Errno::NXIO)),
             Kind::Link => Ok(Resolved::Nothing),
-            Kind::Other => Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
+            Kind::Other => Err(io::Error::from(Errno::NOTDIR)),
         };
     }
     match kind {
         Kind::Directory => Ok(Resolved::Directory(open_at(
             &directory,
             &name,
-            libc::O_RDONLY | libc::O_DIRECTORY,
-            0,
+            OFlags::RDONLY | OFlags::DIRECTORY,
+            Mode::empty(),
         )?)),
         Kind::Link => match enter(names, &directory, last) {
             Ok(target) => Ok(Resolved::Directory(target)),
-            Err(error) if error.raw_os_error() == Some(libc::ENOTDIR) => Ok(Resolved::Nothing),
-            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Ok(Resolved::Nothing),
+            Err(error) if Errno::from_io_error(&error) == Some(Errno::NOTDIR) => {
+                Ok(Resolved::Nothing)
+            }
+            Err(error) if Errno::from_io_error(&error) == Some(Errno::NOENT) => {
+                Ok(Resolved::Nothing)
+            }
             Err(error) => Err(error),
         },
-        _ => Err(io::Error::from_raw_os_error(libc::ENOTDIR)),
+        _ => Err(io::Error::from(Errno::NOTDIR)),
     }
 }
 
 /// Opens the directory `name` in `directory`, following a link when
 /// unconfined or when its target stays below the base.
 fn enter(names: &Names, directory: &File, name: &[u8]) -> io::Result<File> {
-    let c_name = CString::new(name).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-    match open_at(directory, &c_name, libc::O_RDONLY | libc::O_DIRECTORY, 0) {
+    let c_name = CString::new(name).map_err(|_| io::Error::from(Errno::INVAL))?;
+    match open_at(
+        directory,
+        &c_name,
+        OFlags::RDONLY | OFlags::DIRECTORY,
+        Mode::empty(),
+    ) {
         Ok(opened) => Ok(opened),
         Err(error) => {
             let is_link = stat_at(directory, &c_name)
-                .is_ok_and(|status| status.st_mode & libc::S_IFMT == libc::S_IFLNK);
+                .is_ok_and(|status| file_type(&status) == FileType::Symlink);
             if !is_link {
                 return Err(error);
             }
             let target = follow(directory, &c_name)?;
             if names.confined() && !within(names, &target)? {
-                return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+                return Err(io::Error::from(Errno::NOTDIR));
             }
             Ok(target)
         }
@@ -247,20 +211,8 @@ fn enter(names: &Names, directory: &File, name: &[u8]) -> io::Result<File> {
 
 /// Opens a link's target as a directory, through the kernel's lookup.
 fn follow(directory: &File, name: &CString) -> io::Result<File> {
-    // SAFETY: the descriptor is open, the name NUL terminated, and the
-    // returned descriptor is owned by exactly one File.
-    let fd = unsafe {
-        libc::openat(
-            directory.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NONBLOCK,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: fd was just opened and is not owned elsewhere.
-    Ok(unsafe { File::from_raw_fd(fd) })
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    Ok(rustix::fs::openat(directory, name.as_c_str(), flags, Mode::empty())?.into())
 }
 
 /// Whether an opened directory is the base directory or below it: walking
@@ -276,7 +228,12 @@ fn within(names: &Names, directory: &File) -> io::Result<bool> {
         if here.dev() == base.dev() && here.ino() == base.ino() {
             return Ok(true);
         }
-        let up = open_at(&current, &parent, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+        let up = open_at(
+            &current,
+            &parent,
+            OFlags::RDONLY | OFlags::DIRECTORY,
+            Mode::empty(),
+        )?;
         let above = up.metadata()?;
         if above.dev() == here.dev() && above.ino() == here.ino() {
             return Ok(false);
@@ -299,7 +256,7 @@ fn collect(
     visited.push((here.dev(), here.ino()));
     for (name, kind) in read_names(directory)? {
         if found.len() >= ENTRIES_MAX {
-            return Err(io::Error::from_raw_os_error(libc::E2BIG));
+            return Err(io::Error::from(Errno::TOOBIG));
         }
         let mut relative = prefix.to_vec();
         relative.extend_from_slice(&name);
@@ -315,14 +272,18 @@ fn collect(
                 if kind == Kind::Link && confined {
                     continue;
                 }
-                let c_name =
-                    CString::new(name).map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
+                let c_name = CString::new(name).map_err(|_| io::Error::from(Errno::INVAL))?;
                 let child = match kind {
                     Kind::Link => match follow(directory, &c_name) {
                         Ok(child) => child,
                         Err(_) => continue,
                     },
-                    _ => match open_at(directory, &c_name, libc::O_RDONLY | libc::O_DIRECTORY, 0) {
+                    _ => match open_at(
+                        directory,
+                        &c_name,
+                        OFlags::RDONLY | OFlags::DIRECTORY,
+                        Mode::empty(),
+                    ) {
                         Ok(child) => child,
                         Err(_) => continue,
                     },

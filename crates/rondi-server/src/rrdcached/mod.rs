@@ -72,8 +72,8 @@ pub fn is_command(word: &str) -> bool {
 }
 
 /// The C library's text for `errno`, as the reference prints it.
-pub(crate) fn errno_text(errno: i32) -> String {
-    error_text(&std::io::Error::from_raw_os_error(errno))
+pub(crate) fn errno_text(errno: rustix::io::Errno) -> String {
+    error_text(&errno.into())
 }
 
 /// An I/O error's text without Rust's ` (os error N)` suffix.
@@ -95,17 +95,15 @@ const SHARED_WRITE: u32 = 0o022;
 
 /// Removes group and other write permission from an open file.
 pub(crate) fn drop_shared_write(file: &std::fs::File) -> std::io::Result<()> {
-    use std::os::fd::AsRawFd;
+    use rustix::fs::{Mode, RawMode};
     use std::os::unix::fs::MetadataExt;
     let mode = file.metadata()?.mode() & 0o7777;
     if mode & SHARED_WRITE == 0 {
         return Ok(());
     }
-    // SAFETY: fchmod on a descriptor this process holds.
-    if unsafe { libc::fchmod(file.as_raw_fd(), (mode & !SHARED_WRITE) as libc::mode_t) } != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
+    // The mask leaves 12 bits, which fit every platform's mode type.
+    let mode = Mode::from_raw_mode((mode & !SHARED_WRITE) as RawMode);
+    Ok(rustix::fs::fchmod(file, mode)?)
 }
 
 /// Creates `path` and its missing parents with the mode the umask leaves,
@@ -125,7 +123,7 @@ pub(crate) fn create_directories(path: &std::path::Path) -> std::io::Result<()> 
         }
     }
     if !path.is_dir() {
-        return Err(std::io::Error::from_raw_os_error(libc::ENOTDIR));
+        return Err(std::io::Error::from(rustix::io::Errno::NOTDIR));
     }
     Ok(())
 }
@@ -290,7 +288,10 @@ mod tests {
 
     #[test]
     fn error_text_drops_the_os_error_suffix() {
-        assert_eq!(errno_text(libc::ENOENT), "No such file or directory");
+        assert_eq!(
+            errno_text(rustix::io::Errno::NOENT),
+            "No such file or directory"
+        );
         assert_eq!(error_text(&std::io::Error::other("plain")), "plain");
     }
 

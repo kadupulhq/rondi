@@ -2,10 +2,11 @@
 
 use super::error_text;
 use super::listener::{identity_of, stat_at};
+use rustix::fs::{AtFlags, OFlags};
+use rustix::io::Errno;
 use std::ffi::CString;
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::Path;
 
@@ -55,7 +56,7 @@ impl PidFile {
         let created = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(rondi::safe_fs::custom_flags(OFlags::NOFOLLOW))
             .open(path);
         let file = match created {
             Ok(mut file) => {
@@ -87,7 +88,7 @@ impl PidFile {
             .and_then(|name| CString::new(name.as_encoded_bytes()).ok());
         let directory = std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_DIRECTORY)
+            .custom_flags(rondi::safe_fs::custom_flags(OFlags::DIRECTORY))
             .open(directory);
         let (Ok(directory), Some(name)) = (directory, name) else {
             return Err(PidFileError(OPEN_FAILED.to_owned()));
@@ -106,9 +107,8 @@ impl Drop for PidFile {
         let ours = stat_at(&self.directory, &self.name)
             .is_ok_and(|found| identity_of(&found) == self.identity);
         if ours {
-            // SAFETY: the descriptor is open and the name NUL terminated;
             // unlinkat removes the entry and never follows a link.
-            unsafe { libc::unlinkat(self.directory.as_raw_fd(), self.name.as_ptr(), 0) };
+            let _ = rustix::fs::unlinkat(&self.directory, self.name.as_c_str(), AtFlags::empty());
         }
     }
 }
@@ -137,7 +137,9 @@ fn replace_stale(path: &Path, pid: u32, notes: &mut dyn Write) -> Result<File, P
     let mut existing = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .custom_flags(rondi::safe_fs::custom_flags(
+            OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        ))
         .open(path)
         .map_err(|error| cannot_open(notes, error_text(&error)))?;
     let metadata = existing
@@ -149,8 +151,7 @@ fn replace_stale(path: &Path, pid: u32, notes: &mut dyn Write) -> Result<File, P
     if metadata.nlink() > 1 {
         return Err(cannot_open(notes, format!("{} links", metadata.nlink())));
     }
-    // SAFETY: geteuid has no preconditions.
-    if unsafe { libc::geteuid() } == 0 && metadata.uid() != 0 {
+    if rustix::process::geteuid().is_root() && metadata.uid() != 0 {
         return Err(cannot_open(
             notes,
             format!("owned by uid {}", metadata.uid()),
@@ -186,7 +187,7 @@ fn replace_stale(path: &Path, pid: u32, notes: &mut dyn Write) -> Result<File, P
 fn write_beside(path: &Path, pid: u32) -> std::io::Result<File> {
     let name = path
         .file_name()
-        .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EISDIR))?;
+        .ok_or_else(|| std::io::Error::from(Errno::ISDIR))?;
     let directory = path.parent().unwrap_or(Path::new("."));
     for attempt in 0..100u32 {
         let mut staged_name = std::ffi::OsString::from(".");
@@ -196,7 +197,7 @@ fn write_beside(path: &Path, pid: u32) -> std::io::Result<File> {
         let mut file = match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(rondi::safe_fs::custom_flags(OFlags::NOFOLLOW))
             .open(&staged)
         {
             Ok(file) => file,
@@ -210,7 +211,7 @@ fn write_beside(path: &Path, pid: u32) -> std::io::Result<File> {
         }
         return Ok(file);
     }
-    Err(std::io::Error::from_raw_os_error(libc::EEXIST))
+    Err(std::io::Error::from(Errno::EXIST))
 }
 
 /// The pid an existing file names.
@@ -236,8 +237,8 @@ fn parse_pid(contents: &[u8]) -> Option<i32> {
 // the reference (pid 1 started as an ordinary user).
 // Provenance: black-box compatibility test.
 fn process_exists(pid: i32) -> bool {
-    // SAFETY: signal 0 only checks for existence and permission.
-    unsafe { libc::kill(pid, 0) == 0 }
+    rustix::process::Pid::from_raw(pid)
+        .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
 }
 
 #[cfg(test)]

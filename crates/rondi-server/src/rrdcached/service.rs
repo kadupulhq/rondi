@@ -8,9 +8,11 @@
 use super::cache::{self, State};
 use super::commands::{self, Command};
 use super::fetch::{self, FetchReply};
-use super::files::{Access, Denied, Names, Target};
+use super::files::{Access, Denied, Names, Target, file_type};
 use super::journal::{self, Journal};
 use super::protocol::{self, Request};
+use rustix::fs::FileType;
+use rustix::io::Errno;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -308,7 +310,7 @@ impl Shared {
     fn last_update(&self, target: &Target, joined: &[u8]) -> Result<f64, Answer> {
         let shown = lossy(joined);
         match target.status() {
-            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {
+            Err(error) if Errno::from_io_error(&error) == Some(Errno::NOENT) => {
                 return Err(Answer::failed(format!("No such file: {shown}")));
             }
             Err(error) => {
@@ -317,7 +319,7 @@ impl Shared {
                     error.raw_os_error().unwrap_or(0)
                 )));
             }
-            Ok(status) if status.st_mode & libc::S_IFMT != libc::S_IFREG => {
+            Ok(status) if file_type(&status) != FileType::RegularFile => {
                 return Err(Answer::failed(format!("Not a regular file: {shown}")));
             }
             Ok(_) => {}
@@ -372,7 +374,7 @@ impl Shared {
             return Answer::Done(format!("0 Successfully flushed {shown}.\n").into_bytes());
         }
         match target.status() {
-            Ok(status) if status.st_mode & libc::S_IFMT == libc::S_IFREG => {
+            Ok(status) if file_type(&status) == FileType::RegularFile => {
                 Answer::Done(format!("0 Nothing to flush: {shown}.\n").into_bytes())
             }
             _ => Answer::failed(format!("No such file: {shown}.")),
@@ -535,8 +537,10 @@ impl Shared {
         };
         match target.status() {
             Err(error) => return failed("failed to stat", super::error_text(&error)),
-            Ok(status) if status.st_mode & libc::S_IFMT != libc::S_IFREG => {
-                return failed("failed to stat", super::errno_text(0));
+            Ok(status) if file_type(&status) != FileType::RegularFile => {
+                // errno 0, whose text the reference prints here.
+                let none = std::io::Error::from_raw_os_error(0);
+                return failed("failed to stat", super::error_text(&none));
             }
             Ok(_) => {}
         }
@@ -617,7 +621,7 @@ impl Shared {
         let path = as_path(name);
         let file = match self.names.locate(name) {
             Ok(target) => target.open(Access::Write),
-            Err(Denied(_)) => Err(std::io::Error::from_raw_os_error(libc::EACCES)),
+            Err(Denied(_)) => Err(std::io::Error::from(Errno::ACCESS)),
         };
         let result = match file {
             Ok(file) => {

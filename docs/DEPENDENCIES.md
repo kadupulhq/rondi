@@ -4,7 +4,7 @@ Rondi is a pure Rust implementation of RRDtool. These rules decide which crates 
 
 ## Rules
 
-1. **Pure Rust.** Everything Cargo builds in this workspace is Rust: the crates, binaries, tests, benchmarks and fuzz targets, and every dependency of each, including dev and build dependencies. No C, C++ or assembly, no `cc`, `bindgen` or `-sys` crates, no `links =` keys, and no C libraries loaded at build or run time (for example Cairo, Pango, fontconfig, FreeType, HarfBuzz, libxml2, librrd). The one allowance is calling the operating system's C library through the `libc` crate, as Rust's standard library does; the reasons are in the [FAQ](#faq-why-does-rondi-depend-on-libc). There are no other exceptions.
+1. **Pure Rust.** Everything Cargo builds in this workspace is Rust: the crates, binaries, tests, benchmarks and fuzz targets, and every dependency of each, including dev and build dependencies. No C, C++ or assembly, no `cc`, `bindgen` or `-sys` crates, no `links =` keys, and no C libraries loaded at build or run time (for example Cairo, Pango, fontconfig, FreeType, HarfBuzz, libxml2, librrd). Two system-call crates are allowed: `libc`, which declares the operating system's C library for Rust, as Rust's standard library uses it, and `rustix`, which on Linux makes system calls directly with Rust inline assembly (`asm!`) instead of through the C library. The reasons are in the [FAQ](#faq-why-does-rondi-depend-on-libc-and-rustix). There are no other exceptions.
    - Build and release infrastructure may use other languages: CI workflows, the Dockerfile, packaging and release scripts, and the Python generators that record compatibility vectors from RRDtool. It must not become part of what the tool does at run time.
    - What Rondi ships beyond its Rust binary is listed under [Non-Rust files that ship](#non-rust-files-that-ship). Adding to that list needs the same justification as a dependency: an external interface that cannot be met from Rust.
 2. **Idiomatic Rust.** Code follows Rust conventions rather than C ones: ownership and `Result` instead of out-parameters and status codes, enums and types instead of flags and sentinels, iterators instead of index loops where they read better, `unsafe` only at system-call boundaries with a `// SAFETY:` comment. `cargo fmt` and `cargo clippy --all-targets -- -D warnings` pass. AGENTS.md's clean-room rules forbid C-shaped ports of RRDtool.
@@ -37,6 +37,18 @@ The verdict is **adopt**, **adopt with conditions** (the conditions become rules
 ## Register
 
 ### Adopted with conditions
+
+**`rustix` 1.1.6** (Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT; Bytecode Alliance, published by one owner; MSRV 1.65). Safe wrappers for system calls. Reviewed 2026-11-13, published 2026-10-27; already in the lock file as a test dependency through `tempfile`.
+
+- Reasons: typed results (`io::Result`, `OwnedFd`/`BorrowedFd`, bit flags) replace most of Rondi's hand-written `unsafe` system calls. On Linux the `linux_raw` backend calls the kernel through a small set of `asm!` blocks per architecture (14 on x86_64 and on aarch64), and the crate is `deny(unsafe_code)` there outside the modules that need it; other systems go through `libc`. It also replaces `fs2`, whose one use was a non-blocking `flock`. Its tree adds `bitflags`, `errno` (which uses `libc` on Unix) and, on Linux, `linux-raw-sys` (generated constants and structures); all pure Rust with allowed licences. The build script reads the target configuration and compiles small Rust probes; it builds no C. No environment reads, threads or file access in the modules Rondi enables (the `param` module, not enabled, reads `/proc/self/auxv`).
+- Security history: RUSTSEC-2026-0486 (xattr functions with a zero-length buffer, unsound), fixed in 1.1.6, which Rondi requires; GHSA-c827-hfw6-qwvm (2023, `Dir` memory growth on `linux_raw`), fixed long before 1.0.
+- Not checked: the 1,669 `unsafe` uses were not audited one by one. The review read the x86_64 system-call entry points and the Linux `Dir` reader (bounds-checked indexing over the kernel's records, with a buffer that stops growing at 1,024 records); the rest relies on the crate's wide use (including in Wasmtime and `tempfile`) and its tests.
+- Conditions:
+  - `default-features = false` with only the features Rondi calls (`std`, `fs`, `process`, `mm` and, if needed, `net`), at least 1.1.6.
+  - Privilege changes stay on `libc`. rustix's `set_thread_uid` and related calls change one thread on Linux, while `setuid`, `setgid`, `setgroups` and `initgroups` in the C library change the whole process; a partial drop would be a security bug.
+  - Signal masks and dispositions stay on `libc`. rustix's equivalents live in its `runtime` module, which is meant for programs that do not use the C library.
+  - Never enable `use-libc-auxv`, `runtime` or `param`.
+  - Build an `Errno` only from a system call's result or with `Errno::from_io_error`. On Linux `Errno::from_raw_os_error` panics, in release builds too, for anything outside 1 to 4095, including 0; text for errno 0 comes from `std::io::Error::from_raw_os_error(0)`.
 
 These are approved for the graph renderer's text path ([plans/graph-rendering.md](plans/graph-rendering.md)). Neither is a dependency yet. Reviewed 2026-11-13.
 
@@ -83,12 +95,16 @@ Both crates: wrap font loading, shaping and drawing in `catch_unwind` at Rondi's
 
 Rondi ships no PHP: the RRDProxy launcher was removed in 0.2.0 (#167), and the `rrdtool-proxy` name of the Rust binary takes its place.
 
-## FAQ: why does Rondi depend on `libc`?
+## FAQ: why does Rondi depend on `libc` and `rustix`?
 
-`libc` is Rust declarations for the operating system's C library and adds no C code. Rondi uses it for:
+Neither adds C code: `libc` is Rust declarations for the operating system's C library, and `rustix` is Rust that makes system calls itself on Linux and through `libc` elsewhere.
 
-1. System calls the standard library does not expose: `openat`, `fstatat`, `renameat` and `unlinkat` with `O_NOFOLLOW`, `flock` and `fcntl` locks, `mmap` of Rondi's own files, `umask`, ownership changes.
-2. rrdcached process control: privilege drop for `-U` and `-G`, account lookups, signal masks.
-3. Byte-exact RRDtool output that depends on the C library: locale-aware time formatting, `printf`-style number formatting and parsing, `qsort` order, address-lookup error text.
+`rustix` handles system calls the standard library does not expose: `openat`, `fstatat`, `renameat`, `linkat` and `unlinkat` relative to a directory with no-follow flags, `fcntl` and `flock` locks, `statvfs`, `mmap` of Rondi's own files, `umask`, ownership and mode changes, process IDs and `kill`.
 
-The first two could move to a pure Rust system-call crate such as `rustix`. The third cannot be dropped without changing output; reimplementing it in Rust means embedding locale data and reading account databases directly, which loses LDAP and SSSD accounts. Neither change has been decided.
+`libc` remains for what only the C library provides, or what must match it byte for byte:
+
+1. rrdcached privilege drop (`setuid`, `setgid`, `setgroups`, `initgroups`, which apply to the whole process) and account lookups (`getpwnam`, `getgrnam` and related calls, which follow the system's name-service configuration, including LDAP and SSSD).
+2. Signal masks and dispositions.
+3. Output that RRDtool produces through the C library: locale-aware time formatting (`localtime_r`, `mktime`, `strftime`, `nl_langinfo_l`), `printf`-style number formatting and parsing (`snprintf`, `sscanf`, `strtod`), `qsort` order, error text (`strerror`, `gai_strerror`), address lookup (`getaddrinfo`) and `glob`.
+
+Replacing these in Rust would mean embedding locale data and reading account databases directly, which loses LDAP and SSSD accounts and changes output. That has not been decided.

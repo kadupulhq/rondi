@@ -10,23 +10,26 @@
 use std::ffi::{CString, OsStr};
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, Stat};
+use rustix::io::Errno;
 
 // Directory descriptors used only to reach their entries need search
 // permission alone, as a path lookup does.
 #[cfg(any(target_os = "linux", target_os = "android"))]
-const SEARCH: i32 = libc::O_PATH;
+const SEARCH: OFlags = OFlags::PATH;
+// rustix has no name for O_SEARCH, so take the value from the C library.
 #[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
-const SEARCH: i32 = libc::O_SEARCH;
+const SEARCH: OFlags = OFlags::from_bits_retain(libc::O_SEARCH as _);
 #[cfg(not(any(
     target_os = "linux",
     target_os = "android",
     target_vendor = "apple",
     target_os = "freebsd"
 )))]
-const SEARCH: i32 = libc::O_RDONLY;
+const SEARCH: OFlags = OFlags::RDONLY;
 
 /// A name refused by the `-B` confinement. Its text is the reply.
 #[derive(Debug, PartialEq, Eq)]
@@ -145,11 +148,9 @@ impl Names {
         for component in parents {
             let name = c_name(component);
             if create {
-                // SAFETY: the descriptor is open and the name NUL terminated.
-                let made = unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o755) };
-                let error = io::Error::last_os_error();
-                if made != 0 && error.kind() != io::ErrorKind::AlreadyExists {
-                    return Ok(Target::Within(Err(error)));
+                match rustix::fs::mkdirat(&directory, name.as_c_str(), Mode::from_raw_mode(0o755)) {
+                    Ok(()) | Err(Errno::EXIST) => {}
+                    Err(error) => return Ok(Target::Within(Err(error.into()))),
                 }
             }
             directory = match step_into(&directory, &name) {
@@ -160,8 +161,7 @@ impl Names {
         }
         let name = last.map(c_name);
         if let Some(name) = &name
-            && stat_at(&directory, name)
-                .is_ok_and(|status| status.st_mode & libc::S_IFMT == libc::S_IFLNK)
+            && stat_at(&directory, name).is_ok_and(|status| file_type(&status) == FileType::Symlink)
         {
             return Err(refuse());
         }
@@ -220,10 +220,10 @@ fn components(below: &[u8]) -> Result<Vec<&[u8]>, ()> {
 
 /// Opens the directory `name` in `directory` without following a link.
 fn step_into(directory: &File, name: &CString) -> Result<File, Step> {
-    match open_at(directory, name, SEARCH | libc::O_DIRECTORY, 0) {
+    match open_at(directory, name, SEARCH | OFlags::DIRECTORY, Mode::empty()) {
         Ok(next) => Ok(next),
         Err(error) => match stat_at(directory, name) {
-            Ok(status) if status.st_mode & libc::S_IFMT == libc::S_IFLNK => Err(Step::Link),
+            Ok(status) if file_type(&status) == FileType::Symlink => Err(Step::Link),
             _ => Err(Step::Failed(error)),
         },
     }
@@ -238,44 +238,25 @@ fn c_name(bytes: &[u8]) -> CString {
 pub(crate) fn open_at(
     directory: &File,
     name: &CString,
-    flags: i32,
-    mode: libc::mode_t,
+    flags: OFlags,
+    mode: Mode,
 ) -> io::Result<File> {
-    // SAFETY: the descriptor is open, the name NUL terminated, and the
-    // returned descriptor is owned by exactly one File.
-    let fd = unsafe {
-        libc::openat(
-            directory.as_raw_fd(),
-            name.as_ptr(),
-            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY,
-            libc::c_uint::from(mode),
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: fd was just returned by openat and is not owned elsewhere.
-    Ok(unsafe { File::from_raw_fd(fd) })
+    let flags = flags | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY;
+    Ok(rustix::fs::openat(directory, name.as_c_str(), flags, mode)?.into())
 }
 
 /// `fstatat` without following a final link.
-pub(crate) fn stat_at(directory: &File, name: &CString) -> io::Result<libc::stat> {
-    let mut status = std::mem::MaybeUninit::<libc::stat>::zeroed();
-    // SAFETY: the descriptor is open, the name NUL terminated and the
-    // buffer valid for one stat structure.
-    let result = unsafe {
-        libc::fstatat(
-            directory.as_raw_fd(),
-            name.as_ptr(),
-            status.as_mut_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if result != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: fstatat succeeded and filled the structure.
-    Ok(unsafe { status.assume_init() })
+pub(crate) fn stat_at(directory: &File, name: &CString) -> io::Result<Stat> {
+    Ok(rustix::fs::statat(
+        directory,
+        name.as_c_str(),
+        AtFlags::SYMLINK_NOFOLLOW,
+    )?)
+}
+
+/// The type bits of a status.
+pub(crate) fn file_type(status: &Stat) -> FileType {
+    FileType::from_raw_mode(status.st_mode)
 }
 
 /// Opens a directory by path, for the base directory and unconfined use.
@@ -283,7 +264,9 @@ pub(crate) fn open_directory_path(path: &Path) -> io::Result<File> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC)
+        .custom_flags(rondi::safe_fs::custom_flags(
+            OFlags::DIRECTORY | OFlags::CLOEXEC,
+        ))
         .open(path)
 }
 
@@ -302,14 +285,13 @@ fn writable(file: File) -> io::Result<File> {
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
-        return Err(io::Error::from_raw_os_error(libc::EINVAL));
+        return Err(Errno::INVAL.into());
     }
     if metadata.nlink() != 1 {
-        return Err(io::Error::from_raw_os_error(libc::EMLINK));
+        return Err(Errno::MLINK.into());
     }
-    // SAFETY: geteuid has no preconditions.
-    if unsafe { libc::geteuid() } == 0 && metadata.uid() != 0 {
-        return Err(io::Error::from_raw_os_error(libc::EPERM));
+    if rustix::process::geteuid().is_root() && metadata.uid() != 0 {
+        return Err(Errno::PERM.into());
     }
     Ok(file)
 }
@@ -326,8 +308,8 @@ impl Target {
 
     fn open_any(&self, access: Access) -> io::Result<File> {
         let flags = match access {
-            Access::Read => libc::O_RDONLY,
-            Access::Write => libc::O_RDWR,
+            Access::Read => OFlags::RDONLY,
+            Access::Write => OFlags::RDWR,
         };
         match self {
             Self::Path(path) => {
@@ -335,49 +317,39 @@ impl Target {
                 std::fs::OpenOptions::new()
                     .read(true)
                     .write(access == Access::Write)
-                    .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC | libc::O_NOCTTY)
+                    .custom_flags(rondi::safe_fs::custom_flags(
+                        OFlags::NONBLOCK | OFlags::CLOEXEC | OFlags::NOCTTY,
+                    ))
                     .open(path)
             }
             Self::Within(Err(error)) => Err(copy_error(error)),
             Self::Within(Ok(entry)) => {
                 let extra = if entry.directory {
-                    libc::O_DIRECTORY
+                    OFlags::DIRECTORY
                 } else {
-                    0
+                    OFlags::empty()
                 };
                 match &entry.name {
-                    Some(name) => open_at(&entry.parent, name, flags | extra, 0),
-                    None if access == Access::Write => {
-                        Err(io::Error::from_raw_os_error(libc::EISDIR))
-                    }
-                    None => open_at(&entry.parent, &c_name(b"."), flags | extra, 0),
+                    Some(name) => open_at(&entry.parent, name, flags | extra, Mode::empty()),
+                    None if access == Access::Write => Err(Errno::ISDIR.into()),
+                    None => open_at(&entry.parent, &c_name(b"."), flags | extra, Mode::empty()),
                 }
             }
         }
     }
 
     /// The file's status, following links only when unconfined.
-    pub(crate) fn status(&self) -> io::Result<libc::stat> {
+    pub(crate) fn status(&self) -> io::Result<Stat> {
         match self {
-            Self::Path(path) => {
-                let name = CString::new(path.as_os_str().as_bytes())
-                    .map_err(|_| io::Error::from_raw_os_error(libc::EINVAL))?;
-                let mut status = std::mem::MaybeUninit::<libc::stat>::zeroed();
-                // SAFETY: the name is NUL terminated and the buffer valid.
-                if unsafe { libc::stat(name.as_ptr(), status.as_mut_ptr()) } != 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                // SAFETY: stat succeeded and filled the structure.
-                Ok(unsafe { status.assume_init() })
-            }
+            Self::Path(path) => Ok(rustix::fs::stat(path.as_path())?),
             Self::Within(Err(error)) => Err(copy_error(error)),
             Self::Within(Ok(entry)) => {
                 let status = match &entry.name {
                     Some(name) => stat_at(&entry.parent, name)?,
                     None => stat_at(&entry.parent, &c_name(b"."))?,
                 };
-                if entry.directory && status.st_mode & libc::S_IFMT != libc::S_IFDIR {
-                    return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
+                if entry.directory && file_type(&status) != FileType::Directory {
+                    return Err(Errno::NOTDIR.into());
                 }
                 Ok(status)
             }
@@ -461,30 +433,27 @@ mod tests {
         let missing = names.locate(&joined("missing/x.rrd")).unwrap();
         assert_eq!(
             read(&missing).unwrap_err().raw_os_error(),
-            Some(libc::ENOENT)
+            Some(Errno::NOENT.raw_os_error())
         );
         let slash = names.locate(&joined("a.rrd/")).unwrap();
         assert_eq!(
             read(&slash).unwrap_err().raw_os_error(),
-            Some(libc::ENOTDIR)
+            Some(Errno::NOTDIR.raw_os_error())
         );
         assert_eq!(
             slash.status().unwrap_err().raw_os_error(),
-            Some(libc::ENOTDIR)
+            Some(Errno::NOTDIR.raw_os_error())
         );
         let through_file = names.locate(&joined("a.rrd/x")).unwrap();
         assert_eq!(
             through_file.status().unwrap_err().raw_os_error(),
-            Some(libc::ENOTDIR)
+            Some(Errno::NOTDIR.raw_os_error())
         );
         let empty = names.locate(&joined("")).unwrap();
-        assert_eq!(
-            empty.status().unwrap().st_mode & libc::S_IFMT,
-            libc::S_IFDIR
-        );
+        assert_eq!(file_type(&empty.status().unwrap()), FileType::Directory);
         assert_eq!(
             empty.open(Access::Write).unwrap_err().raw_os_error(),
-            Some(libc::EISDIR)
+            Some(Errno::ISDIR.raw_os_error())
         );
     }
 
@@ -506,13 +475,16 @@ mod tests {
             assert!(open("a.rrd").is_ok());
             assert_eq!(
                 open("sub/hard.rrd").unwrap_err().raw_os_error(),
-                Some(libc::EMLINK)
+                Some(Errno::MLINK.raw_os_error())
             );
             assert_eq!(
                 open("fifo.rrd").unwrap_err().raw_os_error(),
-                Some(libc::EINVAL)
+                Some(Errno::INVAL.raw_os_error())
             );
-            assert_eq!(open("sub").unwrap_err().raw_os_error(), Some(libc::EISDIR));
+            assert_eq!(
+                open("sub").unwrap_err().raw_os_error(),
+                Some(Errno::ISDIR.raw_os_error())
+            );
             assert!(
                 names
                     .locate(&names.join(b"sub/hard.rrd"))
@@ -532,7 +504,7 @@ mod tests {
         let slash = names.locate(&names.join(b"a.rrd/")).unwrap();
         assert_eq!(
             read(&slash).unwrap_err().raw_os_error(),
-            Some(libc::ENOTDIR)
+            Some(Errno::NOTDIR.raw_os_error())
         );
     }
 
