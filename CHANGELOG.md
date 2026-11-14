@@ -19,6 +19,7 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ### Security
 
+- Output paths (graph, export, dump, restore, resize) refuse a character device owned by another user, other than `/dev/null`, so a symbolic link planted at an output path can no longer send RRD data to another user's terminal.
 - The fuzz targets' lock file moves to `rustix` 1.1.6 (RUSTSEC-2026-0486) and `tokio` 1.54.1 (RUSTSEC-2026-0386), the versions the workspace already uses.
 
 ## [0.2.0] - 2026-11-13
