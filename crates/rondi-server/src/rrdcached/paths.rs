@@ -2,6 +2,8 @@
 
 use super::config::LogFile;
 use super::{OptionFailure, errno_text, error_text};
+use rustix::fs::OFlags;
+use rustix::io::Errno;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
@@ -17,7 +19,7 @@ pub fn prepare_base_directory(value: &str) -> Result<PathBuf, OptionFailure> {
         )
     };
     if value.is_empty() {
-        return Err(cannot_create(errno_text(libc::EINVAL)));
+        return Err(cannot_create(errno_text(Errno::INVAL)));
     }
     let trimmed = value.trim_end_matches('/');
     if trimmed.is_empty() {
@@ -29,7 +31,7 @@ pub fn prepare_base_directory(value: &str) -> Result<PathBuf, OptionFailure> {
     let path = Path::new(value);
     match std::fs::metadata(path) {
         Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => return Err(cannot_create(errno_text(libc::ENOTDIR))),
+        Ok(_) => return Err(cannot_create(errno_text(Errno::NOTDIR))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             // Rondi policy: new components are 0750, not 0777 less the
             // umask (RCD-3, opt-037).
@@ -77,7 +79,7 @@ pub fn resolve_journal_directory(value: &str) -> Result<PathBuf, OptionFailure> 
             format!(
                 "Failed to create journal directory '{}': {}",
                 real.display(),
-                errno_text(libc::ENOTDIR)
+                errno_text(Errno::NOTDIR)
             ),
         ));
     }
@@ -97,7 +99,9 @@ pub fn open_log_file(value: &str) -> Result<LogFile, OptionFailure> {
     let file = std::fs::OpenOptions::new()
         .append(true)
         .create(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .custom_flags(rondi::safe_fs::custom_flags(
+            OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        ))
         .open(value)
         .map_err(|error| failure(error_text(&error)))?;
     let metadata = file
@@ -107,7 +111,7 @@ pub fn open_log_file(value: &str) -> Result<LogFile, OptionFailure> {
         return Err(failure("not a regular file".to_owned()));
     }
     if metadata.nlink() > 1 {
-        return Err(failure(errno_text(libc::EMLINK)));
+        return Err(failure(errno_text(Errno::MLINK)));
     }
     clear_nonblocking(&file).map_err(|error| failure(error_text(&error)))?;
     super::drop_shared_write(&file).map_err(|error| failure(error_text(&error)))?;
@@ -118,17 +122,8 @@ pub fn open_log_file(value: &str) -> Result<LogFile, OptionFailure> {
 }
 
 fn clear_nonblocking(file: &std::fs::File) -> std::io::Result<()> {
-    use std::os::fd::AsRawFd;
-    let fd = file.as_raw_fd();
-    // SAFETY: fd is an open descriptor owned by `file` for both calls.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: as above.
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) } < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
+    let flags = rustix::fs::fcntl_getfl(file)?;
+    rustix::fs::fcntl_setfl(file, flags - OFlags::NONBLOCK)?;
     Ok(())
 }
 

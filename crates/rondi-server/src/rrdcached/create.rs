@@ -1,7 +1,9 @@
 //! `CREATE <file> [options] <DS...> <RRA...>` (RC-80 to RC-82).
 
-use super::files::{Denied, Target, denied};
+use super::files::{Denied, Target, denied, file_type};
 use super::service::{Answer, Shared};
+use rustix::fs::FileType;
+use rustix::io::Errno;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -155,10 +157,10 @@ fn trailing_slash(shared: &Shared, joined: &[u8]) -> Answer {
     let is_directory = shared.names.locate(joined).is_ok_and(|target| {
         target
             .status()
-            .is_ok_and(|status| status.st_mode & libc::S_IFMT == libc::S_IFDIR)
+            .is_ok_and(|status| file_type(&status) == FileType::Directory)
     });
     if is_directory {
-        let error = std::io::Error::from_raw_os_error(libc::EISDIR);
+        let error = std::io::Error::from(Errno::ISDIR);
         return Answer::Failed(format!("RRD Error: I/O error: {error}").into_bytes());
     }
     Answer::Failed(b"RRD Error: Cannot create temporary file".to_vec())
@@ -187,12 +189,12 @@ fn open_parent(shared: &Shared, joined: &[u8], parent: &[u8]) -> Result<std::fs:
         return match super::files::open_directory_path(path) {
             Ok(directory) => Ok(directory),
             // The umask sets the mode, less group and other write (RCD-13).
-            Err(error) if error.raw_os_error() == Some(libc::ENOENT) && recursive => {
+            Err(error) if Errno::from_io_error(&error) == Some(Errno::NOENT) && recursive => {
                 super::create_directories(path)
                     .and_then(|()| super::files::open_directory_path(path))
                     .map_err(failed)
             }
-            Err(error) if error.raw_os_error() == Some(libc::ENOENT) => Err(missing()),
+            Err(error) if Errno::from_io_error(&error) == Some(Errno::NOENT) => Err(missing()),
             Err(error) => Err(failed(error)),
         };
     }
@@ -205,7 +207,7 @@ fn open_parent(shared: &Shared, joined: &[u8], parent: &[u8]) -> Result<std::fs:
     };
     let target = locate(false).map_err(|Denied(text)| Answer::Failed(text))?;
     let target = match target {
-        Target::Within(Err(error)) if error.raw_os_error() == Some(libc::ENOENT) => {
+        Target::Within(Err(error)) if Errno::from_io_error(&error) == Some(Errno::NOENT) => {
             if !recursive {
                 return Err(missing());
             }

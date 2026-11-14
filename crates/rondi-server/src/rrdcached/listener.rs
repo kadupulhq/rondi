@@ -3,6 +3,8 @@
 
 use super::config::{DEFAULT_PORT, ListenAddress, ListenerSpec};
 use super::{errno_text, error_text};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, Stat};
+use rustix::io::Errno;
 use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -60,9 +62,8 @@ impl Drop for SocketFile {
         let ours =
             stat_at(directory, &self.name).is_ok_and(|found| identity_of(&found) == identity);
         if ours {
-            // SAFETY: the descriptor is open and the name NUL terminated;
             // unlinkat removes the entry and never follows a link.
-            unsafe { libc::unlinkat(directory.as_raw_fd(), self.name.as_ptr(), 0) };
+            let _ = rustix::fs::unlinkat(directory, self.name.as_c_str(), AtFlags::empty());
         }
     }
 }
@@ -149,7 +150,7 @@ fn open_unix(
     let bind_failed = |reason: String| format!("bind({shown}) failed: {reason}.");
     let io_failed = |error: std::io::Error| bind_failed(error_text(&error));
     if path.as_os_str().is_empty() {
-        return Err(bind_failed(errno_text(libc::ENOENT)));
+        return Err(bind_failed(errno_text(Errno::NOENT)));
     }
     let target = if path.is_absolute() {
         path.to_path_buf()
@@ -157,7 +158,7 @@ fn open_unix(
         std::env::current_dir().map_err(io_failed)?.join(path)
     };
     let (Some(directory), Some(name)) = (target.parent(), target.file_name()) else {
-        return Err(bind_failed(errno_text(libc::EISDIR)));
+        return Err(bind_failed(errno_text(Errno::ISDIR)));
     };
     let directory = if directory.as_os_str().is_empty() {
         Path::new("/")
@@ -165,65 +166,61 @@ fn open_unix(
         directory
     };
     let name =
-        CString::new(name.as_encoded_bytes()).map_err(|_| bind_failed(errno_text(libc::EINVAL)))?;
+        CString::new(name.as_encoded_bytes()).map_err(|_| bind_failed(errno_text(Errno::INVAL)))?;
     // Compatibility: a missing socket directory is created, 0755 under
     // umask 022 (opt-050); never group or world writable (RCD-13).
     // Provenance: black-box compatibility test.
     super::create_directories(directory).map_err(io_failed)?;
     let parent = check_directory_chain(directory)?;
     match stat_at(&parent, &name) {
-        Ok(found) if found.st_mode & libc::S_IFMT == libc::S_IFSOCK => {
+        Ok(found) if FileType::from_raw_mode(found.st_mode) == FileType::Socket => {
             if UnixStream::connect(&target).is_ok() {
                 return Err(format!("socket is already active: {shown}"));
             }
         }
         Ok(_) => return Err(format!("refusing to replace {shown}: not a socket")),
-        Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
+        Err(error) if Errno::from_io_error(&error) == Some(Errno::NOENT) => {}
         Err(error) => return Err(io_failed(error)),
     }
     let stage = Stage::create(&parent, directory).map_err(io_failed)?;
     let listener = stage.bind(before_threads).map_err(io_failed)?;
     let bound = stage.socket_identity().map_err(io_failed)?;
     if let Some(gid) = group {
-        // SAFETY: the descriptor is open, the name is NUL terminated, and
         // AT_SYMLINK_NOFOLLOW keeps a swapped-in link from being followed.
-        let changed = unsafe {
-            libc::fchownat(
-                stage.directory.as_raw_fd(),
-                SOCKET_NAME.as_ptr(),
-                u32::MAX,
-                gid,
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if changed != 0 || stage.socket_identity().ok() != Some(bound) {
-            let error = std::io::Error::last_os_error();
-            return Err(format!("chown({shown}) failed: {}", error_text(&error)));
+        // A group of -1 leaves the group unchanged, as chown(2) defines.
+        let group = (gid != u32::MAX).then(|| rustix::fs::Gid::from_raw(gid));
+        let changed = rustix::fs::chownat(
+            &stage.directory,
+            SOCKET_NAME,
+            None,
+            group,
+            AtFlags::SYMLINK_NOFOLLOW,
+        );
+        if let Err(error) = changed {
+            return Err(format!(
+                "chown({shown}) failed: {}",
+                error_text(&error.into())
+            ));
+        }
+        if stage.socket_identity().ok() != Some(bound) {
+            return Err(format!(
+                "chown({shown}) failed: {}",
+                errno_text(Errno::PERM)
+            ));
         }
     }
     stage
         .set_mode(mode, bound)
         .map_err(|error| format!("chmod({shown}) failed: {}", error_text(&error)))?;
-    // SAFETY: both descriptors are open directories and both names are NUL
-    // terminated; renameat replaces a stale socket entry atomically.
-    let renamed = unsafe {
-        libc::renameat(
-            stage.directory.as_raw_fd(),
-            SOCKET_NAME.as_ptr(),
-            parent.as_raw_fd(),
-            name.as_ptr(),
-        )
-    };
-    if renamed != 0 {
-        return Err(io_failed(std::io::Error::last_os_error()));
-    }
+    // renameat replaces a stale socket entry atomically.
+    rustix::fs::renameat(&stage.directory, SOCKET_NAME, &parent, name.as_c_str())
+        .map_err(|error| io_failed(error.into()))?;
     let published = stat_at(&parent, &name).map_err(io_failed)?;
     if identity_of(&published) != bound {
         // What was renamed into place is not the bound socket; take the
         // entry back out rather than publish it.
-        // SAFETY: the descriptor is open and the name NUL terminated;
         // unlinkat never follows a link.
-        unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) };
+        let _ = rustix::fs::unlinkat(&parent, name.as_c_str(), AtFlags::empty());
         return Err(bind_failed(
             "socket was replaced while it was published".to_owned(),
         ));
@@ -243,29 +240,18 @@ fn open_unix(
 const SOCKET_NAME: &CStr = c"s";
 
 /// `fstatat` without following a final symbolic link.
-pub(super) fn stat_at(directory: &std::fs::File, name: &CStr) -> std::io::Result<libc::stat> {
-    // SAFETY: an all-zero stat is a valid out-parameter.
-    let mut found: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: the descriptor is open, the name is NUL terminated and
-    // `found` is valid for writing.
-    let status = unsafe {
-        libc::fstatat(
-            directory.as_raw_fd(),
-            name.as_ptr(),
-            &mut found,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if status != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(found)
+pub(super) fn stat_at(directory: &std::fs::File, name: &CStr) -> std::io::Result<Stat> {
+    Ok(rustix::fs::statat(
+        directory,
+        name,
+        AtFlags::SYMLINK_NOFOLLOW,
+    )?)
 }
 
 /// Device and inode, the identity compared before acting on an entry.
 // The field types differ between platforms (st_dev is 32 bits on macOS).
 #[allow(clippy::unnecessary_cast)]
-pub(super) fn identity_of(found: &libc::stat) -> (u64, u64) {
+pub(super) fn identity_of(found: &Stat) -> (u64, u64) {
     (found.st_dev as u64, found.st_ino as u64)
 }
 
@@ -274,7 +260,9 @@ pub(super) fn open_directory(path: &Path) -> std::io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt;
     std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+        .custom_flags(rondi::safe_fs::custom_flags(
+            OFlags::DIRECTORY | OFlags::NOFOLLOW,
+        ))
         .open(path)
 }
 
@@ -293,28 +281,19 @@ impl Stage {
         let pid = std::process::id();
         for attempt in 0..100u32 {
             let name = CString::new(format!(".rrdcached-{pid}-{attempt}"))
-                .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
-            // SAFETY: the descriptor is open and the name NUL terminated.
-            if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() == Some(libc::EEXIST) {
-                    continue;
-                }
-                return Err(error);
+                .map_err(|_| std::io::Error::from(Errno::INVAL))?;
+            match rustix::fs::mkdirat(&parent, name.as_c_str(), Mode::from_raw_mode(0o700)) {
+                Ok(()) => {}
+                Err(Errno::EXIST) => continue,
+                Err(error) => return Err(error.into()),
             }
-            // SAFETY: as above; O_NOFOLLOW refuses a link swapped in.
-            let fd = unsafe {
-                libc::openat(
-                    parent.as_raw_fd(),
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                )
-            };
-            if fd < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            // SAFETY: fd is a new descriptor owned by nothing else.
-            let directory = unsafe { std::fs::File::from_raw_fd(fd) };
+            // O_NOFOLLOW refuses a link swapped in.
+            let directory = std::fs::File::from(rustix::fs::openat(
+                &parent,
+                name.as_c_str(),
+                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::empty(),
+            )?);
             let path = shown.join(name.to_string_lossy().as_ref());
             let stage = Self {
                 parent,
@@ -323,8 +302,7 @@ impl Stage {
                 path,
             };
             let metadata = stage.directory.metadata()?;
-            // SAFETY: geteuid has no preconditions.
-            let owner = unsafe { libc::geteuid() };
+            let owner = rustix::process::geteuid().as_raw();
             if metadata.uid() != owner || metadata.mode() & 0o7777 != 0o700 {
                 return Err(std::io::Error::other(format!(
                     "staging directory in {} is not private",
@@ -333,18 +311,18 @@ impl Stage {
             }
             return Ok(stage);
         }
-        Err(std::io::Error::from_raw_os_error(libc::EEXIST))
+        Err(Errno::EXIST.into())
     }
 
     /// Binds `s` in the stage. With `before_threads` the umask is narrowed
     /// so the socket is created 0600 rather than widened later.
     fn bind(&self, before_threads: bool) -> std::io::Result<UnixListener> {
-        // SAFETY: umask only swaps the process mask; it is restored below.
-        let previous_mask = before_threads.then(|| unsafe { libc::umask(0o077) });
+        // The process mask is restored below.
+        let previous_mask =
+            before_threads.then(|| rustix::process::umask(Mode::from_raw_mode(0o077)));
         let bound = self.bind_by_name(before_threads);
         if let Some(mask) = previous_mask {
-            // SAFETY: as above.
-            unsafe { libc::umask(mask) };
+            rustix::process::umask(mask);
         }
         bound
     }
@@ -364,18 +342,12 @@ impl Stage {
             return UnixListener::bind(&staged);
         }
         if !before_threads {
-            return Err(std::io::Error::from_raw_os_error(libc::ENAMETOOLONG));
+            return Err(Errno::NAMETOOLONG.into());
         }
         let previous = std::fs::File::open(".")?;
-        // SAFETY: the stage descriptor is an open directory.
-        if unsafe { libc::fchdir(self.directory.as_raw_fd()) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+        rustix::process::fchdir(&self.directory)?;
         let bound = UnixListener::bind(SOCKET_NAME.to_string_lossy().as_ref());
-        // SAFETY: `previous` is an open directory descriptor.
-        if unsafe { libc::fchdir(previous.as_raw_fd()) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+        rustix::process::fchdir(&previous)?;
         bound
     }
 
@@ -383,10 +355,9 @@ impl Stage {
     /// by this process's user.
     fn socket_identity(&self) -> std::io::Result<(u64, u64)> {
         let found = stat_at(&self.directory, SOCKET_NAME)?;
-        // SAFETY: geteuid has no preconditions.
-        let owner = unsafe { libc::geteuid() };
-        if found.st_mode & libc::S_IFMT != libc::S_IFSOCK || found.st_uid != owner {
-            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+        let owner = rustix::process::geteuid().as_raw();
+        if FileType::from_raw_mode(found.st_mode) != FileType::Socket || found.st_uid != owner {
+            return Err(Errno::PERM.into());
         }
         Ok(identity_of(&found))
     }
@@ -398,35 +369,22 @@ impl Stage {
     // /proc descriptor link. There is no fallback that follows a link.
     #[cfg(target_os = "linux")]
     fn set_mode(&self, mode: u32, bound: (u64, u64)) -> std::io::Result<()> {
-        // SAFETY: the descriptor is open and the name NUL terminated.
-        let fd = unsafe {
-            libc::openat(
-                self.directory.as_raw_fd(),
-                SOCKET_NAME.as_ptr(),
-                libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error());
+        let entry = rustix::fs::openat(
+            &self.directory,
+            SOCKET_NAME,
+            OFlags::PATH | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        let found = rustix::fs::fstat(&entry)?;
+        if FileType::from_raw_mode(found.st_mode) != FileType::Socket
+            || identity_of(&found) != bound
+        {
+            return Err(Errno::PERM.into());
         }
-        // SAFETY: fd is a new descriptor owned by nothing else.
-        let entry = unsafe { OwnedFd::from_raw_fd(fd) };
-        // SAFETY: an all-zero stat is a valid out-parameter.
-        let mut found: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: the descriptor is open and `found` is valid for writing.
-        if unsafe { libc::fstat(entry.as_raw_fd(), &mut found) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        if found.st_mode & libc::S_IFMT != libc::S_IFSOCK || identity_of(&found) != bound {
-            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
-        }
-        let link = CString::new(format!("/proc/self/fd/{}", entry.as_raw_fd()))
-            .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
-        // SAFETY: the name is NUL terminated; the /proc link names the
-        // inode the descriptor holds, not the directory entry.
-        if unsafe { libc::chmod(link.as_ptr(), mode as libc::mode_t) } != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+        // The /proc link names the inode the descriptor holds, not the
+        // directory entry.
+        let link = format!("/proc/self/fd/{}", entry.as_raw_fd());
+        rustix::fs::chmod(link.as_str(), Mode::from_raw_mode(mode))?;
         Ok(())
     }
 
@@ -434,25 +392,20 @@ impl Stage {
     #[cfg(not(target_os = "linux"))]
     fn set_mode(&self, mode: u32, bound: (u64, u64)) -> std::io::Result<()> {
         if self.socket_identity()? != bound {
-            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+            return Err(Errno::PERM.into());
         }
-        // SAFETY: the descriptor is open and the name NUL terminated;
-        // AT_SYMLINK_NOFOLLOW changes a link itself, never its target.
-        let changed = unsafe {
-            libc::fchmodat(
-                self.directory.as_raw_fd(),
-                SOCKET_NAME.as_ptr(),
-                mode as libc::mode_t,
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if changed != 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+        // AT_SYMLINK_NOFOLLOW changes a link itself, never its target. The
+        // mode holds permission bits only, which fit every mode type.
+        rustix::fs::chmodat(
+            &self.directory,
+            SOCKET_NAME,
+            Mode::from_raw_mode(mode as rustix::fs::RawMode),
+            AtFlags::SYMLINK_NOFOLLOW,
+        )?;
         // A link swapped in after the check took the mode instead; refuse
         // to publish then.
         if self.socket_identity()? != bound {
-            return Err(std::io::Error::from_raw_os_error(libc::EPERM));
+            return Err(Errno::PERM.into());
         }
         Ok(())
     }
@@ -460,16 +413,9 @@ impl Stage {
 
 impl Drop for Stage {
     fn drop(&mut self) {
-        // SAFETY: descriptors are open and names NUL terminated; unlinkat
-        // removes the entry itself and never follows a link.
-        unsafe {
-            libc::unlinkat(self.directory.as_raw_fd(), SOCKET_NAME.as_ptr(), 0);
-            libc::unlinkat(
-                self.parent.as_raw_fd(),
-                self.name.as_ptr(),
-                libc::AT_REMOVEDIR,
-            );
-        }
+        // unlinkat removes the entry itself and never follows a link.
+        let _ = rustix::fs::unlinkat(&self.directory, SOCKET_NAME, AtFlags::empty());
+        let _ = rustix::fs::unlinkat(&self.parent, self.name.as_c_str(), AtFlags::REMOVEDIR);
     }
 }
 
@@ -484,8 +430,7 @@ fn check_directory_chain(directory: &Path) -> Result<std::fs::File, String> {
         format!("bind({}) failed: {}.", path.display(), error_text(&error))
     };
     let real = std::fs::canonicalize(directory).map_err(|error| failed(directory, error))?;
-    // SAFETY: geteuid has no preconditions.
-    let euid = unsafe { libc::geteuid() };
+    let euid = rustix::process::geteuid().as_raw();
     let mut last = None;
     for component in real.ancestors().collect::<Vec<_>>().into_iter().rev() {
         let metadata =
@@ -549,9 +494,9 @@ fn open_network(text: &str) -> Result<Vec<BoundSocket>, Vec<String>> {
     let host_name = if host.is_empty() {
         None
     } else {
-        Some(CString::new(host).map_err(|_| unresolvable(errno_text(libc::EINVAL)))?)
+        Some(CString::new(host).map_err(|_| unresolvable(errno_text(Errno::INVAL)))?)
     };
-    let service = CString::new(port).map_err(|_| unresolvable(errno_text(libc::EINVAL)))?;
+    let service = CString::new(port).map_err(|_| unresolvable(errno_text(Errno::INVAL)))?;
     let addresses = AddressList::resolve(host_name.as_deref(), &service).map_err(unresolvable)?;
     let mut sockets = Vec::new();
     let mut reasons = Vec::new();
@@ -884,8 +829,7 @@ mod tests {
                 }
             })
         };
-        // SAFETY: getegid has no preconditions.
-        let gid = unsafe { libc::getegid() };
+        let gid = rustix::process::getegid().as_raw();
         let socket = root.join("s.sock");
         for _ in 0..300 {
             if let Ok((listener, file)) = open_unix(&socket, 0o666, Some(gid), false) {

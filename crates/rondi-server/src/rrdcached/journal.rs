@@ -6,11 +6,12 @@
 //! as the reference's buffered stream. The buffer is written out when a
 //! file is closed: at rotation and at shutdown.
 
-use super::files::{open_at, stat_at};
+use super::files::{file_type, open_at, stat_at};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+use rustix::io::Errno;
 use std::ffi::{CString, OsStr};
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -50,8 +51,7 @@ impl Journal {
     pub(crate) fn open(path: &Path) -> io::Result<(Self, Vec<CString>)> {
         let directory = super::files::open_directory_path(path)?;
         let metadata = directory.metadata()?;
-        // SAFETY: geteuid has no preconditions.
-        let user = unsafe { libc::geteuid() };
+        let user = rustix::process::geteuid().as_raw();
         let shared = metadata.mode() & SHARED_WRITE != 0;
         let sticky = metadata.mode() & STICKY != 0;
         if shared && !(sticky && metadata.uid() == user) {
@@ -89,16 +89,8 @@ impl Journal {
         if let Some(at) = names.iter().position(|name| name == PREFIX) {
             let from = CString::new(PREFIX).expect("no NUL");
             let to = CString::new(b"rrd.journal.0001".to_vec()).expect("no NUL");
-            // SAFETY: the descriptor is open and both names NUL terminated.
-            let renamed = unsafe {
-                libc::renameat(
-                    self.directory.as_raw_fd(),
-                    from.as_ptr(),
-                    self.directory.as_raw_fd(),
-                    to.as_ptr(),
-                )
-            };
-            if renamed == 0 {
+            let renamed = rustix::fs::renameat(&self.directory, &from, &self.directory, &to);
+            if renamed.is_ok() {
                 names[at] = to.into_bytes();
             } else {
                 names.remove(at);
@@ -116,14 +108,13 @@ impl Journal {
     /// not a single-link regular file owned by the daemon user, including a
     /// symbolic link, which is skipped rather than followed.
     pub(crate) fn open_for_replay(&self, name: &CString) -> io::Result<Option<File>> {
-        let file = match open_at(&self.directory, name, libc::O_RDONLY, 0) {
+        let file = match open_at(&self.directory, name, OFlags::RDONLY, Mode::empty()) {
             Ok(file) => file,
-            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
+            Err(error) if Errno::from_io_error(&error) == Some(Errno::LOOP) => return Ok(None),
             Err(error) => return Err(error),
         };
         let metadata = file.metadata()?;
-        // SAFETY: geteuid has no preconditions.
-        let owned = metadata.uid() == unsafe { libc::geteuid() };
+        let owned = metadata.uid() == rustix::process::geteuid().as_raw();
         if !metadata.is_file() || metadata.nlink() != 1 || !owned {
             return Ok(None);
         }
@@ -150,8 +141,8 @@ impl Journal {
             match open_at(
                 &self.directory,
                 &name,
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_APPEND,
-                0o600,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::APPEND,
+                Mode::from_raw_mode(0o600),
             ) {
                 Ok(file) => {
                     let metadata = file.metadata()?;
@@ -166,7 +157,7 @@ impl Journal {
                 Err(error) => return Err(error),
             }
         }
-        Err(io::Error::from_raw_os_error(libc::EEXIST))
+        Err(Errno::EXIST.into())
     }
 
     /// Adds one line (without its LF).
@@ -242,10 +233,9 @@ impl Journal {
         // Only a regular file is removed; anything else under the name is
         // not one of ours.
         if stat_at(&self.directory, name)
-            .is_ok_and(|status| status.st_mode & libc::S_IFMT == libc::S_IFREG)
+            .is_ok_and(|status| file_type(&status) == FileType::RegularFile)
         {
-            // SAFETY: the descriptor is open and the name NUL terminated.
-            unsafe { libc::unlinkat(self.directory.as_raw_fd(), name.as_ptr(), 0) };
+            let _ = rustix::fs::unlinkat(&self.directory, name.as_c_str(), AtFlags::empty());
         }
     }
 
