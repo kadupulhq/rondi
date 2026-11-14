@@ -79,9 +79,9 @@ Both crates: wrap font loading, shaping and drawing in `catch_unwind` at Rondi's
 | File | Shipped in | Why it cannot be Rust |
 |---|---|---|
 | `scripts/install-compat-links.sh` | release archives | Creates the `rrdtool`, `rrdcached` and other names as links to the `rondi` binary for archive users. Installation tooling, not part of the tool. |
+| `packaging/scripts/*.sh` | `.deb` and `.rpm` | Package maintainer scripts must be shell; `dpkg` and `rpm` run them. |
 
 Rondi ships no PHP: the RRDProxy launcher was removed in 0.2.0 (#167), and the `rrdtool-proxy` name of the Rust binary takes its place.
-| `packaging/scripts/*.sh` | `.deb` and `.rpm` | Package maintainer scripts must be shell; `dpkg` and `rpm` run them. |
 
 ## FAQ: why does Rondi depend on `libc`?
 
