@@ -343,26 +343,16 @@ fn list_directory() -> Result<Vec<u8>, i32> {
 // Provenance: black-box compatibility test (PM-22, rrdtool_optparse.rs).
 #[cfg(unix)]
 fn directory_names() -> Result<Vec<Vec<u8>>, i32> {
-    // SAFETY: the stream is checked for NULL, read until readdir returns
-    // NULL, and closed exactly once; each entry name is copied out before
-    // the next readdir call can reuse its storage.
-    unsafe {
-        let stream = libc::opendir(c".".as_ptr());
-        if stream.is_null() {
-            return Err(super::last_os_errno());
-        }
-        let mut names = Vec::new();
-        loop {
-            let entry = libc::readdir(stream);
-            if entry.is_null() {
-                break;
-            }
-            let name = std::ffi::CStr::from_ptr((*entry).d_name.as_ptr());
-            names.push(name.to_bytes().to_vec());
-        }
-        libc::closedir(stream);
-        Ok(names)
-    }
+    use rustix::fs::{CWD, Dir, Mode, OFlags};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let directory = rustix::fs::openat(CWD, c".", flags, Mode::empty())
+        .and_then(Dir::new)
+        .map_err(rustix::io::Errno::raw_os_error)?;
+    // Like readdir, a read error ends the listing.
+    Ok(directory
+        .map_while(Result::ok)
+        .map(|entry| entry.file_name().to_bytes().to_vec())
+        .collect())
 }
 
 #[cfg(not(unix))]

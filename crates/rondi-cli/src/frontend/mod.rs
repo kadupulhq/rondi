@@ -431,11 +431,6 @@ pub(crate) fn system_error_text(errno: libc::c_int) -> String {
     text.to_string_lossy().into_owned()
 }
 
-/// The error number the last failing system call left behind.
-pub(crate) fn last_os_errno() -> libc::c_int {
-    io::Error::last_os_error().raw_os_error().unwrap_or(0)
-}
-
 #[cfg(unix)]
 fn os_path(bytes: &[u8]) -> std::path::PathBuf {
     use std::os::unix::ffi::OsStrExt;

@@ -538,10 +538,9 @@ impl Shared {
         match target.status() {
             Err(error) => return failed("failed to stat", super::error_text(&error)),
             Ok(status) if file_type(&status) != FileType::RegularFile => {
-                return failed(
-                    "failed to stat",
-                    super::errno_text(Errno::from_raw_os_error(0)),
-                );
+                // errno 0, whose text the reference prints here.
+                let none = std::io::Error::from_raw_os_error(0);
+                return failed("failed to stat", super::error_text(&none));
             }
             Ok(_) => {}
         }

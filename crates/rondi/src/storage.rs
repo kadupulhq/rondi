@@ -6,7 +6,6 @@ use crate::import_export::{decode_snapshot, encode_snapshot};
 use crate::queries::fetch_retained;
 use crate::rrd_binary::{RrdInfo, fetch_rrd_file, inspect_path};
 use crate::update::update_rrd_file;
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -167,13 +166,12 @@ impl Store {
                 .mode(0o600);
         }
         let lock = lock_options.open(root.join(".rondi.lock"))?;
-        lock.try_lock_exclusive().map_err(|e| {
-            if e.kind() == std::io::ErrorKind::WouldBlock {
-                StoreError::Owned
-            } else {
-                StoreError::Io(e)
-            }
-        })?;
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
+            |error| match error {
+                rustix::io::Errno::WOULDBLOCK => StoreError::Owned,
+                error => StoreError::Io(error.into()),
+            },
+        )?;
         Ok(Self {
             root,
             _lock: lock,

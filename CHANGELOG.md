@@ -14,6 +14,12 @@ follows [Semantic Versioning](VERSIONING.md).
 ### Changed
 
 - The `rrd_queries` benchmark uses a small standard-library harness instead of Criterion, which compiled C through `alloca`. Baselines and filters still work; HTML reports are gone.
+- System calls go through `rustix` instead of hand-written `libc` calls: descriptor-relative file operations, locks, `statvfs`, the `mmap` probe, directory reading, the rrdcached pid file, journal and Unix socket staging. On Linux these reach the kernel directly. Locale and time formatting, C number formatting and parsing, account lookups, privilege changes, signal masks and `getaddrinfo` stay on the C library (see `docs/DEPENDENCIES.md`). `fs2` is no longer a dependency.
+- Breaking: `rondi::safe_fs::open_at` and `open_file` take `rustix::fs::OFlags` and `Mode` instead of C integers, and `safe_fs::custom_flags` converts flags for `OpenOptionsExt::custom_flags`.
+
+### Security
+
+- The fuzz targets' lock file moves to `rustix` 1.1.6 (RUSTSEC-2026-0486) and `tokio` 1.54.1 (RUSTSEC-2026-0386), the versions the workspace already uses.
 
 ## [0.2.0] - 2026-11-13
 
