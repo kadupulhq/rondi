@@ -6,6 +6,15 @@ follows [Semantic Versioning](VERSIONING.md).
 
 ## [Unreleased]
 
+### Added
+
+- A dependency policy (`docs/DEPENDENCIES.md`), enforced by `cargo deny`: everything Cargo builds, including tests, benchmarks and dev-dependencies, is pure Rust.
+- The plan for the pure Rust graph renderer (`docs/plans/graph-rendering.md`).
+
+### Changed
+
+- The `rrd_queries` benchmark uses a small standard-library harness instead of Criterion, which compiled C through `alloca`. Baselines and filters still work; HTML reports are gone.
+
 ## [0.2.0] - 2026-11-13
 
 Rondi is a pure Rust implementation of RRDtool 1.11.0: no C code, no C

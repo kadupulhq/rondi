@@ -117,3 +117,16 @@ RRDtool C are flagged for that audit, not endorsed as a model for new work.
 - [ ] Source-inspection-derived behavior is documented.
 - [ ] Implementation is idiomatic Rust rather than C-shaped Rust.
 - [ ] Any uncertain provenance has been flagged.
+
+## Dependencies
+
+Rondi is idiomatic, pure Rust. Everything Cargo builds, including tests,
+benchmarks and dev-dependencies, has no C code, no `cc`/`bindgen`/`-sys`
+crates and no C libraries (Cairo, Pango, fontconfig, FreeType, libxml2,
+librrd); the only allowance is the OS C library through `libc`. CI,
+packaging and vector-generation scripts may use other languages. Add a crate
+only after the written review that `docs/DEPENDENCIES.md` describes, using
+the smallest feature set and a release at least 14 days old. Never
+memory-map files Rondi does not own. Rejected crates are listed there and
+banned in `deny.toml`. The graph renderer follows
+`docs/plans/graph-rendering.md`.

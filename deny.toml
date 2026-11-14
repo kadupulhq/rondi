@@ -15,6 +15,28 @@ confidence-threshold = 0.8
 [bans]
 multiple-versions = "warn"
 wildcards = "allow"
+# Rejected after review or by policy; reasons in docs/DEPENDENCIES.md.
+deny = [
+  { crate = "parley", reason = "not needed; default features link fontconfig or CoreText (docs/DEPENDENCIES.md)" },
+  { crate = "fontique", reason = "links fontconfig or CoreText by default; memory-maps font files" },
+  { crate = "fontdb", reason = "unbounded TTC face loop and name-table allocation; memory-maps by default" },
+  { crate = "rustybuzz", reason = "unmaintained (RUSTSEC-2026-0206); second font parser" },
+  { crate = "ttf-parser", reason = "unmaintained (RUSTSEC-2026-0192); second font parser" },
+  { crate = "tiny-skia", reason = "Rondi writes its own rasterizer" },
+  { crate = "memmap2", reason = "never memory-map files Rondi does not own" },
+  { crate = "cairo-rs", reason = "C library (pure Rust rule)" },
+  { crate = "cairo-sys-rs", reason = "C library (pure Rust rule)" },
+  { crate = "pango", reason = "C library (pure Rust rule)" },
+  { crate = "pango-sys", reason = "C library (pure Rust rule)" },
+  { crate = "freetype-sys", reason = "C library (pure Rust rule)" },
+  { crate = "freetype-rs", reason = "C library (pure Rust rule)" },
+  { crate = "harfbuzz-sys", reason = "C library (pure Rust rule)" },
+  { crate = "yeslogic-fontconfig-sys", reason = "C library (pure Rust rule)" },
+  { crate = "servo-fontconfig-sys", reason = "C library (pure Rust rule)" },
+  { crate = "libxml", reason = "C library (pure Rust rule)" },
+  { crate = "cc", reason = "no C compilation (pure Rust rule)" },
+  { crate = "bindgen", reason = "no C bindings (pure Rust rule)" },
+]
 
 [sources]
 unknown-registry = "deny"
