@@ -1767,11 +1767,11 @@ pub(crate) fn open_rrd_write(path: &Path) -> Result<File, StoreError> {
 /// Open an output file for writing, creating it with mode 0600 (less the
 /// umask) or, with `exclusive`, only if it does not exist. RRDtool follows a
 /// symbolic link at the final component and writes through any inode; Rondi
-/// refuses a symbolic link, anything but a regular file and a file with more
-/// than one hard link, so an output path cannot redirect the write. A
-/// character device, reached directly or through a symbolic link, is the one
-/// exception. The file is not truncated; callers that truncate do so after
-/// this check.
+/// requires an owned regular file with one hard link, so an output path
+/// cannot redirect the write. A character device owned by the caller, or the
+/// system null device, may also be opened, directly or through a symbolic
+/// link. The file is not truncated; callers that truncate do so after this
+/// check.
 pub fn open_output_file(path: &Path, exclusive: bool) -> std::io::Result<File> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true);
@@ -1797,10 +1797,8 @@ pub fn open_output_file(path: &Path, exclusive: bool) -> std::io::Result<File> {
             Err(error) => return Err(error),
         };
         let metadata = file.metadata()?;
-        // The kernel already applied its own permission check to a device,
-        // so ownership says nothing about whether it may be written.
         if is_character_device(&metadata) {
-            clear_nonblocking(&file)?;
+            prepare_character_output(&file)?;
             return Ok(file);
         }
         if metadata.uid() != rustix::process::geteuid().as_raw() {
@@ -1837,6 +1835,29 @@ fn is_character_device(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_char_device()
 }
 
+/// Refuses a character device owned by another user, other than the system
+/// null device, and restores blocking writes.
+// Rondi policy: a writable terminal forwards what is written to whoever
+// owns it, so device permissions alone do not keep RRD data private. A
+// link planted at an output path must not send it to another user's
+// terminal.
+#[cfg(unix)]
+fn prepare_character_output(file: &File) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    if metadata.uid() != rustix::process::geteuid().as_raw() {
+        let null_sink = std::fs::symlink_metadata("/dev/null").is_ok_and(|null| {
+            is_character_device(&null) && null.uid() == 0 && null.rdev() == metadata.rdev()
+        });
+        if !null_sink {
+            return Err(std::io::Error::other(
+                "refusing to write a device owned by another user",
+            ));
+        }
+    }
+    clear_nonblocking(file)
+}
+
 #[cfg(unix)]
 fn clear_nonblocking(file: &File) -> std::io::Result<()> {
     let flags = rustix::fs::fcntl_getfl(file)?;
@@ -1864,7 +1885,7 @@ fn open_linked_character_device(path: &Path) -> std::io::Result<File> {
     if !is_character_device(&file.metadata()?) {
         return Err(refused());
     }
-    clear_nonblocking(&file)?;
+    prepare_character_output(&file)?;
     Ok(file)
 }
 

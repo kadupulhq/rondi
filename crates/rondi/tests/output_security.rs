@@ -83,3 +83,92 @@ fn symlinks_to_other_inodes_stay_refused() {
     assert!(open_output_file(&dangling, false).is_err());
     assert!(!missing.exists());
 }
+
+/// A new pseudo-terminal: its controller, its terminal and the terminal's path.
+fn terminal_pair() -> (std::fs::File, std::fs::File, std::path::PathBuf) {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    let (mut controller, mut terminal) = (-1, -1);
+    // SAFETY: both descriptor pointers are valid; the optional settings are null.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut controller,
+                &mut terminal,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        },
+        0
+    );
+    // SAFETY: openpty returned two distinct descriptors owned by this scope.
+    let controller = unsafe { std::fs::File::from_raw_fd(controller) };
+    let terminal = unsafe { std::fs::File::from_raw_fd(terminal) };
+    let mut name = [0 as libc::c_char; 256];
+    // SAFETY: the terminal is open and the buffer is writable for its length.
+    assert_eq!(
+        unsafe { libc::ttyname_r(terminal.as_raw_fd(), name.as_mut_ptr(), name.len()) },
+        0
+    );
+    // SAFETY: a successful ttyname_r terminates the buffer.
+    let name = unsafe { std::ffi::CStr::from_ptr(name.as_ptr()) };
+    let path = std::path::PathBuf::from(std::ffi::OsStr::from_bytes(name.to_bytes()));
+    (controller, terminal, path)
+}
+
+#[test]
+fn foreign_owned_terminal_output_is_refused() {
+    // Only root can give a terminal to another account; the Linux oracle
+    // suite runs as root.
+    if !rustix::process::geteuid().is_root() {
+        return;
+    }
+    let (_controller, terminal, path) = terminal_pair();
+    let nobody = Some(rustix::fs::Uid::from_raw(65534));
+    rustix::fs::fchown(&terminal, nobody, None).unwrap();
+    rustix::fs::fchmod(&terminal, rustix::fs::Mode::from_raw_mode(0o666)).unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().uid(), 65534);
+    let dir = tempfile::tempdir().unwrap();
+    let linked = dir.path().join("foreign-terminal");
+    std::os::unix::fs::symlink(&path, &linked).unwrap();
+    assert!(open_output_file(&path, false).is_err());
+    assert!(open_output_file(&linked, false).is_err());
+}
+
+#[test]
+fn owned_terminal_output_stays_available() {
+    let (_controller, _terminal, path) = terminal_pair();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().uid(),
+        rustix::process::geteuid().as_raw()
+    );
+    assert!(open_output_file(&path, false).is_ok());
+    let dir = tempfile::tempdir().unwrap();
+    let linked = dir.path().join("own-terminal");
+    std::os::unix::fs::symlink(&path, &linked).unwrap();
+    assert!(open_output_file(&linked, false).is_ok());
+}
+
+#[test]
+fn null_output_stays_available_to_unprivileged_users() {
+    if !rustix::process::geteuid().is_root() {
+        return;
+    }
+    use std::os::unix::process::CommandExt;
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "character_devices_open_directly_and_through_a_symlink",
+        ])
+        .uid(65534)
+        .gid(65534)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+}
