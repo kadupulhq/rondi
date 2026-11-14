@@ -428,9 +428,10 @@ fn publish_exclusive(temporary: &Path, target: &Path) -> io::Result<()> {
 
 #[cfg(unix)]
 fn hard_links_unsupported(error: &io::Error) -> bool {
+    use rustix::io::Errno;
     matches!(
-        error.raw_os_error(),
-        Some(libc::EPERM | libc::ENOTSUP | libc::EMLINK)
+        Errno::from_io_error(error),
+        Some(Errno::PERM | Errno::NOTSUP | Errno::MLINK)
     )
 }
 
@@ -490,23 +491,12 @@ fn set_mode(_file: &File, _mode: u32) -> io::Result<()> {
 /// Bytes an unprivileged writer may still use in `directory`, when known.
 #[cfg(unix)]
 pub(crate) fn available_space(directory: &Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let path = std::ffi::CString::new(directory.as_os_str().as_bytes()).ok()?;
-    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
-    // SAFETY: path is NUL terminated and stats is a valid output buffer.
-    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
-        return None;
-    }
-    // SAFETY: a successful statvfs initialized the struct.
-    usable_bytes(&unsafe { stats.assume_init() })
+    usable_bytes(&rustix::fs::statvfs(directory).ok()?)
 }
 
-/// The field widths differ between platforms (32-bit block counts on
-/// macOS), so the casts are only redundant on some of them.
 #[cfg(unix)]
-#[allow(clippy::unnecessary_cast)]
-fn usable_bytes(stats: &libc::statvfs) -> Option<u64> {
-    (stats.f_bavail as u64).checked_mul(stats.f_frsize as u64)
+fn usable_bytes(stats: &rustix::fs::StatVfs) -> Option<u64> {
+    stats.f_bavail.checked_mul(stats.f_frsize)
 }
 
 #[cfg(not(unix))]
@@ -528,7 +518,7 @@ pub fn create_rrd_at(
     definitions: &[String],
     no_overwrite: bool,
 ) -> Result<(), StoreError> {
-    use std::os::fd::AsRawFd;
+    use rustix::fs::{AtFlags, FileType, Mode, OFlags};
     use std::os::unix::ffi::OsStrExt;
 
     if step == 0 {
@@ -539,7 +529,8 @@ pub fn create_rrd_at(
         .filter(|name| {
             !matches!(name.to_bytes(), b"" | b"." | b"..") && !name.to_bytes().contains(&b'/')
         })
-        .ok_or_else(|| io::Error::from_raw_os_error(libc::EPERM))?;
+        .ok_or(rustix::io::Errno::PERM)
+        .map_err(io::Error::from)?;
     // CR-62: an existing target is reported before any definition.
     let existing = entry_status(directory, &name);
     if no_overwrite && existing.is_some() {
@@ -559,7 +550,7 @@ pub fn create_rrd_at(
     }
     let head = rrd.head_bytes()?;
     let mode = existing
-        .filter(|status| status.st_mode & libc::S_IFMT == libc::S_IFREG)
+        .filter(|status| FileType::from_raw_mode(status.st_mode) == FileType::RegularFile)
         .map_or(0o644, |status| permission_bits(status.st_mode));
 
     let staging = crate::safe_fs::PrivateDirectory::create(directory)?;
@@ -571,23 +562,17 @@ pub fn create_rrd_at(
     let file = crate::safe_fs::open_at(
         &staging.directory,
         c"rrd",
-        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
-        0o600,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL,
+        Mode::from_raw_mode(0o600),
     )?;
     write_and_sync(&rrd, &head, file, mode)?;
-    let source = staging.directory.as_raw_fd();
-    let target = directory.as_raw_fd();
-    // SAFETY: both descriptors are open and both names are NUL terminated.
-    let status = unsafe {
-        if no_overwrite {
-            libc::linkat(source, c"rrd".as_ptr(), target, name.as_ptr(), 0)
-        } else {
-            libc::renameat(source, c"rrd".as_ptr(), target, name.as_ptr())
-        }
-    };
-    if status != 0 {
-        return Err(io::Error::last_os_error().into());
+    let source = &staging.directory;
+    if no_overwrite {
+        rustix::fs::linkat(source, c"rrd", directory, name.as_c_str(), AtFlags::empty())
+    } else {
+        rustix::fs::renameat(source, c"rrd", directory, name.as_c_str())
     }
+    .map_err(io::Error::from)?;
     // Dropping the staging directory removes the linked copy, if any.
     drop(staging);
     Ok(())
@@ -596,39 +581,19 @@ pub fn create_rrd_at(
 /// `mode_t` is 16 bits on macOS and 32 on Linux.
 #[cfg(unix)]
 #[allow(clippy::useless_conversion)]
-fn permission_bits(mode: libc::mode_t) -> u32 {
+fn permission_bits(mode: rustix::fs::RawMode) -> u32 {
     u32::from(mode) & 0o7777
 }
 
 /// `fstatat` without following a final symbolic link.
 #[cfg(unix)]
-fn entry_status(directory: &File, name: &std::ffi::CStr) -> Option<libc::stat> {
-    use std::os::fd::AsRawFd;
-    let mut status = std::mem::MaybeUninit::<libc::stat>::zeroed();
-    // SAFETY: the descriptor is open, the name is NUL terminated and the
-    // buffer is valid for one stat struct.
-    let result = unsafe {
-        libc::fstatat(
-            directory.as_raw_fd(),
-            name.as_ptr(),
-            status.as_mut_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    // SAFETY: a successful fstatat initialized the struct.
-    (result == 0).then(|| unsafe { status.assume_init() })
+fn entry_status(directory: &File, name: &std::ffi::CStr) -> Option<rustix::fs::Stat> {
+    rustix::fs::statat(directory, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW).ok()
 }
 
 #[cfg(unix)]
 fn fd_available_space(directory: &File) -> Option<u64> {
-    use std::os::fd::AsRawFd;
-    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::zeroed();
-    // SAFETY: the descriptor is open and stats is a valid output buffer.
-    if unsafe { libc::fstatvfs(directory.as_raw_fd(), stats.as_mut_ptr()) } != 0 {
-        return None;
-    }
-    // SAFETY: a successful fstatvfs initialized the struct.
-    usable_bytes(&unsafe { stats.assume_init() })
+    usable_bytes(&rustix::fs::fstatvfs(directory).ok()?)
 }
 
 #[cfg(test)]

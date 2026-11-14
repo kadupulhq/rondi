@@ -37,6 +37,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-uti
 clap = { version = "4", features = ["derive"] }
 roxmltree = "0.21"
 libc = "0.2"
+# Reviewed in docs/DEPENDENCIES.md; 1.1.6 fixes RUSTSEC-2026-0486.
+rustix = { version = "1.1.6", default-features = false, features = ["std", "fs", "process", "mm"] }
 
 [profile.release]
 lto = "thin"

@@ -162,7 +162,9 @@ impl Store {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            lock_options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+            lock_options
+                .custom_flags(crate::safe_fs::custom_flags(rustix::fs::OFlags::NOFOLLOW))
+                .mode(0o600);
         }
         let lock = lock_options.open(root.join(".rondi.lock"))?;
         lock.try_lock_exclusive().map_err(|e| {
@@ -258,7 +260,11 @@ impl Store {
         {
             use std::os::unix::fs::OpenOptionsExt;
             journal_options
-                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                .custom_flags(crate::safe_fs::custom_flags(
+                    rustix::fs::OFlags::NOFOLLOW
+                        | rustix::fs::OFlags::NONBLOCK
+                        | rustix::fs::OFlags::CLOEXEC,
+                ))
                 .mode(0o600);
         }
         let mut journal = journal_options.open(self.root.join(JOURNAL))?;
@@ -384,7 +390,11 @@ impl Store {
             {
                 use std::os::unix::fs::OpenOptionsExt;
                 options
-                    .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+                    .custom_flags(crate::safe_fs::custom_flags(
+                        rustix::fs::OFlags::NOFOLLOW
+                            | rustix::fs::OFlags::NONBLOCK
+                            | rustix::fs::OFlags::CLOEXEC,
+                    ))
                     .mode(0o600);
             }
             let mut file = options.open(&tmp)?;
@@ -433,7 +443,11 @@ impl Store {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+            options.custom_flags(crate::safe_fs::custom_flags(
+                rustix::fs::OFlags::NOFOLLOW
+                    | rustix::fs::OFlags::NONBLOCK
+                    | rustix::fs::OFlags::CLOEXEC,
+            ));
         }
         let mut journal = match options.open(self.root.join(JOURNAL)) {
             Ok(journal) => journal,
@@ -586,7 +600,9 @@ impl Store {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+            options
+                .custom_flags(crate::safe_fs::custom_flags(rustix::fs::OFlags::NOFOLLOW))
+                .mode(0o600);
         }
         let mut file = options.open(&tmp)?;
         file.write_all(&encode_snapshot(db)?)?;
@@ -621,9 +637,8 @@ fn check_native_journal_handle(file: &File) -> Result<(), StoreError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        // SAFETY: geteuid has no preconditions.
         if metadata.nlink() != 1
-            || metadata.uid() != unsafe { libc::geteuid() }
+            || metadata.uid() != rustix::process::geteuid().as_raw()
             || metadata.mode() & 0o022 != 0
         {
             return Err(StoreError::InvalidConfig(
@@ -653,7 +668,7 @@ pub(crate) fn open_read_nofollow(path: &Path) -> Result<File, std::io::Error> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+        options.custom_flags(crate::safe_fs::custom_flags(rustix::fs::OFlags::NOFOLLOW));
     }
     options.open(path)
 }

@@ -4,23 +4,26 @@
 use std::ffi::{CStr, CString};
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path};
+
+use rustix::fs::{AtFlags, Mode, OFlags};
+use rustix::io::Errno;
 
 // A search-only descriptor needs execute permission alone, as a pathname
 // lookup does, so execute-only ancestors stay traversable.
 #[cfg(any(target_os = "linux", target_os = "android"))]
-const DIRECTORY_SEARCH: i32 = libc::O_PATH;
+const DIRECTORY_SEARCH: OFlags = OFlags::PATH;
+// rustix has no name for O_SEARCH, so take the value from the C library.
 #[cfg(any(target_vendor = "apple", target_os = "freebsd"))]
-const DIRECTORY_SEARCH: i32 = libc::O_SEARCH;
+const DIRECTORY_SEARCH: OFlags = OFlags::from_bits_retain(libc::O_SEARCH as _);
 #[cfg(not(any(
     target_os = "linux",
     target_os = "android",
     target_vendor = "apple",
     target_os = "freebsd"
 )))]
-const DIRECTORY_SEARCH: i32 = libc::O_RDONLY;
+const DIRECTORY_SEARCH: OFlags = OFlags::RDONLY;
 
 /// Keep CREATE's unpublished file inaccessible to other accounts, even when
 /// the destination directory is writable by those accounts.
@@ -39,20 +42,23 @@ impl<'a> PrivateDirectory<'a> {
                 .build_hasher()
                 .finish();
             let name = CString::new(format!(".rondi-create-{random:016x}")).unwrap();
-            // SAFETY: parent is open and name is NUL terminated.
-            if unsafe { libc::mkdirat(parent.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::AlreadyExists {
-                    continue;
-                }
-                return Err(error);
+            match rustix::fs::mkdirat(parent, name.as_c_str(), Mode::from_raw_mode(0o700)) {
+                Ok(()) => {}
+                Err(Errno::EXIST) => continue,
+                Err(error) => return Err(error.into()),
             }
-            let directory = open_at(parent, &name, libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+            let directory = open_at(
+                parent,
+                &name,
+                OFlags::RDONLY | OFlags::DIRECTORY,
+                Mode::empty(),
+            )?;
             let metadata = directory.metadata()?;
-            // SAFETY: geteuid has no preconditions. A replacement directory
-            // owned by another account must never become the staging area.
-            if metadata.uid() != unsafe { libc::geteuid() } || metadata.mode() & 0o077 != 0 {
-                return Err(io::Error::from_raw_os_error(libc::EPERM));
+            // A replacement directory owned by another account must never
+            // become the staging area.
+            if metadata.uid() != rustix::process::geteuid().as_raw() || metadata.mode() & 0o077 != 0
+            {
+                return Err(Errno::PERM.into());
             }
             return Ok(Self {
                 parent,
@@ -60,41 +66,25 @@ impl<'a> PrivateDirectory<'a> {
                 directory,
             });
         }
-        Err(io::Error::from_raw_os_error(libc::EEXIST))
+        Err(Errno::EXIST.into())
     }
 }
 
 impl Drop for PrivateDirectory<'_> {
     fn drop(&mut self) {
-        // SAFETY: both descriptors remain open. Remove only our staging file;
-        // a rename of the directory cannot redirect this cleanup elsewhere.
-        unsafe { libc::unlinkat(self.directory.as_raw_fd(), c"rrd".as_ptr(), 0) };
-        let mut ours: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: directory is open and the output buffer remains valid.
-        if unsafe { libc::fstat(self.directory.as_raw_fd(), &mut ours) } != 0 {
+        // Remove only our staging file; a rename of the directory cannot
+        // redirect this cleanup elsewhere.
+        let _ = rustix::fs::unlinkat(&self.directory, c"rrd", AtFlags::empty());
+        let Ok(ours) = rustix::fs::fstat(&self.directory) else {
             return;
-        }
-        let mut current: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: the descriptor, name, and output buffer remain valid.
-        if unsafe {
-            libc::fstatat(
-                self.parent.as_raw_fd(),
-                self.name.as_ptr(),
-                &mut current,
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        } == 0
+        };
+        if let Ok(current) =
+            rustix::fs::statat(self.parent, self.name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW)
             && current.st_dev == ours.st_dev
             && current.st_ino == ours.st_ino
         {
-            // SAFETY: this name still identifies our empty staging directory.
-            unsafe {
-                libc::unlinkat(
-                    self.parent.as_raw_fd(),
-                    self.name.as_ptr(),
-                    libc::AT_REMOVEDIR,
-                )
-            };
+            // This name still identifies our empty staging directory.
+            let _ = rustix::fs::unlinkat(self.parent, self.name.as_c_str(), AtFlags::REMOVEDIR);
         }
     }
 }
@@ -110,53 +100,51 @@ pub fn open_directory(path: &Path, create: bool) -> io::Result<File> {
         let name = match component {
             Component::RootDir | Component::CurDir => continue,
             Component::Normal(name) => CString::new(name.as_bytes())?,
-            _ => return Err(io::Error::from_raw_os_error(libc::EPERM)),
+            _ => return Err(Errno::PERM.into()),
         };
         if create {
-            // SAFETY: the descriptor and NUL-terminated name remain valid.
-            let status = unsafe { libc::mkdirat(directory.as_raw_fd(), name.as_ptr(), 0o755) };
-            if status != 0 && io::Error::last_os_error().raw_os_error() != Some(libc::EEXIST) {
-                return Err(io::Error::last_os_error());
+            match rustix::fs::mkdirat(&directory, name.as_c_str(), Mode::from_raw_mode(0o755)) {
+                Ok(()) | Err(Errno::EXIST) => {}
+                Err(error) => return Err(error.into()),
             }
         }
-        directory = open_at(&directory, &name, DIRECTORY_SEARCH | libc::O_DIRECTORY, 0)?;
+        directory = open_at(
+            &directory,
+            &name,
+            DIRECTORY_SEARCH | OFlags::DIRECTORY,
+            Mode::empty(),
+        )?;
     }
     Ok(directory)
 }
 
-pub fn open_at(directory: &File, name: &CStr, flags: i32, mode: libc::mode_t) -> io::Result<File> {
+/// `flags` as `std::os::unix::fs::OpenOptionsExt::custom_flags` takes them.
+pub fn custom_flags(flags: OFlags) -> i32 {
+    flags.bits() as i32
+}
+
+/// Open `name` in `directory` without following a final symbolic link.
+/// `name` must be a single path component.
+pub fn open_at(directory: &File, name: &CStr, flags: OFlags, mode: Mode) -> io::Result<File> {
     if name.to_bytes().is_empty()
         || name.to_bytes().contains(&b'/')
         || name.to_bytes() == b"."
         || name.to_bytes() == b".."
     {
-        return Err(io::Error::from_raw_os_error(libc::EPERM));
+        return Err(Errno::PERM.into());
     }
-    // SAFETY: directory is open, name is NUL terminated, and the returned
-    // descriptor is transferred exactly once into an owning File.
-    let fd = unsafe {
-        libc::openat(
-            directory.as_raw_fd(),
-            name.as_ptr(),
-            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK | libc::O_NOCTTY,
-            mode as libc::c_uint,
-        )
-    };
-    if fd < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(unsafe { File::from_raw_fd(fd) })
+    let fd = rustix::fs::openat(
+        directory,
+        name,
+        flags | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY,
+        mode,
+    )?;
+    Ok(File::from(fd))
 }
 
-pub fn open_file(path: &Path, flags: i32, mode: libc::mode_t) -> io::Result<File> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?;
-    let name = CString::new(
-        path.file_name()
-            .ok_or_else(|| io::Error::from_raw_os_error(libc::EINVAL))?
-            .as_bytes(),
-    )?;
+pub fn open_file(path: &Path, flags: OFlags, mode: Mode) -> io::Result<File> {
+    let parent = path.parent().ok_or(Errno::INVAL)?;
+    let name = CString::new(path.file_name().ok_or(Errno::INVAL)?.as_bytes())?;
     let directory = open_directory(parent, false)?;
     open_at(&directory, &name, flags, mode)
 }
@@ -175,7 +163,11 @@ mod tests {
         std::fs::create_dir_all(search_only.join("data")).unwrap();
         std::fs::write(search_only.join("data/metric.rrd"), b"rrd").unwrap();
         std::fs::set_permissions(&search_only, std::fs::Permissions::from_mode(0o300)).unwrap();
-        let opened = super::open_file(&search_only.join("data/metric.rrd"), libc::O_RDONLY, 0);
+        let opened = super::open_file(
+            &search_only.join("data/metric.rrd"),
+            OFlags::RDONLY,
+            Mode::empty(),
+        );
         let created = super::open_directory(&search_only.join("data/new"), true);
         std::fs::set_permissions(&search_only, std::fs::Permissions::from_mode(0o700)).unwrap();
         opened.unwrap();
@@ -195,8 +187,8 @@ mod tests {
         let mut file = open_at(
             &staging.directory,
             c"rrd",
-            libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-            0o600,
+            OFlags::RDWR | OFlags::CREATE | OFlags::EXCL,
+            Mode::from_raw_mode(0o600),
         )
         .unwrap();
         file.write_all(b"original RRD").unwrap();
@@ -208,17 +200,7 @@ mod tests {
         std::fs::create_dir(&original).unwrap();
         std::fs::write(original.join("rrd"), b"replacement").unwrap();
         // Publishing resolves the payload through the pinned private directory.
-        assert_eq!(
-            unsafe {
-                libc::renameat(
-                    staging.directory.as_raw_fd(),
-                    c"rrd".as_ptr(),
-                    parent.as_raw_fd(),
-                    c"result".as_ptr(),
-                )
-            },
-            0
-        );
+        rustix::fs::renameat(&staging.directory, c"rrd", &parent, c"result").unwrap();
         drop(staging);
         let mut bytes = String::new();
         File::open(temp.path().join("result"))
