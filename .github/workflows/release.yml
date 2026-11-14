@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   release:
-    uses: kadupulhq/.github/.github/workflows/release.yml@f1b6366e6c1a18eafb994e88ada44680b9e1b80e # main
+    uses: kadupulhq/.github/.github/workflows/release.yml@4c99890a9b87b654183c1f3fca93cfb0ac8cdec9 # main
     with:
       generate-notes: true
       # Pushes ghcr.io/kadupulhq/rondi for linux/amd64 and linux/arm64 from
