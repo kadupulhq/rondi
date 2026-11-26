@@ -190,54 +190,12 @@ impl Locale {
 
     /// Canonical BCP-47 language tag for this locale.
     pub const fn code(self) -> &'static str {
-        match self {
-            Self::En => "en",
-            Self::De => "de",
-            Self::Es => "es",
-            Self::Fr => "fr",
-            Self::It => "it",
-            Self::PtBr => "pt-BR",
-            Self::Nl => "nl",
-            Self::Ru => "ru",
-            Self::Uk => "uk",
-            Self::Ja => "ja",
-            Self::Ko => "ko",
-            Self::ZhCn => "zh-CN",
-            Self::ZhTw => "zh-TW",
-            Self::Ar => "ar",
-            Self::Hi => "hi",
-            Self::Pl => "pl",
-            Self::Tr => "tr",
-            Self::Sv => "sv",
-            Self::Vi => "vi",
-            Self::Id => "id",
-        }
+        TimeLocale::from_cli_locale(self).code()
     }
 
     /// Endonym (native name) of this locale.
     pub const fn native_name(self) -> &'static str {
-        match self {
-            Self::En => "English",
-            Self::De => "Deutsch",
-            Self::Es => "Español",
-            Self::Fr => "Français",
-            Self::It => "Italiano",
-            Self::PtBr => "Português (Brasil)",
-            Self::Nl => "Nederlands",
-            Self::Ru => "Русский",
-            Self::Uk => "Українська",
-            Self::Ja => "日本語",
-            Self::Ko => "한국어",
-            Self::ZhCn => "简体中文",
-            Self::ZhTw => "繁體中文",
-            Self::Ar => "العربية",
-            Self::Hi => "हिन्दी",
-            Self::Pl => "Polski",
-            Self::Tr => "Türkçe",
-            Self::Sv => "Svenska",
-            Self::Vi => "Tiếng Việt",
-            Self::Id => "Bahasa Indonesia",
-        }
+        TimeLocale::from_cli_locale(self).native_name()
     }
 
     /// Parses a BCP-47 or POSIX locale identifier (such as `de_DE.UTF-8`,
