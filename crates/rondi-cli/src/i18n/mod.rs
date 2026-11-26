@@ -7,7 +7,7 @@
 
 mod catalogs;
 
-use rondi::Locale;
+use rondi::{Locale, TimeLocale};
 use std::borrow::Cow;
 
 /// All user-facing CLI strings and command help bodies for one locale.
@@ -163,24 +163,28 @@ pub(crate) const EN_PIPE_USAGE: &str = concat!(
 /// Resolves the active CLI messages locale from POSIX environment variables
 /// (`LC_ALL`, then `LC_MESSAGES`, then `LANG`), defaulting to [`Locale::En`].
 pub(crate) fn messages_locale() -> Locale {
-    resolve_posix_vars(&["LC_ALL", "LC_MESSAGES", "LANG"])
+    first_non_empty_env(&["LC_ALL", "LC_MESSAGES", "LANG"])
+        .as_deref()
+        .map_or(Locale::En, Locale::from_posix_env)
 }
 
 /// Resolves the active `LC_TIME` locale from POSIX environment variables
-/// (`LC_ALL`, then `LC_TIME`, then `LANG`), defaulting to [`Locale::En`].
-pub(crate) fn time_locale() -> Locale {
-    resolve_posix_vars(&["LC_ALL", "LC_TIME", "LANG"])
+/// (`LC_ALL`, then `LC_TIME`, then `LANG`), defaulting to [`TimeLocale::En`].
+pub(crate) fn time_locale() -> TimeLocale {
+    first_non_empty_env(&["LC_ALL", "LC_TIME", "LANG"])
+        .as_deref()
+        .map_or(TimeLocale::En, TimeLocale::from_posix_env)
 }
 
-fn resolve_posix_vars(vars: &[&str]) -> Locale {
+fn first_non_empty_env(vars: &[&str]) -> Option<String> {
     for name in vars {
         if let Ok(value) = std::env::var(name)
             && !value.is_empty()
         {
-            return Locale::from_posix_env(&value);
+            return Some(value);
         }
     }
-    Locale::En
+    None
 }
 
 /// Returns the static message catalog for `locale`.

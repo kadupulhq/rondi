@@ -1,13 +1,15 @@
-//! Pure-Rust locale types and `LC_TIME` formatting tables for Tier 1 locales.
+//! Pure-Rust locale types and `LC_TIME` formatting tables.
 //!
 //! This module has no ambient authority: it never reads environment variables
-//! or calls OS locale APIs. Callers pass an explicit [`Locale`] value.
+//! or calls OS locale APIs. Callers pass an explicit [`Locale`] or
+//! [`TimeLocale`] value.
+
+mod time_tables;
 
 use std::fmt;
 use std::str::FromStr;
 
-/// Tier 1 locales supported by Rondi's pure-Rust localization and `LC_TIME`
-/// formatter.
+/// Tier 1 locales supported by Rondi's pure-Rust CLI localization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Locale {
     #[default]
@@ -31,6 +33,64 @@ pub enum Locale {
     Sv,
     Vi,
     Id,
+}
+
+/// Locales supported by Rondi's pure-Rust `LC_TIME` formatter (the 20 Tier 1
+/// locales plus 31 additional regional and Kadupul locales, 51 in total).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TimeLocale {
+    #[default]
+    En,
+    De,
+    Es,
+    Fr,
+    It,
+    PtBr,
+    Nl,
+    Ru,
+    Uk,
+    Ja,
+    Ko,
+    ZhCn,
+    ZhTw,
+    Ar,
+    Hi,
+    Pl,
+    Tr,
+    Sv,
+    Vi,
+    Id,
+    AfZa,
+    AmEt,
+    ArEg,
+    ArMa,
+    ArSa,
+    BgBg,
+    BnBd,
+    ElGr,
+    EnGb,
+    EsMx,
+    FaIr,
+    FrCa,
+    FrMa,
+    FrSn,
+    HaNg,
+    HeIl,
+    IgNg,
+    LvLv,
+    MgMg,
+    MrIn,
+    PtPt,
+    RwRw,
+    SoSo,
+    SwKe,
+    TaIn,
+    TeIn,
+    ThTh,
+    UrPk,
+    XhZa,
+    YoNg,
+    ZuZa,
 }
 
 /// Error returned when parsing an unsupported locale identifier via [`FromStr`].
@@ -83,8 +143,28 @@ pub struct TimeLocaleData {
     pub time_12h_fmt: &'static str,
 }
 
+fn normalize_locale_tag(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Strip POSIX `@modifier` and `.codeset` suffixes.
+    let base = trimmed
+        .split('@')
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .trim();
+    if base.is_empty() {
+        return None;
+    }
+    Some(base.to_ascii_lowercase().replace('_', "-"))
+}
+
 impl Locale {
-    /// All 20 supported Tier 1 locales in canonical order.
+    /// All 20 supported Tier 1 CLI locales in canonical order.
     pub const ALL: &'static [Locale] = &[
         Self::En,
         Self::De,
@@ -161,27 +241,12 @@ impl Locale {
     }
 
     /// Parses a BCP-47 or POSIX locale identifier (such as `de_DE.UTF-8`,
-    /// `pt-BR`, `zh_Hant_TW`, `C`, or `POSIX@euro`).
+    /// `pt-BR`, `zh_Hant_TW`, `ar-MA`, `fr-CA`, `C`, or `POSIX@euro`) into one
+    /// of the 20 Tier 1 CLI locales.
     ///
     /// Returns `None` for empty or unrecognized identifiers.
     pub fn parse(raw: &str) -> Option<Self> {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        // Strip POSIX `@modifier` and `.codeset` suffixes.
-        let base = trimmed
-            .split('@')
-            .next()
-            .unwrap_or("")
-            .split('.')
-            .next()
-            .unwrap_or("")
-            .trim();
-        if base.is_empty() {
-            return None;
-        }
-        let normalized = base.to_ascii_lowercase().replace('_', "-");
+        let normalized = normalize_locale_tag(raw)?;
         if matches!(normalized.as_str(), "c" | "posix") {
             return Some(Self::En);
         }
@@ -229,6 +294,348 @@ impl Locale {
 
     /// Returns the pure-Rust `LC_TIME` formatting tables for this locale.
     pub const fn time_data(self) -> &'static TimeLocaleData {
+        TimeLocale::from_cli_locale(self).time_data()
+    }
+}
+
+impl fmt::Display for Locale {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+impl FromStr for Locale {
+    type Err = ParseLocaleError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or_else(|| ParseLocaleError { raw: s.to_owned() })
+    }
+}
+
+impl TimeLocale {
+    /// All 51 supported pure-Rust `LC_TIME` locales in canonical order.
+    pub const ALL: &'static [TimeLocale] = &[
+        Self::En,
+        Self::De,
+        Self::Es,
+        Self::Fr,
+        Self::It,
+        Self::PtBr,
+        Self::Nl,
+        Self::Ru,
+        Self::Uk,
+        Self::Ja,
+        Self::Ko,
+        Self::ZhCn,
+        Self::ZhTw,
+        Self::Ar,
+        Self::Hi,
+        Self::Pl,
+        Self::Tr,
+        Self::Sv,
+        Self::Vi,
+        Self::Id,
+        Self::AfZa,
+        Self::AmEt,
+        Self::ArEg,
+        Self::ArMa,
+        Self::ArSa,
+        Self::BgBg,
+        Self::BnBd,
+        Self::ElGr,
+        Self::EnGb,
+        Self::EsMx,
+        Self::FaIr,
+        Self::FrCa,
+        Self::FrMa,
+        Self::FrSn,
+        Self::HaNg,
+        Self::HeIl,
+        Self::IgNg,
+        Self::LvLv,
+        Self::MgMg,
+        Self::MrIn,
+        Self::PtPt,
+        Self::RwRw,
+        Self::SoSo,
+        Self::SwKe,
+        Self::TaIn,
+        Self::TeIn,
+        Self::ThTh,
+        Self::UrPk,
+        Self::XhZa,
+        Self::YoNg,
+        Self::ZuZa,
+    ];
+
+    /// Converts a Tier 1 CLI [`Locale`] into its corresponding [`TimeLocale`].
+    pub const fn from_cli_locale(locale: Locale) -> Self {
+        match locale {
+            Locale::En => Self::En,
+            Locale::De => Self::De,
+            Locale::Es => Self::Es,
+            Locale::Fr => Self::Fr,
+            Locale::It => Self::It,
+            Locale::PtBr => Self::PtBr,
+            Locale::Nl => Self::Nl,
+            Locale::Ru => Self::Ru,
+            Locale::Uk => Self::Uk,
+            Locale::Ja => Self::Ja,
+            Locale::Ko => Self::Ko,
+            Locale::ZhCn => Self::ZhCn,
+            Locale::ZhTw => Self::ZhTw,
+            Locale::Ar => Self::Ar,
+            Locale::Hi => Self::Hi,
+            Locale::Pl => Self::Pl,
+            Locale::Tr => Self::Tr,
+            Locale::Sv => Self::Sv,
+            Locale::Vi => Self::Vi,
+            Locale::Id => Self::Id,
+        }
+    }
+
+    /// Maps this `LC_TIME` locale to its nearest Tier 1 CLI message [`Locale`].
+    pub const fn message_locale(self) -> Locale {
+        match self {
+            Self::En | Self::EnGb => Locale::En,
+            Self::De => Locale::De,
+            Self::Es | Self::EsMx => Locale::Es,
+            Self::Fr | Self::FrCa | Self::FrMa | Self::FrSn => Locale::Fr,
+            Self::It => Locale::It,
+            Self::PtBr | Self::PtPt => Locale::PtBr,
+            Self::Nl => Locale::Nl,
+            Self::Ru => Locale::Ru,
+            Self::Uk => Locale::Uk,
+            Self::Ja => Locale::Ja,
+            Self::Ko => Locale::Ko,
+            Self::ZhCn => Locale::ZhCn,
+            Self::ZhTw => Locale::ZhTw,
+            Self::Ar | Self::ArEg | Self::ArMa | Self::ArSa => Locale::Ar,
+            Self::Hi => Locale::Hi,
+            Self::Pl => Locale::Pl,
+            Self::Tr => Locale::Tr,
+            Self::Sv => Locale::Sv,
+            Self::Vi => Locale::Vi,
+            Self::Id => Locale::Id,
+            _ => Locale::En,
+        }
+    }
+
+    /// Canonical BCP-47 tag for this `LC_TIME` locale.
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::En => "en",
+            Self::De => "de",
+            Self::Es => "es",
+            Self::Fr => "fr",
+            Self::It => "it",
+            Self::PtBr => "pt-BR",
+            Self::Nl => "nl",
+            Self::Ru => "ru",
+            Self::Uk => "uk",
+            Self::Ja => "ja",
+            Self::Ko => "ko",
+            Self::ZhCn => "zh-CN",
+            Self::ZhTw => "zh-TW",
+            Self::Ar => "ar",
+            Self::Hi => "hi",
+            Self::Pl => "pl",
+            Self::Tr => "tr",
+            Self::Sv => "sv",
+            Self::Vi => "vi",
+            Self::Id => "id",
+            Self::AfZa => "af-ZA",
+            Self::AmEt => "am-ET",
+            Self::ArEg => "ar-EG",
+            Self::ArMa => "ar-MA",
+            Self::ArSa => "ar-SA",
+            Self::BgBg => "bg-BG",
+            Self::BnBd => "bn-BD",
+            Self::ElGr => "el-GR",
+            Self::EnGb => "en-GB",
+            Self::EsMx => "es-MX",
+            Self::FaIr => "fa-IR",
+            Self::FrCa => "fr-CA",
+            Self::FrMa => "fr-MA",
+            Self::FrSn => "fr-SN",
+            Self::HaNg => "ha-NG",
+            Self::HeIl => "he-IL",
+            Self::IgNg => "ig-NG",
+            Self::LvLv => "lv-LV",
+            Self::MgMg => "mg-MG",
+            Self::MrIn => "mr-IN",
+            Self::PtPt => "pt-PT",
+            Self::RwRw => "rw-RW",
+            Self::SoSo => "so-SO",
+            Self::SwKe => "sw-KE",
+            Self::TaIn => "ta-IN",
+            Self::TeIn => "te-IN",
+            Self::ThTh => "th-TH",
+            Self::UrPk => "ur-PK",
+            Self::XhZa => "xh-ZA",
+            Self::YoNg => "yo-NG",
+            Self::ZuZa => "zu-ZA",
+        }
+    }
+
+    /// Endonym (native name) of this `LC_TIME` locale.
+    pub const fn native_name(self) -> &'static str {
+        match self {
+            Self::En => "English",
+            Self::De => "Deutsch",
+            Self::Es => "Español",
+            Self::Fr => "Français",
+            Self::It => "Italiano",
+            Self::PtBr => "Português (Brasil)",
+            Self::Nl => "Nederlands",
+            Self::Ru => "Русский",
+            Self::Uk => "Українська",
+            Self::Ja => "日本語",
+            Self::Ko => "한국어",
+            Self::ZhCn => "简体中文",
+            Self::ZhTw => "繁體中文",
+            Self::Ar => "العربية",
+            Self::Hi => "हिन्दी",
+            Self::Pl => "Polski",
+            Self::Tr => "Türkçe",
+            Self::Sv => "Svenska",
+            Self::Vi => "Tiếng Việt",
+            Self::Id => "Bahasa Indonesia",
+            Self::AfZa => "Afrikaans (Suid-Afrika)",
+            Self::AmEt => "አማርኛ",
+            Self::ArEg => "العربية (مصر)",
+            Self::ArMa => "العربية (المغرب)",
+            Self::ArSa => "العربية (المملكة العربية السعودية)",
+            Self::BgBg => "Български",
+            Self::BnBd => "বাংলা",
+            Self::ElGr => "Ελληνικά",
+            Self::EnGb => "English (UK)",
+            Self::EsMx => "Español (México)",
+            Self::FaIr => "فارسی",
+            Self::FrCa => "Français (Canada)",
+            Self::FrMa => "Français (Maroc)",
+            Self::FrSn => "Français (Sénégal)",
+            Self::HaNg => "Hausa (Najeriya)",
+            Self::HeIl => "עברית",
+            Self::IgNg => "Igbo",
+            Self::LvLv => "Latviešu",
+            Self::MgMg => "Malagasy",
+            Self::MrIn => "मराठी",
+            Self::PtPt => "Português (Portugal)",
+            Self::RwRw => "Kinyarwanda",
+            Self::SoSo => "Soomaali (Soomaaliya)",
+            Self::SwKe => "Kiswahili (Kenya)",
+            Self::TaIn => "தமிழ்",
+            Self::TeIn => "తెలుగు",
+            Self::ThTh => "ไทย",
+            Self::UrPk => "اردو",
+            Self::XhZa => "isiXhosa",
+            Self::YoNg => "Yorùbá",
+            Self::ZuZa => "isiZulu",
+        }
+    }
+
+    /// Parses a BCP-47 or POSIX locale identifier into one of the 51 supported
+    /// pure-Rust `LC_TIME` locales, preserving regional conventions such as
+    /// `en-GB`, `ar-MA`, `ar-EG`, `ar-SA`, `es-MX`, `fr-CA`, `fr-MA`, `fr-SN`,
+    /// and `pt-PT`.
+    pub fn parse(raw: &str) -> Option<Self> {
+        let normalized = normalize_locale_tag(raw)?;
+        if matches!(normalized.as_str(), "c" | "posix") {
+            return Some(Self::En);
+        }
+        let mut parts = normalized.split('-');
+        let lang = parts.next()?;
+        let rest: Vec<&str> = parts.collect();
+        let has_region = |region: &str| rest.contains(&region);
+        match lang {
+            "en" => Some(if has_region("gb") {
+                Self::EnGb
+            } else {
+                Self::En
+            }),
+            "de" => Some(Self::De),
+            "es" => Some(if has_region("mx") {
+                Self::EsMx
+            } else {
+                Self::Es
+            }),
+            "fr" => Some(if has_region("ca") {
+                Self::FrCa
+            } else if has_region("ma") {
+                Self::FrMa
+            } else if has_region("sn") {
+                Self::FrSn
+            } else {
+                Self::Fr
+            }),
+            "it" => Some(Self::It),
+            "pt" => Some(if has_region("pt") {
+                Self::PtPt
+            } else {
+                Self::PtBr
+            }),
+            "nl" => Some(Self::Nl),
+            "ru" => Some(Self::Ru),
+            "uk" => Some(Self::Uk),
+            "ja" => Some(Self::Ja),
+            "ko" => Some(Self::Ko),
+            "zh" => {
+                let traditional = rest
+                    .iter()
+                    .any(|sub| matches!(*sub, "tw" | "hk" | "mo" | "hant"));
+                Some(if traditional { Self::ZhTw } else { Self::ZhCn })
+            }
+            "ar" => Some(if has_region("eg") {
+                Self::ArEg
+            } else if has_region("ma") {
+                Self::ArMa
+            } else if has_region("sa") {
+                Self::ArSa
+            } else {
+                Self::Ar
+            }),
+            "hi" => Some(Self::Hi),
+            "pl" => Some(Self::Pl),
+            "tr" => Some(Self::Tr),
+            "sv" => Some(Self::Sv),
+            "vi" => Some(Self::Vi),
+            "id" | "in" => Some(Self::Id),
+            "af" => Some(Self::AfZa),
+            "am" => Some(Self::AmEt),
+            "bg" => Some(Self::BgBg),
+            "bn" => Some(Self::BnBd),
+            "el" => Some(Self::ElGr),
+            "fa" => Some(Self::FaIr),
+            "ha" => Some(Self::HaNg),
+            "he" | "iw" => Some(Self::HeIl),
+            "ig" => Some(Self::IgNg),
+            "lv" => Some(Self::LvLv),
+            "mg" => Some(Self::MgMg),
+            "mr" => Some(Self::MrIn),
+            "rw" => Some(Self::RwRw),
+            "so" => Some(Self::SoSo),
+            "sw" => Some(Self::SwKe),
+            "ta" => Some(Self::TaIn),
+            "te" => Some(Self::TeIn),
+            "th" => Some(Self::ThTh),
+            "ur" => Some(Self::UrPk),
+            "xh" => Some(Self::XhZa),
+            "yo" => Some(Self::YoNg),
+            "zu" => Some(Self::ZuZa),
+            _ => None,
+        }
+    }
+
+    /// Resolves a POSIX `LC_TIME` environment variable value, falling back to
+    /// [`TimeLocale::En`] when empty, `C`/`POSIX`, or unrecognized.
+    pub fn from_posix_env(raw: &str) -> Self {
+        Self::parse(raw).unwrap_or(Self::En)
+    }
+
+    /// Returns the pure-Rust CLDR `LC_TIME` formatting tables for this locale.
+    pub const fn time_data(self) -> &'static TimeLocaleData {
+        use time_tables::*;
         match self {
             Self::En => &TIME_EN,
             Self::De => &TIME_DE,
@@ -250,17 +657,54 @@ impl Locale {
             Self::Sv => &TIME_SV,
             Self::Vi => &TIME_VI,
             Self::Id => &TIME_ID,
+            Self::AfZa => &TIME_AF_ZA,
+            Self::AmEt => &TIME_AM_ET,
+            Self::ArEg => &TIME_AR_EG,
+            Self::ArMa => &TIME_AR_MA,
+            Self::ArSa => &TIME_AR_SA,
+            Self::BgBg => &TIME_BG_BG,
+            Self::BnBd => &TIME_BN_BD,
+            Self::ElGr => &TIME_EL_GR,
+            Self::EnGb => &TIME_EN_GB,
+            Self::EsMx => &TIME_ES_MX,
+            Self::FaIr => &TIME_FA_IR,
+            Self::FrCa => &TIME_FR_CA,
+            Self::FrMa => &TIME_FR_MA,
+            Self::FrSn => &TIME_FR_SN,
+            Self::HaNg => &TIME_HA_NG,
+            Self::HeIl => &TIME_HE_IL,
+            Self::IgNg => &TIME_IG_NG,
+            Self::LvLv => &TIME_LV_LV,
+            Self::MgMg => &TIME_MG_MG,
+            Self::MrIn => &TIME_MR_IN,
+            Self::PtPt => &TIME_PT_PT,
+            Self::RwRw => &TIME_RW_RW,
+            Self::SoSo => &TIME_SO_SO,
+            Self::SwKe => &TIME_SW_KE,
+            Self::TaIn => &TIME_TA_IN,
+            Self::TeIn => &TIME_TE_IN,
+            Self::ThTh => &TIME_TH_TH,
+            Self::UrPk => &TIME_UR_PK,
+            Self::XhZa => &TIME_XH_ZA,
+            Self::YoNg => &TIME_YO_NG,
+            Self::ZuZa => &TIME_ZU_ZA,
         }
     }
 }
 
-impl fmt::Display for Locale {
+impl From<Locale> for TimeLocale {
+    fn from(locale: Locale) -> Self {
+        Self::from_cli_locale(locale)
+    }
+}
+
+impl fmt::Display for TimeLocale {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.code())
     }
 }
 
-impl FromStr for Locale {
+impl FromStr for TimeLocale {
     type Err = ParseLocaleError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -324,10 +768,10 @@ impl DateTimeParts {
 }
 
 /// Formats `dt` using a `strftime` format string and the pure-Rust `LC_TIME`
-/// tables for `locale`.
-pub fn format_strftime(fmt: &str, dt: &DateTimeParts, locale: Locale) -> String {
+/// tables for `locale` (accepting either [`Locale`] or [`TimeLocale`]).
+pub fn format_strftime(fmt: &str, dt: &DateTimeParts, locale: impl Into<TimeLocale>) -> String {
     let mut out = String::with_capacity(fmt.len() + 16);
-    format_strftime_into(fmt, dt, locale, &mut out, 0);
+    format_strftime_into(fmt, dt, locale.into(), &mut out, 0);
     out
 }
 
@@ -336,7 +780,7 @@ pub fn format_strftime(fmt: &str, dt: &DateTimeParts, locale: Locale) -> String 
 pub fn format_strftime_bytes(
     fmt: &str,
     dt: &DateTimeParts,
-    locale: Locale,
+    locale: impl Into<TimeLocale>,
     capacity: usize,
 ) -> Vec<u8> {
     if capacity == 0 {
@@ -372,7 +816,7 @@ enum CaseMod {
 fn format_strftime_into(
     fmt: &str,
     dt: &DateTimeParts,
-    locale: Locale,
+    locale: TimeLocale,
     out: &mut String,
     depth: u8,
 ) {
@@ -727,747 +1171,13 @@ fn iso_week_year(dt: &DateTimeParts) -> (i32, u8) {
     }
 }
 
-static TIME_EN: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "January",
-        "February",
-        "March",
-        "April",
-        "May",
-        "June",
-        "July",
-        "August",
-        "September",
-        "October",
-        "November",
-        "December",
-    ],
-    months_abbr: [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ],
-    weekdays_full: [
-        "Sunday",
-        "Monday",
-        "Tuesday",
-        "Wednesday",
-        "Thursday",
-        "Friday",
-        "Saturday",
-    ],
-    weekdays_abbr: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
-    am: "AM",
-    pm: "PM",
-    am_lower: "am",
-    pm_lower: "pm",
-    date_time_fmt: "%a %b %e %H:%M:%S %Y",
-    date_fmt: "%m/%d/%y",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%I:%M:%S %p",
-};
-
-static TIME_DE: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "Januar",
-        "Februar",
-        "März",
-        "April",
-        "Mai",
-        "Juni",
-        "Juli",
-        "August",
-        "September",
-        "Oktober",
-        "November",
-        "Dezember",
-    ],
-    months_abbr: [
-        "Jan", "Feb", "Mär", "Apr", "Mai", "Jun", "Jul", "Aug", "Sep", "Okt", "Nov", "Dez",
-    ],
-    weekdays_full: [
-        "Sonntag",
-        "Montag",
-        "Dienstag",
-        "Mittwoch",
-        "Donnerstag",
-        "Freitag",
-        "Samstag",
-    ],
-    weekdays_abbr: ["So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"],
-    am: "AM",
-    pm: "PM",
-    am_lower: "am",
-    pm_lower: "pm",
-    date_time_fmt: "%a %d %b %Y %H:%M:%S %Z",
-    date_fmt: "%d.%m.%Y",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%I:%M:%S %p",
-};
-
-static TIME_ES: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "enero",
-        "febrero",
-        "marzo",
-        "abril",
-        "mayo",
-        "junio",
-        "julio",
-        "agosto",
-        "septiembre",
-        "octubre",
-        "noviembre",
-        "diciembre",
-    ],
-    months_abbr: [
-        "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic",
-    ],
-    weekdays_full: [
-        "domingo",
-        "lunes",
-        "martes",
-        "miércoles",
-        "jueves",
-        "viernes",
-        "sábado",
-    ],
-    weekdays_abbr: ["dom", "lun", "mar", "mié", "jue", "vie", "sáb"],
-    am: "a. m.",
-    pm: "p. m.",
-    am_lower: "a. m.",
-    pm_lower: "p. m.",
-    date_time_fmt: "%a %d %b %Y %H:%M:%S %Z",
-    date_fmt: "%d/%m/%Y",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%I:%M:%S %p",
-};
-
-static TIME_FR: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "janvier",
-        "février",
-        "mars",
-        "avril",
-        "mai",
-        "juin",
-        "juillet",
-        "août",
-        "septembre",
-        "octobre",
-        "novembre",
-        "décembre",
-    ],
-    months_abbr: [
-        "janv.", "févr.", "mars", "avr.", "mai", "juin", "juil.", "août", "sept.", "oct.", "nov.",
-        "déc.",
-    ],
-    weekdays_full: [
-        "dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi",
-    ],
-    weekdays_abbr: ["dim.", "lun.", "mar.", "mer.", "jeu.", "ven.", "sam."],
-    am: "AM",
-    pm: "PM",
-    am_lower: "am",
-    pm_lower: "pm",
-    date_time_fmt: "%a %d %b %Y %H:%M:%S %Z",
-    date_fmt: "%d/%m/%Y",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%I:%M:%S %p",
-};
-
-static TIME_IT: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "gennaio",
-        "febbraio",
-        "marzo",
-        "aprile",
-        "maggio",
-        "giugno",
-        "luglio",
-        "agosto",
-        "settembre",
-        "ottobre",
-        "novembre",
-        "dicembre",
-    ],
-    months_abbr: [
-        "gen", "feb", "mar", "apr", "mag", "giu", "lug", "ago", "set", "ott", "nov", "dic",
-    ],
-    weekdays_full: [
-        "domenica",
-        "lunedì",
-        "martedì",
-        "mercoledì",
-        "giovedì",
-        "venerdì",
-        "sabato",
-    ],
-    weekdays_abbr: ["dom", "lun", "mar", "mer", "gio", "ven", "sab"],
-    am: "AM",
-    pm: "PM",
-    am_lower: "am",
-    pm_lower: "pm",
-    date_time_fmt: "%a %d %b %Y %H:%M:%S %Z",
-    date_fmt: "%d/%m/%Y",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%I:%M:%S %p",
-};
-
-static TIME_PT_BR: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "janeiro",
-        "fevereiro",
-        "março",
-        "abril",
-        "maio",
-        "junho",
-        "julho",
-        "agosto",
-        "setembro",
-        "outubro",
-        "novembro",
-        "dezembro",
-    ],
-    months_abbr: [
-        "jan", "fev", "mar", "abr", "mai", "jun", "jul", "ago", "set", "out", "nov", "dez",
-    ],
-    weekdays_full: [
-        "domingo",
-        "segunda-feira",
-        "terça-feira",
-        "quarta-feira",
-        "quinta-feira",
-        "sexta-feira",
-        "sábado",
-    ],
-    weekdays_abbr: ["dom", "seg", "ter", "qua", "qui", "sex", "sáb"],
-    am: "AM",
-    pm: "PM",
-    am_lower: "am",
-    pm_lower: "pm",
-    date_time_fmt: "%a %d %b %Y %H:%M:%S %Z",
-    date_fmt: "%d/%m/%Y",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%I:%M:%S %p",
-};
-
-static TIME_NL: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "januari",
-        "februari",
-        "maart",
-        "april",
-        "mei",
-        "juni",
-        "juli",
-        "augustus",
-        "september",
-        "oktober",
-        "november",
-        "december",
-    ],
-    months_abbr: [
-        "jan", "feb", "mrt", "apr", "mei", "jun", "jul", "aug", "sep", "okt", "nov", "dec",
-    ],
-    weekdays_full: [
-        "zondag",
-        "maandag",
-        "dinsdag",
-        "woensdag",
-        "donderdag",
-        "vrijdag",
-        "zaterdag",
-    ],
-    weekdays_abbr: ["zo", "ma", "di", "wo", "do", "vr", "za"],
-    am: "a.m.",
-    pm: "p.m.",
-    am_lower: "a.m.",
-    pm_lower: "p.m.",
-    date_time_fmt: "%a %d %b %Y %H:%M:%S %Z",
-    date_fmt: "%d-%m-%Y",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%I:%M:%S %p",
-};
-
-static TIME_RU: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "январь",
-        "февраль",
-        "март",
-        "апрель",
-        "май",
-        "июнь",
-        "июль",
-        "август",
-        "сентябрь",
-        "октябрь",
-        "ноябрь",
-        "декабрь",
-    ],
-    months_abbr: [
-        "янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек",
-    ],
-    weekdays_full: [
-        "воскресенье",
-        "понедельник",
-        "вторник",
-        "среда",
-        "четверг",
-        "пятница",
-        "суббота",
-    ],
-    weekdays_abbr: ["вс", "пн", "вт", "ср", "чт", "пт", "сб"],
-    am: "ДП",
-    pm: "ПП",
-    am_lower: "дп",
-    pm_lower: "пп",
-    date_time_fmt: "%a %d %b %Y %H:%M:%S %Z",
-    date_fmt: "%d.%m.%Y",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%I:%M:%S %p",
-};
-
-static TIME_UK: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "січень",
-        "лютий",
-        "березень",
-        "квітень",
-        "травень",
-        "червень",
-        "липень",
-        "серпень",
-        "вересень",
-        "жовтень",
-        "листопад",
-        "грудень",
-    ],
-    months_abbr: [
-        "січ", "лют", "бер", "кві", "тра", "чер", "лип", "сер", "вер", "жов", "лис", "гру",
-    ],
-    weekdays_full: [
-        "неділя",
-        "понеділок",
-        "вівторок",
-        "середа",
-        "четвер",
-        "п'ятниця",
-        "субота",
-    ],
-    weekdays_abbr: ["нд", "пн", "вт", "ср", "чт", "пт", "сб"],
-    am: "дп",
-    pm: "пп",
-    am_lower: "дп",
-    pm_lower: "пп",
-    date_time_fmt: "%a %d %b %Y %H:%M:%S %Z",
-    date_fmt: "%d.%m.%Y",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%I:%M:%S %p",
-};
-
-static TIME_JA: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月",
-    ],
-    months_abbr: [
-        "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月",
-    ],
-    weekdays_full: [
-        "日曜日",
-        "月曜日",
-        "火曜日",
-        "水曜日",
-        "木曜日",
-        "金曜日",
-        "土曜日",
-    ],
-    weekdays_abbr: ["日", "月", "火", "水", "木", "金", "土"],
-    am: "午前",
-    pm: "午後",
-    am_lower: "午前",
-    pm_lower: "午後",
-    date_time_fmt: "%Y年%m月%d日 %H時%M分%S秒",
-    date_fmt: "%Y/%m/%d",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%p %I時%M分%S秒",
-};
-
-static TIME_KO: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "1월", "2월", "3월", "4월", "5월", "6월", "7월", "8월", "9월", "10월", "11월", "12월",
-    ],
-    months_abbr: [
-        "1월", "2월", "3월", "4월", "5월", "6월", "7월", "8월", "9월", "10월", "11월", "12월",
-    ],
-    weekdays_full: [
-        "일요일",
-        "월요일",
-        "화요일",
-        "수요일",
-        "목요일",
-        "금요일",
-        "토요일",
-    ],
-    weekdays_abbr: ["일", "월", "화", "수", "목", "금", "토"],
-    am: "오전",
-    pm: "오후",
-    am_lower: "오전",
-    pm_lower: "오후",
-    date_time_fmt: "%Y년 %m월 %d일 (%a) %p %I:%M:%S %Z",
-    date_fmt: "%Y. %m. %d.",
-    time_fmt: "%p %I:%M:%S",
-    time_12h_fmt: "%p %I:%M:%S",
-};
-
-static TIME_ZH_CN: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "一月",
-        "二月",
-        "三月",
-        "四月",
-        "五月",
-        "六月",
-        "七月",
-        "八月",
-        "九月",
-        "十月",
-        "十一月",
-        "十二月",
-    ],
-    months_abbr: [
-        "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月",
-    ],
-    weekdays_full: [
-        "星期日",
-        "星期一",
-        "星期二",
-        "星期三",
-        "星期四",
-        "星期五",
-        "星期六",
-    ],
-    weekdays_abbr: ["周日", "周一", "周二", "周三", "周四", "周五", "周六"],
-    am: "上午",
-    pm: "下午",
-    am_lower: "上午",
-    pm_lower: "下午",
-    date_time_fmt: "%Y年%m月%d日 %A %H:%M:%S %Z",
-    date_fmt: "%Y/%m/%d",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%p %I:%M:%S",
-};
-
-static TIME_ZH_TW: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "一月",
-        "二月",
-        "三月",
-        "四月",
-        "五月",
-        "六月",
-        "七月",
-        "八月",
-        "九月",
-        "十月",
-        "十一月",
-        "十二月",
-    ],
-    months_abbr: [
-        "1月", "2月", "3月", "4月", "5月", "6月", "7月", "8月", "9月", "10月", "11月", "12月",
-    ],
-    weekdays_full: [
-        "星期日",
-        "星期一",
-        "星期二",
-        "星期三",
-        "星期四",
-        "星期五",
-        "星期六",
-    ],
-    weekdays_abbr: ["週日", "週一", "週二", "週三", "週四", "週五", "週六"],
-    am: "上午",
-    pm: "下午",
-    am_lower: "上午",
-    pm_lower: "下午",
-    date_time_fmt: "%Y年%m月%d日 %A %H:%M:%S %Z",
-    date_fmt: "%Y/%m/%d",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%p %I:%M:%S",
-};
-
-static TIME_AR: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "يناير",
-        "فبراير",
-        "مارس",
-        "أبريل",
-        "مايو",
-        "يونيو",
-        "يوليو",
-        "أغسطس",
-        "سبتمبر",
-        "أكتوبر",
-        "نوفمبر",
-        "ديسمبر",
-    ],
-    months_abbr: [
-        "يناير",
-        "فبراير",
-        "مارس",
-        "أبريل",
-        "مايو",
-        "يونيو",
-        "يوليو",
-        "أغسطس",
-        "سبتمبر",
-        "أكتوبر",
-        "نوفمبر",
-        "ديسمبر",
-    ],
-    weekdays_full: [
-        "الأحد",
-        "الاثنين",
-        "الثلاثاء",
-        "الأربعاء",
-        "الخميس",
-        "الجمعة",
-        "السبت",
-    ],
-    weekdays_abbr: ["أحد", "اثنين", "ثلاثاء", "أربعاء", "خميس", "جمعة", "سبت"],
-    am: "ص",
-    pm: "م",
-    am_lower: "ص",
-    pm_lower: "م",
-    date_time_fmt: "%a %d %b %Y %H:%M:%S %Z",
-    date_fmt: "%d/%m/%Y",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%I:%M:%S %p",
-};
-
-static TIME_HI: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "जनवरी",
-        "फ़रवरी",
-        "मार्च",
-        "अप्रैल",
-        "मई",
-        "जून",
-        "जुलाई",
-        "अगस्त",
-        "सितंबर",
-        "अक्तूबर",
-        "नवंबर",
-        "दिसंबर",
-    ],
-    months_abbr: [
-        "जन॰",
-        "फ़र॰",
-        "मार्च",
-        "अप्रैल",
-        "मई",
-        "जून",
-        "जुल॰",
-        "अग॰",
-        "सित॰",
-        "अक्तू॰",
-        "नव॰",
-        "दिस॰",
-    ],
-    weekdays_full: [
-        "रविवार",
-        "सोमवार",
-        "मंगलवार",
-        "बुधवार",
-        "गुरुवार",
-        "शुक्रवार",
-        "शनिवार",
-    ],
-    weekdays_abbr: ["रवि", "सोम", "मंगल", "बुध", "गुरु", "शुक्र", "शनि"],
-    am: "पूर्वाह्न",
-    pm: "अपराह्न",
-    am_lower: "पूर्वाह्न",
-    pm_lower: "अपराह्न",
-    date_time_fmt: "%A %d %B %Y %I:%M:%S %p %Z",
-    date_fmt: "%d/%m/%Y",
-    time_fmt: "%I:%M:%S %p",
-    time_12h_fmt: "%I:%M:%S %p",
-};
-
-static TIME_PL: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "styczeń",
-        "luty",
-        "marzec",
-        "kwiecień",
-        "maj",
-        "czerwiec",
-        "lipiec",
-        "sierpień",
-        "wrzesień",
-        "październik",
-        "listopad",
-        "grudzień",
-    ],
-    months_abbr: [
-        "sty", "lut", "mar", "kwi", "maj", "cze", "lip", "sie", "wrz", "paź", "lis", "gru",
-    ],
-    weekdays_full: [
-        "niedziela",
-        "poniedziałek",
-        "wtorek",
-        "środa",
-        "czwartek",
-        "piątek",
-        "sobota",
-    ],
-    weekdays_abbr: ["niedz.", "pon.", "wt.", "śr.", "czw.", "pt.", "sob."],
-    am: "AM",
-    pm: "PM",
-    am_lower: "am",
-    pm_lower: "pm",
-    date_time_fmt: "%a %d %b %Y %H:%M:%S %Z",
-    date_fmt: "%d.%m.%Y",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%I:%M:%S %p",
-};
-
-static TIME_TR: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim",
-        "Kasım", "Aralık",
-    ],
-    months_abbr: [
-        "Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara",
-    ],
-    weekdays_full: [
-        "Pazar",
-        "Pazartesi",
-        "Salı",
-        "Çarşamba",
-        "Perşembe",
-        "Cuma",
-        "Cumartesi",
-    ],
-    weekdays_abbr: ["Paz", "Pzt", "Sal", "Çar", "Per", "Cum", "Cmt"],
-    am: "ÖÖ",
-    pm: "ÖS",
-    am_lower: "öö",
-    pm_lower: "ös",
-    date_time_fmt: "%d %b %Y %a %H:%M:%S %Z",
-    date_fmt: "%d.%m.%Y",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%I:%M:%S %p",
-};
-
-static TIME_SV: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "januari",
-        "februari",
-        "mars",
-        "april",
-        "maj",
-        "juni",
-        "juli",
-        "augusti",
-        "september",
-        "oktober",
-        "november",
-        "december",
-    ],
-    months_abbr: [
-        "jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec",
-    ],
-    weekdays_full: [
-        "söndag", "måndag", "tisdag", "onsdag", "torsdag", "fredag", "lördag",
-    ],
-    weekdays_abbr: ["sön", "mån", "tis", "ons", "tor", "fre", "lör"],
-    am: "fm",
-    pm: "em",
-    am_lower: "fm",
-    pm_lower: "em",
-    date_time_fmt: "%a %d %b %Y %H:%M:%S %Z",
-    date_fmt: "%Y-%m-%d",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%I:%M:%S %p",
-};
-
-static TIME_VI: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "Tháng 1",
-        "Tháng 2",
-        "Tháng 3",
-        "Tháng 4",
-        "Tháng 5",
-        "Tháng 6",
-        "Tháng 7",
-        "Tháng 8",
-        "Tháng 9",
-        "Tháng 10",
-        "Tháng 11",
-        "Tháng 12",
-    ],
-    months_abbr: [
-        "Thg 1", "Thg 2", "Thg 3", "Thg 4", "Thg 5", "Thg 6", "Thg 7", "Thg 8", "Thg 9", "Thg 10",
-        "Thg 11", "Thg 12",
-    ],
-    weekdays_full: [
-        "Chủ Nhật",
-        "Thứ Hai",
-        "Thứ Ba",
-        "Thứ Tư",
-        "Thứ Năm",
-        "Thứ Sáu",
-        "Thứ Bảy",
-    ],
-    weekdays_abbr: ["CN", "T2", "T3", "T4", "T5", "T6", "T7"],
-    am: "SA",
-    pm: "CH",
-    am_lower: "sa",
-    pm_lower: "ch",
-    date_time_fmt: "%a %d %b %Y %H:%M:%S %Z",
-    date_fmt: "%d/%m/%Y",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%I:%M:%S %p",
-};
-
-static TIME_ID: TimeLocaleData = TimeLocaleData {
-    months_full: [
-        "Januari",
-        "Februari",
-        "Maret",
-        "April",
-        "Mei",
-        "Juni",
-        "Juli",
-        "Agustus",
-        "September",
-        "Oktober",
-        "November",
-        "Desember",
-    ],
-    months_abbr: [
-        "Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des",
-    ],
-    weekdays_full: [
-        "Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu",
-    ],
-    weekdays_abbr: ["Min", "Sen", "Sel", "Rab", "Kam", "Jum", "Sab"],
-    am: "AM",
-    pm: "PM",
-    am_lower: "am",
-    pm_lower: "pm",
-    date_time_fmt: "%a %d %b %Y %H:%M:%S %Z",
-    date_fmt: "%d/%m/%Y",
-    time_fmt: "%H:%M:%S",
-    time_12h_fmt: "%I:%M:%S %p",
-};
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashSet;
 
     #[test]
-    fn all_20_locales_have_unique_codes_and_round_trip() {
+    fn all_20_cli_locales_have_unique_codes_and_round_trip() {
         assert_eq!(Locale::ALL.len(), 20);
         let mut codes = HashSet::new();
         for &locale in Locale::ALL {
@@ -1480,26 +1190,49 @@ mod tests {
             assert_eq!(Locale::parse(locale.code()), Some(locale));
             assert_eq!(locale.code().parse::<Locale>().unwrap(), locale);
             assert_eq!(locale.to_string(), locale.code());
+            let time_locale: TimeLocale = locale.into();
+            assert_eq!(time_locale.message_locale(), locale);
+            assert_eq!(time_locale.time_data(), locale.time_data());
         }
     }
 
     #[test]
-    fn parse_handles_posix_bcp47_encodings_modifiers_and_fallbacks() {
-        let cases = [
+    fn all_51_time_locales_have_unique_codes_and_round_trip() {
+        assert_eq!(TimeLocale::ALL.len(), 51);
+        let mut codes = HashSet::new();
+        for &locale in TimeLocale::ALL {
+            assert!(
+                codes.insert(locale.code()),
+                "duplicate code {}",
+                locale.code()
+            );
+            assert!(!locale.native_name().is_empty());
+            assert_eq!(TimeLocale::parse(locale.code()), Some(locale));
+            assert_eq!(locale.code().parse::<TimeLocale>().unwrap(), locale);
+            assert_eq!(locale.to_string(), locale.code());
+        }
+    }
+
+    #[test]
+    fn parse_handles_posix_bcp47_regional_and_cli_fallbacks() {
+        let cli_cases = [
             ("C", Some(Locale::En)),
             ("POSIX", Some(Locale::En)),
             ("C.UTF-8", Some(Locale::En)),
             ("en_US.UTF-8", Some(Locale::En)),
+            ("en-GB", Some(Locale::En)),
             ("de_DE.UTF-8", Some(Locale::De)),
             ("de_DE@euro", Some(Locale::De)),
             ("de_AT.ISO-8859-1", Some(Locale::De)),
             ("es_ES.UTF-8", Some(Locale::Es)),
-            ("es_MX", Some(Locale::Es)),
+            ("es-MX", Some(Locale::Es)),
             ("fr_FR.UTF-8", Some(Locale::Fr)),
-            ("fr_CA", Some(Locale::Fr)),
+            ("fr-CA", Some(Locale::Fr)),
+            ("fr-MA", Some(Locale::Fr)),
+            ("fr-SN", Some(Locale::Fr)),
             ("it_IT.UTF-8", Some(Locale::It)),
             ("pt_BR.UTF-8", Some(Locale::PtBr)),
-            ("pt-BR", Some(Locale::PtBr)),
+            ("pt-PT", Some(Locale::PtBr)),
             ("pt", Some(Locale::PtBr)),
             ("nl_NL.UTF-8", Some(Locale::Nl)),
             ("ru_RU.UTF-8", Some(Locale::Ru)),
@@ -1514,7 +1247,8 @@ mod tests {
             ("zh_HK.UTF-8", Some(Locale::ZhTw)),
             ("zh-Hant", Some(Locale::ZhTw)),
             ("ar_SA.UTF-8", Some(Locale::Ar)),
-            ("ar_EG", Some(Locale::Ar)),
+            ("ar-EG", Some(Locale::Ar)),
+            ("ar-MA", Some(Locale::Ar)),
             ("hi_IN.UTF-8", Some(Locale::Hi)),
             ("pl_PL.UTF-8", Some(Locale::Pl)),
             ("tr_TR.UTF-8", Some(Locale::Tr)),
@@ -1526,12 +1260,60 @@ mod tests {
             ("   ", None),
             ("xx_XX.UTF-8", None),
         ];
-        for (input, expected) in cases {
-            assert_eq!(Locale::parse(input), expected, "input={input:?}");
+        for (input, expected) in cli_cases {
+            assert_eq!(Locale::parse(input), expected, "cli input={input:?}");
         }
         assert_eq!(Locale::from_posix_env(""), Locale::En);
         assert_eq!(Locale::from_posix_env("xx_XX"), Locale::En);
         assert_eq!(Locale::from_posix_env("ja_JP.UTF-8"), Locale::Ja);
+
+        let time_cases = [
+            ("C", Some(TimeLocale::En)),
+            ("POSIX", Some(TimeLocale::En)),
+            ("en_US.UTF-8", Some(TimeLocale::En)),
+            ("en_GB.UTF-8", Some(TimeLocale::EnGb)),
+            ("en-GB", Some(TimeLocale::EnGb)),
+            ("ar_EG.UTF-8", Some(TimeLocale::ArEg)),
+            ("ar_MA.UTF-8", Some(TimeLocale::ArMa)),
+            ("ar_SA.UTF-8", Some(TimeLocale::ArSa)),
+            ("ar_JO.UTF-8", Some(TimeLocale::Ar)),
+            ("es_MX.UTF-8", Some(TimeLocale::EsMx)),
+            ("es_ES.UTF-8", Some(TimeLocale::Es)),
+            ("fr_CA.UTF-8", Some(TimeLocale::FrCa)),
+            ("fr_MA.UTF-8", Some(TimeLocale::FrMa)),
+            ("fr_SN.UTF-8", Some(TimeLocale::FrSn)),
+            ("fr_FR.UTF-8", Some(TimeLocale::Fr)),
+            ("pt_PT.UTF-8", Some(TimeLocale::PtPt)),
+            ("pt_BR.UTF-8", Some(TimeLocale::PtBr)),
+            ("af_ZA.UTF-8", Some(TimeLocale::AfZa)),
+            ("am_ET.UTF-8", Some(TimeLocale::AmEt)),
+            ("bg_BG.UTF-8", Some(TimeLocale::BgBg)),
+            ("bn_BD.UTF-8", Some(TimeLocale::BnBd)),
+            ("el_GR.UTF-8", Some(TimeLocale::ElGr)),
+            ("fa_IR.UTF-8", Some(TimeLocale::FaIr)),
+            ("ha_NG.UTF-8", Some(TimeLocale::HaNg)),
+            ("he_IL.UTF-8", Some(TimeLocale::HeIl)),
+            ("iw_IL.UTF-8", Some(TimeLocale::HeIl)),
+            ("ig_NG.UTF-8", Some(TimeLocale::IgNg)),
+            ("lv_LV.UTF-8", Some(TimeLocale::LvLv)),
+            ("mg_MG.UTF-8", Some(TimeLocale::MgMg)),
+            ("mr_IN.UTF-8", Some(TimeLocale::MrIn)),
+            ("rw_RW.UTF-8", Some(TimeLocale::RwRw)),
+            ("so_SO.UTF-8", Some(TimeLocale::SoSo)),
+            ("sw_KE.UTF-8", Some(TimeLocale::SwKe)),
+            ("ta_IN.UTF-8", Some(TimeLocale::TaIn)),
+            ("te_IN.UTF-8", Some(TimeLocale::TeIn)),
+            ("th_TH.UTF-8", Some(TimeLocale::ThTh)),
+            ("ur_PK.UTF-8", Some(TimeLocale::UrPk)),
+            ("xh_ZA.UTF-8", Some(TimeLocale::XhZa)),
+            ("yo_NG.UTF-8", Some(TimeLocale::YoNg)),
+            ("zu_ZA.UTF-8", Some(TimeLocale::ZuZa)),
+            ("xx_XX.UTF-8", None),
+        ];
+        for (input, expected) in time_cases {
+            assert_eq!(TimeLocale::parse(input), expected, "time input={input:?}");
+        }
+        assert_eq!(TimeLocale::from_posix_env("xx_XX"), TimeLocale::En);
     }
 
     #[test]
@@ -1569,16 +1351,19 @@ mod tests {
     }
 
     #[test]
-    fn all_20_time_tables_are_complete_and_format_cleanly() {
+    fn all_51_time_tables_are_complete_and_format_cleanly() {
         let dt = DateTimeParts::from_utc_timestamp(1_000_000_000);
-        for &locale in Locale::ALL {
+        for &locale in TimeLocale::ALL {
             let td = locale.time_data();
-            assert!(td.months_full.iter().all(|s| !s.is_empty()));
-            assert!(td.months_abbr.iter().all(|s| !s.is_empty()));
-            assert!(td.weekdays_full.iter().all(|s| !s.is_empty()));
-            assert!(td.weekdays_abbr.iter().all(|s| !s.is_empty()));
-            assert!(!td.am.is_empty() && !td.pm.is_empty());
-            assert!(!td.am_lower.is_empty() && !td.pm_lower.is_empty());
+            assert!(td.months_full.iter().all(|s| !s.is_empty()), "{locale}");
+            assert!(td.months_abbr.iter().all(|s| !s.is_empty()), "{locale}");
+            assert!(td.weekdays_full.iter().all(|s| !s.is_empty()), "{locale}");
+            assert!(td.weekdays_abbr.iter().all(|s| !s.is_empty()), "{locale}");
+            assert!(!td.am.is_empty() && !td.pm.is_empty(), "{locale}");
+            assert!(
+                !td.am_lower.is_empty() && !td.pm_lower.is_empty(),
+                "{locale}"
+            );
             let rendered = format_strftime("%A %a %B %b %p %P | %c | %x | %X | %r", &dt, locale);
             assert!(!rendered.is_empty(), "{locale}");
             assert!(
@@ -1590,21 +1375,56 @@ mod tests {
             assert!(truncated.len() <= 7);
             assert!(std::str::from_utf8(&truncated).is_ok());
         }
-        // Spot-check distinct script fidelity.
+        // Spot-check distinct regional and script fidelity.
+        assert_eq!(format_strftime("%x", &dt, TimeLocale::EnGb), "09/09/2001");
+        assert_eq!(format_strftime("%x", &dt, TimeLocale::FrCa), "2001-09-09");
         assert_eq!(
-            format_strftime("%A %B", &dt, Locale::De),
-            "Sonntag September"
+            format_strftime("%A %B", &dt, TimeLocale::ArMa),
+            "الأحد شتنبر"
         );
-        assert_eq!(format_strftime("%A %B", &dt, Locale::Ja), "日曜日 9月");
-        assert_eq!(format_strftime("%A %B", &dt, Locale::Ko), "일요일 9월");
-        assert_eq!(format_strftime("%a %B", &dt, Locale::ZhCn), "周日 九月");
-        assert_eq!(format_strftime("%a %B", &dt, Locale::ZhTw), "週日 九月");
-        assert_eq!(format_strftime("%A %B", &dt, Locale::Ar), "الأحد سبتمبر");
-        assert_eq!(format_strftime("%A %B", &dt, Locale::Hi), "रविवार सितंबर");
         assert_eq!(
-            format_strftime("%A %B", &dt, Locale::Ru),
-            "воскресенье сентябрь"
+            format_strftime("%A %B", &dt, TimeLocale::ArEg),
+            "الأحد سبتمبر"
         );
-        assert_eq!(format_strftime("%A %B", &dt, Locale::Uk), "неділя вересень");
+        assert_eq!(
+            format_strftime("%A %B", &dt, TimeLocale::FaIr),
+            "یکشنبه سپتامبر"
+        );
+        assert_eq!(
+            format_strftime("%A %B", &dt, TimeLocale::HeIl),
+            "יום ראשון ספטמבר"
+        );
+        assert_eq!(
+            format_strftime("%A %B", &dt, TimeLocale::ElGr),
+            "Κυριακή Σεπτέμβριος"
+        );
+        assert_eq!(
+            format_strftime("%A %B", &dt, TimeLocale::ThTh),
+            "วันอาทิตย์ กันยายน"
+        );
+        assert_eq!(
+            format_strftime("%A %B", &dt, TimeLocale::YoNg),
+            "Ọjọ́ Àìkú Owewe"
+        );
+        assert_eq!(
+            format_strftime("%A %B", &dt, TimeLocale::AmEt),
+            "እሑድ ሴፕቴምበር"
+        );
+        assert_eq!(
+            format_strftime("%A %B", &dt, TimeLocale::BnBd),
+            "রবিবার সেপ্টেম্বর"
+        );
+        assert_eq!(
+            format_strftime("%A %B", &dt, TimeLocale::TaIn),
+            "ஞாயிறு செப்டம்பர்"
+        );
+        assert_eq!(
+            format_strftime("%A %B", &dt, TimeLocale::TeIn),
+            "ఆదివారం సెప్టెంబర్"
+        );
+        assert_eq!(
+            format_strftime("%A %B", &dt, TimeLocale::UrPk),
+            "اتوار ستمبر"
+        );
     }
 }

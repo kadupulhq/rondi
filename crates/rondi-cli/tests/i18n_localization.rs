@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use rondi::Locale;
+use rondi::{Locale, TimeLocale};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -339,5 +339,88 @@ fn print_strftime_uses_pure_rust_lc_time_for_all_tier1_locales() {
             .output()
             .unwrap();
         assert!(out.status.success(), "locale={locale}");
+    }
+
+    // Verify all 31 extended Kadupul LC_TIME locales render authentic localized
+    // PRINT strftime output via pure-Rust tables even without OS locale packs.
+    let kadupul_cases = [
+        ("af-ZA", "Sondag September 2001-09-09"),
+        ("am-ET", "እሑድ ሴፕቴምበር 09/09/2001"),
+        ("ar-EG", "الأحد سبتمبر 09/09/2001"),
+        ("ar-MA", "الأحد شتنبر 09/09/2001"),
+        ("ar-SA", "الأحد سبتمبر 09/09/2001"),
+        ("bg-BG", "неделя септември 09.09.2001"),
+        ("bn-BD", "রবিবার সেপ্টেম্বর 09/09/2001"),
+        ("el-GR", "Κυριακή Σεπτέμβριος 09/09/2001"),
+        ("en-GB", "Sunday September 09/09/2001"),
+        ("es-MX", "domingo septiembre 09/09/2001"),
+        ("fa-IR", "یکشنبه سپتامبر 2001/09/09"),
+        ("fr-CA", "dimanche septembre 2001-09-09"),
+        ("fr-MA", "dimanche septembre 09/09/2001"),
+        ("fr-SN", "dimanche septembre 09/09/2001"),
+        ("ha-NG", "Lahadi Satumba 09/09/2001"),
+        ("he-IL", "יום ראשון ספטמבר 09.09.2001"),
+        ("ig-NG", "Sọnde Septemba 09/09/2001"),
+        ("lv-LV", "svētdiena septembris 09.09.2001"),
+        ("mg-MG", "Alahady Septambra 2001-09-09"),
+        ("mr-IN", "रविवार सप्टेंबर 09/09/2001"),
+        ("pt-PT", "domingo setembro 09/09/2001"),
+        ("rw-RW", "Ku cyumweru Nzeli 2001-09-09"),
+        ("so-SO", "Axad Sebteembar 09/09/2001"),
+        ("sw-KE", "Jumapili Septemba 09/09/2001"),
+        ("ta-IN", "ஞாயிறு செப்டம்பர் 09/09/2001"),
+        ("te-IN", "ఆదివారం సెప్టెంబర్ 09-09-2001"),
+        ("th-TH", "วันอาทิตย์ กันยายน 09/09/2001"),
+        ("ur-PK", "اتوار ستمبر 09/09/2001"),
+        ("xh-ZA", "Cawe Septemba 2001-09-09"),
+        ("yo-NG", "Ọjọ́ Àìkú Owewe 09/09/2001"),
+        ("zu-ZA", "ISonto Septhemba 2001-09-09"),
+    ];
+    for (lc_time, expected) in kadupul_cases {
+        let out = clean_locale_cmd(&rrdtool)
+            .env("LC_ALL", "")
+            .env("LC_TIME", lc_time)
+            .args([
+                "graph",
+                "/dev/null",
+                "--start",
+                "1000000000",
+                "--end",
+                "1000000300",
+                &def,
+                "VDEF:v=x,MAXIMUM",
+                "PRINT:v:%A %B %x:strftime",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "lc_time={lc_time}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        let line = stdout.lines().nth(1).unwrap_or("");
+        assert_eq!(line, expected, "lc_time={lc_time}");
+    }
+
+    // Verify all 51 TimeLocale variants are covered and regional CLI tags map cleanly.
+    assert_eq!(TimeLocale::ALL.len(), 51);
+    for (tag, expected_cli) in [
+        ("ar-MA", Locale::Ar),
+        ("ar-EG", Locale::Ar),
+        ("ar-SA", Locale::Ar),
+        ("es-MX", Locale::Es),
+        ("fr-CA", Locale::Fr),
+        ("fr-MA", Locale::Fr),
+        ("fr-SN", Locale::Fr),
+        ("pt-PT", Locale::PtBr),
+        ("en-GB", Locale::En),
+    ] {
+        assert_eq!(Locale::parse(tag), Some(expected_cli), "tag={tag}");
+        let out = clean_locale_cmd(rondi_bin())
+            .args(["--lang", tag, "--help"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "native --lang {tag}");
     }
 }

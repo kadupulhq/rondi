@@ -271,7 +271,7 @@ pub(crate) fn strftime_bytes(format: &str, tm: &libc::tm, capacity: usize) -> Ve
         return Vec::new();
     }
     let time_locale = super::i18n::time_locale();
-    if time_locale != rondi::Locale::En && os_lc_time_is_posix() {
+    if time_locale != rondi::TimeLocale::En && os_lc_time_is_posix() {
         let dt = tm_to_datetime_parts(tm);
         return rondi::locale::format_strftime_bytes(format, &dt, time_locale, capacity);
     }
