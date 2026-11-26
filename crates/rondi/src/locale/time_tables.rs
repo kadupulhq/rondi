@@ -2040,7 +2040,7 @@ pub(super) static TIME_PT_PT: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/cs/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/cs/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_CS_CZ: TimeLocaleData = TimeLocaleData {
     months_full: [
         "leden",
@@ -2079,7 +2079,7 @@ pub(super) static TIME_CS_CZ: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/da/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/da/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_DA_DK: TimeLocaleData = TimeLocaleData {
     months_full: [
         "januar",
@@ -2113,7 +2113,7 @@ pub(super) static TIME_DA_DK: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/fi/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/fi/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_FI_FI: TimeLocaleData = TimeLocaleData {
     months_full: [
         "tammikuu",
@@ -2153,7 +2153,7 @@ pub(super) static TIME_FI_FI: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/hu/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/hu/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_HU_HU: TimeLocaleData = TimeLocaleData {
     months_full: [
         "január",
@@ -2193,7 +2193,7 @@ pub(super) static TIME_HU_HU: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/ro/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/ro/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_RO_RO: TimeLocaleData = TimeLocaleData {
     months_full: [
         "ianuarie",
@@ -2233,7 +2233,7 @@ pub(super) static TIME_RO_RO: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/sk/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/sk/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_SK_SK: TimeLocaleData = TimeLocaleData {
     months_full: [
         "január",
@@ -2266,7 +2266,7 @@ pub(super) static TIME_SK_SK: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/nb/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/nb/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_NB_NO: TimeLocaleData = TimeLocaleData {
     months_full: [
         "januar",
@@ -2299,7 +2299,7 @@ pub(super) static TIME_NB_NO: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/ca/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/ca/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_CA_ES: TimeLocaleData = TimeLocaleData {
     months_full: [
         "gener", "febrer", "març", "abril", "maig", "juny", "juliol", "agost", "setembre",
@@ -2329,7 +2329,7 @@ pub(super) static TIME_CA_ES: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/hr/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/hr/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_HR_HR: TimeLocaleData = TimeLocaleData {
     months_full: [
         "siječanj",
@@ -2368,7 +2368,7 @@ pub(super) static TIME_HR_HR: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/sr/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/sr/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_SR_RS: TimeLocaleData = TimeLocaleData {
     months_full: [
         "јануар",
@@ -2407,7 +2407,7 @@ pub(super) static TIME_SR_RS: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/sl/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/sl/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_SL_SI: TimeLocaleData = TimeLocaleData {
     months_full: [
         "januar",
@@ -2447,7 +2447,7 @@ pub(super) static TIME_SL_SI: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/lt/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/lt/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_LT_LT: TimeLocaleData = TimeLocaleData {
     months_full: [
         "sausis",
@@ -2487,7 +2487,7 @@ pub(super) static TIME_LT_LT: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/et/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/et/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_ET_EE: TimeLocaleData = TimeLocaleData {
     months_full: [
         "jaanuar",
@@ -2527,7 +2527,7 @@ pub(super) static TIME_ET_EE: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/ka/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/ka/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_KA_GE: TimeLocaleData = TimeLocaleData {
     months_full: [
         "იანვარი",
@@ -2577,7 +2577,7 @@ pub(super) static TIME_KA_GE: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/ms/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/ms/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_MS_MY: TimeLocaleData = TimeLocaleData {
     months_full: [
         "Januari",
@@ -2610,7 +2610,7 @@ pub(super) static TIME_MS_MY: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/fil/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/fil/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_FIL_PH: TimeLocaleData = TimeLocaleData {
     months_full: [
         "Enero",
@@ -2649,7 +2649,7 @@ pub(super) static TIME_FIL_PH: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/ne/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/ne/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_NE_NP: TimeLocaleData = TimeLocaleData {
     months_full: [
         "जनवरी",
@@ -2699,7 +2699,7 @@ pub(super) static TIME_NE_NP: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/pa/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/pa/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_PA_IN: TimeLocaleData = TimeLocaleData {
     months_full: [
         "ਜਨਵਰੀ",
@@ -2749,7 +2749,7 @@ pub(super) static TIME_PA_IN: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/gu/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/gu/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_GU_IN: TimeLocaleData = TimeLocaleData {
     months_full: [
         "જાન્યુઆરી",
@@ -2799,7 +2799,7 @@ pub(super) static TIME_GU_IN: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/kn/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/kn/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_KN_IN: TimeLocaleData = TimeLocaleData {
     months_full: [
         "ಜನವರಿ",
@@ -2849,7 +2849,7 @@ pub(super) static TIME_KN_IN: TimeLocaleData = TimeLocaleData {
     time_12h_fmt: "%I:%M:%S %p",
 };
 
-// Provenance: CLDR 49.0.0, cldr-dates-full/main/ml/ca-gregorian.json.
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/ml/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
 pub(super) static TIME_ML_IN: TimeLocaleData = TimeLocaleData {
     months_full: [
         "ജനുവരി",
