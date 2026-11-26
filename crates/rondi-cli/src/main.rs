@@ -8,7 +8,7 @@ mod frontend;
 /// docs/compatibility/graph.md. Options that only change pixels are
 /// checked and then left unused.
 mod graph_args;
-/// Pure-Rust Tier 1 localization for the CLI front ends.
+/// Pure-Rust message localization for the CLI front ends.
 mod i18n;
 /// Text of graph PRINT and GPRINT items, written from
 /// docs/compatibility/format-strings.md.

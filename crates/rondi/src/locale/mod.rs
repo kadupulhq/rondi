@@ -9,7 +9,12 @@ mod time_tables;
 use std::fmt;
 use std::str::FromStr;
 
-/// Tier 1 locales supported by Rondi's pure-Rust CLI localization.
+/// CLI message locales supported by Rondi's pure-Rust localization: the 20
+/// Tier 1 locales followed by 44 further message locales (64 in total).
+///
+/// Every message locale has a matching [`TimeLocale`], which supplies its
+/// [`Locale::code`] and [`Locale::native_name`]. Catalogs for the 44 further
+/// locales start as copies of the English catalog until translated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Locale {
     #[default]
@@ -33,10 +38,54 @@ pub enum Locale {
     Sv,
     Vi,
     Id,
+    Af,
+    Am,
+    Ha,
+    Ig,
+    Mg,
+    Rw,
+    So,
+    Sw,
+    Xh,
+    Yo,
+    Zu,
+    Fa,
+    He,
+    Bn,
+    Mr,
+    Ta,
+    Te,
+    Th,
+    Ur,
+    Bg,
+    El,
+    Lv,
+    PtPt,
+    Cs,
+    Da,
+    Fi,
+    Hu,
+    Ro,
+    Sk,
+    Nb,
+    Ca,
+    Hr,
+    Sr,
+    Sl,
+    Lt,
+    Et,
+    Ka,
+    Ms,
+    Fil,
+    Ne,
+    Pa,
+    Gu,
+    Kn,
+    Ml,
 }
 
 /// Locales supported by Rondi's pure-Rust `LC_TIME` formatter (the 20 Tier 1
-/// locales plus 31 additional regional and Kadupul locales, 51 in total).
+/// locales plus 52 additional regional and Kadupul locales, 72 in total).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TimeLocale {
     #[default]
@@ -91,6 +140,27 @@ pub enum TimeLocale {
     XhZa,
     YoNg,
     ZuZa,
+    CsCz,
+    DaDk,
+    FiFi,
+    HuHu,
+    RoRo,
+    SkSk,
+    NbNo,
+    CaEs,
+    HrHr,
+    SrRs,
+    SlSi,
+    LtLt,
+    EtEe,
+    KaGe,
+    MsMy,
+    FilPh,
+    NeNp,
+    PaIn,
+    GuIn,
+    KnIn,
+    MlIn,
 }
 
 /// Error returned when parsing an unsupported locale identifier via [`FromStr`].
@@ -164,7 +234,8 @@ fn normalize_locale_tag(raw: &str) -> Option<String> {
 }
 
 impl Locale {
-    /// All 20 supported Tier 1 CLI locales in canonical order.
+    /// All 64 supported CLI message locales in canonical order: the 20 Tier 1
+    /// locales first, then the 44 further message locales.
     pub const ALL: &'static [Locale] = &[
         Self::En,
         Self::De,
@@ -186,6 +257,50 @@ impl Locale {
         Self::Sv,
         Self::Vi,
         Self::Id,
+        Self::Af,
+        Self::Am,
+        Self::Ha,
+        Self::Ig,
+        Self::Mg,
+        Self::Rw,
+        Self::So,
+        Self::Sw,
+        Self::Xh,
+        Self::Yo,
+        Self::Zu,
+        Self::Fa,
+        Self::He,
+        Self::Bn,
+        Self::Mr,
+        Self::Ta,
+        Self::Te,
+        Self::Th,
+        Self::Ur,
+        Self::Bg,
+        Self::El,
+        Self::Lv,
+        Self::PtPt,
+        Self::Cs,
+        Self::Da,
+        Self::Fi,
+        Self::Hu,
+        Self::Ro,
+        Self::Sk,
+        Self::Nb,
+        Self::Ca,
+        Self::Hr,
+        Self::Sr,
+        Self::Sl,
+        Self::Lt,
+        Self::Et,
+        Self::Ka,
+        Self::Ms,
+        Self::Fil,
+        Self::Ne,
+        Self::Pa,
+        Self::Gu,
+        Self::Kn,
+        Self::Ml,
     ];
 
     /// Canonical BCP-47 language tag for this locale.
@@ -199,49 +314,17 @@ impl Locale {
     }
 
     /// Parses a BCP-47 or POSIX locale identifier (such as `de_DE.UTF-8`,
-    /// `pt-BR`, `zh_Hant_TW`, `ar-MA`, `fr-CA`, `C`, or `POSIX@euro`) into one
-    /// of the 20 Tier 1 CLI locales.
+    /// `pt-BR`, `zh_Hant_TW`, `ar-MA`, `fr-CA`, `nb_NO`, `C`, or `POSIX@euro`)
+    /// into one of the 64 CLI message locales.
+    ///
+    /// The identifier is resolved through [`TimeLocale::parse`] and
+    /// [`TimeLocale::message_locale`], so regional variants such as `en-GB`,
+    /// `es-MX`, `fr-CA`, and `ar-EG` select their language's catalog while
+    /// `pt-PT` selects the European Portuguese catalog.
     ///
     /// Returns `None` for empty or unrecognized identifiers.
     pub fn parse(raw: &str) -> Option<Self> {
-        let normalized = normalize_locale_tag(raw)?;
-        if matches!(normalized.as_str(), "c" | "posix") {
-            return Some(Self::En);
-        }
-        let mut parts = normalized.split('-');
-        let lang = parts.next()?;
-        let rest: Vec<&str> = parts.collect();
-        match lang {
-            "en" => Some(Self::En),
-            "de" => Some(Self::De),
-            "es" => Some(Self::Es),
-            "fr" => Some(Self::Fr),
-            "it" => Some(Self::It),
-            "pt" => Some(Self::PtBr),
-            "nl" => Some(Self::Nl),
-            "ru" => Some(Self::Ru),
-            "uk" => Some(Self::Uk),
-            "ja" => Some(Self::Ja),
-            "ko" => Some(Self::Ko),
-            "zh" => {
-                let traditional = rest
-                    .iter()
-                    .any(|sub| matches!(*sub, "tw" | "hk" | "mo" | "hant"));
-                if traditional {
-                    Some(Self::ZhTw)
-                } else {
-                    Some(Self::ZhCn)
-                }
-            }
-            "ar" => Some(Self::Ar),
-            "hi" => Some(Self::Hi),
-            "pl" => Some(Self::Pl),
-            "tr" => Some(Self::Tr),
-            "sv" => Some(Self::Sv),
-            "vi" => Some(Self::Vi),
-            "id" | "in" => Some(Self::Id),
-            _ => None,
-        }
+        TimeLocale::parse(raw).map(TimeLocale::message_locale)
     }
 
     /// Resolves a POSIX locale environment variable value, falling back to
@@ -271,7 +354,7 @@ impl FromStr for Locale {
 }
 
 impl TimeLocale {
-    /// All 51 supported pure-Rust `LC_TIME` locales in canonical order.
+    /// All 72 supported pure-Rust `LC_TIME` locales in canonical order.
     pub const ALL: &'static [TimeLocale] = &[
         Self::En,
         Self::De,
@@ -324,9 +407,30 @@ impl TimeLocale {
         Self::XhZa,
         Self::YoNg,
         Self::ZuZa,
+        Self::CsCz,
+        Self::DaDk,
+        Self::FiFi,
+        Self::HuHu,
+        Self::RoRo,
+        Self::SkSk,
+        Self::NbNo,
+        Self::CaEs,
+        Self::HrHr,
+        Self::SrRs,
+        Self::SlSi,
+        Self::LtLt,
+        Self::EtEe,
+        Self::KaGe,
+        Self::MsMy,
+        Self::FilPh,
+        Self::NeNp,
+        Self::PaIn,
+        Self::GuIn,
+        Self::KnIn,
+        Self::MlIn,
     ];
 
-    /// Converts a Tier 1 CLI [`Locale`] into its corresponding [`TimeLocale`].
+    /// Converts a CLI message [`Locale`] into its corresponding [`TimeLocale`].
     pub const fn from_cli_locale(locale: Locale) -> Self {
         match locale {
             Locale::En => Self::En,
@@ -349,10 +453,54 @@ impl TimeLocale {
             Locale::Sv => Self::Sv,
             Locale::Vi => Self::Vi,
             Locale::Id => Self::Id,
+            Locale::Af => Self::AfZa,
+            Locale::Am => Self::AmEt,
+            Locale::Ha => Self::HaNg,
+            Locale::Ig => Self::IgNg,
+            Locale::Mg => Self::MgMg,
+            Locale::Rw => Self::RwRw,
+            Locale::So => Self::SoSo,
+            Locale::Sw => Self::SwKe,
+            Locale::Xh => Self::XhZa,
+            Locale::Yo => Self::YoNg,
+            Locale::Zu => Self::ZuZa,
+            Locale::Fa => Self::FaIr,
+            Locale::He => Self::HeIl,
+            Locale::Bn => Self::BnBd,
+            Locale::Mr => Self::MrIn,
+            Locale::Ta => Self::TaIn,
+            Locale::Te => Self::TeIn,
+            Locale::Th => Self::ThTh,
+            Locale::Ur => Self::UrPk,
+            Locale::Bg => Self::BgBg,
+            Locale::El => Self::ElGr,
+            Locale::Lv => Self::LvLv,
+            Locale::PtPt => Self::PtPt,
+            Locale::Cs => Self::CsCz,
+            Locale::Da => Self::DaDk,
+            Locale::Fi => Self::FiFi,
+            Locale::Hu => Self::HuHu,
+            Locale::Ro => Self::RoRo,
+            Locale::Sk => Self::SkSk,
+            Locale::Nb => Self::NbNo,
+            Locale::Ca => Self::CaEs,
+            Locale::Hr => Self::HrHr,
+            Locale::Sr => Self::SrRs,
+            Locale::Sl => Self::SlSi,
+            Locale::Lt => Self::LtLt,
+            Locale::Et => Self::EtEe,
+            Locale::Ka => Self::KaGe,
+            Locale::Ms => Self::MsMy,
+            Locale::Fil => Self::FilPh,
+            Locale::Ne => Self::NeNp,
+            Locale::Pa => Self::PaIn,
+            Locale::Gu => Self::GuIn,
+            Locale::Kn => Self::KnIn,
+            Locale::Ml => Self::MlIn,
         }
     }
 
-    /// Maps this `LC_TIME` locale to its nearest Tier 1 CLI message [`Locale`].
+    /// Maps this `LC_TIME` locale to its nearest CLI message [`Locale`].
     pub const fn message_locale(self) -> Locale {
         match self {
             Self::En | Self::EnGb => Locale::En,
@@ -360,7 +508,7 @@ impl TimeLocale {
             Self::Es | Self::EsMx => Locale::Es,
             Self::Fr | Self::FrCa | Self::FrMa | Self::FrSn => Locale::Fr,
             Self::It => Locale::It,
-            Self::PtBr | Self::PtPt => Locale::PtBr,
+            Self::PtBr => Locale::PtBr,
             Self::Nl => Locale::Nl,
             Self::Ru => Locale::Ru,
             Self::Uk => Locale::Uk,
@@ -375,7 +523,50 @@ impl TimeLocale {
             Self::Sv => Locale::Sv,
             Self::Vi => Locale::Vi,
             Self::Id => Locale::Id,
-            _ => Locale::En,
+            Self::AfZa => Locale::Af,
+            Self::AmEt => Locale::Am,
+            Self::HaNg => Locale::Ha,
+            Self::IgNg => Locale::Ig,
+            Self::MgMg => Locale::Mg,
+            Self::RwRw => Locale::Rw,
+            Self::SoSo => Locale::So,
+            Self::SwKe => Locale::Sw,
+            Self::XhZa => Locale::Xh,
+            Self::YoNg => Locale::Yo,
+            Self::ZuZa => Locale::Zu,
+            Self::FaIr => Locale::Fa,
+            Self::HeIl => Locale::He,
+            Self::BnBd => Locale::Bn,
+            Self::MrIn => Locale::Mr,
+            Self::TaIn => Locale::Ta,
+            Self::TeIn => Locale::Te,
+            Self::ThTh => Locale::Th,
+            Self::UrPk => Locale::Ur,
+            Self::BgBg => Locale::Bg,
+            Self::ElGr => Locale::El,
+            Self::LvLv => Locale::Lv,
+            Self::PtPt => Locale::PtPt,
+            Self::CsCz => Locale::Cs,
+            Self::DaDk => Locale::Da,
+            Self::FiFi => Locale::Fi,
+            Self::HuHu => Locale::Hu,
+            Self::RoRo => Locale::Ro,
+            Self::SkSk => Locale::Sk,
+            Self::NbNo => Locale::Nb,
+            Self::CaEs => Locale::Ca,
+            Self::HrHr => Locale::Hr,
+            Self::SrRs => Locale::Sr,
+            Self::SlSi => Locale::Sl,
+            Self::LtLt => Locale::Lt,
+            Self::EtEe => Locale::Et,
+            Self::KaGe => Locale::Ka,
+            Self::MsMy => Locale::Ms,
+            Self::FilPh => Locale::Fil,
+            Self::NeNp => Locale::Ne,
+            Self::PaIn => Locale::Pa,
+            Self::GuIn => Locale::Gu,
+            Self::KnIn => Locale::Kn,
+            Self::MlIn => Locale::Ml,
         }
     }
 
@@ -433,6 +624,27 @@ impl TimeLocale {
             Self::XhZa => "xh-ZA",
             Self::YoNg => "yo-NG",
             Self::ZuZa => "zu-ZA",
+            Self::CsCz => "cs-CZ",
+            Self::DaDk => "da-DK",
+            Self::FiFi => "fi-FI",
+            Self::HuHu => "hu-HU",
+            Self::RoRo => "ro-RO",
+            Self::SkSk => "sk-SK",
+            Self::NbNo => "nb-NO",
+            Self::CaEs => "ca-ES",
+            Self::HrHr => "hr-HR",
+            Self::SrRs => "sr-RS",
+            Self::SlSi => "sl-SI",
+            Self::LtLt => "lt-LT",
+            Self::EtEe => "et-EE",
+            Self::KaGe => "ka-GE",
+            Self::MsMy => "ms-MY",
+            Self::FilPh => "fil-PH",
+            Self::NeNp => "ne-NP",
+            Self::PaIn => "pa-IN",
+            Self::GuIn => "gu-IN",
+            Self::KnIn => "kn-IN",
+            Self::MlIn => "ml-IN",
         }
     }
 
@@ -490,13 +702,41 @@ impl TimeLocale {
             Self::XhZa => "isiXhosa",
             Self::YoNg => "Yorùbá",
             Self::ZuZa => "isiZulu",
+            Self::CsCz => "Čeština",
+            Self::DaDk => "Dansk",
+            Self::FiFi => "Suomi",
+            Self::HuHu => "Magyar",
+            Self::RoRo => "Română",
+            Self::SkSk => "Slovenčina",
+            Self::NbNo => "Norsk bokmål",
+            Self::CaEs => "Català",
+            Self::HrHr => "Hrvatski",
+            Self::SrRs => "Српски",
+            Self::SlSi => "Slovenščina",
+            Self::LtLt => "Lietuvių",
+            Self::EtEe => "Eesti",
+            Self::KaGe => "ქართული",
+            Self::MsMy => "Melayu",
+            Self::FilPh => "Filipino",
+            Self::NeNp => "नेपाली",
+            Self::PaIn => "ਪੰਜਾਬੀ",
+            Self::GuIn => "ગુજરાતી",
+            Self::KnIn => "ಕನ್ನಡ",
+            Self::MlIn => "മലയാളം",
         }
     }
 
-    /// Parses a BCP-47 or POSIX locale identifier into one of the 51 supported
+    /// Parses a BCP-47 or POSIX locale identifier into one of the 72 supported
     /// pure-Rust `LC_TIME` locales, preserving regional conventions such as
     /// `en-GB`, `ar-MA`, `ar-EG`, `ar-SA`, `es-MX`, `fr-CA`, `fr-MA`, `fr-SN`,
     /// and `pt-PT`.
+    ///
+    /// Each further language has one table regardless of region or script, so
+    /// `ca_ES@valencia` selects `ca-ES` and `pa-PK` selects `pa-IN`. The legacy
+    /// codes `no` (Norwegian, selecting `nb-NO`), `tl` (Tagalog, selecting
+    /// `fil-PH`), `iw`, and `in` are accepted. Serbian always selects the
+    /// Cyrillic `sr-RS` table: Rondi has no Latin-script Serbian table, and
+    /// `sr_RS@latin` and `sr-Latn` therefore format in Cyrillic.
     pub fn parse(raw: &str) -> Option<Self> {
         let normalized = normalize_locale_tag(raw)?;
         if matches!(normalized.as_str(), "c" | "posix") {
@@ -581,6 +821,27 @@ impl TimeLocale {
             "xh" => Some(Self::XhZa),
             "yo" => Some(Self::YoNg),
             "zu" => Some(Self::ZuZa),
+            "cs" => Some(Self::CsCz),
+            "da" => Some(Self::DaDk),
+            "fi" => Some(Self::FiFi),
+            "hu" => Some(Self::HuHu),
+            "ro" => Some(Self::RoRo),
+            "sk" => Some(Self::SkSk),
+            "nb" | "no" => Some(Self::NbNo),
+            "ca" => Some(Self::CaEs),
+            "hr" => Some(Self::HrHr),
+            "sr" => Some(Self::SrRs),
+            "sl" => Some(Self::SlSi),
+            "lt" => Some(Self::LtLt),
+            "et" => Some(Self::EtEe),
+            "ka" => Some(Self::KaGe),
+            "ms" => Some(Self::MsMy),
+            "fil" | "tl" => Some(Self::FilPh),
+            "ne" => Some(Self::NeNp),
+            "pa" => Some(Self::PaIn),
+            "gu" => Some(Self::GuIn),
+            "kn" => Some(Self::KnIn),
+            "ml" => Some(Self::MlIn),
             _ => None,
         }
     }
@@ -646,6 +907,27 @@ impl TimeLocale {
             Self::XhZa => &TIME_XH_ZA,
             Self::YoNg => &TIME_YO_NG,
             Self::ZuZa => &TIME_ZU_ZA,
+            Self::CsCz => &TIME_CS_CZ,
+            Self::DaDk => &TIME_DA_DK,
+            Self::FiFi => &TIME_FI_FI,
+            Self::HuHu => &TIME_HU_HU,
+            Self::RoRo => &TIME_RO_RO,
+            Self::SkSk => &TIME_SK_SK,
+            Self::NbNo => &TIME_NB_NO,
+            Self::CaEs => &TIME_CA_ES,
+            Self::HrHr => &TIME_HR_HR,
+            Self::SrRs => &TIME_SR_RS,
+            Self::SlSi => &TIME_SL_SI,
+            Self::LtLt => &TIME_LT_LT,
+            Self::EtEe => &TIME_ET_EE,
+            Self::KaGe => &TIME_KA_GE,
+            Self::MsMy => &TIME_MS_MY,
+            Self::FilPh => &TIME_FIL_PH,
+            Self::NeNp => &TIME_NE_NP,
+            Self::PaIn => &TIME_PA_IN,
+            Self::GuIn => &TIME_GU_IN,
+            Self::KnIn => &TIME_KN_IN,
+            Self::MlIn => &TIME_ML_IN,
         }
     }
 }
@@ -1135,8 +1417,8 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn all_20_cli_locales_have_unique_codes_and_round_trip() {
-        assert_eq!(Locale::ALL.len(), 20);
+    fn all_64_cli_locales_have_unique_codes_and_round_trip() {
+        assert_eq!(Locale::ALL.len(), 64);
         let mut codes = HashSet::new();
         for &locale in Locale::ALL {
             assert!(
@@ -1155,8 +1437,8 @@ mod tests {
     }
 
     #[test]
-    fn all_51_time_locales_have_unique_codes_and_round_trip() {
-        assert_eq!(TimeLocale::ALL.len(), 51);
+    fn all_72_time_locales_have_unique_codes_and_round_trip() {
+        assert_eq!(TimeLocale::ALL.len(), 72);
         let mut codes = HashSet::new();
         for &locale in TimeLocale::ALL {
             assert!(
@@ -1190,7 +1472,8 @@ mod tests {
             ("fr-SN", Some(Locale::Fr)),
             ("it_IT.UTF-8", Some(Locale::It)),
             ("pt_BR.UTF-8", Some(Locale::PtBr)),
-            ("pt-PT", Some(Locale::PtBr)),
+            ("pt-PT", Some(Locale::PtPt)),
+            ("pt_PT.UTF-8", Some(Locale::PtPt)),
             ("pt", Some(Locale::PtBr)),
             ("nl_NL.UTF-8", Some(Locale::Nl)),
             ("ru_RU.UTF-8", Some(Locale::Ru)),
@@ -1309,7 +1592,7 @@ mod tests {
     }
 
     #[test]
-    fn all_51_time_tables_are_complete_and_format_cleanly() {
+    fn all_72_time_tables_are_complete_and_format_cleanly() {
         let dt = DateTimeParts::from_utc_timestamp(1_000_000_000);
         for &locale in TimeLocale::ALL {
             let td = locale.time_data();
@@ -1384,5 +1667,268 @@ mod tests {
             format_strftime("%A %B", &dt, TimeLocale::UrPk),
             "اتوار ستمبر"
         );
+        // CLDR 49.0.0 spot checks for the locales added with the 64 message locales.
+        assert_eq!(
+            format_strftime("%A %B %x", &dt, TimeLocale::CsCz),
+            "neděle září 09.09.2001"
+        );
+        assert_eq!(
+            format_strftime("%x %X", &dt, TimeLocale::DaDk),
+            "09.09.2001 01.46.40"
+        );
+        assert_eq!(
+            format_strftime("%x", &dt, TimeLocale::HuHu),
+            "2001. 09. 09."
+        );
+        assert_eq!(
+            format_strftime("%A %B", &dt, TimeLocale::SrRs),
+            "недеља септембар"
+        );
+        assert_eq!(format_strftime("%x", &dt, TimeLocale::LtLt), "2001-09-09");
+        assert_eq!(
+            format_strftime("%A %B", &dt, TimeLocale::KaGe),
+            "კვირა სექტემბერი"
+        );
+        assert_eq!(
+            format_strftime("%x %X", &dt, TimeLocale::FilPh),
+            "09/09/2001 01:46:40 AM"
+        );
+        assert_eq!(
+            format_strftime("%A %B", &dt, TimeLocale::PaIn),
+            "ਐਤਵਾਰ ਸਤੰਬਰ"
+        );
+    }
+
+    #[test]
+    fn new_message_and_time_locales_parse_and_round_trip() {
+        let time_cases = [
+            (
+                "cs_CZ.UTF-8",
+                TimeLocale::CsCz,
+                "cs-CZ",
+                "Čeština",
+                Locale::Cs,
+            ),
+            ("da_DK", TimeLocale::DaDk, "da-DK", "Dansk", Locale::Da),
+            ("fi-FI", TimeLocale::FiFi, "fi-FI", "Suomi", Locale::Fi),
+            (
+                "hu_HU.UTF-8",
+                TimeLocale::HuHu,
+                "hu-HU",
+                "Magyar",
+                Locale::Hu,
+            ),
+            (
+                "ro_RO.UTF-8",
+                TimeLocale::RoRo,
+                "ro-RO",
+                "Română",
+                Locale::Ro,
+            ),
+            (
+                "sk_SK.UTF-8",
+                TimeLocale::SkSk,
+                "sk-SK",
+                "Slovenčina",
+                Locale::Sk,
+            ),
+            (
+                "nb_NO",
+                TimeLocale::NbNo,
+                "nb-NO",
+                "Norsk bokmål",
+                Locale::Nb,
+            ),
+            (
+                "no_NO.UTF-8",
+                TimeLocale::NbNo,
+                "nb-NO",
+                "Norsk bokmål",
+                Locale::Nb,
+            ),
+            ("no", TimeLocale::NbNo, "nb-NO", "Norsk bokmål", Locale::Nb),
+            (
+                "ca_ES@valencia",
+                TimeLocale::CaEs,
+                "ca-ES",
+                "Català",
+                Locale::Ca,
+            ),
+            (
+                "hr_HR.UTF-8",
+                TimeLocale::HrHr,
+                "hr-HR",
+                "Hrvatski",
+                Locale::Hr,
+            ),
+            (
+                "sr_RS.UTF-8",
+                TimeLocale::SrRs,
+                "sr-RS",
+                "Српски",
+                Locale::Sr,
+            ),
+            (
+                "sr_RS@latin",
+                TimeLocale::SrRs,
+                "sr-RS",
+                "Српски",
+                Locale::Sr,
+            ),
+            (
+                "sr-Latn-RS",
+                TimeLocale::SrRs,
+                "sr-RS",
+                "Српски",
+                Locale::Sr,
+            ),
+            (
+                "sl_SI.UTF-8",
+                TimeLocale::SlSi,
+                "sl-SI",
+                "Slovenščina",
+                Locale::Sl,
+            ),
+            (
+                "lt_LT.UTF-8",
+                TimeLocale::LtLt,
+                "lt-LT",
+                "Lietuvių",
+                Locale::Lt,
+            ),
+            (
+                "et_EE.UTF-8",
+                TimeLocale::EtEe,
+                "et-EE",
+                "Eesti",
+                Locale::Et,
+            ),
+            (
+                "ka_GE.UTF-8",
+                TimeLocale::KaGe,
+                "ka-GE",
+                "ქართული",
+                Locale::Ka,
+            ),
+            (
+                "ms_MY.UTF-8",
+                TimeLocale::MsMy,
+                "ms-MY",
+                "Melayu",
+                Locale::Ms,
+            ),
+            (
+                "fil_PH.UTF-8",
+                TimeLocale::FilPh,
+                "fil-PH",
+                "Filipino",
+                Locale::Fil,
+            ),
+            (
+                "tl_PH.UTF-8",
+                TimeLocale::FilPh,
+                "fil-PH",
+                "Filipino",
+                Locale::Fil,
+            ),
+            (
+                "ne_NP.UTF-8",
+                TimeLocale::NeNp,
+                "ne-NP",
+                "नेपाली",
+                Locale::Ne,
+            ),
+            (
+                "pa_IN.UTF-8",
+                TimeLocale::PaIn,
+                "pa-IN",
+                "ਪੰਜਾਬੀ",
+                Locale::Pa,
+            ),
+            ("pa-Guru-IN", TimeLocale::PaIn, "pa-IN", "ਪੰਜਾਬੀ", Locale::Pa),
+            (
+                "gu_IN.UTF-8",
+                TimeLocale::GuIn,
+                "gu-IN",
+                "ગુજરાતી",
+                Locale::Gu,
+            ),
+            ("kn_IN.UTF-8", TimeLocale::KnIn, "kn-IN", "ಕನ್ನಡ", Locale::Kn),
+            (
+                "ml_IN.UTF-8",
+                TimeLocale::MlIn,
+                "ml-IN",
+                "മലയാളം",
+                Locale::Ml,
+            ),
+        ];
+        for (input, time, code, name, message) in time_cases {
+            assert_eq!(TimeLocale::parse(input), Some(time), "input={input:?}");
+            assert_eq!(
+                input.parse::<TimeLocale>().unwrap(),
+                time,
+                "input={input:?}"
+            );
+            assert_eq!(time.code(), code);
+            assert_eq!(time.native_name(), name);
+            assert_eq!(TimeLocale::parse(code), Some(time));
+            assert_eq!(time.message_locale(), message);
+            assert_eq!(TimeLocale::from_cli_locale(message), time);
+            assert_eq!(Locale::parse(input), Some(message), "input={input:?}");
+            assert_eq!(message.code(), code);
+            assert_eq!(message.native_name(), name);
+        }
+
+        // Message locales whose LC_TIME table predates them.
+        let message_cases = [
+            ("af_ZA.UTF-8", Locale::Af, TimeLocale::AfZa),
+            ("am_ET", Locale::Am, TimeLocale::AmEt),
+            ("ha_NG", Locale::Ha, TimeLocale::HaNg),
+            ("ig_NG", Locale::Ig, TimeLocale::IgNg),
+            ("mg_MG", Locale::Mg, TimeLocale::MgMg),
+            ("rw_RW", Locale::Rw, TimeLocale::RwRw),
+            ("so_SO", Locale::So, TimeLocale::SoSo),
+            ("sw_KE", Locale::Sw, TimeLocale::SwKe),
+            ("sw-TZ", Locale::Sw, TimeLocale::SwKe),
+            ("xh_ZA", Locale::Xh, TimeLocale::XhZa),
+            ("yo_NG", Locale::Yo, TimeLocale::YoNg),
+            ("zu_ZA", Locale::Zu, TimeLocale::ZuZa),
+            ("fa_IR", Locale::Fa, TimeLocale::FaIr),
+            ("he_IL", Locale::He, TimeLocale::HeIl),
+            ("iw_IL.UTF-8", Locale::He, TimeLocale::HeIl),
+            ("bn_BD", Locale::Bn, TimeLocale::BnBd),
+            ("mr_IN", Locale::Mr, TimeLocale::MrIn),
+            ("ta_IN", Locale::Ta, TimeLocale::TaIn),
+            ("te_IN", Locale::Te, TimeLocale::TeIn),
+            ("th_TH", Locale::Th, TimeLocale::ThTh),
+            ("ur_PK", Locale::Ur, TimeLocale::UrPk),
+            ("bg_BG", Locale::Bg, TimeLocale::BgBg),
+            ("el_GR", Locale::El, TimeLocale::ElGr),
+            ("lv_LV", Locale::Lv, TimeLocale::LvLv),
+            ("pt_PT.UTF-8", Locale::PtPt, TimeLocale::PtPt),
+        ];
+        for (input, message, time) in message_cases {
+            assert_eq!(Locale::parse(input), Some(message), "input={input:?}");
+            assert_eq!(TimeLocale::from_cli_locale(message), time);
+            assert_eq!(time.message_locale(), message);
+            assert_eq!(message.code(), time.code());
+        }
+
+        // Regional LC_TIME variants keep their language's message locale.
+        for (time, message) in [
+            (TimeLocale::ArEg, Locale::Ar),
+            (TimeLocale::ArMa, Locale::Ar),
+            (TimeLocale::ArSa, Locale::Ar),
+            (TimeLocale::FrCa, Locale::Fr),
+            (TimeLocale::FrMa, Locale::Fr),
+            (TimeLocale::FrSn, Locale::Fr),
+            (TimeLocale::EsMx, Locale::Es),
+            (TimeLocale::EnGb, Locale::En),
+            (TimeLocale::PtBr, Locale::PtBr),
+        ] {
+            assert_eq!(time.message_locale(), message, "{time}");
+        }
+        assert_eq!(Locale::parse("pt"), Some(Locale::PtBr));
+        assert_eq!(Locale::parse("nn_NO.UTF-8"), None);
     }
 }
