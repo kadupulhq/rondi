@@ -51,23 +51,28 @@ impl Error for RawMessage {}
 
 // The usage pages share their pieces; `concat!` needs literals, so the
 // pieces are macros.
+#[cfg(test)]
 macro_rules! banner {
     () => {
         "RRDtool 1.11.0  Copyright by Tobias Oetiker <tobi@oetiker.ch>\n               Compiled \n\nUsage: rrdtool [options] command command_options\n"
     };
 }
+#[cfg(test)]
 macro_rules! command_list {
     () => {
         "Valid commands: create, update, updatev, graph, graphv,  dump, restore,\n\t\tlast, lastupdate, first, info, list, fetch, tune,\n\t\tresize, xport, flushcached\n"
     };
 }
+#[cfg(test)]
 macro_rules! notice {
     () => {
         "\nRRDtool is distributed under the Terms of the GNU General\nPublic License Version 2. (www.gnu.org/copyleft/gpl.html)\n\nFor more information read the RRD manpages\n\n"
     };
 }
 
+#[cfg(test)]
 const USAGE: &str = concat!(banner!(), command_list!(), notice!());
+#[cfg(test)]
 const PIPE_USAGE: &str = concat!(
     banner!(),
     command_list!(),
@@ -80,6 +85,7 @@ const VERSION_LINE: &str = "RRDtool 1.11.0  Copyright by Tobi Oetiker (1.011000)
 struct Command {
     name: &'static str,
     run: fn(&[String]) -> CommandResult,
+    #[cfg(test)]
     help: &'static str,
     /// `first` and `last` print `-1` before their error.
     // Compatibility: the failed time is printed for option and usage
@@ -91,11 +97,12 @@ struct Command {
 const fn command(
     name: &'static str,
     run: fn(&[String]) -> CommandResult,
-    help: &'static str,
+    #[allow(unused_variables)] help: &'static str,
 ) -> Command {
     Command {
         name,
         run,
+        #[cfg(test)]
         help,
         minus_one_on_error: false,
     }
@@ -196,6 +203,7 @@ static COMMANDS: &[Command] = &[
 ];
 
 /// Help pages for the pipe-mode commands, which `rrdtool help` also knows.
+#[cfg(test)]
 static SESSION_HELP: &[(&str, &str)] = &[
     ("cd", include_str!("../help/cd.txt")),
     ("mkdir", include_str!("../help/mkdir.txt")),
@@ -210,6 +218,7 @@ fn find_command(name: &[u8]) -> Option<&'static Command> {
         .find(|command| command.name.as_bytes() == name)
 }
 
+#[cfg(test)]
 fn help_page(topic: &str) -> Option<&'static str> {
     find_command(topic.as_bytes())
         .map(|command| command.help)
@@ -227,9 +236,9 @@ fn help_page(topic: &str) -> Option<&'static str> {
 // -017).
 const ERROR_MESSAGE_LIMIT: usize = 4095;
 
-fn message_bytes(error: &(dyn Error + 'static)) -> Vec<u8> {
+fn message_bytes_for(error: &(dyn Error + 'static), locale: rondi::Locale) -> Vec<u8> {
     let mut bytes = if let Some(option) = error.downcast_ref::<OptionError>() {
-        option.message_bytes()
+        option.message_bytes_for(locale)
     } else if let Some(raw) = error.downcast_ref::<RawMessage>() {
         raw.0.clone()
     } else {
@@ -237,6 +246,11 @@ fn message_bytes(error: &(dyn Error + 'static)) -> Vec<u8> {
     };
     bytes.truncate(ERROR_MESSAGE_LIMIT);
     bytes
+}
+
+#[cfg(test)]
+fn message_bytes(error: &(dyn Error + 'static)) -> Vec<u8> {
+    message_bytes_for(error, rondi::Locale::En)
 }
 
 fn error_line(message: &[u8]) -> Vec<u8> {
@@ -254,7 +268,7 @@ fn write_stderr(bytes: &[u8]) {
 }
 
 /// Runs a command and returns its error message, if any.
-fn execute(command: &Command, args: &[String]) -> Result<(), Vec<u8>> {
+fn execute(command: &Command, args: &[String], locale: rondi::Locale) -> Result<(), Vec<u8>> {
     let result = (command.run)(args);
     let _ = io::stdout().flush();
     let Err(error) = result else {
@@ -263,7 +277,7 @@ fn execute(command: &Command, args: &[String]) -> Result<(), Vec<u8>> {
     if command.minus_one_on_error {
         write_stdout(b"-1\n");
     }
-    let message = message_bytes(error.as_ref());
+    let message = message_bytes_for(error.as_ref(), locale);
     // Compatibility: a failure that leaves no message is reported as a
     // success: no ERROR line, status 0, and `OK` in pipe mode.
     // Provenance: black-box compatibility test (rrdcached_client_paths.rs,
@@ -276,33 +290,37 @@ fn execute(command: &Command, args: &[String]) -> Result<(), Vec<u8>> {
 
 /// The `rrdtool` program. `argv` includes the program name.
 pub(crate) fn run_rrdtool(argv: &[String]) -> i32 {
+    let locale = super::i18n::messages_locale();
     let args = argv.get(1..).unwrap_or_default();
     let status = match args {
         [] => {
-            write_stdout(USAGE.as_bytes());
+            write_stdout(super::i18n::rrdtool_usage(locale).as_bytes());
             0
         }
-        [only] if only == "-" => run_pipe_mode(None),
+        [only] if only == "-" => run_pipe_mode(None, locale),
         [only] => {
-            write_stdout(help_page(only).unwrap_or(USAGE).as_bytes());
+            let text = super::i18n::rrdtool_help(only, locale)
+                .unwrap_or_else(|| super::i18n::rrdtool_usage(locale));
+            write_stdout(text.as_bytes());
             0
         }
         [first, rest @ ..] => match first.as_str() {
             "help" | "--help" | "-h" | "-?" => {
                 let page = match rest {
-                    [topic] if first == "help" => help_page(topic),
+                    [topic] if first == "help" => super::i18n::rrdtool_help(topic, locale),
                     _ => None,
                 };
-                write_stdout(page.unwrap_or(USAGE).as_bytes());
+                let text = page.unwrap_or_else(|| super::i18n::rrdtool_usage(locale));
+                write_stdout(text.as_bytes());
                 0
             }
             "version" | "--version" | "-v" => {
                 write_stdout(VERSION_LINE.as_bytes());
                 0
             }
-            "-" if rest.len() == 1 => run_pipe_mode(Some(&rest[0])),
+            "-" if rest.len() == 1 => run_pipe_mode(Some(&rest[0]), locale),
             name => match find_command(name.as_bytes()) {
-                Some(command) => match execute(command, args) {
+                Some(command) => match execute(command, args, locale) {
                     Ok(()) => 0,
                     Err(message) => {
                         write_stderr(&error_line(&message));
@@ -310,7 +328,12 @@ pub(crate) fn run_rrdtool(argv: &[String]) -> i32 {
                     }
                 },
                 None => {
-                    let mut message = [b"unknown function '", name.as_bytes(), b"'"].concat();
+                    let mut message = if locale == rondi::Locale::En {
+                        [b"unknown function '", name.as_bytes(), b"'"].concat()
+                    } else {
+                        let cat = super::i18n::catalog(locale);
+                        super::i18n::fmt1(cat.rrdtool_unknown_function, name).into_bytes()
+                    };
                     message.truncate(ERROR_MESSAGE_LIMIT);
                     write_stderr(&error_line(&message));
                     1
@@ -322,7 +345,7 @@ pub(crate) fn run_rrdtool(argv: &[String]) -> i32 {
     status
 }
 
-fn run_pipe_mode(directory: Option<&String>) -> i32 {
+fn run_pipe_mode(directory: Option<&String>, locale: rondi::Locale) -> i32 {
     if let Some(directory) = directory.filter(|directory| !directory.is_empty())
         && let Err(errno) = pipe::change_dir(directory.as_bytes())
     {
@@ -333,10 +356,14 @@ fn run_pipe_mode(directory: Option<&String>) -> i32 {
     let mut input = io::stdin().lock();
     pipe::run_session(
         &mut input,
+        locale,
         |name| find_command(name).is_some(),
         |args| match find_command(args[0].as_bytes()) {
-            Some(command) => execute(command, args),
-            None => Err(b"unknown function".to_vec()),
+            Some(command) => execute(command, args, locale),
+            None => Err(super::i18n::catalog(locale)
+                .rrdtool_unknown_function_bare
+                .as_bytes()
+                .to_vec()),
         },
     );
     0
@@ -369,27 +396,22 @@ impl Alias {
         find_command(name)
     }
 
-    fn usage(self) -> &'static str {
+    fn usage_for(self, locale: rondi::Locale) -> &'static str {
+        let cat = super::i18n::catalog(locale);
         match self {
-            Self::Update => {
-                "Usage: rrdupdate <filename>\n\t\t\t[--locking|-L <try|block|none>]\n\t\t\t[--template|-t ds-name[:ds-name]...]\n\t\t\t[--skip-past-updates]\n\t\t\ttime|N:value[:value...]\n\n\t\t\tat-time@value[:value...]\n\n\t\t\t[ time:value[:value...] ..]\n\n"
-            }
-            Self::Create => {
-                "Usage: rrdcreate <filename>\n\t\t\t[--start|-b start time]\n\t\t\t[--step|-s step]\n\t\t\t[--no-overwrite]\n\t\t\t[DS:ds-name:DST:dst arguments]\n\t\t\t[RRA:CF:cf arguments]\n\n"
-            }
-            Self::Info => "Usage: rrdinfo <filename>\n",
+            Self::Update => cat.alias_usage_update,
+            Self::Create => cat.alias_usage_create,
+            Self::Info => cat.alias_usage_info,
         }
     }
 
     /// The error for a run with no arguments at all.
-    fn no_arguments(self, program: &str) -> Vec<u8> {
+    fn no_arguments_for(self, program: &str, locale: rondi::Locale) -> Vec<u8> {
+        let cat = super::i18n::catalog(locale);
         match self {
-            Self::Update => b"Not enough arguments".to_vec(),
-            Self::Create => b"need name of an rrd file to create".to_vec(),
-            Self::Info => {
-                format!("Usage: rrdtool {program} [--daemon |-d <addr> [--noflush|-F]] <file>")
-                    .into_bytes()
-            }
+            Self::Update => cat.alias_not_enough_args.as_bytes().to_vec(),
+            Self::Create => cat.alias_need_rrd_name.as_bytes().to_vec(),
+            Self::Info => super::i18n::fmt1(cat.alias_info_usage_error, program).into_bytes(),
         }
     }
 }
@@ -397,13 +419,17 @@ impl Alias {
 /// `rrdupdate`, `rrdcreate` or `rrdinfo`. `argv` includes the program
 /// name, which the command sees in place of its own name.
 pub(crate) fn run_alias(alias: Alias, argv: &[String]) -> i32 {
+    let locale = super::i18n::messages_locale();
     let program = argv.first().map_or("", String::as_str);
     let outcome = if argv.len() <= 1 {
-        Err(alias.no_arguments(program))
+        Err(alias.no_arguments_for(program, locale))
     } else {
         match alias.command() {
-            Some(command) => execute(command, argv),
-            None => Err(b"unknown function".to_vec()),
+            Some(command) => execute(command, argv, locale),
+            None => Err(super::i18n::catalog(locale)
+                .rrdtool_unknown_function_bare
+                .as_bytes()
+                .to_vec()),
         }
     };
     let status = match outcome {
@@ -413,7 +439,7 @@ pub(crate) fn run_alias(alias: Alias, argv: &[String]) -> i32 {
             // output after a short banner and their usage text.
             // Provenance: black-box compatibility test (CLI-54).
             let mut text = b"RRDtool 1.11.0  Copyright by Tobi Oetiker\n\n".to_vec();
-            text.extend_from_slice(alias.usage().as_bytes());
+            text.extend_from_slice(alias.usage_for(locale).as_bytes());
             text.extend_from_slice(&error_line(&message));
             write_stdout(&text);
             1

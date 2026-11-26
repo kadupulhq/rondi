@@ -9,6 +9,7 @@ pub mod holt_winters;
 mod hw_tune;
 pub mod import_export;
 pub mod layout;
+pub mod locale;
 mod numeric_cast;
 mod queries;
 mod rpn;
@@ -31,6 +32,7 @@ pub use format::{
     ArchivePoint, DatabaseConfig, FORMAT_VERSION, FetchResult, RrdFetchResult, RrdFetchRow, Update,
 };
 pub use hw_tune::{HwTuneOption, tune_holt_winters, tune_holt_winters_file};
+pub use locale::{Locale, TimeLocale};
 pub use rrd_binary::{
     RrdArchiveInfo, RrdCdpPrepInfo, RrdDataSourceInfo, RrdDataSourceTune, RrdDumpHeader,
     RrdFetchRows, RrdInfo, RrdResizeAction, RrdTuneBound, cf_conv_error, create_rrd_file,

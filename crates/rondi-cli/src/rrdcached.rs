@@ -129,20 +129,22 @@ struct Scanner<'a> {
     resume_at: usize,
     pending: Option<(usize, usize)>,
     ended: bool,
+    locale: rondi::Locale,
 }
 
 impl<'a> Scanner<'a> {
-    fn new(words: &'a [String]) -> Self {
+    fn new(words: &'a [String], locale: rondi::Locale) -> Self {
         Self {
             words,
             next: 0,
             resume_at: 1,
             pending: None,
             ended: false,
+            locale,
         }
     }
 
-    fn rejected(text: &[u8], name: &[u8]) -> Scanned {
+    fn rejected_en(text: &[u8], name: &[u8]) -> Scanned {
         let mut message = text.to_vec();
         message.extend_from_slice(name);
         message.push(b'\'');
@@ -153,11 +155,33 @@ impl<'a> Scanner<'a> {
         Scanned::Rejected(message)
     }
 
+    fn rejected_localized(&self, template: &str, name: &[u8]) -> Scanned {
+        let trimmed = match name.iter().position(|byte| *byte == 0) {
+            Some(nul) => &name[..nul],
+            None => name,
+        };
+        let text = super::i18n::fmt1(template, &String::from_utf8_lossy(trimmed));
+        Scanned::Rejected(text.into_bytes())
+    }
+
     fn long(&self, body: &str) -> Scanned {
+        let cat = super::i18n::catalog(self.locale);
         match body.split_once('=') {
             None if body == "help" => Scanned::Option(Opt::Help, String::new()),
-            Some(("help", _)) => Self::rejected(b"option takes no arguments -- '", b"help"),
-            _ => Self::rejected(b"invalid option -- '", body.as_bytes()),
+            Some(("help", _)) => {
+                if self.locale == rondi::Locale::En {
+                    Self::rejected_en(b"option takes no arguments -- '", b"help")
+                } else {
+                    self.rejected_localized(cat.opt_takes_no_args, b"help")
+                }
+            }
+            _ => {
+                if self.locale == rondi::Locale::En {
+                    Self::rejected_en(b"invalid option -- '", body.as_bytes())
+                } else {
+                    self.rejected_localized(cat.opt_invalid, body.as_bytes())
+                }
+            }
         }
     }
 
@@ -166,10 +190,15 @@ impl<'a> Scanner<'a> {
         let word = &self.words[index];
         let bytes = word.as_bytes();
         let byte = bytes.get(offset).copied().unwrap_or(0);
+        let cat = super::i18n::catalog(self.locale);
         let Some(&(_, option, takes_value)) = OPTIONS.iter().find(|(letter, ..)| *letter == byte)
         else {
             self.resume_at = offset;
-            return Self::rejected(b"invalid option -- '", &[byte]);
+            return if self.locale == rondi::Locale::En {
+                Self::rejected_en(b"invalid option -- '", &[byte])
+            } else {
+                self.rejected_localized(cat.opt_invalid, &[byte])
+            };
         };
         self.resume_at = 1;
         let rest = offset + 1;
@@ -188,7 +217,13 @@ impl<'a> Scanner<'a> {
                 self.next += 1;
                 Scanned::Option(option, value.clone())
             }
-            None => Self::rejected(b"option requires an argument -- '", &[byte]),
+            None => {
+                if self.locale == rondi::Locale::En {
+                    Self::rejected_en(b"option requires an argument -- '", &[byte])
+                } else {
+                    self.rejected_localized(cat.opt_requires_an_arg, &[byte])
+                }
+            }
         }
     }
 }
@@ -291,6 +326,7 @@ struct Reader<'a, E> {
     defaults: ListenerDefaults,
     status: i32,
     usage: usize,
+    locale: rondi::Locale,
 }
 
 impl<E: Environment> Reader<'_, E> {
@@ -300,6 +336,7 @@ impl<E: Environment> Reader<'_, E> {
 
     /// Handles one option; `Err` stops reading with that status.
     fn apply(&mut self, option: Opt, value: &str) -> Result<(), i32> {
+        let cat = super::i18n::catalog(self.locale);
         match option {
             Opt::AllocationChunk => {
                 // Compatibility: a whole C int above zero (opt-013, opt-014);
@@ -308,11 +345,11 @@ impl<E: Environment> Reader<'_, E> {
                 let chunk =
                     c_long(value, 10).filter(|size| (1..=i64::from(i32::MAX)).contains(size));
                 if value.is_empty() {
-                    self.note("Missing argument for -a");
+                    self.note(&super::i18n::fmt1(cat.rrdcached_missing_arg, "-a"));
                     return Err(10);
                 }
                 let Some(chunk) = chunk else {
-                    self.note(&format!("Invalid allocation size: {value}"));
+                    self.note(&super::i18n::fmt1(cat.rrdcached_invalid_alloc, value));
                     return Err(10);
                 };
                 self.config.allocation_chunk = chunk as usize;
@@ -327,15 +364,13 @@ impl<E: Environment> Reader<'_, E> {
             }
             Opt::FlushAtShutdown => self.config.flush_at_shutdown = true,
             Opt::FlushInterval => {
-                if let Some(interval) = self.interval(value, "flush interval", 3) {
+                if let Some(interval) = self.interval(value, cat.rrdcached_flush_interval, 3) {
                     self.config.flush_interval = interval;
                 }
             }
             Opt::Group => {
                 let Some(gid) = self.environment.group(value) else {
-                    self.note(&format!(
-                        "read_options: couldn't map \"{value}\" to a group, Sorry"
-                    ));
+                    self.note(&super::i18n::fmt1(cat.rrdcached_map_group, value));
                     return Err(5);
                 };
                 self.config.group = Some(gid);
@@ -360,7 +395,7 @@ impl<E: Environment> Reader<'_, E> {
                 // Compatibility: an octal C long from 0 to 07777 (opt-017).
                 // Provenance: black-box compatibility test.
                 let Some(mode) = c_long(value, 8).filter(|mode| (0..=0o7777).contains(mode)) else {
-                    self.note(&format!("read_options: Invalid file mode \"{value}\"."));
+                    self.note(&super::i18n::fmt1(cat.rrdcached_invalid_mode, value));
                     return Err(5);
                 };
                 self.defaults.access.mode = Some(mode as u32);
@@ -378,9 +413,7 @@ impl<E: Environment> Reader<'_, E> {
             Opt::RecursiveCreate => self.config.recursive_create = true,
             Opt::SocketGroup => {
                 let Some(gid) = self.environment.socket_group(value) else {
-                    self.note(&format!(
-                        "read_options: couldn't map \"{value}\" to a group, Sorry"
-                    ));
+                    self.note(&super::i18n::fmt1(cat.rrdcached_map_group, value));
                     return Err(5);
                 };
                 self.defaults.access.group = Some(gid);
@@ -389,20 +422,18 @@ impl<E: Environment> Reader<'_, E> {
                 let threads =
                     c_long(value, 10).filter(|count| (1..=i64::from(i32::MAX)).contains(count));
                 if value.is_empty() {
-                    self.note("Missing argument for -t");
+                    self.note(&super::i18n::fmt1(cat.rrdcached_missing_arg, "-t"));
                     return Err(1);
                 }
                 let Some(threads) = threads else {
-                    self.note(&format!("Invalid thread count: -t {value}"));
+                    self.note(&super::i18n::fmt1(cat.rrdcached_invalid_threads, value));
                     return Err(1);
                 };
                 self.config.write_threads = threads as u32;
             }
             Opt::User => {
                 let Some(account) = self.environment.user(value) else {
-                    self.note(&format!(
-                        "read_options: couldn't map \"{value}\" to a user, Sorry"
-                    ));
+                    self.note(&super::i18n::fmt1(cat.rrdcached_map_user, value));
                     return Err(5);
                 };
                 self.config.user = Some(account);
@@ -410,19 +441,20 @@ impl<E: Environment> Reader<'_, E> {
             Opt::LogLevel => match LogLevel::from_name(value) {
                 Some(level) => self.config.log_level = level,
                 None => {
-                    self.note(&format!(
-                        "Unrecognized log level '{value}'; falling back to default LOG_ERR."
+                    self.note(&super::i18n::fmt1(
+                        cat.rrdcached_unrecognized_loglevel,
+                        value,
                     ));
                     self.config.log_level = LogLevel::Err;
                 }
             },
             Opt::WriteInterval => {
-                if let Some(interval) = self.interval(value, "write interval", 2) {
+                if let Some(interval) = self.interval(value, cat.rrdcached_write_interval, 2) {
                     self.config.write_interval = interval;
                 }
             }
             Opt::WriteJitter => {
-                if let Some(interval) = self.interval(value, "write jitter", 2) {
+                if let Some(interval) = self.interval(value, cat.rrdcached_write_jitter, 2) {
                     self.config.write_jitter = interval;
                 }
             }
@@ -436,10 +468,17 @@ impl<E: Environment> Reader<'_, E> {
     }
 
     fn interval(&mut self, value: &str, what: &str, status: i32) -> Option<Interval> {
+        let cat = super::i18n::catalog(self.locale);
         match parse_interval(value) {
             Ok(interval) => Some(interval),
             Err(problem) => {
-                self.note(&format!("Invalid {what} {value}: {}", problem.text()));
+                let msg = super::i18n::fmt3(
+                    cat.rrdcached_invalid_interval,
+                    what,
+                    value,
+                    problem.text_for(self.locale),
+                );
+                self.note(&msg);
                 self.status = status;
                 None
             }
@@ -460,15 +499,14 @@ impl<E: Environment> Reader<'_, E> {
     // empty list leaves the listeners unrestricted (RC-130, opt-042,
     // opt-047). Provenance: black-box compatibility test.
     fn permissions(&mut self, value: &str) {
+        let cat = super::i18n::catalog(self.locale);
         let mut allowed = Vec::new();
         for name in value.split([',', ' ']).filter(|name| !name.is_empty()) {
             if daemon::is_command(name) {
                 allowed.push(name.to_owned());
                 self.status = 0;
             } else {
-                self.note(&format!(
-                    "read_options: Adding permission \"{name}\" to socket failed. Most likely, this permission doesn't exist. Check your command line."
-                ));
+                self.note(&super::i18n::fmt1(cat.rrdcached_bad_permission, name));
                 self.status = 4;
             }
         }
@@ -483,11 +521,22 @@ impl<E: Environment> Reader<'_, E> {
     }
 }
 
-/// Reads `args` (without the program name).
+/// Reads `args` (without the program name) in the English compatibility locale.
+#[cfg(test)]
 fn read_options(
     args: &[String],
     environment: &mut impl Environment,
     errors: &mut dyn Write,
+) -> Verdict {
+    read_options_with_locale(args, environment, errors, rondi::Locale::En)
+}
+
+/// Reads `args` (without the program name) using `locale` for front-end text.
+fn read_options_with_locale(
+    args: &[String],
+    environment: &mut impl Environment,
+    errors: &mut dyn Write,
+    locale: rondi::Locale,
 ) -> Verdict {
     let mut reader = Reader {
         environment,
@@ -496,9 +545,10 @@ fn read_options(
         defaults: ListenerDefaults::default(),
         status: 0,
         usage: 0,
+        locale,
     };
     let mut stopped = false;
-    for item in Scanner::new(args) {
+    for item in Scanner::new(args, locale) {
         match item {
             Scanned::Option(option, value) => {
                 if let Err(status) = reader.apply(option, &value) {
@@ -541,11 +591,12 @@ enum IntervalProblem {
 }
 
 impl IntervalProblem {
-    fn text(self) -> &'static str {
+    fn text_for(self, locale: rondi::Locale) -> &'static str {
+        let cat = super::i18n::catalog(locale);
         match self {
-            Self::NotNumber => "value must be (suffixed) positive number",
-            Self::TrailingGarbage => "value has trailing garbage",
-            Self::NotPositive => "value must be positive",
+            Self::NotNumber => cat.rrdcached_interval_not_number,
+            Self::TrailingGarbage => cat.rrdcached_interval_trailing_garbage,
+            Self::NotPositive => cat.rrdcached_interval_not_positive,
         }
     }
 }
@@ -597,12 +648,18 @@ fn c_long(text: &str, radix: u32) -> Option<i64> {
 
 /// Runs the `rrdcached` personality and exits with its status.
 pub(crate) fn rrdcached_mode(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let verdict = read_options(args, &mut System, &mut std::io::stderr());
+    let locale = super::i18n::messages_locale();
+    let verdict = read_options_with_locale(args, &mut System, &mut std::io::stderr(), locale);
+    let usage_text = if locale == rondi::Locale::En {
+        USAGE
+    } else {
+        super::i18n::catalog(locale).rrdcached_usage
+    };
     let status = match verdict {
         Verdict::Exit { status, usage } => {
             let mut stdout = std::io::stdout();
             for _ in 0..usage {
-                let _ = stdout.write_all(USAGE.as_bytes());
+                let _ = stdout.write_all(usage_text.as_bytes());
             }
             let _ = stdout.flush();
             status

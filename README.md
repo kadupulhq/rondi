@@ -134,6 +134,16 @@ Fetch and `xport` use shared RRDtool-compatible locking. Updates use exclusive l
 
 Graph data preparation supports per-DEF windows and steps, consolidation, dependent CDEFs, VDEF substitutions, and ordered SHIFT operations. Differential tests exercise RPN numeric parsing, stack operations, unknown handling, trend/prediction calculations, numeric PRINT/GPRINT formatting, and SI scaling. Native PNG rendering supports the primitives and limits listed above, but exact RRDtool images remain a compatibility gap. See the [compatibility matrix](docs/compatibility.md) for the tested subsets.
 
+## Localization
+
+Rondi includes pure-Rust localization with no external i18n dependencies or OS locale requirements:
+
+- **20 Tier 1 CLI locales (`rondi::Locale`):** `en`, `de`, `es`, `fr`, `it`, `pt-BR`, `nl`, `ru`, `uk`, `ja`, `ko`, `zh-CN`, `zh-TW`, `ar`, `hi`, `pl`, `tr`, `sv`, `vi`, `id`. Regional variants such as `en-GB`, `es-MX`, `fr-CA`/`fr-MA`/`fr-SN`, `pt-PT`, and `ar-EG`/`ar-MA`/`ar-SA` fall back to their matching Tier 1 CLI catalog.
+- **51 pure-Rust `LC_TIME` locales (`rondi::TimeLocale`):** all 20 Tier 1 locales plus 31 additional regional and Kadupul locales (`af-ZA`, `am-ET`, `ar-EG`, `ar-MA`, `ar-SA`, `bg-BG`, `bn-BD`, `el-GR`, `en-GB`, `es-MX`, `fa-IR`, `fr-CA`, `fr-MA`, `fr-SN`, `ha-NG`, `he-IL`, `ig-NG`, `lv-LV`, `mg-MG`, `mr-IN`, `pt-PT`, `rw-RW`, `so-SO`, `sw-KE`, `ta-IN`, `te-IN`, `th-TH`, `ur-PK`, `xh-ZA`, `yo-NG`, `zu-ZA`).
+- **Native `rondi` CLI:** Pass `--lang <locale>` (for example `rondi --lang ja --help`) or set POSIX `LC_ALL`, `LC_MESSAGES`, or `LANG`.
+- **Compatibility front ends (`rrdtool`, `rrdupdate`, `rrdcreate`, `rrdinfo`, `rrdcached`):** Honor POSIX `LC_ALL`, `LC_MESSAGES`, and `LANG` without adding non-RRDtool flags. Under `C`, `POSIX`, `en`, or an unset locale, output remains byte-for-byte identical to RRDtool 1.11.0.
+- **Time formatting (`LC_TIME`):** `PRINT`/`GPRINT` `:strftime` and `:valstrftime` honor `LC_ALL`, `LC_TIME`, and `LANG`. When the requested locale is not installed in the host C library (such as in minimal containers), Rondi falls back to its built-in pure-Rust `rondi::locale` tables for `%a`, `%A`, `%b`, `%B`, `%h`, `%p`, `%P`, `%c`, `%x`, `%X`, and `%r`. Library callers pass `rondi::Locale` or `rondi::TimeLocale` explicitly without reading environment variables.
+
 ## Performance measurements
 
 Run the checked-in workloads with the pinned toolchain:

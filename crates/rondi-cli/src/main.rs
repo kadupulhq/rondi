@@ -8,6 +8,8 @@ mod frontend;
 /// docs/compatibility/graph.md. Options that only change pixels are
 /// checked and then left unused.
 mod graph_args;
+/// Pure-Rust Tier 1 localization for the CLI front ends.
+mod i18n;
 /// Text of graph PRINT and GPRINT items, written from
 /// docs/compatibility/format-strings.md.
 mod print_format;
@@ -17,7 +19,7 @@ mod rrdcached;
 use frontend::{OptionScanner, OptionSpec, RawMessage, system_error_text};
 use print_format::{PrintOutcome, local_tm, printf_double as c_printf_double};
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use rondi::time::{
     UpdateTimestamp, parse_time_spec, parse_update_timestamp, resolve_start_end, resolve_window,
 };
@@ -34,6 +36,9 @@ use std::path::{Path, PathBuf};
 #[derive(Parser)]
 #[command(name = "rondi", version, about = "Round-robin time-series storage")]
 struct Args {
+    /// UI language locale (e.g. en, de, ja, zh-CN, ar).
+    #[arg(long, global = true, value_name = "LOCALE")]
+    lang: Option<String>,
     /// Use the server's Unix socket instead of local storage.
     #[arg(long, global = true)]
     socket: Option<PathBuf>,
@@ -59,6 +64,7 @@ enum Command {
         #[arg(long, default_value_t = 256)]
         queue_capacity: usize,
     },
+    /// Create a new native .rondi time-series database.
     Create {
         name: String,
         #[arg(long)]
@@ -70,15 +76,97 @@ enum Command {
         #[arg(long)]
         start: i64,
     },
+    /// Write a timestamped sample to a native .rondi database.
     Update {
         name: String,
         timestamp: i64,
         value: String,
     },
-    Fetch {
-        name: String,
-    },
+    /// Fetch stored points from a native .rondi database as JSON.
+    Fetch { name: String },
+    /// Print storage health status as JSON.
     Health,
+}
+
+fn extract_lang_flag(args: &[String]) -> Option<String> {
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--" {
+            break;
+        }
+        if arg == "--lang" {
+            return iter.next().cloned();
+        }
+        if let Some(value) = arg.strip_prefix("--lang=") {
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
+fn localized_rondi_command(locale: rondi::Locale) -> clap::Command {
+    let cat = i18n::catalog(locale);
+    let mut cmd = Args::command()
+        .about(cat.native_about)
+        .mut_arg("lang", |arg| arg.help(cat.native_arg_lang))
+        .mut_arg("socket", |arg| arg.help(cat.native_arg_socket))
+        .mut_arg("root", |arg| arg.help(cat.native_arg_root))
+        .mut_arg("max_rows", |arg| arg.help(cat.native_arg_max_rows))
+        .mut_arg("idempotency_window", |arg| {
+            arg.help(cat.native_arg_idempotency_window)
+        });
+    cmd = cmd
+        .mut_subcommand("server", |sub| {
+            sub.about(cat.native_cmd_server)
+                .mut_arg("listen", |arg| arg.help(cat.native_cmd_server_listen))
+                .mut_arg("queue_capacity", |arg| {
+                    arg.help(cat.native_cmd_server_queue_capacity)
+                })
+        })
+        .mut_subcommand("create", |sub| {
+            sub.about(cat.native_cmd_create)
+                .mut_arg("name", |arg| arg.help(cat.native_cmd_create_name))
+                .mut_arg("step", |arg| arg.help(cat.native_cmd_create_step))
+                .mut_arg("heartbeat", |arg| arg.help(cat.native_cmd_create_heartbeat))
+                .mut_arg("rows", |arg| arg.help(cat.native_cmd_create_rows))
+                .mut_arg("start", |arg| arg.help(cat.native_cmd_create_start))
+        })
+        .mut_subcommand("update", |sub| {
+            sub.about(cat.native_cmd_update)
+                .mut_arg("name", |arg| arg.help(cat.native_cmd_update_name))
+                .mut_arg("timestamp", |arg| arg.help(cat.native_cmd_update_timestamp))
+                .mut_arg("value", |arg| arg.help(cat.native_cmd_update_value))
+        })
+        .mut_subcommand("fetch", |sub| {
+            sub.about(cat.native_cmd_fetch)
+                .mut_arg("name", |arg| arg.help(cat.native_cmd_fetch_name))
+        })
+        .mut_subcommand("health", |sub| sub.about(cat.native_cmd_health));
+    cmd
+}
+
+fn parse_native_args() -> (Args, rondi::Locale) {
+    let raw_args = lossy_args(1);
+    let env_locale = i18n::messages_locale();
+    let locale = match extract_lang_flag(&raw_args) {
+        Some(raw) => match rondi::Locale::parse(&raw) {
+            Some(locale) => locale,
+            None => {
+                let cat = i18n::catalog(env_locale);
+                let msg = i18n::fmt2(
+                    cat.native_err_invalid_lang,
+                    &raw,
+                    &i18n::supported_locale_codes(),
+                );
+                eprintln!("error: {msg}");
+                std::process::exit(2);
+            }
+        },
+        None => env_locale,
+    };
+    let matches = localized_rondi_command(locale).get_matches();
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    (args, locale)
 }
 
 fn invoked_name() -> String {
@@ -111,7 +199,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         invoked_name().as_str(),
         "rrdtool" | "rrdupdate" | "rrdcreate" | "rrdinfo" | "rrdtool-proxy" | "rrdproxy"
     );
-    let args = native.then(Args::parse);
+    let parsed_native = native.then(parse_native_args);
+    let (args, native_locale) = match parsed_native {
+        Some((args, locale)) => (Some(args), locale),
+        None => (None, rondi::Locale::En),
+    };
     let prepared = match args.as_ref() {
         Some(args) if args.socket.is_none() => match &args.command {
             Command::Server {
@@ -130,12 +222,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         _ => None,
     };
-    async_main(args, prepared)
+    async_main(args, native_locale, prepared)
 }
 
 #[tokio::main]
 async fn async_main(
     parsed: Option<Args>,
+    native_locale: rondi::Locale,
     prepared: Option<rondi_server::PreparedServer>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let invoked_as = invoked_name();
@@ -164,18 +257,22 @@ async fn async_main(
     if let Some(prepared) = prepared {
         return rondi_server::run(prepared).await;
     }
-    let args = parsed.unwrap_or_else(Args::parse);
+    let (args, locale) = match parsed {
+        Some(args) => (args, native_locale),
+        None => parse_native_args(),
+    };
     if let Some(socket) = args.socket {
-        return server_mode(socket, args.command).await;
+        return server_mode(socket, args.command, locale).await;
     }
     let options = StoreOptions {
         max_rows: args.max_rows,
         idempotency_window: std::time::Duration::from_secs(args.idempotency_window),
     };
     let store = Store::open_with(&args.root, options)?;
+    let cat = i18n::catalog(locale);
     match args.command {
         Command::Server { .. } => {
-            return Err("server must be prepared before starting runtime threads".into());
+            return Err(cat.native_err_server_not_prepared.into());
         }
         Command::Create {
             name,
@@ -215,9 +312,22 @@ async fn async_main(
 fn initialize_rrdtool_locale() {
     // The upstream rrdtool executable calls setlocale(LC_ALL, "") before
     // command dispatch so graph time and calendar operators use the active
-    // environment locale.
+    // environment locale. If one category names an uninstalled OS locale,
+    // fall back to loading each installed category individually so numeric
+    // and ctype behavior still follow installed host locales while pure-Rust
+    // LC_TIME handles uninstalled time locales.
     unsafe {
-        libc::setlocale(libc::LC_ALL, c"".as_ptr());
+        if libc::setlocale(libc::LC_ALL, c"".as_ptr()).is_null() {
+            for category in [
+                libc::LC_CTYPE,
+                libc::LC_NUMERIC,
+                libc::LC_TIME,
+                libc::LC_COLLATE,
+                libc::LC_MONETARY,
+            ] {
+                libc::setlocale(category, c"".as_ptr());
+            }
+        }
     }
 }
 
@@ -273,9 +383,16 @@ fn current_local_year() -> i32 {
     }
 }
 
+fn print_rrdtool_help(topic: &str) {
+    let locale = i18n::messages_locale();
+    if let Some(page) = i18n::rrdtool_help(topic, locale) {
+        print!("{page}");
+    }
+}
+
 fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
-        print!("{}", rrdtool_create_help());
+        print_rrdtool_help("create");
         return Ok(());
     }
     let now = std::time::SystemTime::now()
@@ -538,13 +655,9 @@ fn rrdtool_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn rrdtool_create_help() -> &'static str {
-    "RRDtool 1.11.0  Copyright by Tobias Oetiker <tobi@oetiker.ch>\n               Compiled \n\nUsage: rrdtool [options] command command_options\n* create - create a new RRD\n\n\trrdtool create filename [--start|-b start time]\n\t\t[--step|-s step]\n\t\t[--template|-t template-file]\n\t\t[--source|-r source-file]\n\t\t[--no-overwrite|-O]\n\t\t[--daemon|-d address]\n\t\t[DS:ds-name:DST:dst arguments]\n\t\t[RRA:CF:cf arguments]\n\nRRDtool is distributed under the Terms of the GNU General\nPublic License Version 2. (www.gnu.org/copyleft/gpl.html)\n\nFor more information read the RRD manpages\n\n"
-}
-
 fn rrdtool_fetch(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
-        print!("{}", include_str!("help/fetch.txt"));
+        print_rrdtool_help("fetch");
         return Ok(());
     }
     const LONGOPTS: &[OptionSpec<char>] = &[
@@ -793,11 +906,7 @@ fn daemon_fetch_uses_rrd_numeric_conversion() {
 
 fn rrdtool_graph(args: &[String], verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
-        if verbose {
-            print!("{}", include_str!("help/graphv.txt"));
-        } else {
-            print!("{}", include_str!("help/graph.txt"));
-        }
+        print_rrdtool_help(if verbose { "graphv" } else { "graph" });
         return Ok(());
     }
     let now = std::time::SystemTime::now()
@@ -1637,7 +1746,7 @@ fn write_output_file(path: &str, bytes: &[u8]) -> Result<(), OutputError> {
 
 fn rrdtool_xport(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
-        print!("{}", include_str!("help/xport.txt"));
+        print_rrdtool_help("xport");
         return Ok(());
     }
     let (output, error) = render_xport(args)?;
@@ -3135,11 +3244,7 @@ fn rrdtool_updatev(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 fn rrdtool_update_impl(args: &[String], verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
-        if verbose {
-            print!("{}", include_str!("help/updatev.txt"));
-        } else {
-            print!("{}", include_str!("help/update.txt"));
-        }
+        print_rrdtool_help(if verbose { "updatev" } else { "update" });
         return Ok(());
     }
     // RRDtool (updatev) and :679 (update).
@@ -3619,7 +3724,7 @@ fn rrdtool_last_help() -> &'static str {
 
 fn rrdtool_lastupdate(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
-        print!("{}", include_str!("help/lastupdate.txt"));
+        print_rrdtool_help("lastupdate");
         return Ok(());
     }
     const LONGOPTS: &[OptionSpec<char>] = &[OptionSpec::value("daemon", Some('d'), 'd')];
@@ -3660,7 +3765,7 @@ fn rrdtool_lastupdate(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
 fn rrdtool_first(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
-        print!("{}", include_str!("help/first.txt"));
+        print_rrdtool_help("first");
         return Ok(());
     }
     const LONGOPTS: &[OptionSpec<char>] = &[
@@ -3709,7 +3814,7 @@ fn rrdtool_first(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
-        print!("{}", include_str!("help/info.txt"));
+        print_rrdtool_help("info");
         return Ok(());
     }
     const LONGOPTS: &[OptionSpec<char>] = &[
@@ -3849,7 +3954,7 @@ fn rrdtool_info(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
-        print!("{}", include_str!("help/dump.txt"));
+        print_rrdtool_help("dump");
         return Ok(());
     }
     const LONGOPTS: &[OptionSpec<char>] = &[
@@ -3921,7 +4026,7 @@ fn rrdtool_dump(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 fn rrdtool_restore(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
-        print!("{}", include_str!("help/restore.txt"));
+        print_rrdtool_help("restore");
         return Ok(());
     }
     // Upstream keeps both flags in file statics that
@@ -4001,7 +4106,7 @@ fn rrdtool_restore(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 fn rrdtool_tune(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
-        print!("{}", include_str!("help/tune.txt"));
+        print_rrdtool_help("tune");
         return Ok(());
     }
     // RRDtool's tune reads only --daemon in a first pass that
@@ -4378,7 +4483,7 @@ fn tune_scan_name(value: &str) -> Option<String> {
 
 fn rrdtool_resize(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
-        print!("{}", include_str!("help/resize.txt"));
+        print_rrdtool_help("resize");
         return Ok(());
     }
     // Checks run in this order: reserved name, argument count, then values.
@@ -4421,7 +4526,7 @@ fn rrdtool_resize(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
 fn rrdtool_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 {
-        print!("{}", include_str!("help/list.txt"));
+        print_rrdtool_help("list");
         return Ok(());
     }
     const LONGOPTS: &[OptionSpec<char>] = &[
@@ -5013,13 +5118,18 @@ fn rrd_archive_definition_matches(
     xff == archive.xff && pdp_per_row == archive.pdp_per_row && rows == archive.rows
 }
 
-async fn server_mode(socket: PathBuf, command: Command) -> Result<(), Box<dyn std::error::Error>> {
+async fn server_mode(
+    socket: PathBuf,
+    command: Command,
+    locale: rondi::Locale,
+) -> Result<(), Box<dyn std::error::Error>> {
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
     use hyper::Request;
     use hyper::client::conn::http1;
     use hyper_util::rt::TokioIo;
     use tokio::net::UnixStream;
+    let cat = i18n::catalog(locale);
     let (method, path, body) = match command {
         Command::Create {
             name,
@@ -5047,7 +5157,7 @@ async fn server_mode(socket: PathBuf, command: Command) -> Result<(), Box<dyn st
             serde_json::Value::Null,
         ),
         Command::Health => ("GET", "/v1/health".to_string(), serde_json::Value::Null),
-        Command::Server { .. } => return Err("server cannot be invoked as a client request".into()),
+        Command::Server { .. } => return Err(cat.native_err_server_client_request.into()),
     };
     let stream = UnixStream::connect(socket).await?;
     let encoded = if body.is_null() {
@@ -5070,7 +5180,9 @@ async fn server_mode(socket: PathBuf, command: Command) -> Result<(), Box<dyn st
     let body = response.into_body().collect().await?.to_bytes();
     let body = std::str::from_utf8(&body)?;
     if !status.is_success() {
-        return Err(format!("server error (HTTP {status}): {}", body.trim()).into());
+        return Err(
+            i18n::fmt2(cat.native_err_server_http, &status.to_string(), body.trim()).into(),
+        );
     }
     if !body.trim().is_empty() {
         println!(
