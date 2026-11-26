@@ -92,7 +92,11 @@ jobs:
           echo "24c345b5c077c1b2b2fcbc1a364f1da051650fb6743ad5213096adc04c862ed4  $archive" | sha256sum --check
           tar -xzf "$archive" -C "$RUNNER_TEMP"
           cd "$RUNNER_TEMP/rrdtool-1.11.0"
-          ./configure --prefix=/usr/local --disable-perl --disable-python --disable-ruby --disable-lua
+          # ubuntu-26.04 runners install amd64v3 packages whose gcc defaults to
+          # x86-64-v3, which fuses multiply-adds. Build the baseline x86_64
+          # oracle the differential tests compare against (update.md UP-35).
+          CFLAGS='-g -O2 -march=x86-64 -ffp-contract=off' \
+            ./configure --prefix=/usr/local --disable-perl --disable-python --disable-ruby --disable-lua
           make -j"$(nproc)"
           sudo make install
           sudo ldconfig
