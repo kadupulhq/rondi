@@ -1,6 +1,6 @@
-//! Pure-Rust CLDR-aligned `LC_TIME` data tables for all 72 supported `TimeLocale` values.
+//! Pure-Rust CLDR-aligned `LC_TIME` data tables for all 73 supported `TimeLocale` values.
 //!
-//! The 21 tables from `TIME_CS_CZ` onward were generated from the Unicode
+//! The 22 tables from `TIME_CS_CZ` onward were generated from the Unicode
 //! CLDR JSON release tagged `49.0.0` (<https://github.com/unicode-org/cldr-json>),
 //! reading `cldr-json/cldr-dates-full/main/<cldr-id>/ca-gregorian.json` for
 //! each locale. Month and weekday names come from the `stand-alone` `wide`
@@ -2896,5 +2896,44 @@ pub(super) static TIME_ML_IN: TimeLocaleData = TimeLocaleData {
     date_time_fmt: "%a %d %b %Y, %I:%M:%S %p",
     date_fmt: "%d/%m/%Y",
     time_fmt: "%I:%M:%S %p",
+    time_12h_fmt: "%I:%M:%S %p",
+};
+
+// Provenance: specification, Unicode CLDR 49.0.0 cldr-dates-full/main/bs/ca-gregorian.json; see THIRD-PARTY-NOTICES.md.
+pub(super) static TIME_BS_BA: TimeLocaleData = TimeLocaleData {
+    months_full: [
+        "januar",
+        "februar",
+        "mart",
+        "april",
+        "maj",
+        "juni",
+        "juli",
+        "august",
+        "septembar",
+        "oktobar",
+        "novembar",
+        "decembar",
+    ],
+    months_abbr: [
+        "jan", "feb", "mar", "apr", "maj", "jun", "jul", "aug", "sep", "okt", "nov", "dec",
+    ],
+    weekdays_full: [
+        "nedjelja",
+        "ponedjeljak",
+        "utorak",
+        "srijeda",
+        "četvrtak",
+        "petak",
+        "subota",
+    ],
+    weekdays_abbr: ["ned", "pon", "uto", "sri", "čet", "pet", "sub"],
+    am: "a.\u{202f}m.",
+    pm: "p.\u{202f}m.",
+    am_lower: "a.\u{202f}m.",
+    pm_lower: "p.\u{202f}m.",
+    date_time_fmt: "%a %d %b %Y %H:%M:%S",
+    date_fmt: "%d. %m. %Y.",
+    time_fmt: "%H:%M:%S",
     time_12h_fmt: "%I:%M:%S %p",
 };

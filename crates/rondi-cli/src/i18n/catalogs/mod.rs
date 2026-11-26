@@ -3,6 +3,7 @@ mod am;
 mod ar;
 mod bg;
 mod bn;
+mod bs;
 mod ca;
 mod cs;
 mod da;
@@ -132,6 +133,7 @@ pub(super) const fn get(locale: Locale) -> &'static Catalog {
         Locale::Gu => &gu::CATALOG,
         Locale::Kn => &kn::CATALOG,
         Locale::Ml => &ml::CATALOG,
+        Locale::Bs => &bs::CATALOG,
     }
 }
 
