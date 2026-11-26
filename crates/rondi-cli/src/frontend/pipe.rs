@@ -193,6 +193,7 @@ fn join(parts: &[&[u8]]) -> Vec<u8> {
 /// Runs a session until end of input or `quit`.
 pub(crate) fn run_session(
     input: &mut impl BufRead,
+    locale: rondi::Locale,
     is_command: impl Fn(&[u8]) -> bool,
     mut run: impl FnMut(&[String]) -> Result<(), Vec<u8>>,
 ) {
@@ -202,7 +203,7 @@ pub(crate) fn run_session(
             Ok(Some(line)) => line,
             Ok(None) | Err(_) => return,
         };
-        let reply = respond(&line, &is_command, &mut run, started);
+        let reply = respond(&line, locale, &is_command, &mut run, started);
         let mut out = io::stdout().lock();
         let _ = out.write_all(&reply.text);
         let _ = out.flush();
@@ -234,10 +235,12 @@ impl Reply {
 
 fn respond(
     line: &Line,
+    locale: rondi::Locale,
     is_command: &impl Fn(&[u8]) -> bool,
     run: &mut impl FnMut(&[String]) -> Result<(), Vec<u8>>,
     started: Instant,
 ) -> Reply {
+    let cat = super::super::i18n::catalog(locale);
     if !line.terminated {
         if line.bytes.is_empty() {
             return Reply::text(Vec::new());
@@ -246,18 +249,23 @@ fn respond(
         // a newline is rejected, unlike a blank line that is.
         // Provenance: black-box compatibility test.
         if line.bytes.iter().all(|&byte| byte == b' ') {
-            return Reply::error(b"not enough arguments");
+            return Reply::error(cat.pipe_not_enough_args.as_bytes());
         }
     }
     let Some(words) = split(trim(&line.bytes)) else {
-        return Reply::error(b"creating arguments");
+        return Reply::error(cat.pipe_creating_args.as_bytes());
     };
     match classify(words, is_command) {
-        Action::Usage => Reply::ok(super::PIPE_USAGE.as_bytes().to_vec(), started),
+        Action::Usage => Reply::ok(
+            super::super::i18n::rrdtool_pipe_usage(locale)
+                .as_bytes()
+                .to_vec(),
+            started,
+        ),
         Action::Version => Reply::ok(super::VERSION_LINE.as_bytes().to_vec(), started),
-        Action::WrongCount(builtin) => {
-            Reply::error(format!("invalid parameter count for {}", builtin.name()).as_bytes())
-        }
+        Action::WrongCount(builtin) => Reply::error(
+            super::super::i18n::fmt1(cat.pipe_invalid_param_count, builtin.name()).as_bytes(),
+        ),
         Action::Builtin(Builtin::Quit, _) => Reply {
             text: Vec::new(),
             quit: true,
@@ -310,7 +318,17 @@ fn respond(
                 Err(message) => Reply::error(&message),
             }
         }
-        Action::Unknown(name) => Reply::error(&join(&[b"unknown function '", &name, b"'"])),
+        Action::Unknown(name) => {
+            if locale == rondi::Locale::En {
+                Reply::error(&join(&[b"unknown function '", &name, b"'"]))
+            } else {
+                let text = super::super::i18n::fmt1(
+                    cat.rrdtool_unknown_function,
+                    &String::from_utf8_lossy(&name),
+                );
+                Reply::error(text.as_bytes())
+            }
+        }
     }
 }
 

@@ -106,6 +106,29 @@ impl OptionError {
         text.truncate(OPTION_MESSAGE_LIMIT);
         text
     }
+
+    /// Returns the error message in `locale`. Under [`rondi::Locale::En`],
+    /// this returns [`Self::message_bytes`] byte-for-byte.
+    pub(crate) fn message_bytes_for(&self, locale: rondi::Locale) -> Vec<u8> {
+        if locale == rondi::Locale::En {
+            return self.message_bytes();
+        }
+        let cat = super::super::i18n::catalog(locale);
+        let formatted = match self {
+            Self::UnknownLong(name) => super::super::i18n::fmt1(cat.opt_invalid, name),
+            Self::UnknownShort(byte) => {
+                let buf = [*byte];
+                let s = String::from_utf8_lossy(&buf);
+                super::super::i18n::fmt1(cat.opt_invalid, &s)
+            }
+            Self::MissingLongValue(name) => super::super::i18n::fmt1(cat.opt_requires_arg, name),
+            Self::MissingShortValue(letter) => {
+                super::super::i18n::fmt1(cat.opt_requires_an_arg, &letter.to_string())
+            }
+            Self::UnexpectedValue(name) => super::super::i18n::fmt1(cat.opt_takes_no_args, name),
+        };
+        formatted.into_bytes()
+    }
 }
 
 impl fmt::Display for OptionError {

@@ -258,19 +258,26 @@ pub(crate) fn utc_tm(time: i64) -> libc::tm {
 }
 
 /// Formats `tm` with the C library's `strftime` into a buffer of
-/// `capacity` bytes.
+/// `capacity` bytes, falling back to Rondi's pure-Rust `LC_TIME` tables when
+/// the user requested a supported non-English locale that the host C library
+/// does not have installed.
 ///
 /// When the result does not fit, `strftime` reports failure but leaves
 /// what it wrote in the buffer. RRDtool prints that partial text, so this
 /// returns it too: the first `capacity` bytes on macOS, the complete
 /// conversions that fit in `capacity - 1` bytes on glibc (FS-34).
 pub(crate) fn strftime_bytes(format: &str, tm: &libc::tm, capacity: usize) -> Vec<u8> {
+    if capacity == 0 || format.as_bytes().contains(&0) {
+        return Vec::new();
+    }
+    let time_locale = super::i18n::time_locale();
+    if time_locale != rondi::Locale::En && os_lc_time_is_posix() {
+        let dt = tm_to_datetime_parts(tm);
+        return rondi::locale::format_strftime_bytes(format, &dt, time_locale, capacity);
+    }
     let Ok(format) = CString::new(format) else {
         return Vec::new();
     };
-    if capacity == 0 {
-        return Vec::new();
-    }
     // One spare zero byte ends the text when strftime fills the buffer.
     let mut buffer = vec![0_u8; capacity + 1];
     // SAFETY: the buffer holds `capacity + 1` bytes and strftime writes at
@@ -287,6 +294,53 @@ pub(crate) fn strftime_bytes(format: &str, tm: &libc::tm, capacity: usize) -> Ve
     };
     buffer.truncate(end);
     buffer
+}
+
+#[cfg(unix)]
+fn os_lc_time_is_posix() -> bool {
+    // SAFETY: passing null queries the current LC_TIME locale without mutating state.
+    unsafe {
+        let ptr = libc::setlocale(libc::LC_TIME, std::ptr::null());
+        if ptr.is_null() {
+            return true;
+        }
+        matches!(CStr::from_ptr(ptr).to_str(), Ok("C" | "POSIX") | Err(_))
+    }
+}
+
+#[cfg(not(unix))]
+fn os_lc_time_is_posix() -> bool {
+    true
+}
+
+fn tm_to_datetime_parts(tm: &libc::tm) -> rondi::locale::DateTimeParts {
+    #[cfg(unix)]
+    let (utc_offset_secs, tz_name) = {
+        let tz = if tm.tm_zone.is_null() {
+            "UTC".to_owned()
+        } else {
+            // SAFETY: tm_zone from localtime_r/gmtime_r points to a static NUL-terminated string.
+            unsafe { CStr::from_ptr(tm.tm_zone) }
+                .to_string_lossy()
+                .into_owned()
+        };
+        (tm.tm_gmtoff as i32, tz)
+    };
+    #[cfg(not(unix))]
+    let (utc_offset_secs, tz_name) = (0_i32, "UTC".to_owned());
+    rondi::locale::DateTimeParts {
+        year: tm.tm_year + 1900,
+        month: (tm.tm_mon + 1).clamp(1, 12) as u8,
+        day: tm.tm_mday.clamp(1, 31) as u8,
+        weekday: tm.tm_wday.rem_euclid(7) as u8,
+        yearday: (tm.tm_yday + 1).clamp(1, 366) as u16,
+        hour: tm.tm_hour.clamp(0, 23) as u8,
+        minute: tm.tm_min.clamp(0, 59) as u8,
+        second: tm.tm_sec.clamp(0, 60) as u8,
+        utc_offset_secs,
+        tz_name,
+        epoch_secs: None,
+    }
 }
 
 /// [`strftime_bytes`] as text, with invalid UTF-8 replaced.

@@ -48,6 +48,14 @@ rondi fetch temperature
 
 `rondi server --listen ./run/rondi.sock` serves the same store over a Unix socket, and `rondi --socket ./run/rondi.sock ...` sends commands to it.
 
+## Localization
+
+`rondi-cli` ships pure-Rust catalogs and `LC_TIME` formatting tables for 20 Tier 1 locales: `en`, `de`, `es`, `fr`, `it`, `pt-BR`, `nl`, `ru`, `uk`, `ja`, `ko`, `zh-CN`, `zh-TW`, `ar`, `hi`, `pl`, `tr`, `sv`, `vi`, and `id`.
+
+- On the native `rondi` command line, select a language with `--lang <locale>` (for example `rondi --lang ja --help`) or via POSIX `LC_ALL`, `LC_MESSAGES`, or `LANG`.
+- On `rrdtool`, `rrdupdate`, `rrdcreate`, `rrdinfo`, and `rrdcached`, localization follows POSIX `LC_ALL`, `LC_MESSAGES`, `LC_TIME`, and `LANG` with no extra flags. Under `C`, `POSIX`, `en`, or an unset locale, compatibility output stays byte-for-byte identical to RRDtool 1.11.0.
+- When `LC_TIME` requests a supported locale that is not installed in the host C library, `:strftime` and `:valstrftime` fall back to Rondi's built-in pure-Rust `LC_TIME` tables.
+
 ## Compatibility
 
 The contract is the behavior of RRDtool 1.11.0, including output, error text and exit status. Rondi checks it by running the same commands through both implementations. Supported today: create, update and updatev, fetch, info, first, last and lastupdate, dump and restore, list, tune (including `rrd_modify` changes), v3 and v4 resize, xport, graph data export, PNG graphs, flushcached, the `rrdtool -` stdin mode, and a tested subset of `rrdcached`. Known gaps include COMPUTE sources, Holt-Winters archives, SVG, PDF and EPS output, PNG bytes and fonts, and the RRDProxy daemon. The [compatibility matrix](https://github.com/kadupulhq/rondi/blob/main/docs/compatibility.md) and [defect register](https://github.com/kadupulhq/rondi/blob/main/docs/COMPATIBILITY_DEFECTS.md) have the details.
