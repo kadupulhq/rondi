@@ -1,6 +1,6 @@
 //! Pure-Rust localization for the `rondi`, `rrdtool`, and `rrdcached`
-//! command-line front ends: the 20 Tier 1 locales plus 44 further message
-//! locales (64 in total, all translated).
+//! command-line front ends: the 20 Tier 1 locales plus 45 further message
+//! locales (65 in total, all translated).
 //!
 //! Under `Locale::En` (including `C`, `POSIX`, and unset locale environment
 //! variables), every compatibility output is returned byte-for-byte identical
@@ -211,7 +211,7 @@ pub(crate) fn fmt3(template: &str, a0: &str, a1: &str, a2: &str) -> String {
         .replace("{2}", a2)
 }
 
-/// Comma-separated list of all 64 supported message locale codes.
+/// Comma-separated list of all 65 supported message locale codes.
 pub(crate) fn supported_locale_codes() -> String {
     Locale::ALL
         .iter()
@@ -534,10 +534,10 @@ mod tests {
     }
 
     #[test]
-    fn all_64_catalogs_and_1408_help_pages_pass_parity_checks() {
+    fn all_65_catalogs_and_1430_help_pages_pass_parity_checks() {
         let en = catalog(Locale::En);
         let en_fields = all_fields(en);
-        assert_eq!(Locale::ALL.len(), 64);
+        assert_eq!(Locale::ALL.len(), 65);
         assert_eq!(HELP_TOPICS.len(), 22);
         let mut help_pages_checked = 0;
         for &locale in Locale::ALL {
@@ -590,7 +590,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(help_pages_checked, 1408);
+        assert_eq!(help_pages_checked, 1430);
     }
 
     #[test]

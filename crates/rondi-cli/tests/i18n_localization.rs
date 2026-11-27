@@ -332,7 +332,7 @@ fn print_strftime_uses_pure_rust_lc_time_for_all_tier1_locales() {
         assert_eq!(line, expected, "lc_time={lc_time}");
     }
 
-    // Verify all 64 message locales can render native `rondi --lang <code> --help`.
+    // Verify all 65 message locales can render native `rondi --lang <code> --help`.
     for &locale in Locale::ALL {
         let out = clean_locale_cmd(rondi_bin())
             .args(["--lang", locale.code(), "--help"])
@@ -341,7 +341,7 @@ fn print_strftime_uses_pure_rust_lc_time_for_all_tier1_locales() {
         assert!(out.status.success(), "locale={locale}");
     }
 
-    // Verify all 52 extended Kadupul LC_TIME locales render authentic localized
+    // Verify all 53 extended Kadupul LC_TIME locales render authentic localized
     // PRINT strftime output via pure-Rust tables even without OS locale packs.
     let kadupul_cases = [
         ("af-ZA", "Sondag September 2001-09-09"),
@@ -396,6 +396,7 @@ fn print_strftime_uses_pure_rust_lc_time_for_all_tier1_locales() {
         ("gu-IN", "રવિવાર સપ્ટેમ્બર 09/09/2001"),
         ("kn-IN", "ಭಾನುವಾರ ಸೆಪ್ಟೆಂಬರ್ 09/09/2001"),
         ("ml-IN", "ഞായറാഴ്\u{200c}ച സെപ്റ്റംബർ 09/09/2001"),
+        ("bs-BA", "nedjelja septembar 09. 09. 2001."),
     ];
     for (lc_time, expected) in kadupul_cases {
         let out = clean_locale_cmd(&rrdtool)
@@ -424,8 +425,8 @@ fn print_strftime_uses_pure_rust_lc_time_for_all_tier1_locales() {
         assert_eq!(line, expected, "lc_time={lc_time}");
     }
 
-    // Verify all 72 TimeLocale variants are covered and regional CLI tags map cleanly.
-    assert_eq!(TimeLocale::ALL.len(), 72);
+    // Verify all 73 TimeLocale variants are covered and regional CLI tags map cleanly.
+    assert_eq!(TimeLocale::ALL.len(), 73);
     for (tag, expected_cli) in [
         ("ar-MA", Locale::Ar),
         ("ar-EG", Locale::Ar),
@@ -437,6 +438,9 @@ fn print_strftime_uses_pure_rust_lc_time_for_all_tier1_locales() {
         ("pt-PT", Locale::PtPt),
         ("sw-TZ", Locale::Sw),
         ("sr-Latn-RS", Locale::Sr),
+        ("bs", Locale::Bs),
+        ("bs-BA", Locale::Bs),
+        ("bs-Latn-BA", Locale::Bs),
         ("no-NO", Locale::Nb),
         ("en-GB", Locale::En),
     ] {

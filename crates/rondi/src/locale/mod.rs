@@ -10,10 +10,10 @@ use std::fmt;
 use std::str::FromStr;
 
 /// CLI message locales supported by Rondi's pure-Rust localization: the 20
-/// Tier 1 locales followed by 44 further message locales (64 in total).
+/// Tier 1 locales followed by 45 further message locales (65 in total).
 ///
 /// Every message locale has a matching [`TimeLocale`], which supplies its
-/// [`Locale::code`] and [`Locale::native_name`]. Catalogs for the 44 further
+/// [`Locale::code`] and [`Locale::native_name`]. Catalogs for the 45 further
 /// locales start as copies of the English catalog until translated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Locale {
@@ -82,10 +82,11 @@ pub enum Locale {
     Gu,
     Kn,
     Ml,
+    Bs,
 }
 
 /// Locales supported by Rondi's pure-Rust `LC_TIME` formatter (the 20 Tier 1
-/// locales plus 52 additional regional and Kadupul locales, 72 in total).
+/// locales plus 53 additional regional and Kadupul locales, 73 in total).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TimeLocale {
     #[default]
@@ -161,6 +162,7 @@ pub enum TimeLocale {
     GuIn,
     KnIn,
     MlIn,
+    BsBa,
 }
 
 /// Error returned when parsing an unsupported locale identifier via [`FromStr`].
@@ -234,8 +236,8 @@ fn normalize_locale_tag(raw: &str) -> Option<String> {
 }
 
 impl Locale {
-    /// All 64 supported CLI message locales in canonical order: the 20 Tier 1
-    /// locales first, then the 44 further message locales.
+    /// All 65 supported CLI message locales in canonical order: the 20 Tier 1
+    /// locales first, then the 45 further message locales.
     pub const ALL: &'static [Locale] = &[
         Self::En,
         Self::De,
@@ -301,6 +303,7 @@ impl Locale {
         Self::Gu,
         Self::Kn,
         Self::Ml,
+        Self::Bs,
     ];
 
     /// Canonical BCP-47 language tag for this locale.
@@ -315,7 +318,7 @@ impl Locale {
 
     /// Parses a BCP-47 or POSIX locale identifier (such as `de_DE.UTF-8`,
     /// `pt-BR`, `zh_Hant_TW`, `ar-MA`, `fr-CA`, `nb_NO`, `C`, or `POSIX@euro`)
-    /// into one of the 64 CLI message locales.
+    /// into one of the 65 CLI message locales.
     ///
     /// The identifier is resolved through [`TimeLocale::parse`] and
     /// [`TimeLocale::message_locale`], so regional variants such as `en-GB`,
@@ -354,7 +357,7 @@ impl FromStr for Locale {
 }
 
 impl TimeLocale {
-    /// All 72 supported pure-Rust `LC_TIME` locales in canonical order.
+    /// All 73 supported pure-Rust `LC_TIME` locales in canonical order.
     pub const ALL: &'static [TimeLocale] = &[
         Self::En,
         Self::De,
@@ -428,6 +431,7 @@ impl TimeLocale {
         Self::GuIn,
         Self::KnIn,
         Self::MlIn,
+        Self::BsBa,
     ];
 
     /// Converts a CLI message [`Locale`] into its corresponding [`TimeLocale`].
@@ -497,6 +501,7 @@ impl TimeLocale {
             Locale::Gu => Self::GuIn,
             Locale::Kn => Self::KnIn,
             Locale::Ml => Self::MlIn,
+            Locale::Bs => Self::BsBa,
         }
     }
 
@@ -567,6 +572,7 @@ impl TimeLocale {
             Self::GuIn => Locale::Gu,
             Self::KnIn => Locale::Kn,
             Self::MlIn => Locale::Ml,
+            Self::BsBa => Locale::Bs,
         }
     }
 
@@ -645,6 +651,7 @@ impl TimeLocale {
             Self::GuIn => "gu-IN",
             Self::KnIn => "kn-IN",
             Self::MlIn => "ml-IN",
+            Self::BsBa => "bs-BA",
         }
     }
 
@@ -723,10 +730,11 @@ impl TimeLocale {
             Self::GuIn => "ગુજરાતી",
             Self::KnIn => "ಕನ್ನಡ",
             Self::MlIn => "മലയാളം",
+            Self::BsBa => "Bosanski",
         }
     }
 
-    /// Parses a BCP-47 or POSIX locale identifier into one of the 72 supported
+    /// Parses a BCP-47 or POSIX locale identifier into one of the 73 supported
     /// pure-Rust `LC_TIME` locales, preserving regional conventions such as
     /// `en-GB`, `ar-MA`, `ar-EG`, `ar-SA`, `es-MX`, `fr-CA`, `fr-MA`, `fr-SN`,
     /// and `pt-PT`.
@@ -842,6 +850,7 @@ impl TimeLocale {
             "gu" => Some(Self::GuIn),
             "kn" => Some(Self::KnIn),
             "ml" => Some(Self::MlIn),
+            "bs" => Some(Self::BsBa),
             _ => None,
         }
     }
@@ -928,6 +937,7 @@ impl TimeLocale {
             Self::GuIn => &TIME_GU_IN,
             Self::KnIn => &TIME_KN_IN,
             Self::MlIn => &TIME_ML_IN,
+            Self::BsBa => &TIME_BS_BA,
         }
     }
 }
@@ -1417,8 +1427,8 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn all_64_cli_locales_have_unique_codes_and_round_trip() {
-        assert_eq!(Locale::ALL.len(), 64);
+    fn all_65_cli_locales_have_unique_codes_and_round_trip() {
+        assert_eq!(Locale::ALL.len(), 65);
         let mut codes = HashSet::new();
         for &locale in Locale::ALL {
             assert!(
@@ -1437,8 +1447,8 @@ mod tests {
     }
 
     #[test]
-    fn all_72_time_locales_have_unique_codes_and_round_trip() {
-        assert_eq!(TimeLocale::ALL.len(), 72);
+    fn all_73_time_locales_have_unique_codes_and_round_trip() {
+        assert_eq!(TimeLocale::ALL.len(), 73);
         let mut codes = HashSet::new();
         for &locale in TimeLocale::ALL {
             assert!(
@@ -1592,7 +1602,7 @@ mod tests {
     }
 
     #[test]
-    fn all_72_time_tables_are_complete_and_format_cleanly() {
+    fn all_73_time_tables_are_complete_and_format_cleanly() {
         let dt = DateTimeParts::from_utc_timestamp(1_000_000_000);
         for &locale in TimeLocale::ALL {
             let td = locale.time_data();
@@ -1696,6 +1706,10 @@ mod tests {
         assert_eq!(
             format_strftime("%A %B", &dt, TimeLocale::PaIn),
             "ਐਤਵਾਰ ਸਤੰਬਰ"
+        );
+        assert_eq!(
+            format_strftime("%A %B %x", &dt, TimeLocale::BsBa),
+            "nedjelja septembar 09. 09. 2001."
         );
     }
 
@@ -1860,6 +1874,21 @@ mod tests {
                 "ml-IN",
                 "മലയാളം",
                 Locale::Ml,
+            ),
+            (
+                "bs_BA.UTF-8",
+                TimeLocale::BsBa,
+                "bs-BA",
+                "Bosanski",
+                Locale::Bs,
+            ),
+            ("bs", TimeLocale::BsBa, "bs-BA", "Bosanski", Locale::Bs),
+            (
+                "bs-Latn-BA",
+                TimeLocale::BsBa,
+                "bs-BA",
+                "Bosanski",
+                Locale::Bs,
             ),
         ];
         for (input, time, code, name, message) in time_cases {
